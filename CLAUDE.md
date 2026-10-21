@@ -80,6 +80,7 @@ cxl-fmd/
 │   └── libcxlmi/                 # CXL MI library (CCI commands)
 └── docs/
     ├── discovery.md              # Discovery process documentation
+    ├── DCD-FM-API.md             # Proposed DCD (FM-API 56h) to Redfish mapping
     └── mock-topology.md          # Mock topology language reference
 ```
 

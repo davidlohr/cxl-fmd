@@ -2,6 +2,8 @@
 
 This document describes the CXL to Redfish mapping implemented by cxl-fmd, based on [DMTF DSP0288 v1.4.0](https://www.dmtf.org/dsp/DSP0288) (CXL to Redfish Mapping Specification).
 
+DSP0288 v1.4.0 does not cover the FM-API DCD Management (56h) or MHD (55h) command sets. The proposed DCD mapping (Table 3) is in [DCD-FM-API.md](DCD-FM-API.md).
+
 ## Quick Start
 
 Start cxl-fmd with a mock topology:

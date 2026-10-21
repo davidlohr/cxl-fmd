@@ -294,11 +294,12 @@ python scripts/run_redfish_validator.py --output-dir ./logs
 
 The following CXL features are not yet supported:
 - **Port-Based Routing (PBR)**: PBR fabric discovery and Global Fabric-Attached Memory Devices
-- **Dynamic Capacity Devices (DCD)**: Dynamic capacity add/release events
+- **Dynamic Capacity Devices (DCD)**: Dynamic capacity add/release. The FM-API (56h) to Redfish mapping is specified in [docs/DCD-FM-API.md](docs/DCD-FM-API.md)
 
 ## References
 
 - [CXL Specification 3.2](https://www.computeexpresslink.org/spec-landing)
 - [DMTF Redfish Specification](https://www.dmtf.org/standards/redfish)
 - [DMTF Redfish CXL Schemas](https://redfish.dmtf.org/schemas/)
+- [DMTF DSP0288 CXL to Redfish Mapping](https://www.dmtf.org/dsp/DSP0288)
 - [libcxlmi Documentation](https://github.com/computexpresslink/libcxlmi)
