@@ -207,16 +207,20 @@ static inline const char *rf_rack_units_to_str(enum rf_rack_units val)
 /* Chassis.v1_28_0.RackMountWidth */
 enum rf_rack_mount_width {
 	RACK_MOUNT_WIDTH_INVALID = 0,
-	RACK_MOUNT_WIDTH_OPEN_U = 1,
-	RACK_MOUNT_WIDTH_EIA_310 = 2,
-	RACK_MOUNT_WIDTH_EIA_310__TELCO = 3,
-	RACK_MOUNT_WIDTH_HALF_WIDTH = 4,
+	RACK_MOUNT_WIDTH_OPEN_RACK = 1,
+	RACK_MOUNT_WIDTH_OPEN_RACK_WIDE = 2,
+	RACK_MOUNT_WIDTH_OPEN_U = 3,
+	RACK_MOUNT_WIDTH_EIA_310 = 4,
+	RACK_MOUNT_WIDTH_EIA_310__TELCO = 5,
+	RACK_MOUNT_WIDTH_HALF_WIDTH = 6,
 };
 
 static inline const char *rf_rack_mount_width_to_str(enum rf_rack_mount_width val)
 {
 	switch (val) {
 	case RACK_MOUNT_WIDTH_INVALID: return "Invalid";
+	case RACK_MOUNT_WIDTH_OPEN_RACK: return "OpenRack";
+	case RACK_MOUNT_WIDTH_OPEN_RACK_WIDE: return "OpenRackWide";
 	case RACK_MOUNT_WIDTH_OPEN_U: return "OpenU";
 	case RACK_MOUNT_WIDTH_EIA_310: return "EIA_310";
 	case RACK_MOUNT_WIDTH_EIA_310__TELCO: return "EIA_310_Telco";

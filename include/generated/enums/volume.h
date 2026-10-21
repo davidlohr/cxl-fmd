@@ -364,4 +364,29 @@ static inline const char *rf_lba_relative_performance_type_to_str(enum rf_lba_re
 	}
 }
 
+/* Volume.ReservationType */
+enum rf_reservation_type {
+	RESERVATION_TYPE_INVALID = 0,
+	RESERVATION_TYPE_WRITE_EXCLUSIVE = 1,
+	RESERVATION_TYPE_EXCLUSIVE_ACCESS = 2,
+	RESERVATION_TYPE_WRITE_EXCLUSIVE_REGISTRANTS_ONLY = 3,
+	RESERVATION_TYPE_EXCLUSIVE_ACCESS_REGISTRANTS_ONLY = 4,
+	RESERVATION_TYPE_WRITE_EXCLUSIVE_ALL_REGISTRANTS = 5,
+	RESERVATION_TYPE_EXCLUSIVE_ACCESS_ALL_REGISTRANTS = 6,
+};
+
+static inline const char *rf_reservation_type_to_str(enum rf_reservation_type val)
+{
+	switch (val) {
+	case RESERVATION_TYPE_INVALID: return "Invalid";
+	case RESERVATION_TYPE_WRITE_EXCLUSIVE: return "WriteExclusive";
+	case RESERVATION_TYPE_EXCLUSIVE_ACCESS: return "ExclusiveAccess";
+	case RESERVATION_TYPE_WRITE_EXCLUSIVE_REGISTRANTS_ONLY: return "WriteExclusiveRegistrantsOnly";
+	case RESERVATION_TYPE_EXCLUSIVE_ACCESS_REGISTRANTS_ONLY: return "ExclusiveAccessRegistrantsOnly";
+	case RESERVATION_TYPE_WRITE_EXCLUSIVE_ALL_REGISTRANTS: return "WriteExclusiveAllRegistrants";
+	case RESERVATION_TYPE_EXCLUSIVE_ACCESS_ALL_REGISTRANTS: return "ExclusiveAccessAllRegistrants";
+	default: return NULL;
+	}
+}
+
 #endif /* REDFISH_ENUM_VOLUME_H */

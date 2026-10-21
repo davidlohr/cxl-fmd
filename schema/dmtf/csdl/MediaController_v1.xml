@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!---->
 <!--################################################################################       -->
-<!--# Redfish Schema:  MediaController v1.3.2                                              -->
+<!--# Redfish Schema:  MediaController v1.3.3                                              -->
 <!--#                                                                                      -->
 <!--# For a detailed change log, see the README file contained in the DSP8010 bundle,      -->
 <!--# available at http://www.dmtf.org/standards/redfish                                   -->
-<!--# Copyright 2014-2025 DMTF.                                                            -->
+<!--# Copyright 2014-2026 DMTF.                                                            -->
 <!--# For the full DMTF copyright policy, see http://www.dmtf.org/about/policies/copyright -->
 <!--################################################################################       -->
 <!---->
@@ -14,12 +14,8 @@
   <edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/csd01/complete/vocabularies/Org.OData.Core.V1.xml">
     <edmx:Include Namespace="Org.OData.Core.V1" Alias="OData"/>
   </edmx:Reference>
-  <edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/csd01/complete/vocabularies/Org.OData.Measures.V1.xml">
-    <edmx:Include Namespace="Org.OData.Measures.V1" Alias="Measures"/>
-  </edmx:Reference>
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/RedfishExtensions_v1.xml">
     <edmx:Include Namespace="RedfishExtensions.v1_0_0" Alias="Redfish"/>
-    <edmx:Include Namespace="Validation.v1_0_0" Alias="Validation"/>
   </edmx:Reference>
   <edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/csd01/complete/vocabularies/Org.OData.Capabilities.V1.xml">
     <edmx:Include Namespace="Org.OData.Capabilities.V1" Alias="Capabilities"/>
@@ -27,12 +23,6 @@
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Resource_v1.xml">
     <edmx:Include Namespace="Resource"/>
     <edmx:Include Namespace="Resource.v1_0_0"/>
-  </edmx:Reference>
-  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Chassis_v1.xml">
-    <edmx:Include Namespace="Chassis"/>
-  </edmx:Reference>
-  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Assembly_v1.xml">
-    <edmx:Include Namespace="Assembly"/>
   </edmx:Reference>
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/PortCollection_v1.xml">
     <edmx:Include Namespace="PortCollection"/>
@@ -86,7 +76,7 @@
           <Collection>
             <Record>
               <PropertyValue Property="Kind" EnumMember="Redfish.RevisionKind/Deprecated"/>
-              <PropertyValue Property="Version" String="v1_2_0"/>
+              <PropertyValue Property="Version" String="v1_3_0"/>
               <PropertyValue Property="Description" String="This schema has been deprecated in favor of the `FabricAdapter` schema."/>
             </Record>
           </Collection>
@@ -213,9 +203,9 @@
 
       <EntityType Name="MediaController" BaseType="MediaController.v1_0_1.MediaController">
         <Property Name="UUID" Type="Resource.UUID">
-           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
-           <Annotation Term="OData.Description" String="The UUID for this media controller."/>
-           <Annotation Term="OData.LongDescription" String="This property shall contain a universally unique identifier number for the media controller."/>
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The UUID for this media controller."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain a universally unique identifier number for the media controller."/>
         </Property>
       </EntityType>
     </Schema>
@@ -258,6 +248,12 @@
       <EntityType Name="MediaController" BaseType="MediaController.v1_2_1.MediaController"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="MediaController.v1_2_3">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the deprecated schema annotation."/>
+      <EntityType Name="MediaController" BaseType="MediaController.v1_2_2.MediaController"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="MediaController.v1_3_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2022.1"/>
@@ -276,6 +272,12 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to force the regeneration of OpenAPI schemas to properly express nullable properties with external references.  It was also created to correct various typographical errors."/>
       <EntityType Name="MediaController" BaseType="MediaController.v1_3_1.MediaController"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="MediaController.v1_3_3">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the deprecated schema annotation."/>
+      <EntityType Name="MediaController" BaseType="MediaController.v1_3_2.MediaController"/>
     </Schema>
 
   </edmx:DataServices>

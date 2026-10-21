@@ -6,6 +6,25 @@
 
 #include <stddef.h>
 
+/* PowerDistribution.PowerState */
+enum rf_power_state {
+	POWER_STATE_INVALID = 0,
+	POWER_STATE_ON = 1,
+	POWER_STATE_OFF = 2,
+	POWER_STATE_POWER_CYCLE = 3,
+};
+
+static inline const char *rf_power_state_to_str(enum rf_power_state val)
+{
+	switch (val) {
+	case POWER_STATE_INVALID: return "Invalid";
+	case POWER_STATE_ON: return "On";
+	case POWER_STATE_OFF: return "Off";
+	case POWER_STATE_POWER_CYCLE: return "PowerCycle";
+	default: return NULL;
+	}
+}
+
 /* PowerDistribution.v1_0_0.PowerEquipmentType */
 enum rf_power_equipment_type {
 	POWER_EQUIPMENT_TYPE_INVALID = 0,

@@ -14,6 +14,9 @@ enum rf_coolant_connector_type {
 	COOLANT_CONNECTOR_TYPE_RETURN = 3,
 	COOLANT_CONNECTOR_TYPE_INLINE = 4,
 	COOLANT_CONNECTOR_TYPE_CLOSED = 5,
+	COOLANT_CONNECTOR_TYPE_PAIR_GROUP_MEMBER = 6,
+	COOLANT_CONNECTOR_TYPE_SUPPLY_GROUP_MEMBER = 7,
+	COOLANT_CONNECTOR_TYPE_RETURN_GROUP_MEMBER = 8,
 };
 
 static inline const char *rf_coolant_connector_type_to_str(enum rf_coolant_connector_type val)
@@ -25,6 +28,9 @@ static inline const char *rf_coolant_connector_type_to_str(enum rf_coolant_conne
 	case COOLANT_CONNECTOR_TYPE_RETURN: return "Return";
 	case COOLANT_CONNECTOR_TYPE_INLINE: return "Inline";
 	case COOLANT_CONNECTOR_TYPE_CLOSED: return "Closed";
+	case COOLANT_CONNECTOR_TYPE_PAIR_GROUP_MEMBER: return "PairGroupMember";
+	case COOLANT_CONNECTOR_TYPE_SUPPLY_GROUP_MEMBER: return "SupplyGroupMember";
+	case COOLANT_CONNECTOR_TYPE_RETURN_GROUP_MEMBER: return "ReturnGroupMember";
 	default: return NULL;
 	}
 }

@@ -255,4 +255,59 @@ static inline const char *rf_config_lock_options_to_str(enum rf_config_lock_opti
 	}
 }
 
+/* Drive.v1_22_0.NMVeMinimumRequiredResetType */
+enum rf_nm_ve_minimum_required_reset_type {
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_INVALID = 0,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NO_RESET = 1,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_CONTROLLER_LEVEL = 2,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_LIMITED_CONTROLLER_LEVEL = 3,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NVM_SUBSYSTEM_RESET = 4,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_POWER_CYCLE = 5,
+};
+
+static inline const char *rf_nm_ve_minimum_required_reset_type_to_str(enum rf_nm_ve_minimum_required_reset_type val)
+{
+	switch (val) {
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_INVALID: return "Invalid";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NO_RESET: return "NoReset";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_CONTROLLER_LEVEL: return "ControllerLevel";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_LIMITED_CONTROLLER_LEVEL: return "LimitedControllerLevel";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NVM_SUBSYSTEM_RESET: return "NVMSubsystemReset";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_POWER_CYCLE: return "PowerCycle";
+	default: return NULL;
+	}
+}
+
+/* Drive.v1_22_0.NMVeUnfreezeAuthMode */
+enum rf_nm_ve_unfreeze_auth_mode {
+	NM_VE_UNFREEZE_AUTH_MODE_INVALID = 0,
+	NM_VE_UNFREEZE_AUTH_MODE_PROGRAMMED_KEY = 1,
+	NM_VE_UNFREEZE_AUTH_MODE_PHYSICAL_ID = 2,
+};
+
+static inline const char *rf_nm_ve_unfreeze_auth_mode_to_str(enum rf_nm_ve_unfreeze_auth_mode val)
+{
+	switch (val) {
+	case NM_VE_UNFREEZE_AUTH_MODE_INVALID: return "Invalid";
+	case NM_VE_UNFREEZE_AUTH_MODE_PROGRAMMED_KEY: return "ProgrammedKey";
+	case NM_VE_UNFREEZE_AUTH_MODE_PHYSICAL_ID: return "PhysicalId";
+	default: return NULL;
+	}
+}
+
+/* Drive.v1_22_0.NMVePersonalityKeyAlgorithm */
+enum rf_nm_ve_personality_key_algorithm {
+	NM_VE_PERSONALITY_KEY_ALGORITHM_INVALID = 0,
+	NM_VE_PERSONALITY_KEY_ALGORITHM_HMAC_SHA384 = 1,
+};
+
+static inline const char *rf_nm_ve_personality_key_algorithm_to_str(enum rf_nm_ve_personality_key_algorithm val)
+{
+	switch (val) {
+	case NM_VE_PERSONALITY_KEY_ALGORITHM_INVALID: return "Invalid";
+	case NM_VE_PERSONALITY_KEY_ALGORITHM_HMAC_SHA384: return "HMAC_SHA384";
+	default: return NULL;
+	}
+}
+
 #endif /* REDFISH_ENUM_DRIVE_H */

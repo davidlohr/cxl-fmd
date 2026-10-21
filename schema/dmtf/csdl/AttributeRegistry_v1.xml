@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!---->
 <!--################################################################################       -->
-<!--# Redfish Schema:  AttributeRegistry v1.4.0                                            -->
+<!--# Redfish Schema:  AttributeRegistry v1.5.1                                            -->
 <!--#                                                                                      -->
 <!--# For a detailed change log, see the README file contained in the DSP8010 bundle,      -->
 <!--# available at http://www.dmtf.org/standards/redfish                                   -->
-<!--# Copyright 2014-2025 DMTF.                                                            -->
+<!--# Copyright 2014-2026 DMTF.                                                            -->
 <!--# For the full DMTF copyright policy, see http://www.dmtf.org/about/policies/copyright -->
 <!--################################################################################       -->
 <!---->
@@ -157,12 +157,12 @@
         <Property Name="CurrentValue" Type="Edm.PrimitiveType">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
           <Annotation Term="OData.Description" String="The placeholder of the current value for the attribute."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain the placeholder of the current value for the attribute, to aid in evaluating dependencies.  The evaluation results of the `Dependencies` array may affect the current attribute value."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the placeholder of the current value for the attribute, to aid in evaluating dependencies.  The evaluation results of the `Dependencies` array may affect the current attribute value.  For attributes of the `Enumeration` type, this property shall contain one of the values specified by the `ValueName` property in the `Value` array or `null`."/>
         </Property>
         <Property Name="DefaultValue" Type="Edm.PrimitiveType">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
           <Annotation Term="OData.Description" String="The default value for the attribute."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain the default value for the attribute."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the default value for the attribute.  For attributes of the `Enumeration` type, this property shall contain one of the values specified by the `ValueName` property in the `Value` array or `null`."/>
         </Property>
         <Property Name="DisplayOrder" Type="Edm.Int64">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
@@ -409,6 +409,28 @@
         <Member Name="LEQ">
           <Annotation Term="OData.Description" String="The logical operation for 'Less than or Equal'."/>
         </Member>
+        <Member Name="BITAND">
+          <Annotation Term="OData.Description" String="The logical operation for 'BITAND'."/>
+          <Annotation Term="Redfish.Revisions">
+            <Collection>
+              <Record>
+                <PropertyValue Property="Kind" EnumMember="Redfish.RevisionKind/Added"/>
+                <PropertyValue Property="Version" String="v1_5_0"/>
+              </Record>
+            </Collection>
+          </Annotation>
+        </Member>
+        <Member Name="BITOR">
+          <Annotation Term="OData.Description" String="The logical operation for 'BITOR'."/>
+          <Annotation Term="Redfish.Revisions">
+            <Collection>
+              <Record>
+                <PropertyValue Property="Kind" EnumMember="Redfish.RevisionKind/Added"/>
+                <PropertyValue Property="Version" String="v1_5_0"/>
+              </Record>
+            </Collection>
+          </Annotation>
+        </Member>
       </EnumType>
 
       <EnumType Name="MapFromProperty">
@@ -453,6 +475,17 @@
         </Member>
         <Member Name="OR">
           <Annotation Term="OData.Description" String="The operation used for logical 'OR' of dependency terms."/>
+        </Member>
+        <Member Name="NOT">
+          <Annotation Term="OData.Description" String="The operation used for logical 'NOT' of dependency terms."/>
+          <Annotation Term="Redfish.Revisions">
+            <Collection>
+              <Record>
+                <PropertyValue Property="Kind" EnumMember="Redfish.RevisionKind/Added"/>
+                <PropertyValue Property="Version" String="v1_5_0"/>
+              </Record>
+            </Collection>
+          </Annotation>
         </Member>
       </EnumType>
 
@@ -595,6 +628,12 @@
       <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_0_13.AttributeRegistry"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_0_15">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the usage of `CurrentValue` and `DefaultValue` for enumerations."/>
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_0_14.AttributeRegistry"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_1_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2017.1"/>
@@ -709,6 +748,12 @@
       <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_1_12.AttributeRegistry"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_1_14">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the usage of `CurrentValue` and `DefaultValue` for enumerations."/>
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_1_13.AttributeRegistry"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_2_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2018.1"/>
@@ -807,6 +852,12 @@
       <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_2_10.AttributeRegistry"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_2_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the usage of `CurrentValue` and `DefaultValue` for enumerations."/>
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_2_11.AttributeRegistry"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_3_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2018.3"/>
@@ -887,6 +938,12 @@
       <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_3_8.AttributeRegistry"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_3_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the usage of `CurrentValue` and `DefaultValue` for enumerations."/>
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_3_9.AttributeRegistry"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_4_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2025.3"/>
@@ -909,6 +966,33 @@
           <Annotation Term="OData.LongDescription" String="This array shall contain an array of privileges that are required to modify this attribute.  This property shall contain strings from the `PrivilegesUsed` and `OEMPrivilegesUsed` properties in the privilege registry of this service."/>
         </Property>
       </ComplexType>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_4_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the usage of `CurrentValue` and `DefaultValue` for enumerations."/>
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_4_0.AttributeRegistry"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_5_0">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="Redfish.Release" String="2026.1"/>
+      <Annotation Term="OData.Description" String="This version was created to add `NOT` to `MapTerms`.  This version was also created to add `BITAND` and `BITOR` to `MapFromCondition`."/>
+
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_4_0.AttributeRegistry"/>
+
+      <ComplexType Name="MapFrom" BaseType="AttributeRegistry.v1_0_0.MapFrom">
+        <Property Name="Subexpressions" Type="Collection(AttributeRegistry.v1_0_0.MapFrom)" Nullable="false">
+          <Annotation Term="OData.Description" String="The subexpressions to use to evaluate this dependency expression."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the subexpressions to use to evaluate this dependency expression term."/>
+        </Property>
+      </ComplexType>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AttributeRegistry.v1_5_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the usage of `CurrentValue` and `DefaultValue` for enumerations."/>
+      <EntityType Name="AttributeRegistry" BaseType="AttributeRegistry.v1_5_0.AttributeRegistry"/>
     </Schema>
 
   </edmx:DataServices>

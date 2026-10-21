@@ -51,6 +51,7 @@ enum rf_protocol {
 	PROTOCOL_QPI = 40,
 	PROTOCOL_E_MMC = 41,
 	PROTOCOL_UET = 42,
+	PROTOCOL_UA_LINK = 43,
 };
 
 static inline const char *rf_protocol_to_str(enum rf_protocol val)
@@ -99,6 +100,7 @@ static inline const char *rf_protocol_to_str(enum rf_protocol val)
 	case PROTOCOL_QPI: return "QPI";
 	case PROTOCOL_E_MMC: return "eMMC";
 	case PROTOCOL_UET: return "UET";
+	case PROTOCOL_UA_LINK: return "UALink";
 	default: return NULL;
 	}
 }

@@ -80,6 +80,8 @@ enum rf_reset_type {
 	RESET_TYPE_PAUSE = 11,
 	RESET_TYPE_RESUME = 12,
 	RESET_TYPE_FULL_POWER_CYCLE = 13,
+	RESET_TYPE_SLEEP = 14,
+	RESET_TYPE_HIBERNATE = 15,
 };
 
 static inline const char *rf_reset_type_to_str(enum rf_reset_type val)
@@ -99,6 +101,8 @@ static inline const char *rf_reset_type_to_str(enum rf_reset_type val)
 	case RESET_TYPE_PAUSE: return "Pause";
 	case RESET_TYPE_RESUME: return "Resume";
 	case RESET_TYPE_FULL_POWER_CYCLE: return "FullPowerCycle";
+	case RESET_TYPE_SLEEP: return "Sleep";
+	case RESET_TYPE_HIBERNATE: return "Hibernate";
 	default: return NULL;
 	}
 }
@@ -130,6 +134,8 @@ enum rf_power_state {
 	POWER_STATE_POWERING_ON = 3,
 	POWER_STATE_POWERING_OFF = 4,
 	POWER_STATE_PAUSED = 5,
+	POWER_STATE_SLEEPING = 6,
+	POWER_STATE_HIBERNATING = 7,
 };
 
 static inline const char *rf_power_state_to_str(enum rf_power_state val)
@@ -141,6 +147,8 @@ static inline const char *rf_power_state_to_str(enum rf_power_state val)
 	case POWER_STATE_POWERING_ON: return "PoweringOn";
 	case POWER_STATE_POWERING_OFF: return "PoweringOff";
 	case POWER_STATE_PAUSED: return "Paused";
+	case POWER_STATE_SLEEPING: return "Sleeping";
+	case POWER_STATE_HIBERNATING: return "Hibernating";
 	default: return NULL;
 	}
 }

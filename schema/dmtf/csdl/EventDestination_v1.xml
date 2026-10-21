@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!---->
 <!--################################################################################       -->
-<!--# Redfish Schema:  EventDestination v1.15.1                                            -->
+<!--# Redfish Schema:  EventDestination v1.17.1                                            -->
 <!--#                                                                                      -->
 <!--# For a detailed change log, see the README file contained in the DSP8010 bundle,      -->
 <!--# available at http://www.dmtf.org/standards/redfish                                   -->
-<!--# Copyright 2014-2025 DMTF.                                                            -->
+<!--# Copyright 2014-2026 DMTF.                                                            -->
 <!--# For the full DMTF copyright policy, see http://www.dmtf.org/about/policies/copyright -->
 <!--################################################################################       -->
 <!---->
@@ -298,7 +298,7 @@
         <Annotation Term="Redfish.DynamicPropertyPatterns">
           <Collection>
             <Record>
-              <PropertyValue Property="Pattern" String="^[^:\\s]+$"/>
+              <PropertyValue Property="Pattern" String="^[^:\s]+$"/>
               <PropertyValue Property="Type" String="Edm.String"/>
             </Record>
           </Collection>
@@ -376,6 +376,12 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to force the regeneration of OpenAPI schemas to properly express nullable properties with external references.  It was also created to correct various typographical errors."/>
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_0_12.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_0_14">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_0_13.EventDestination"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_1_0">
@@ -474,6 +480,12 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_1_12.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_1_14">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_1_13.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_2_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2017.1"/>
@@ -566,6 +578,12 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to force the regeneration of OpenAPI schemas to properly express nullable properties with external references.  It was also created to correct various typographical errors."/>
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_2_10.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_2_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_2_11.EventDestination"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_3_0">
@@ -693,6 +711,12 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_3_8.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_3_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_3_9.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_4_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2018.2"/>
@@ -775,6 +799,12 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_4_8.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_4_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_4_9.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_5_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2019.1"/>
@@ -831,6 +861,12 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_5_7.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_5_9">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_5_8.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_6_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2019.2"/>
@@ -864,11 +900,11 @@
         </Member>
         <Member Name="RetryForever">
           <Annotation Term="OData.Description" String="The subscription is not suspended or terminated, and attempts at delivery of future events continues regardless of the number of retries."/>
-          <Annotation Term="OData.LongDescription" String="This value shall indicate the subscription is not suspended or terminated, and attempts at delivery of future events shall continue regardless of the number of retries.  The interval between retries remains constant and is specified by the `DeliveryRetryIntervalSeconds` property in the event service."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate the subscription is not suspended or terminated, and attempts at delivery of future events shall continue regardless of the number of retries.  The interval between retries remains constant and is specified by the `DeliveryRetryIntervalSeconds` property in the event service.  The `DeliveryRetryAttempts` property in the event service shall not affect subscriptions configured with this policy."/>
         </Member>
         <Member Name="RetryForeverWithBackoff">
           <Annotation Term="OData.Description" String="The subscription is not suspended or terminated, and attempts at delivery of future events continues regardless of the number of retries, but issued over time according to a service-defined backoff algorithm."/>
-          <Annotation Term="OData.LongDescription" String="This value shall indicate the subscription is not suspended or terminated, and attempts at delivery of future events shall continue regardless of the number of retries.  Retry attempts are issued over time according to a service-defined backoff algorithm.  The backoff algorithm may insert an increasing amount of delay between retry attempts and may reach a maximum."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate the subscription is not suspended or terminated, and attempts at delivery of future events shall continue regardless of the number of retries.  Retry attempts are issued over time according to a service-defined backoff algorithm.  The backoff algorithm may insert an increasing amount of delay between retry attempts and may reach a maximum.  The `DeliveryRetryAttempts` property in the event service shall not affect subscriptions configured with this policy."/>
           <Annotation Term="Redfish.Revisions">
             <Collection>
               <Record>
@@ -941,6 +977,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_6_9.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_6_11">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_6_10.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_6_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_6_11.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_7_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2019.3"/>
@@ -958,9 +1006,9 @@
         <Annotation Term="OData.Description" String="Settings for an SNMP event destination."/>
         <Annotation Term="OData.LongDescription" String="This type shall contain the settings for an SNMP event destination."/>
         <Property Name="TrapCommunity" Type="Edm.String">
-          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Write"/>
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/ReadWrite"/>
           <Annotation Term="OData.Description" String="The SNMP trap community string."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain the SNMP trap community string.  The value shall be `null` in responses."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the SNMP trap community string.  If `HideCommunityStrings` contains `true` or is not supported, the value shall be `null` in responses.  Otherwise the trap community string shall be returned."/>
         </Property>
         <Property Name="AuthenticationKey" Type="Edm.String">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Write"/>
@@ -994,6 +1042,15 @@
         <Member Name="CommunityString">
           <Annotation Term="OData.Description" String="Trap community string authentication."/>
           <Annotation Term="OData.LongDescription" String="This value shall indicate authentication using SNMP community strings and the value of TrapCommunity."/>
+          <Annotation Term="Redfish.Revisions">
+            <Collection>
+              <Record>
+                <PropertyValue Property="Kind" EnumMember="Redfish.RevisionKind/Deprecated"/>
+                <PropertyValue Property="Version" String="v1_17_0"/>
+                <PropertyValue Property="Description" String="This value has been deprecated to clarify that `AuthenticationProtocol` applies to SNMPv3 support, which does not support community string-based authentication."/>
+              </Record>
+            </Collection>
+          </Annotation>
         </Member>
         <Member Name="HMAC_MD5">
           <Annotation Term="OData.Description" String="HMAC-MD5-96 authentication."/>
@@ -1159,6 +1216,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_7_10.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_7_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_7_11.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_7_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_7_12.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_8_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2020.1"/>
@@ -1238,6 +1307,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_8_10.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_8_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_8_11.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_8_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_8_12.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_9_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2020.3"/>
@@ -1305,7 +1386,7 @@
       <EnumType Name="SyslogFacility">
         <Annotation Term="OData.Description" String="The syslog facility code is an enumeration of program types."/>
         <Annotation Term="OData.LongDescription" String="This type shall specify the syslog facility codes as program types.  Facility values are described in the RFC5424."/>
-         <Member Name="Kern">
+        <Member Name="Kern">
           <Annotation Term="OData.Description" String="Kernel messages."/>
         </Member>
         <Member Name="User">
@@ -1468,6 +1549,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_9_11.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_9_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_9_12.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_9_14">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_9_13.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_10_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to add additional SNMP authentication protocols and to provide better description for the authentication and encryption keys.  It also added `RetryForeverWithBackoff` to `DeliveryRetryPolicy` and long description details to the `DeliveryRetryPolicy` values."/>
@@ -1555,6 +1648,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_10_10.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_10_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_10_11.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_10_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_10_12.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_11_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2021.2"/>
@@ -1635,6 +1740,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_11_8.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_11_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_11_9.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_11_11">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_11_10.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_12_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2022.1"/>
@@ -1696,6 +1813,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_12_6.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_12_8">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_12_7.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_12_9">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_12_8.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_13_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2022.3"/>
@@ -1746,6 +1875,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_13_5.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_13_7">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_13_6.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_13_8">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_13_7.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_14_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2023.3"/>
@@ -1772,6 +1913,18 @@
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_14_2.EventDestination"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_14_4">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_14_3.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_14_5">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_14_4.EventDestination"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_15_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2024.3"/>
@@ -1790,6 +1943,59 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to clarify that terminating a subscription also deletes the resource."/>
       <EntityType Name="EventDestination" BaseType="EventDestination.v1_15_0.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_15_2">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_15_1.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_15_3">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_15_2.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_16_0">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="Redfish.Release" String="2025.4"/>
+
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_15_1.EventDestination"/>
+
+      <ComplexType Name="SNMPSettings" BaseType="EventDestination.v1_10_0.SNMPSettings">
+        <Property Name="HideCommunityStrings" Type="Edm.Boolean">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/ReadWrite"/>
+          <Annotation Term="OData.Description" String="Indicates whether the SNMP trap community string is hidden in responses."/>
+          <Annotation Term="OData.LongDescription" String="This property shall indicate whether the SNMP trap community string is hidden in responses.  If `true`, the `TrapCommunity` property shall be `null` in responses.  If `false`, the `TrapCommunity` property shall contain the trap community string in responses."/>
+        </Property>
+      </ComplexType>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_16_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify that `RetryForever` and `RetryForeverWithBackoff` are not affected by the `DeliveryRetryAttempts` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_16_0.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_16_2">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_16_1.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_17_0">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="Redfish.Release" String="2026.1"/>
+      <Annotation Term="OData.Description" String="This version was created to deprecate the value of `CommunityString` in `AuthenticationProtocol` in `SNMP`."/>
+
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_16_1.EventDestination"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="EventDestination.v1_17_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to correct the pattern property definition for the contents of the `HttpHeaders` property."/>
+      <EntityType Name="EventDestination" BaseType="EventDestination.v1_17_0.EventDestination"/>
     </Schema>
 
   </edmx:DataServices>

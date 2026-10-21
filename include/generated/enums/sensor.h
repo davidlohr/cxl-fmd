@@ -125,6 +125,9 @@ enum rf_reading_type {
 	READING_TYPE_ROTATIONAL_VELOCITY = 29,
 	READING_TYPE_ROTATIONAL_ACCELERATION = 30,
 	READING_TYPE_VALVE = 31,
+	READING_TYPE_TURBIDITY = 32,
+	READING_TYPE_LIQUID_CONDUCTIVITY = 33,
+	READING_TYPE_P_H = 34,
 };
 
 static inline const char *rf_reading_type_to_str(enum rf_reading_type val)
@@ -162,6 +165,9 @@ static inline const char *rf_reading_type_to_str(enum rf_reading_type val)
 	case READING_TYPE_ROTATIONAL_VELOCITY: return "RotationalVelocity";
 	case READING_TYPE_ROTATIONAL_ACCELERATION: return "RotationalAcceleration";
 	case READING_TYPE_VALVE: return "Valve";
+	case READING_TYPE_TURBIDITY: return "Turbidity";
+	case READING_TYPE_LIQUID_CONDUCTIVITY: return "LiquidConductivity";
+	case READING_TYPE_P_H: return "pH";
 	default: return NULL;
 	}
 }

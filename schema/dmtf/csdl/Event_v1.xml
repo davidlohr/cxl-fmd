@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!---->
 <!--################################################################################       -->
-<!--# Redfish Schema:  Event v1.12.0                                                       -->
+<!--# Redfish Schema:  Event v1.14.0                                                       -->
 <!--#                                                                                      -->
 <!--# For a detailed change log, see the README file contained in the DSP8010 bundle,      -->
 <!--# available at http://www.dmtf.org/standards/redfish                                   -->
-<!--# Copyright 2014-2025 DMTF.                                                            -->
+<!--# Copyright 2014-2026 DMTF.                                                            -->
 <!--# For the full DMTF copyright policy, see http://www.dmtf.org/about/policies/copyright -->
 <!--################################################################################       -->
 <!---->
@@ -42,7 +42,7 @@
       <Annotation Term="Redfish.Language" String="en"/>
 
       <EntityType Name="Event" BaseType="Resource.v1_0_0.Resource" Abstract="true">
-        <Annotation Term="OData.Description" String="The `Event` schema describes the JSON payload received by an event destination, which has subscribed to event notification, when events occur.  This resource contains data about events, including descriptions, severity, and a message identifier to a message registry that can be accessed for further information."/>
+        <Annotation Term="OData.Description" String="The `Event` schema describes the JSON payload received by an event destination, which has subscribed to event notification, when events occur.  This resource contains data about events, including descriptions, severity, and a `MessageId` reference to a message registry that can be accessed for further information.  For standard message definitions, see DSP2065."/>
         <Annotation Term="OData.LongDescription" String="This resource contains an event for a Redfish implementation."/>
         <Annotation Term="Capabilities.InsertRestrictions">
           <Record>
@@ -981,7 +981,7 @@
           <Annotation Term="OData.Description" String="The list of recommended steps to resolve the cause of the event."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain an array of recommended steps to resolve the cause of the event.  This property shall not be present if the `MessageSeverity` or `Severity` properties contain `OK`.  A client can stop executing the resolution steps once the `Resolved` property in the associated `LogEntry` resource contains `true` or the `Health` property in the associated resource referenced by the `OriginOfCondition` property contains `OK`."/>
         </Property>
-       </EntityType>
+      </EntityType>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_10_1">
@@ -1012,8 +1012,8 @@
         </Property>
         <Property Name="UserAuthenticationSource" Type="Edm.String">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
-          <Annotation Term="OData.Description" String="The source of authentication for the username property associated with the event record."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain the URL to the authentication service that is associated with the username property.  This should be used for events that result from a user action."/>
+          <Annotation Term="OData.Description" String="The source of authentication for the user associated with the event record."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain source of authentication for the user, specified by the `Username` property, associated with the event record.  For local users, this property shall contain `/redfish/v1/AccountService`.  For users managed by external account providers, this property shall contain the member of the `ServiceAddresses` property that authenticated the user.  This should be used for events that result from a user action."/>
         </Property>
       </EntityType>
     </Schema>
@@ -1023,6 +1023,13 @@
       <Annotation Term="OData.Description" String="This version was created to clarify that Base64-encoded string properties include padding characters."/>
       <EntityType Name="Event" BaseType="Event.v1_11_0.Event"/>
       <EntityType Name="EventRecord" BaseType="Event.v1_11_0.EventRecord"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_11_2">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the format of `UserAuthenticationSource`."/>
+      <EntityType Name="Event" BaseType="Event.v1_11_1.Event"/>
+      <EntityType Name="EventRecord" BaseType="Event.v1_11_1.EventRecord"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_12_0">
@@ -1039,6 +1046,52 @@
         </Property>
       </EntityType>
     </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_12_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the format of `UserAuthenticationSource`."/>
+      <EntityType Name="Event" BaseType="Event.v1_12_0.Event"/>
+      <EntityType Name="EventRecord" BaseType="Event.v1_12_0.EventRecord"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_13_0">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="Redfish.Release" String="2025.4"/>
+      <Annotation Term="OData.Description" String="This version was created to update the schema description and add a reference to DSP2065."/>
+
+      <EntityType Name="Event" BaseType="Event.v1_12_0.Event"/>
+
+      <EntityType Name="EventRecord" BaseType="Event.v1_12_0.EventRecord">
+        <Property Name="OriginAddress" Type="Edm.String">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The IP address, with scheme, of the user associated with the log entry."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the IP address, with scheme, of the user associated with the log entry.  This should be used for audit logs that result from a user action."/>
+          <Annotation Term="Validation.Pattern" String="^.+:\/\/.+$"/>
+        </Property>
+      </EntityType>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_13_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the format of `UserAuthenticationSource`."/>
+      <EntityType Name="Event" BaseType="Event.v1_13_0.Event"/>
+      <EntityType Name="EventRecord" BaseType="Event.v1_13_0.EventRecord"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Event.v1_14_0">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="Redfish.Release" String="2026.2"/>
+
+      <EntityType Name="Event" BaseType="Event.v1_13_1.Event"/>
+
+      <EntityType Name="EventRecord" BaseType="Event.v1_13_1.EventRecord">
+        <Property Name="VendorCode" Type="Edm.String">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The vendor-defined code used to identify this event."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain a vendor-defined code or identifier equivalent to this event or `MessageId` value.  This value allows clients to map a `MessageId` value to a legacy or vendor-specific value for the same condition or error message."/>
+        </Property>
+	  </EntityType>
+	</Schema>
 
   </edmx:DataServices>
 </edmx:Edmx>

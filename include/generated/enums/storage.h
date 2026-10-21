@@ -162,4 +162,82 @@ static inline const char *rf_volume_assignment_policy_to_str(enum rf_volume_assi
 	}
 }
 
+/* Storage.v1_21_0.NMVeMinimumRequiredResetType */
+enum rf_nm_ve_minimum_required_reset_type {
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_INVALID = 0,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NO_RESET = 1,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_CONTROLLER_LEVEL = 2,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_LIMITED_CONTROLLER_LEVEL = 3,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NVM_SUBSYSTEM_RESET = 4,
+	NM_VE_MINIMUM_REQUIRED_RESET_TYPE_POWER_CYCLE = 5,
+};
+
+static inline const char *rf_nm_ve_minimum_required_reset_type_to_str(enum rf_nm_ve_minimum_required_reset_type val)
+{
+	switch (val) {
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_INVALID: return "Invalid";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NO_RESET: return "NoReset";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_CONTROLLER_LEVEL: return "ControllerLevel";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_LIMITED_CONTROLLER_LEVEL: return "LimitedControllerLevel";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_NVM_SUBSYSTEM_RESET: return "NVMSubsystemReset";
+	case NM_VE_MINIMUM_REQUIRED_RESET_TYPE_POWER_CYCLE: return "PowerCycle";
+	default: return NULL;
+	}
+}
+
+/* Storage.v1_21_0.NMVeUnfreezeAuthMode */
+enum rf_nm_ve_unfreeze_auth_mode {
+	NM_VE_UNFREEZE_AUTH_MODE_INVALID = 0,
+	NM_VE_UNFREEZE_AUTH_MODE_PROGRAMMED_KEY = 1,
+	NM_VE_UNFREEZE_AUTH_MODE_PHYSICAL_ID = 2,
+};
+
+static inline const char *rf_nm_ve_unfreeze_auth_mode_to_str(enum rf_nm_ve_unfreeze_auth_mode val)
+{
+	switch (val) {
+	case NM_VE_UNFREEZE_AUTH_MODE_INVALID: return "Invalid";
+	case NM_VE_UNFREEZE_AUTH_MODE_PROGRAMMED_KEY: return "ProgrammedKey";
+	case NM_VE_UNFREEZE_AUTH_MODE_PHYSICAL_ID: return "PhysicalId";
+	default: return NULL;
+	}
+}
+
+/* Storage.v1_21_0.NMVePersonalityKeyAlgorithm */
+enum rf_nm_ve_personality_key_algorithm {
+	NM_VE_PERSONALITY_KEY_ALGORITHM_INVALID = 0,
+	NM_VE_PERSONALITY_KEY_ALGORITHM_HMAC_SHA384 = 1,
+};
+
+static inline const char *rf_nm_ve_personality_key_algorithm_to_str(enum rf_nm_ve_personality_key_algorithm val)
+{
+	switch (val) {
+	case NM_VE_PERSONALITY_KEY_ALGORITHM_INVALID: return "Invalid";
+	case NM_VE_PERSONALITY_KEY_ALGORITHM_HMAC_SHA384: return "HMAC_SHA384";
+	default: return NULL;
+	}
+}
+
+/* Storage.v1_23_0.ReservationCapabilities */
+enum rf_reservation_capabilities {
+	RESERVATION_CAPABILITIES_INVALID = 0,
+	RESERVATION_CAPABILITIES_COMPATIBLE_RESERVATION_HANDLING = 1,
+	RESERVATION_CAPABILITIES_SPECIFY_INITIATOR_PORTS = 2,
+	RESERVATION_CAPABILITIES_MULTIPLE_TARGET_PORTS = 3,
+	RESERVATION_CAPABILITIES_PERSIST_THROUGH_POWER_LOSS = 4,
+	RESERVATION_CAPABILITIES_SUPPORT_CLEAR_RESERVATIONS_OUT_OF_BAND = 5,
+};
+
+static inline const char *rf_reservation_capabilities_to_str(enum rf_reservation_capabilities val)
+{
+	switch (val) {
+	case RESERVATION_CAPABILITIES_INVALID: return "Invalid";
+	case RESERVATION_CAPABILITIES_COMPATIBLE_RESERVATION_HANDLING: return "CompatibleReservationHandling";
+	case RESERVATION_CAPABILITIES_SPECIFY_INITIATOR_PORTS: return "SpecifyInitiatorPorts";
+	case RESERVATION_CAPABILITIES_MULTIPLE_TARGET_PORTS: return "MultipleTargetPorts";
+	case RESERVATION_CAPABILITIES_PERSIST_THROUGH_POWER_LOSS: return "PersistThroughPowerLoss";
+	case RESERVATION_CAPABILITIES_SUPPORT_CLEAR_RESERVATIONS_OUT_OF_BAND: return "SupportClearReservationsOutOfBand";
+	default: return NULL;
+	}
+}
+
 #endif /* REDFISH_ENUM_STORAGE_H */
