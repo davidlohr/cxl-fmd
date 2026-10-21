@@ -152,7 +152,7 @@ def run_validator(venv_mgr, port, schema_dir=None, output_dir=None,
     cmd = [
         str(venv_mgr.validator),
         "-r", f"http://localhost:{port}",
-        "--authtype", "None",
+        "--user", "none", "--password", "none", "--authtype", "Basic",
         "--nooemcheck",
     ]
 

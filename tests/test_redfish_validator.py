@@ -106,7 +106,7 @@ class TestRedfishValidator:
         cmd = [
             str(validator_path),
             "-r", url,
-            "--authtype", "None",
+            "--user", "none", "--password", "none", "--authtype", "Basic",
             "--nooemcheck",
         ]
 
