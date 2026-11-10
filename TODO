@@ -1,8 +1,16 @@
 - Support for MHD at the CXL topology level, Redfish modeling is pretty much done - some missing links.
 - Support for SSL (https://...)
-- DCD: fall back to polling DC event records when the device lacks Set MCTP Event Interrupt Policy or the transport is ioctl; map notifications to the sending EID instead of draining every DCD; Task support for add/release
+- DCD: map MCTP Event Notifications to the sending EID instead of draining every DCD; Task support for add/release
 - Support GFD
 - Support BG commands/context
 - Users of cxl-fmd (authentication)
 - State for mock topologies.
 - Testing, testing, testing.
+- OpenBMC integration: bmcweb is the only Redfish service on an OpenBMC
+  BMC, so a second service root on another port is not reachable from
+  it. Export the topology and DCD state as D-Bus objects (interfaces
+  proposed to phosphor-dbus-interfaces, Add/Release Capacity as methods,
+  PropertiesChanged on extent updates) and add bmcweb handlers that
+  render them. Until then cxl-fmd stays self-contained; bmcweb Redfish
+  aggregation (one satellite, prefixed IDs) is the interim option:
+  https://github.com/openbmc/bmcweb/blob/master/docs/AGGREGATION.md
