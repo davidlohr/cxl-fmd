@@ -34,6 +34,8 @@ static void print_usage(const char *prog)
 	       "  -M, --mock FILE       Use mock topology from JSON file\n"
 	       "  -m, --mctp            Enable MCTP device scanning\n"
 	       "  -i, --ioctl           Enable ioctl device scanning\n"
+	       "  -e, --event-poll SECS Drain the DC event log every SECS seconds\n"
+	       "                        (default: %d, 0 disables)\n"
 	       "  -v, --verbose         Increase verbosity (can repeat)\n"
 	       "  -h, --help            Show this help\n"
 	       "  -V, --version         Show version\n"
@@ -43,7 +45,7 @@ static void print_usage(const char *prog)
 	       "  the JSON topology file instead of scanning for real hardware.\n"
 	       "  This is useful for testing and development.\n"
 	       "\n",
-	       prog, FMD_DEFAULT_PORT);
+	       prog, FMD_DEFAULT_PORT, FMD_DEFAULT_EVENT_POLL_SEC);
 }
 
 static void print_version(void)
@@ -65,6 +67,7 @@ struct fmd_ctx *fmd_ctx_new(void)
 	ctx->config.scan_ioctl = false;
 	ctx->log_level = FMD_LOG_INFO;
 	ctx->running = true;
+	ctx->notify_sd[0] = ctx->notify_sd[1] = -1;
 	pthread_mutex_init(&ctx->dcd_lock, NULL);
 
 	/* Initialize topology */
@@ -90,6 +93,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 		return;
 
 	fmd_redfish_stop(ctx);
+	fmd_events_cleanup(ctx);
 	fmd_topology_cleanup(&ctx->topology);
 	pthread_mutex_destroy(&ctx->dcd_lock);
 
@@ -116,6 +120,7 @@ int main(int argc, char *argv[])
 		{"mock",    required_argument, NULL, 'M'},
 		{"mctp",    no_argument,       NULL, 'm'},
 		{"ioctl",   no_argument,       NULL, 'i'},
+		{"event-poll", required_argument, NULL, 'e'},
 		{"verbose", no_argument,       NULL, 'v'},
 		{"help",    no_argument,       NULL, 'h'},
 		{"version", no_argument,       NULL, 'V'},
@@ -127,9 +132,10 @@ int main(int argc, char *argv[])
 	bool use_mctp = false;
 	bool use_ioctl = false;
 	bool transport_specified = false;
+	unsigned int event_poll_sec = FMD_DEFAULT_EVENT_POLL_SEC;
 	const char *mock_path = NULL;
 
-	while ((opt = getopt_long(argc, argv, "p:M:mivhV", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:M:mie:vhV", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p': {
 			char *endptr;
@@ -153,6 +159,16 @@ int main(int argc, char *argv[])
 			use_ioctl = true;
 			transport_specified = true;
 			break;
+		case 'e': {
+			char *endptr;
+			long val = strtol(optarg, &endptr, 10);
+			if (endptr == optarg || *endptr != '\0' || val < 0) {
+				fprintf(stderr, "Invalid event poll interval: %s\n", optarg);
+				return EXIT_FAILURE;
+			}
+			event_poll_sec = (unsigned int)val;
+			break;
+		}
 		case 'v':
 			verbosity++;
 			break;
@@ -182,6 +198,7 @@ int main(int argc, char *argv[])
 	ctx->config.port = port;
 	ctx->config.scan_mctp = use_mctp;
 	ctx->config.scan_ioctl = use_ioctl;
+	ctx->config.event_poll_sec = event_poll_sec;
 	ctx->config.mock_topology_path = mock_path ? strdup(mock_path) : NULL;
 
 	if (verbosity >= 1)
@@ -216,6 +233,9 @@ int main(int argc, char *argv[])
 	fmd_info(ctx, "Discovered %d CXL device(s)",
 		 ctx->topology.root ? ctx->topology.root->device_count : 0);
 
+	if (!mock_path && use_mctp)
+		fmd_events_init(ctx);
+
 	/* Start Redfish server */
 	if (fmd_redfish_start(ctx) < 0) {
 		fmd_err(ctx, "Failed to start Redfish server");
@@ -225,10 +245,9 @@ int main(int argc, char *argv[])
 	fmd_info(ctx, "Redfish API available at http://localhost:%d/redfish/v1",
 		 ctx->config.port);
 
-	/* Main loop */
-	while (g_running && ctx->running) {
-		sleep(1);
-	}
+	/* Main loop: drain the DC event log on a timer and on notification */
+	while (g_running && ctx->running)
+		fmd_events_poll(ctx, 1000);
 
 	fmd_info(ctx, "Shutting down...");
 	ret = EXIT_SUCCESS;

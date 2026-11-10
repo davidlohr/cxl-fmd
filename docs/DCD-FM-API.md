@@ -642,13 +642,19 @@ region reconfiguration, reference/unreference a tag, shared access).
 1. **Units of the `Length` action parameter.** The 2026.1 schema does not
    annotate it with `MiBy`. cxl-fmd assumes MiB. This is worth raising with
    the Redfish Forum together with the missing DCD rows in DSP0288.
-2. **Task support.** Comment 5 above. Without a `TaskService` the actions
-   complete at "device accepted the request", not "host accepted the
-   capacity".
+2. **Task support.** Comment 5 above. The completion signal now exists:
+   the DC event drain (item 3) clears the host's bit in the extent's
+   `pending_mask` when the host accepts or the add is withdrawn, so a
+   `Task` could be moved to `Completed` or `Exception` from that path
+   without polling the device. What is missing is the `TaskService`
+   plumbing itself. Until it lands the actions return `204 No Content` at
+   "device accepted the request", and clients have to watch the extent's
+   `Pending` property to learn when the host accepted the capacity.
 3. **Events.** Hosts learn about add/release through DC event records on
-   their own mailbox. The FM sees the FM-side records only if it polls Get
-   Event Records on the FM-owned LD, which cxl-fmd does not do yet; this is
-   what should drive the `Pending` transition instead of a rescan.
+   their own mailbox. The FM sees the FM-side records (types 04h/05h) by
+   reading Get Event Records on the FM-owned LD; cxl-fmd does this on a
+   timer (`--event-poll`) and early on MCTP Event Notification, and the
+   records drive the `Pending` transition instead of a rescan.
 4. **GFD.** The GFAM equivalents (4907h-490Bh) share the same shapes but
    address the device via PBR. Out of scope here and listed separately in
    `TODO`.

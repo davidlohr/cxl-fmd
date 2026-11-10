@@ -30,6 +30,21 @@
 #define DC_TAG_LIST_PAGE  32
 #define DC_LIST_RETRIES   3
 
+/* Dynamic Capacity Event Log (CXL r3.2 Section 8.2.10.2.2 and Table 8-229) */
+#define DC_EVENT_LOG		4
+#define DC_EVENT_LOG_NOTIFY	(1 << 4)	/* Event Interrupt Settings bit */
+#define DC_EVENT_ADD_RESPONSE	0x04
+#define DC_EVENT_RELEASED	0x05
+#define EVENT_FLAG_MORE		(1 << 0)
+#define EVENT_FLAG_OVERFLOW	(1 << 1)
+#define DC_EVENT_MAX_PAGES	16
+#define DC_EVENT_MAX_DEVS	64
+
+static const uint8_t dc_event_uuid[0x10] = {
+	0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
+	0x8c, 0x2f, 0x95, 0x26, 0x8e, 0x10, 0x1a, 0x2a,
+};
+
 static inline bool dev_is_hw(struct fmd_component *dev)
 {
 	return dev && dev->fabric && dev->fabric->ep;
@@ -1050,6 +1065,8 @@ int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
 int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct cxlmi_cmd_fmapi_get_dcd_info_rsp info = {0};
+	struct cxlmi_cmd_get_mctp_event_interrupt_policy_rsp cur = {0};
+	struct cxlmi_cmd_set_mctp_event_interrupt_policy_req pol;
 	struct cxlmi_tunnel_info tbuf, *ti;
 	struct fmd_dcd_info *dcd;
 	int rc;
@@ -1101,7 +1118,122 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 		 dev->id, dcd->num_hosts, dcd->num_regions,
 		 (uint64_t)(dcd->total_dc_capacity / FMD_MIB));
 
+	/*
+	 * Ask for an Event Notification whenever the DC event log goes
+	 * non-empty, keeping whatever the other logs were already set to.
+	 */
+	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(dev->fabric->ep, ti, &cur);
+	if (rc == 0 && !(cur.event_interrupt_settings & DC_EVENT_LOG_NOTIFY)) {
+		pol.event_interrupt_settings = cur.event_interrupt_settings |
+					       DC_EVENT_LOG_NOTIFY;
+		rc = cxlmi_cmd_set_mctp_event_interrupt_policy(dev->fabric->ep, ti, &pol);
+	}
+	if (rc)
+		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", dev->id, rc);
+
 	return fmd_dcd_refresh(ctx, dev, -1);
+}
+
+/*
+ * Read and clear the FM-side DC event log of one device, then refresh every
+ * host that an Add Capacity Response or Capacity Released record names.
+ */
+static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct cxlmi_cmd_get_event_records_req req = { .event_log = DC_EVENT_LOG };
+	struct cxlmi_cmd_get_event_records_rsp *rsp;
+	struct cxlmi_cmd_clear_event_records_req *clr;
+	struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+	struct cxlmi_endpoint *ep = dev->fabric->ep;
+	uint64_t hosts = 0;
+	bool overflow = false;
+	int rc = 0;
+
+	rsp = calloc(1, sizeof(*rsp) +
+		     CXLMI_MAX_SUPPORTED_EVENT_RECORDS * sizeof(rsp->records[0]));
+	clr = calloc(1, sizeof(*clr) +
+		     CXLMI_MAX_SUPPORTED_EVENT_RECORDS * sizeof(clr->handles[0]));
+	if (!rsp || !clr) {
+		free(rsp);
+		free(clr);
+		return -ENOMEM;
+	}
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+
+	for (int page = 0; page < DC_EVENT_MAX_PAGES; page++) {
+		rc = cxlmi_cmd_get_event_records(ep, ti, &req, rsp);
+		if (rc)
+			goto out;
+		if (rsp->flags & EVENT_FLAG_OVERFLOW)
+			overflow = true;
+		if (!rsp->record_count)
+			break;
+
+		for (int i = 0; i < rsp->record_count; i++) {
+			struct cxlmi_event_record *rec = &rsp->records[i];
+			uint8_t type = rec->data[0];
+			int host = rec->data[2] | (rec->data[3] << 8);
+
+			clr->handles[i] = rec->handle;
+			if (memcmp(rec->uuid, dc_event_uuid, sizeof(dc_event_uuid)))
+				continue;
+			if (type == DC_EVENT_ADD_RESPONSE || type == DC_EVENT_RELEASED)
+				hosts |= fmd_dc_host_bit(host);
+		}
+
+		clr->event_log = DC_EVENT_LOG;
+		clr->nr_recs = rsp->record_count;
+		rc = cxlmi_cmd_clear_event_records(ep, ti, clr);
+		if (rc)
+			goto out;
+		if (!(rsp->flags & EVENT_FLAG_MORE))
+			break;
+	}
+
+	if (overflow) {
+		fmd_warn(ctx, "%s: DC event log overflowed, refreshing all hosts", dev->id);
+		rc = dcd_refresh_locked(ctx, dev, -1);
+		goto out;
+	}
+
+	for (int h = 0; h < FMD_MAX_DC_HOSTS && !rc; h++) {
+		if (hosts & fmd_dc_host_bit(h))
+			rc = dcd_refresh_locked(ctx, dev, h);
+	}
+out:
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	free(rsp);
+	free(clr);
+	return rc;
+}
+
+int fmd_dcd_poll_events(struct fmd_ctx *ctx)
+{
+	static const enum fmd_component_type types[] = {
+		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
+	};
+	struct fmd_component *devs[DC_EVENT_MAX_DEVS], *comp;
+	int n = 0, rc = 0;
+
+	/* Collect under the read lock; each drain then runs under dcd_lock */
+	fmd_topology_rdlock(&ctx->topology);
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, types[t]) {
+			if (dev_is_hw(comp) && fmd_memdev_dcd(comp) &&
+			    n < DC_EVENT_MAX_DEVS)
+				devs[n++] = comp;
+		}
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+
+	for (int i = 0; i < n; i++) {
+		int r = drain_dc_events(ctx, devs[i]);
+
+		if (r && !rc)
+			rc = r;
+	}
+	return rc;
 }
 
 /*

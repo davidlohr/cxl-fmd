@@ -51,6 +51,7 @@ src = files(
     'src/mock.c',
     'src/cci_redfish_map.c',
     'src/dcd.c',
+    'src/events.c',
     'src/redfish/server.c',
     'src/redfish/handlers.c',
     'src/redfish/dcd_handlers.c',

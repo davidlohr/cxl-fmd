@@ -323,7 +323,7 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cx
 
 The following CXL features are not yet supported:
 - **Port-Based Routing (PBR)**: PBR fabric discovery and Global Fabric-Attached Memory Devices
-- **Dynamic Capacity events**: DC event records (host and FM side) are not polled yet, so an extent's `Pending` state only changes on rescan
+- **Dynamic Capacity events**: the FM-side DC event log is drained every `--event-poll` seconds (default 10) and early on MCTP Event Notification, so an extent's `Pending` state can lag the host's response by up to one interval on devices or transports without notifications
 
 ## References
 

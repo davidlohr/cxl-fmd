@@ -933,10 +933,13 @@ struct fmd_ctx {
 	bool running;
 	enum fmd_log_level log_level;
 
+	/* AF_MCTP listeners for Event Notification: CXL CCI, FM-API (-1 if unbound) */
+	int notify_sd[2];
+	int64_t next_dc_poll_ms;	/* CLOCK_MONOTONIC, 0 = not armed */
 	/*
-	 * Serializes DCD state changes (refresh, add/release, reference,
-	 * region configuration) across threads. The topology rwlock only
-	 * covers single add/remove calls, not a whole refresh.
+	 * Serializes DCD state changes (refresh, event drain, add/release)
+	 * across the event loop and the Redfish threads. The topology rwlock
+	 * only covers single add/remove calls, not a whole refresh.
 	 */
 	pthread_mutex_t dcd_lock;
 
@@ -945,6 +948,7 @@ struct fmd_ctx {
 		uint16_t port;
 		bool scan_mctp;
 		bool scan_ioctl;
+		unsigned int event_poll_sec;	/* 0 disables */
 		char *mock_topology_path;
 	} config;
 };
@@ -953,6 +957,8 @@ static inline bool fmd_is_mock(struct fmd_ctx *ctx)
 {
 	return ctx->config.mock_topology_path != NULL;
 }
+
+#define FMD_DEFAULT_EVENT_POLL_SEC 10
 
 struct fmd_ctx *fmd_ctx_new(void);
 void fmd_ctx_free(struct fmd_ctx *ctx);
@@ -1354,6 +1360,17 @@ int fmd_dc_region_extent_count(struct fmd_component *dev, struct fmd_dc_region *
 
 /* Hardware discovery: 5600h, then 5601h/5603h per host and 5608h */
 int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev);
+
+/*
+ * Drain the Dynamic Capacity Event Log of every DCD and refresh the hosts
+ * named in Add Capacity Response / Capacity Released records.
+ */
+int fmd_dcd_poll_events(struct fmd_ctx *ctx);
+
+/* MCTP Event Notification listeners (src/events.c) */
+int fmd_events_init(struct fmd_ctx *ctx);
+void fmd_events_cleanup(struct fmd_ctx *ctx);
+int fmd_events_poll(struct fmd_ctx *ctx, int timeout_ms);
 
 /* Refresh one host's regions and extents, and the tag list (hardware only) */
 int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id);
