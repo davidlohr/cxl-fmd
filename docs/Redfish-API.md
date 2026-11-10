@@ -1,6 +1,6 @@
 # Redfish API Reference
 
-This document describes the CXL to Redfish mapping implemented by cxl-fmd, based on [DMTF DSP0288 v1.3.0](https://www.dmtf.org/dsp/DSP0288) (CXL to Redfish Mapping Specification).
+This document describes the CXL to Redfish mapping implemented by cxl-fmd, based on [DMTF DSP0288 v1.4.0](https://www.dmtf.org/dsp/DSP0288) (CXL to Redfish Mapping Specification).
 
 ## Quick Start
 
@@ -159,6 +159,9 @@ Mapping between CXL Fabric Management API (FM-API) commands and Redfish resource
 | Get QoS Allocated BW | QoS Allocation Fraction | `CXLLogicalDevice` | `QoS/AllocatedBandwidth` | Yes |
 | Get QoS BW Limit | QoS Limit Fraction | `CXLLogicalDevice` | `QoS/LimitPercent` | Yes |
 | Set QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | No |
+| Get PBR Link Partner Info | Port ID - ID of requested Port | `Port` | `LinkPartnerTransmit/PortId` | No |
+| Get PBR Link Partner Info | Far End Port ID - Port ID of Far End Device | `Port` | `LinkPartnerReceived/PortId` | No |
+| Get PBR Link Partner Info | Device UUID | `Port` | `LinkPartnerReceived/LinkPartnerId` | No |
 | Bind vPPB | All | `Connection` | POST /Connections | Yes |
 | Unbind vPPB | All | `Connection` | DELETE /Connections | Yes |
 | MLD Port Event Record | All | `LogEntry` | | No |
