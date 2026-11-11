@@ -173,6 +173,24 @@ if pytest_available and requests_available
         suite: 'security',
     )
 
+    # Dynamic Capacity Device tests
+    test(
+        'dcd',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_dcd.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Unit topology tests (all 8 CXL combinations)
     test(
         'unit-topologies',

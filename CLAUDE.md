@@ -67,6 +67,7 @@ cxl-fmd/
 │   ├── single-sld.json           # Single SLD (16GB)
 │   ├── mld-device.json           # Multiple MLDs with various configs
 │   ├── degraded-device.json      # Device with health issues
+│   ├── dcd-device.json           # Dynamic Capacity Devices
 │   └── unit/                     # Unit test topologies (all 8 combinations)
 ├── schema/dmtf/
 │   ├── csdl/                     # DMTF CSDL (XML) schemas

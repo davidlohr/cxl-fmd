@@ -1,0 +1,123 @@
+{
+    "version": 1,
+    "id": "dcd_devices",
+    "description": "Dynamic Capacity Devices: a single-host SLD DCD and a two-host MLD DCD with a shared region",
+
+    "devices": [
+        {
+            "id": "cxl_dcd0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d95",
+            "serial_number": "0x4443443030303030",
+            "component_type": 3,
+            "ld_count": 1,
+
+            "identify_memory_device": {
+                "fw_revision": "3.2.0",
+                "total_capacity_mb": 16384,
+                "volatile_capacity_mb": 16384,
+                "persistent_capacity_mb": 0,
+                "partition_align_mb": 256,
+                "dc_region_count": 2
+            },
+
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+
+            "dcd": {
+                "num_hosts": 1,
+                "add_policies": ["Free", "Contiguous", "Prescriptive"],
+                "release_policies": ["TagBased", "Prescriptive"],
+                "max_extents": 64,
+                "max_tags": 16,
+                "regions": [
+                    {
+                        "region_id": 0,
+                        "base_mb": 16384,
+                        "region_len_mb": 32768,
+                        "block_size_mb": 256,
+                        "supported_block_sizes_mb": [256, 512, 1024],
+                        "sanitize_on_release": true,
+                        "interconnect_dcm": true,
+                        "sanitize_configurable": true
+                    },
+                    {
+                        "region_id": 1,
+                        "base_mb": 49152,
+                        "region_len_mb": 16384,
+                        "block_size_mb": 256,
+                        "sanitize_on_release": false,
+                        "sanitize_configurable": false,
+                        "nonvolatile": true
+                    }
+                ],
+                "extents": [
+                    {
+                        "start_mb": 16384,
+                        "len_mb": 4096,
+                        "tag": "6f1a2c3e-0000-4000-8000-000000000001",
+                        "host_id": 0
+                    }
+                ]
+            }
+        },
+
+        {
+            "id": "cxl_dcd_mld0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d96",
+            "serial_number": "0x4443444d4c443030",
+            "component_type": 3,
+            "ld_count": 2,
+            "max_ld_count": 4,
+
+            "identify_memory_device": {
+                "fw_revision": "3.2.0",
+                "total_capacity_mb": 8192,
+                "volatile_capacity_mb": 8192,
+                "persistent_capacity_mb": 0
+            },
+
+            "logical_devices": [
+                { "ld_id": 0, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 },
+                { "ld_id": 1, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 }
+            ],
+
+            "dcd": {
+                "num_hosts": 2,
+                "add_policies": ["Free", "Contiguous", "Prescriptive", "EnableSharedAccess"],
+                "release_policies": ["TagBased", "Prescriptive"],
+                "regions": [
+                    {
+                        "region_id": 0,
+                        "base_mb": 8192,
+                        "region_len_mb": 16384,
+                        "block_size_mb": 256,
+                        "supported_block_sizes_mb": [256, 512],
+                        "shareable": true,
+                        "hw_coherency": true,
+                        "hosts": [0, 1]
+                    }
+                ],
+                "extents": [
+                    {
+                        "start_mb": 8192,
+                        "len_mb": 2048,
+                        "tag": "6f1a2c3e-0000-4000-8000-000000000002",
+                        "hosts": [0, 1],
+                        "fm_referenced": true
+                    },
+                    {
+                        "start_mb": 10240,
+                        "len_mb": 1024,
+                        "tag": "6f1a2c3e-0000-4000-8000-000000000003",
+                        "hosts": [1],
+                        "pending": true
+                    }
+                ]
+            }
+        }
+    ]
+}

@@ -560,6 +560,267 @@ static void update_ld_bindings_for_head(struct fmd_mhd *mhd, struct fmd_head *he
 	}
 }
 
+/*
+ * ============================================================================
+ * Dynamic Capacity ("dcd" object on a Type 3 device)
+ * ============================================================================
+ *
+ * Mirrors the FM-API DCD Management responses:
+ *   - top level            -> Get DCD Info (5600h)
+ *   - "regions"[]          -> Get Host DC Region Configuration (5601h)
+ *   - "extents"[]          -> Get DC Region Extent Lists (5603h) + List Tags (5608h)
+ * See docs/mock-topology.md "Dynamic Capacity".
+ */
+
+/* Policy names (Redfish spelling) into a 5600h capability mask; @def if absent */
+static uint16_t parse_policies(json_t *arr, bool release, uint16_t def)
+{
+	uint16_t mask = 0;
+	size_t idx;
+	json_t *v;
+
+	if (!arr || !json_is_array(arr))
+		return def;
+
+	json_array_foreach(arr, idx, v) {
+		int p = fmd_dc_policy_from_str(release, json_string_value(v));
+
+		if (p >= 0)
+			mask |= fmd_dc_policy_cap_bit(release, p);
+	}
+	return mask;
+}
+
+/* "hosts": [..] or "host_id": N into a host bitmask; default is @def_mask */
+static uint64_t parse_host_mask(json_t *obj, uint64_t def_mask)
+{
+	json_t *jhosts = json_object_get(obj, "hosts");
+	json_t *jhost = json_object_get(obj, "host_id");
+	uint64_t mask = 0;
+	size_t idx;
+	json_t *v;
+
+	if (jhosts && json_is_array(jhosts)) {
+		json_array_foreach(jhosts, idx, v) {
+			if (json_is_integer(v))
+				mask |= fmd_dc_host_bit((int)json_integer_value(v));
+		}
+		return mask;
+	}
+	if (jhost && json_is_integer(jhost) && fmd_dc_host_bit((int)json_integer_value(jhost)))
+		return fmd_dc_host_bit((int)json_integer_value(jhost));
+
+	return def_mask;
+}
+
+static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *dev)
+{
+	json_t *jdcd = json_object_get(jdev, "dcd");
+	struct fmd_dcd_info *dcd;
+	struct fmd_component *child;
+	uint64_t region_base[FMD_MAX_DC_REGIONS] = {0};
+	uint64_t region_len[FMD_MAX_DC_REGIONS] = {0};
+	uint64_t all_hosts;
+	uint32_t max_extents, max_tags;
+	int default_hosts;
+	int n_regions = 0, n_extents = 0;
+	json_t *arr, *item;
+	size_t idx;
+
+	if (!jdcd || !json_is_object(jdcd))
+		return 0;
+
+	switch (dev->type) {
+	case FMD_COMPONENT_SLD:
+		default_hosts = 1;
+		break;
+	case FMD_COMPONENT_MLD:
+		default_hosts = fmd_to_mld(dev)->ld_count;
+		break;
+	case FMD_COMPONENT_MHD:
+		/* Host IDs are pool LD indices, see docs/DCD-FM-API.md */
+		default_hosts = fmd_to_mhd(dev)->total_lds;
+		break;
+	default:
+		return -1;
+	}
+
+	dcd = calloc(1, sizeof(*dcd));
+	if (!dcd)
+		return -1;
+
+	/* Get DCD Info (5600h) */
+	dcd->num_hosts = (uint8_t)json_int_or(jdcd, "num_hosts", default_hosts);
+	if (dcd->num_hosts > FMD_MAX_DC_HOSTS)
+		dcd->num_hosts = FMD_MAX_DC_HOSTS;
+	dcd->add_policies = parse_policies(json_object_get(jdcd, "add_policies"), false,
+					   FMD_DC_ADD_FREE | FMD_DC_ADD_CONTIGUOUS |
+					   FMD_DC_ADD_PRESCRIPTIVE);
+	dcd->release_policies = parse_policies(json_object_get(jdcd, "release_policies"), true,
+					       FMD_DC_REL_TAG_BASED | FMD_DC_REL_PRESCRIPTIVE);
+	max_extents = (uint32_t)json_int_or(jdcd, "max_extents", 256);
+	max_tags = (uint32_t)json_int_or(jdcd, "max_tags", 64);
+	dcd->extents_supported = dcd->extents_available = max_extents;
+	dcd->tags_supported = dcd->tags_available = max_tags;
+	all_hosts = (dcd->num_hosts >= 64) ? ~0ULL : (1ULL << dcd->num_hosts) - 1;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+		struct fmd_ld *ld = fmd_to_ld(child);
+		ld->dc_extents_supported = ld->dc_extents_available = max_extents;
+		ld->dc_tags_supported = ld->dc_tags_available = max_tags;
+	}
+
+	/* Regions: Get Host DC Region Configuration (5601h), one copy per host */
+	arr = json_object_get(jdcd, "regions");
+	if (arr && json_is_array(arr)) {
+		json_array_foreach(arr, idx, item) {
+			int rid = (int)json_int_or(item, "region_id", (int64_t)idx);
+			uint64_t len_mb = json_uint_or(item, "region_len_mb", 0);
+			uint64_t base_mb = json_uint_or(item, "base_mb", 0);
+			uint64_t decode_mb = json_uint_or(item, "decode_len_mb", len_mb);
+			uint64_t bs_mb = json_uint_or(item, "block_size_mb", 256);
+			bool sanitize = json_is_true(json_object_get(item, "sanitize_on_release"));
+			json_t *jcfg = json_object_get(item, "sanitize_configurable");
+			json_t *jbs = json_object_get(item, "supported_block_sizes_mb");
+			uint64_t hosts;
+			uint8_t flags = 0;
+
+			if (rid < 0 || rid >= FMD_MAX_DC_REGIONS || len_mb == 0 || bs_mb == 0) {
+				fmd_warn(ctx, "%s: dcd region %d: invalid or empty, skipping",
+					 dev->id, rid);
+				continue;
+			}
+
+			if (rid + 1 > dcd->num_regions)
+				dcd->num_regions = (uint8_t)(rid + 1);
+			region_base[rid] = base_mb * FMD_MIB;
+			region_len[rid] = len_mb * FMD_MIB;
+
+			if (json_is_true(json_object_get(item, "shareable")))
+				flags |= FMD_DC_REGION_SHAREABLE;
+			if (json_is_true(json_object_get(item, "nonvolatile")))
+				flags |= FMD_DC_REGION_NONVOLATILE;
+			if (json_is_true(json_object_get(item, "hw_coherency")))
+				flags |= FMD_DC_REGION_HW_COHERENT;
+			if (json_is_true(json_object_get(item, "interconnect_dcm")))
+				flags |= FMD_DC_REGION_INTERCONNECT_DCM;
+			if (json_is_true(json_object_get(item, "read_only")))
+				flags |= FMD_DC_REGION_READ_ONLY;
+			if (!jcfg || json_is_true(jcfg))
+				dcd->sanitize_cfg_mask |= (uint8_t)(1 << rid);
+
+			if (jbs && json_is_array(jbs)) {
+				size_t bidx;
+				json_t *jb;
+				json_array_foreach(jbs, bidx, jb) {
+					if (json_is_integer(jb) && json_integer_value(jb) > 0)
+						dcd->blk_sz_mask[rid] |=
+							1ULL << (20 + fmd_ilog2_u64((uint64_t)json_integer_value(jb)));
+				}
+			}
+			dcd->blk_sz_mask[rid] |= 1ULL << (20 + fmd_ilog2_u64(bs_mb));
+
+			hosts = parse_host_mask(item, all_hosts);
+			for (int h = 0; h < dcd->num_hosts; h++) {
+				struct fmd_component *owner;
+				struct fmd_dc_region *r;
+
+				if (!(hosts & fmd_dc_host_bit(h)))
+					continue;
+				owner = fmd_dc_host_component(dev, h);
+				if (!owner) {
+					fmd_warn(ctx, "%s: dcd region %d: host %d has no logical device, skipping",
+						 dev->id, rid, h);
+					continue;
+				}
+
+				r = fmd_dc_region_add(ctx, owner, (uint8_t)rid, (uint16_t)h);
+				if (!r)
+					continue;
+				r->base_dpa = region_base[rid];
+				r->decode_len = decode_mb * FMD_MIB;
+				r->region_len = region_len[rid];
+				r->block_size = bs_mb * FMD_MIB;
+				r->flags = flags;
+				r->sanitize_on_release = sanitize;
+				n_regions++;
+			}
+		}
+	}
+
+	dcd->total_dc_capacity = json_uint_or(jdcd, "total_capacity_mb", 0) * FMD_MIB;
+	if (dcd->total_dc_capacity == 0) {
+		for (int r = 0; r < FMD_MAX_DC_REGIONS; r++)
+			dcd->total_dc_capacity += region_len[r];
+	}
+
+	/* Attach before extents so the counters can be adjusted */
+	switch (dev->type) {
+	case FMD_COMPONENT_SLD:
+		fmd_to_sld(dev)->dcd = dcd;
+		break;
+	case FMD_COMPONENT_MLD:
+		fmd_to_mld(dev)->dcd = dcd;
+		break;
+	default:
+		fmd_to_mhd(dev)->dcd = dcd;
+		fmd_to_mhd(dev)->dynamic_capacity = true;
+		break;
+	}
+
+	/* Extents: Get DC Region Extent Lists (5603h) + DC List Tags (5608h) */
+	arr = json_object_get(jdcd, "extents");
+	if (arr && json_is_array(arr)) {
+		json_array_foreach(arr, idx, item) {
+			uint64_t dpa = json_uint_or(item, "start_mb", 0) * FMD_MIB;
+			uint64_t len = json_uint_or(item, "len_mb", 0) * FMD_MIB;
+			const char *tag_str = json_str_or(item, "tag", "");
+			uint64_t hosts = parse_host_mask(item, 1ULL);
+			uint8_t tag[FMD_DC_TAG_LEN];
+			struct fmd_dc_extent *ext;
+			int rid = -1;
+
+			for (int r = 0; r < FMD_MAX_DC_REGIONS; r++) {
+				if (region_len[r] && dpa >= region_base[r] &&
+				    dpa < region_base[r] + region_len[r]) {
+					rid = r;
+					break;
+				}
+			}
+			if (len == 0 || rid < 0) {
+				fmd_warn(ctx, "%s: dcd extent at %" PRIu64 " MB is empty or outside every region, skipping",
+					 dev->id, (uint64_t)(dpa / FMD_MIB));
+				continue;
+			}
+
+			if (fmd_dc_tag_from_str(tag_str, tag) < 0)
+				fmd_warn(ctx, "%s: dcd extent at %" PRIu64 " MB: invalid tag '%s'",
+					 dev->id, (uint64_t)(dpa / FMD_MIB), tag_str);
+			ext = fmd_dc_extent_add(ctx, dev, dpa, len, tag,
+						(uint16_t)json_int_or(item, "shared_seq", 0),
+						(uint8_t)rid);
+			if (!ext)
+				continue;
+			ext->host_mask = hosts & all_hosts;
+			ext->pending_mask = json_is_true(json_object_get(item, "pending")) ?
+				ext->host_mask : 0;
+			ext->fm_referenced = json_is_true(json_object_get(item, "fm_referenced"));
+			n_extents++;
+
+			for (int h = 0; h < dcd->num_hosts; h++) {
+				if (ext->host_mask & fmd_dc_host_bit(h))
+					fmd_dc_adjust_available_extents(dev, h, -1);
+			}
+		}
+	}
+
+	fmd_info(ctx, "Mock DCD %s: %d hosts, %d regions (%d host views), %d extents, %" PRIu64 " MB dynamic",
+		 dev->id, dcd->num_hosts, dcd->num_regions, n_regions, n_extents,
+		 (uint64_t)(dcd->total_dc_capacity / FMD_MIB));
+
+	return 0;
+}
+
 static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 			struct fmd_component *parent)
 {
@@ -635,6 +896,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 		}
 
 		fmd_create_mhd_memory_resources(ctx, mhd);
+		parse_dcd(ctx, jdev, &mhd->base);
 
 		fmd_info(ctx, "Mock MHD %s: %d heads, %d LDs", id, mhd->num_heads, mhd->total_lds);
 		return 0;
@@ -650,6 +912,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 		fmd_topology_add(&ctx->topology, &sld->base, parent);
 		fmd_create_sld_memory_resources(ctx, sld);
+		parse_dcd(ctx, jdev, &sld->base);
 
 		fmd_info(ctx, "Mock SLD %s: %" PRIu64 " MB",
 			 id, (uint64_t)(sld->memory_size / (1024ULL * 1024)));
@@ -719,6 +982,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 		}
 
 		fmd_create_mld_memory_resources(ctx, mld);
+		parse_dcd(ctx, jdev, &mld->base);
 
 		fmd_info(ctx, "Mock MLD %s: %d LDs", id, mld->ld_count);
 	}

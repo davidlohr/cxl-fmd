@@ -299,6 +299,8 @@ python scripts/run_redfish_validator.py --output-dir ./logs
 Type 3 devices that implement the FM-API DCD Management command set (CXL r3.2 Section 7.6.7.6) are exposed through the 2026.1 Redfish model. DSP0288 does not cover these commands yet; the mapping cxl-fmd implements is specified in [docs/DCD-FM-API.md](docs/DCD-FM-API.md).
 
 ```bash
+./build/cxl-fmd --mock mock/dcd-device.json
+
 # Device capabilities (Get DCD Info)
 curl -s http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0 | jq .CXLDevice.DynamicCapacity
 
