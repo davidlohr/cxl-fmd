@@ -143,6 +143,34 @@ static enum MHD_Result send_error(struct MHD_Connection *conn,
 }
 
 /*
+ * Map a negative errno from a handler to an HTTP error response
+ */
+static enum MHD_Result send_errno(struct MHD_Connection *conn, int rc,
+				  const char *msg)
+{
+	unsigned int status;
+
+	switch (-rc) {
+	case ENOENT:
+		status = MHD_HTTP_NOT_FOUND;
+		break;
+	case EINVAL:
+		status = MHD_HTTP_BAD_REQUEST;
+		break;
+	case EBUSY:
+	case ENOSPC:
+	case EEXIST:
+		status = MHD_HTTP_CONFLICT;
+		break;
+	default:
+		status = MHD_HTTP_INTERNAL_SERVER_ERROR;
+		break;
+	}
+
+	return send_error(conn, status, msg ? msg : "Request failed");
+}
+
+/*
  * Send 204 No Content response (for DELETE success)
  */
 static enum MHD_Result send_no_content(struct MHD_Connection *conn)
@@ -596,6 +624,44 @@ static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
 		goto not_found;
 	}
 
+	/* Dynamic capacity: MemoryRegions (per LD) and MemoryExtents (per device) */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions",
+			norm_url, params, 8)) {
+		response = fmd_redfish_dc_memory_regions(ctx, params[0], params[1], params[2]);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}",
+			norm_url, params, 8)) {
+		response = fmd_redfish_dc_memory_region(ctx, params[0], params[1],
+							params[2], params[3]);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents",
+			norm_url, params, 8)) {
+		response = fmd_redfish_dc_memory_extents(ctx, params[0], params[1]);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}",
+			norm_url, params, 8)) {
+		response = fmd_redfish_dc_memory_extent(ctx, params[0], params[1], params[2]);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
 	/* Memory Collection and Memory resources */
 	if (match_route("/redfish/v1/Chassis/{id}/Memory", norm_url, params, 8)) {
 		response = fmd_redfish_memory_collection(ctx, params[0]);
@@ -795,6 +861,51 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 				  "Action failed");
 	}
 
+	/* POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd",
+			norm_url, params, 8)) {
+		const char *msg = NULL;
+
+		rc = fmd_redfish_action_dc_add(ctx, params[0], params[1], params[2],
+					       body, body_size, &msg);
+		free_params(params, 8);
+		free(norm_url);
+
+		if (rc == 0)
+			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		return send_errno(conn, rc, msg);
+	}
+
+	/* POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease",
+			norm_url, params, 8)) {
+		const char *msg = NULL;
+
+		rc = fmd_redfish_action_dc_release(ctx, params[0], params[1], params[2],
+						   body, body_size, &msg);
+		free_params(params, 8);
+		free(norm_url);
+
+		if (rc == 0)
+			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		return send_errno(conn, rc, msg);
+	}
+
+	/* POST .../PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory",
+			norm_url, params, 8)) {
+		const char *msg = NULL;
+
+		rc = fmd_redfish_action_dc_reference(ctx, params[0], params[1],
+						     body, body_size, &msg);
+		free_params(params, 8);
+		free(norm_url);
+
+		if (rc == 0)
+			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		return send_errno(conn, rc, msg);
+	}
+
 	/* POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks - create chunk */
 	if (match_route("/redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks",
 			norm_url, params, 8)) {
@@ -960,6 +1071,21 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "CCI command failed");
 	}
 
+	/* PATCH .../CXLLogicalDevices/{ld}/MemoryRegions/{region} - Set DC Region Config */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}",
+			norm_url, params, 8)) {
+		const char *msg = NULL;
+
+		rc = fmd_redfish_patch_dc_memory_region(ctx, params[0], params[1], params[2],
+							params[3], body, body_size, &msg);
+		free_params(params, 8);
+		free(norm_url);
+
+		if (rc == 0)
+			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		return send_errno(conn, rc, msg);
+	}
+
 	free(norm_url);
 	return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
 			  "PATCH not supported for this resource");
@@ -1017,6 +1143,21 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 					  "Connection not found");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete connection");
+	}
+
+	/* DELETE .../PCIeDevices/{dev}/MemoryExtents/{ext} - release the extent */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}",
+			norm_url, params, 8)) {
+		const char *msg = NULL;
+
+		rc = fmd_redfish_delete_dc_memory_extent(ctx, params[0], params[1],
+							 params[2], &msg);
+		free_params(params, 8);
+		free(norm_url);
+
+		if (rc == 0)
+			return send_no_content(conn);
+		return send_errno(conn, rc, msg);
 	}
 
 	free(norm_url);

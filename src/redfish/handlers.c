@@ -2219,7 +2219,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"  s:{s:s}"  /* CXLLogicalDevices */
 		"}",
 		"@odata.id", uri,
-		"@odata.type", "#PCIeDevice.v1_19_0.PCIeDevice",
+		"@odata.type", "#PCIeDevice.v1_23_0.PCIeDevice",
 		"Id", dev_id,
 		"Name", dev_name,
 		"DeviceType", "SingleFunction",
@@ -2325,6 +2325,43 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 						    json_string(ts_str));
 				free(ts_str);
 			}
+		}
+	}
+
+	/* CXLDevice/DeviceClass (PCIeDevice v1.23): SLD, MLD, MH_SLD or MH_MLD */
+	{
+		enum rf_cxl_device_class dev_class = CXL_DEVICE_CLASS_SLD;
+
+		if (comp->type == FMD_COMPONENT_MLD) {
+			dev_class = CXL_DEVICE_CLASS_MLD;
+		} else if (comp->type == FMD_COMPONENT_MHD) {
+			struct fmd_component *child;
+
+			dev_class = CXL_DEVICE_CLASS_MH_SLD;
+			fmd_topology_rdlock(&ctx->topology);
+			fmd_for_each_child_type(comp, child, FMD_COMPONENT_HEAD) {
+				if (fmd_to_head(child)->presentation == FMD_HEAD_MLD) {
+					dev_class = CXL_DEVICE_CLASS_MH_MLD;
+					break;
+				}
+			}
+			fmd_topology_rdunlock(&ctx->topology);
+		}
+		json_object_set_new(cxl_device, "DeviceClass",
+			json_string(rf_cxl_device_class_to_str(dev_class)));
+	}
+
+	/*
+	 * DSP0288 gap, see docs/DCD-FM-API.md Table 3:
+	 * Get DCD Info (5600h) -> CXLDevice/DynamicCapacity, and the
+	 * CXLReferenceDCMemory action for DC Add/Remove Reference (5606h/5607h).
+	 */
+	{
+		json_t *dyn = fmd_redfish_dc_capabilities(ctx, comp, chassis_id, dev_id);
+		if (dyn) {
+			json_object_set_new(cxl_device, "DynamicCapacity", dyn);
+			json_object_set_new(result, "Actions",
+				fmd_redfish_dc_pcie_actions(chassis_id, dev_id));
 		}
 	}
 
@@ -2523,7 +2560,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"  s:{s:I, s:I}"   /* QoS */
 		"}",
 		"@odata.id", uri,
-		"@odata.type", "#CXLLogicalDevice.v1_2_0.CXLLogicalDevice",
+		"@odata.type", "#CXLLogicalDevice.v1_5_0.CXLLogicalDevice",
 		"Id", ld_id,
 		"Name", name,
 		"MemorySizeMiB", (json_int_t)mem_size_mib,
@@ -2624,6 +2661,13 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		json_decref(chunks_array);
 	}
 	json_object_set_new(result, "Links", links);
+
+	/*
+	 * Dynamic capacity (docs/DCD-FM-API.md Table 3): MemoryRegions link,
+	 * extent/tag counters and the DynamicCapacityAdd/Release actions.
+	 */
+	fmd_redfish_dc_logical_device_props(ctx, comp, ld_idx, chassis_id, pcie_id,
+					    ld_id, result);
 
 	return result;
 }
@@ -4001,14 +4045,14 @@ char *fmd_redfish_metadata(struct fmd_ctx *ctx)
 		"  </edmx:Reference>\n"
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/PCIeDevice_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"PCIeDevice\"/>\n"
-		"    <edmx:Include Namespace=\"PCIeDevice.v1_19_0\"/>\n"
+		"    <edmx:Include Namespace=\"PCIeDevice.v1_23_0\"/>\n"
 		"  </edmx:Reference>\n"
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/PCIeDeviceCollection_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"PCIeDeviceCollection\"/>\n"
 		"  </edmx:Reference>\n"
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/CXLLogicalDevice_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"CXLLogicalDevice\"/>\n"
-		"    <edmx:Include Namespace=\"CXLLogicalDevice.v1_2_0\"/>\n"
+		"    <edmx:Include Namespace=\"CXLLogicalDevice.v1_5_0\"/>\n"
 		"  </edmx:Reference>\n"
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/CXLLogicalDeviceCollection_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"CXLLogicalDeviceCollection\"/>\n"
@@ -4033,6 +4077,20 @@ char *fmd_redfish_metadata(struct fmd_ctx *ctx)
 		"  </edmx:Reference>\n"
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MemoryChunksCollection_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"MemoryChunksCollection\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MemoryRegion_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"MemoryRegion\"/>\n"
+		"    <edmx:Include Namespace=\"MemoryRegion.v1_1_0\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MemoryRegionCollection_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"MemoryRegionCollection\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MemoryExtent_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"MemoryExtent\"/>\n"
+		"    <edmx:Include Namespace=\"MemoryExtent.v1_0_0\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MemoryExtentCollection_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"MemoryExtentCollection\"/>\n"
 		"  </edmx:Reference>\n"
 		"  <edmx:DataServices>\n"
 		"    <Schema xmlns=\"http://docs.oasis-open.org/odata/ns/edm\" Namespace=\"Service\">\n"

@@ -65,6 +65,7 @@ struct fmd_ctx *fmd_ctx_new(void)
 	ctx->config.scan_ioctl = false;
 	ctx->log_level = FMD_LOG_INFO;
 	ctx->running = true;
+	pthread_mutex_init(&ctx->dcd_lock, NULL);
 
 	/* Initialize topology */
 	if (fmd_topology_init(&ctx->topology) < 0) {
@@ -90,6 +91,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 
 	fmd_redfish_stop(ctx);
 	fmd_topology_cleanup(&ctx->topology);
+	pthread_mutex_destroy(&ctx->dcd_lock);
 
 	if (ctx->mock_fabric)
 		fmd_mock_free(ctx->mock_fabric);

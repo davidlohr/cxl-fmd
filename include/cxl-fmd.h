@@ -20,6 +20,7 @@
 
 #include "generated/enums/resource.h"
 #include "generated/enums/cxl_logical_device.h"
+#include "generated/enums/pcie_device.h"
 
 /*
  * Forward declarations
@@ -41,6 +42,9 @@ struct fmd_host;
 struct fmd_connection;
 struct fmd_mhd;
 struct fmd_head;
+struct fmd_dcd_info;
+struct fmd_dc_region;
+struct fmd_dc_extent;
 
 /*
  * Logging
@@ -77,6 +81,7 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  */
 #define CXL_CAPACITY_UNIT  (256ULL * 1024 * 1024)
 #define CXL_TO_BYTES(x)    ((x) * CXL_CAPACITY_UNIT)
+#define FMD_MIB            (1024ULL * 1024)
 
 /*
  * Maximum Logical Devices per MLD
@@ -89,6 +94,13 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  */
 #define FMD_MAX_HEADS    8      /* Max heads per MHD */
 #define FMD_MAX_LD_POOL  64     /* Max LDs in MHD pool (can exceed 16) */
+
+/*
+ * Dynamic Capacity Device (DCD) limits (CXL r3.2 Section 7.6.7.6)
+ */
+#define FMD_MAX_DC_REGIONS 8      /* DC regions per host */
+#define FMD_DC_TAG_LEN     16     /* Extent tag is a 16-byte UUID */
+#define FMD_MAX_DC_HOSTS   64     /* Hosts tracked per extent (bitmask) */
 
 /*
  * Hash table size for component lookup
@@ -136,6 +148,8 @@ enum fmd_component_type {
 	FMD_COMPONENT_DOMAIN,        /* Memory Domain */
 	FMD_COMPONENT_CHUNK,         /* Memory Chunk */
 	FMD_COMPONENT_HOST,          /* Host system (initiator) */
+	FMD_COMPONENT_DC_REGION,     /* DC region (per host, child of SLD/LD) */
+	FMD_COMPONENT_DC_EXTENT,     /* DC extent (device-wide, child of memdev) */
 };
 
 /*
@@ -176,6 +190,8 @@ struct fmd_component {
 #define fmd_to_host(c)     fmd_container_of(c, struct fmd_host, base)
 #define fmd_to_mhd(c)      fmd_container_of(c, struct fmd_mhd, base)
 #define fmd_to_head(c)     fmd_container_of(c, struct fmd_head, base)
+#define fmd_to_dc_region(c) fmd_container_of(c, struct fmd_dc_region, base)
+#define fmd_to_dc_extent(c) fmd_container_of(c, struct fmd_dc_extent, base)
 
 /* Tree iteration macros */
 #define fmd_for_each_child(parent, child) \
@@ -426,6 +442,9 @@ struct fmd_sld {
 	uint64_t memory_size;
 	uint64_t volatile_size;
 	uint64_t persistent_size;
+
+	/* Dynamic capacity capabilities (NULL if not a DCD) */
+	struct fmd_dcd_info *dcd;
 };
 
 
@@ -473,6 +492,9 @@ struct fmd_mld {
 		bool backpressure_avg_valid;
 		uint8_t backpressure_avg_pct;
 	} qos_status;
+
+	/* Dynamic capacity capabilities (NULL if not a DCD) */
+	struct fmd_dcd_info *dcd;
 };
 
 
@@ -534,6 +556,12 @@ struct fmd_ld {
 
 	/* From tunneled Get Health Info (4200h) */
 	struct cxlmi_cmd_memdev_get_health_info_rsp health;
+
+	/* From Get Host DC Region Configuration (5601h) trailer, DCD only */
+	uint32_t dc_extents_supported;
+	uint32_t dc_extents_available;
+	uint32_t dc_tags_supported;
+	uint32_t dc_tags_available;
 };
 
 
@@ -639,6 +667,9 @@ struct fmd_mhd {
 		bool backpressure_avg_valid;
 		uint8_t backpressure_avg_pct;
 	} qos_status;
+
+	/* Dynamic capacity capabilities (NULL if not a DCD) */
+	struct fmd_dcd_info *dcd;
 };
 
 
@@ -687,6 +718,106 @@ struct fmd_mem_chunk {
 	char address_range_type[16];       /* "PMEM" or "Volatile" */
 	int interleave_set_count;
 	struct fmd_interleave_set interleave_sets[FMD_MAX_INTERLEAVE];
+};
+
+
+/*
+ * Dynamic Capacity policies (CXL r3.2 Table 7-xx, Get DCD Info 5600h)
+ */
+#define FMD_DC_ADD_FREE            0x01
+#define FMD_DC_ADD_CONTIGUOUS      0x02
+#define FMD_DC_ADD_PRESCRIPTIVE    0x04
+#define FMD_DC_ADD_SHARED_ACCESS   0x08
+
+#define FMD_DC_REL_TAG_BASED       0x01
+#define FMD_DC_REL_PRESCRIPTIVE    0x02
+
+/* Initiate DC Add (5604h) selection policy values */
+#define FMD_DC_POLICY_FREE          0
+#define FMD_DC_POLICY_CONTIGUOUS    1
+#define FMD_DC_POLICY_PRESCRIPTIVE  2
+#define FMD_DC_POLICY_SHARED_ACCESS 3
+
+/* Initiate DC Release (5605h) flags */
+#define FMD_DC_REL_POLICY_MASK      0x0F
+#define FMD_DC_REL_POLICY_TAG_BASED 0
+#define FMD_DC_REL_POLICY_PRESCRIPTIVE 1
+#define FMD_DC_REL_FORCED_REMOVAL   0x10
+#define FMD_DC_REL_SANITIZE         0x20
+
+/*
+ * DC region flags: 5601h Region Configuration, Attributes1 byte
+ * (CXL r3.2 Table 7-68). Bit positions follow the CDAT DSMAS Flags field.
+ */
+#define FMD_DC_REGION_NONVOLATILE   (1 << 2)
+#define FMD_DC_REGION_SHAREABLE     (1 << 3)
+#define FMD_DC_REGION_HW_COHERENT   (1 << 4)
+#define FMD_DC_REGION_INTERCONNECT_DCM (1 << 5)
+#define FMD_DC_REGION_READ_ONLY     (1 << 6)
+
+/*
+ * Device-wide Dynamic Capacity capabilities
+ *
+ * From FM-API Get DCD Info (5600h). Attached to fmd_sld, fmd_mld or
+ * fmd_mhd when the device supports dynamic capacity. Redfish exposes it as
+ * PCIeDevice.CXLDevice/DynamicCapacity.
+ */
+struct fmd_dcd_info {
+	uint8_t  num_hosts;
+	uint8_t  num_regions;               /* Supported DC regions (1..8) */
+	uint16_t add_policies;              /* FMD_DC_ADD_* bitmask */
+	uint16_t release_policies;          /* FMD_DC_REL_* bitmask */
+	uint8_t  sanitize_cfg_mask;         /* bit N: region N sanitize configurable */
+	uint64_t total_dc_capacity;         /* bytes */
+	uint64_t blk_sz_mask[FMD_MAX_DC_REGIONS]; /* bit n: 2^n byte block supported */
+
+	/* Per-host counters for SLDs (MLD/MHD keep them on fmd_ld) */
+	uint32_t extents_supported;
+	uint32_t extents_available;
+	uint32_t tags_supported;
+	uint32_t tags_available;
+};
+
+/*
+ * DC Region - one host's view of a dynamic capacity region
+ *
+ * From FM-API Get Host DC Region Configuration (5601h).
+ * Child of fmd_sld (host 0) or of the fmd_ld the host is bound to.
+ * Redfish: CXLLogicalDevices/{ld}/MemoryRegions/{region}
+ */
+struct fmd_dc_region {
+	struct fmd_component base;
+
+	uint8_t  region_id;                 /* 0..num_regions-1 */
+	uint16_t host_id;                   /* FM-API Host ID */
+	uint64_t base_dpa;                  /* Region Base */
+	uint64_t decode_len;                /* Region Decode Length */
+	uint64_t region_len;                /* Region Length */
+	uint64_t block_size;                /* Region Block Size */
+	uint8_t  flags;                     /* FMD_DC_REGION_* */
+	bool     sanitize_on_release;
+};
+
+/*
+ * DC Extent - a block of dynamic capacity allocated to one or more hosts
+ *
+ * From FM-API Get DC Region Extent Lists (5603h), decorated with
+ * Dynamic Capacity List Tags (5608h). Keyed by DPA, device-wide.
+ * Child of the fmd_sld/fmd_mld/fmd_mhd.
+ * Redfish: PCIeDevices/{dev}/MemoryExtents/{ext}
+ */
+struct fmd_dc_extent {
+	struct fmd_component base;
+
+	uint64_t start_dpa;
+	uint64_t len;
+	uint8_t  tag[FMD_DC_TAG_LEN];
+	uint16_t shared_seq;
+	uint8_t  region_id;
+
+	uint64_t host_mask;                 /* bit h: host h has (or was offered) it */
+	uint64_t pending_mask;              /* bit h: host h has not accepted yet */
+	bool     fm_referenced;             /* FM holds a reference on the tag */
 };
 
 
@@ -802,6 +933,13 @@ struct fmd_ctx {
 	bool running;
 	enum fmd_log_level log_level;
 
+	/*
+	 * Serializes DCD state changes (refresh, add/release, reference,
+	 * region configuration) across threads. The topology rwlock only
+	 * covers single add/remove calls, not a whole refresh.
+	 */
+	pthread_mutex_t dcd_lock;
+
 	/* Configuration */
 	struct {
 		uint16_t port;
@@ -896,6 +1034,9 @@ struct fmd_mem_chunk *fmd_chunk_create(const char *id);
 struct fmd_host *fmd_host_create(const char *id);
 struct fmd_mhd *fmd_mhd_create(const char *id);
 struct fmd_head *fmd_head_create(const char *id, uint8_t head_id);
+struct fmd_dc_region *fmd_dc_region_create(const char *id, uint8_t region_id,
+					   uint16_t host_id);
+struct fmd_dc_extent *fmd_dc_extent_create(const char *id);
 
 /*
  * Create a memory chunk in a domain with full configuration.
@@ -1137,6 +1278,122 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 			  uint64_t volatile_bytes, bool immediate);
 
 
+
+/*
+ * Dynamic Capacity Device (DCD) management (CXL r3.2 Section 7.6.7.6)
+ *
+ * See docs/DCD-FM-API.md for the FM-API to Redfish mapping. All functions
+ * work on the Type 3 device component (SLD, MLD or MHD). For mock mode they
+ * update local state only; for hardware they issue the FM-API command and
+ * refresh the affected host's regions and extents from the device.
+ */
+
+/* Device-level accessor: NULL when the device is not a DCD */
+struct fmd_dcd_info *fmd_memdev_dcd(struct fmd_component *dev);
+
+/*
+ * Resolve the FM-API Host ID for a CXLLogicalDevice index:
+ *   SLD: 0, MLD: LD-ID, MHD: pool LD index (docs/DCD-FM-API.md,
+ *   "Host ID Resolution").
+ * Returns the host id, or -1 if the LD does not exist.
+ */
+int fmd_dc_host_id(struct fmd_component *dev, int ld_idx);
+
+/* Bit for @host_id in fmd_dc_extent host/pending masks; 0 when out of range */
+static inline uint64_t fmd_dc_host_bit(int host_id)
+{
+	if (host_id < 0 || host_id >= FMD_MAX_DC_HOSTS)
+		return 0;
+	return 1ULL << host_id;
+}
+
+/* floor(log2(v)); 0 for v <= 1 */
+static inline int fmd_ilog2_u64(uint64_t v)
+{
+	int n = 0;
+
+	while (v > 1) {
+		v >>= 1;
+		n++;
+	}
+	return n;
+}
+
+/*
+ * Policy tables (CXL r3.2 Table 7-xx) keyed by the FMD_DC_POLICY_* /
+ * FMD_DC_REL_POLICY_* wire values; names come from the generated
+ * PCIeDevice.CXLDynamicCapacityPolicies enum.
+ */
+const char *fmd_dc_policy_name(bool release, int value);	/* NULL past the end */
+uint16_t fmd_dc_policy_cap_bit(bool release, int value);	/* 5600h bit, 0 if invalid */
+int fmd_dc_policy_from_str(bool release, const char *name);	/* -1 if unknown */
+
+/* Create and attach a host's view of a region / a device-wide extent */
+struct fmd_dc_region *fmd_dc_region_add(struct fmd_ctx *ctx, struct fmd_component *owner,
+					uint8_t region_id, uint16_t host_id);
+struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_component *dev,
+					uint64_t dpa, uint64_t len,
+					const uint8_t tag[FMD_DC_TAG_LEN],
+					uint16_t shared_seq, uint8_t region_id);
+
+/* Per-host available-extent counter (SLD keeps it on dcd, MLD/MHD on the LD) */
+void fmd_dc_adjust_available_extents(struct fmd_component *dev, int host_id, int delta);
+
+/* Component (SLD or LD) that owns the DC regions of a host */
+struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_id);
+
+/* Find a host's region by region number */
+struct fmd_dc_region *fmd_dc_find_region(struct fmd_component *dev, int host_id,
+					 uint8_t region_id);
+
+/* Find the extent that starts at a DPA */
+struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, uint64_t dpa);
+
+/* Count extents visible to a host in a region */
+int fmd_dc_region_extent_count(struct fmd_component *dev, struct fmd_dc_region *region);
+
+/* Hardware discovery: 5600h, then 5601h/5603h per host and 5608h */
+int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev);
+
+/* Refresh one host's regions and extents, and the tag list (hardware only) */
+int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id);
+
+/*
+ * Set DC Region Configuration (5602h)
+ * Returns 0, -EINVAL (unsupported value), -EBUSY (extents allocated), -EIO.
+ */
+int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
+			     struct fmd_dc_region *region, uint64_t block_size,
+			     bool sanitize_on_release);
+
+/*
+ * Initiate Dynamic Capacity Add (5604h)
+ * @policy: FMD_DC_POLICY_*; @extents/@ext_count used for Prescriptive.
+ * Returns 0, -EINVAL, -ENOSPC (no room), -ENOENT (region/extent missing), -EIO.
+ */
+int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+	       uint8_t policy, uint8_t region_id, uint64_t length,
+	       const uint8_t tag[FMD_DC_TAG_LEN],
+	       struct fmd_dc_extent **extents, int ext_count);
+
+/*
+ * Initiate Dynamic Capacity Release (5605h)
+ * @policy: FMD_DC_REL_POLICY_*; @extents/@ext_count used for Prescriptive.
+ */
+int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+		   uint8_t policy, bool forced, bool sanitize, uint64_t length,
+		   const uint8_t tag[FMD_DC_TAG_LEN],
+		   struct fmd_dc_extent **extents, int ext_count);
+
+/* Dynamic Capacity Add Reference (5606h) / Remove Reference (5607h) */
+int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
+		     const uint8_t tag[FMD_DC_TAG_LEN], bool add);
+
+/* Tag helpers: 16-byte tag <-> UUID string (37 bytes incl. NUL) */
+void fmd_dc_tag_to_str(const uint8_t tag[FMD_DC_TAG_LEN], char *buf, size_t len);
+int fmd_dc_tag_from_str(const char *str, uint8_t tag[FMD_DC_TAG_LEN]);
+
+
 int fmd_redfish_start(struct fmd_ctx *ctx);
 void fmd_redfish_stop(struct fmd_ctx *ctx);
 
@@ -1229,6 +1486,46 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx, const char *chassi
 					 const char *mem_id, const char *body, size_t body_size);
 int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx, const char *switch_id,
 				 const char *port_id);
+
+/*
+ * Dynamic Capacity handlers (src/redfish/dcd_handlers.c)
+ *
+ * Write handlers return 0 on success or a negative errno that server.c
+ * maps to an HTTP status: -ENOENT 404, -EINVAL 400, -EBUSY/-ENOSPC/-EEXIST 409,
+ * anything else 500. @msg receives a static error message when non-NULL.
+ */
+json_t *fmd_redfish_dc_capabilities(struct fmd_ctx *ctx, struct fmd_component *dev,
+				    const char *chassis_id, const char *dev_id);
+json_t *fmd_redfish_dc_pcie_actions(const char *chassis_id, const char *dev_id);
+void fmd_redfish_dc_logical_device_props(struct fmd_ctx *ctx, struct fmd_component *dev,
+					 int ld_idx, const char *chassis_id,
+					 const char *dev_id, const char *ld_id,
+					 json_t *result);
+json_t *fmd_redfish_dc_memory_extents(struct fmd_ctx *ctx, const char *chassis_id,
+				      const char *dev_id);
+json_t *fmd_redfish_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
+				     const char *dev_id, const char *ext_id);
+json_t *fmd_redfish_dc_memory_regions(struct fmd_ctx *ctx, const char *chassis_id,
+				      const char *dev_id, const char *ld_id);
+json_t *fmd_redfish_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id,
+				     const char *dev_id, const char *ld_id,
+				     const char *region_id);
+int fmd_redfish_patch_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id,
+				       const char *dev_id, const char *ld_id,
+				       const char *region_id, const char *body,
+				       size_t body_size, const char **msg);
+int fmd_redfish_delete_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
+					const char *dev_id, const char *ext_id,
+					const char **msg);
+int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
+			      const char *dev_id, const char *ld_id,
+			      const char *body, size_t body_size, const char **msg);
+int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
+				  const char *dev_id, const char *ld_id,
+				  const char *body, size_t body_size, const char **msg);
+int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
+				    const char *dev_id, const char *body,
+				    size_t body_size, const char **msg);
 
 
 enum rf_health fmd_map_health_status(uint8_t cci_health_status);

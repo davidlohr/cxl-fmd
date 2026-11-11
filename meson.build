@@ -50,8 +50,10 @@ src = files(
     'src/topology.c',
     'src/mock.c',
     'src/cci_redfish_map.c',
+    'src/dcd.c',
     'src/redfish/server.c',
     'src/redfish/handlers.c',
+    'src/redfish/dcd_handlers.c',
 )
 
 # Build executable

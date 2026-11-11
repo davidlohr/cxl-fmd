@@ -819,6 +819,41 @@ struct fmd_head *fmd_head_create(const char *id, uint8_t head_id)
 	return head;
 }
 
+struct fmd_dc_region *fmd_dc_region_create(const char *id, uint8_t region_id,
+					   uint16_t host_id)
+{
+	struct fmd_dc_region *region;
+
+	region = calloc(1, sizeof(*region));
+	if (!region)
+		return NULL;
+
+	if (component_init(&region->base, id, FMD_COMPONENT_DC_REGION) < 0) {
+		free(region);
+		return NULL;
+	}
+	region->region_id = region_id;
+	region->host_id = host_id;
+
+	return region;
+}
+
+struct fmd_dc_extent *fmd_dc_extent_create(const char *id)
+{
+	struct fmd_dc_extent *ext;
+
+	ext = calloc(1, sizeof(*ext));
+	if (!ext)
+		return NULL;
+
+	if (component_init(&ext->base, id, FMD_COMPONENT_DC_EXTENT) < 0) {
+		free(ext);
+		return NULL;
+	}
+
+	return ext;
+}
+
 struct fmd_host *fmd_topology_find_host(struct fmd_topology *topo, const char *id)
 {
 	struct fmd_component *comp = fmd_topology_find(topo, id);
@@ -964,6 +999,21 @@ void fmd_component_free(struct fmd_component *comp)
 {
 	if (!comp)
 		return;
+
+	/* Devices own their DCD capability block */
+	switch (comp->type) {
+	case FMD_COMPONENT_SLD:
+		free(fmd_to_sld(comp)->dcd);
+		break;
+	case FMD_COMPONENT_MLD:
+		free(fmd_to_mld(comp)->dcd);
+		break;
+	case FMD_COMPONENT_MHD:
+		free(fmd_to_mhd(comp)->dcd);
+		break;
+	default:
+		break;
+	}
 
 	/* All component types are allocated with calloc, so free works */
 	free(comp);

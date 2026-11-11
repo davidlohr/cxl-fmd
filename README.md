@@ -106,7 +106,11 @@ Returns the Redfish service root with links to available resource collections.
 | PCIeDevices | `/redfish/v1/Chassis/{id}/PCIeDevices` | PCIe device collection |
 | PCIeDevice | `/redfish/v1/Chassis/{id}/PCIeDevices/{dev}` | PCIe device details |
 | CXLLogicalDevices | `.../PCIeDevices/{dev}/CXLLogicalDevices` | Logical device collection |
-| CXLLogicalDevice | `.../CXLLogicalDevices/{ld}` | Logical device with memory info |
+| CXLLogicalDevice | `.../CXLLogicalDevices/{ld}` | Logical device with memory info and DCD actions |
+| MemoryRegions | `.../CXLLogicalDevices/{ld}/MemoryRegions` | Dynamic capacity regions seen by the LD's host (PATCH) |
+| MemoryRegion | `.../MemoryRegions/{region}` | DC region configuration and extent links |
+| MemoryExtents | `.../PCIeDevices/{dev}/MemoryExtents` | Dynamic capacity extents on the device (DELETE) |
+| MemoryExtent | `.../MemoryExtents/{ext}` | Extent offset, size, tag, FM reference |
 | MemoryDomains | `/redfish/v1/Chassis/{id}/MemoryDomains` | Memory domain collection |
 | MemoryDomain | `.../MemoryDomains/{dom}` | Memory domain details |
 | MemoryChunks | `.../MemoryDomains/{dom}/MemoryChunks` | Memory chunk collection (POST/DELETE) |
@@ -290,11 +294,34 @@ python scripts/run_redfish_validator.py --mock-topology mock/mld-device.json
 python scripts/run_redfish_validator.py --output-dir ./logs
 ```
 
+## Dynamic Capacity
+
+Type 3 devices that implement the FM-API DCD Management command set (CXL r3.2 Section 7.6.7.6) are exposed through the 2026.1 Redfish model. DSP0288 does not cover these commands yet; the mapping cxl-fmd implements is specified in [docs/DCD-FM-API.md](docs/DCD-FM-API.md).
+
+```bash
+# Device capabilities (Get DCD Info)
+curl -s http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0 | jq .CXLDevice.DynamicCapacity
+
+# Regions a host sees, and the extents on the device
+curl -s http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/CXLLogicalDevices/0/MemoryRegions/0
+curl -s http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents
+
+# Add 1 GiB to region 0 (Initiate Dynamic Capacity Add)
+curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd \
+  -H 'Content-Type: application/json' \
+  -d '{"Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": "6f1a2c3e-0000-4000-8000-0000000000aa"}'
+
+# Release it again (Initiate Dynamic Capacity Release)
+curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease \
+  -H 'Content-Type: application/json' \
+  -d '{"Policy": "TagBased", "Tag": "6f1a2c3e-0000-4000-8000-0000000000aa", "Length": 0, "ForcedRemoval": false, "SanitizeOnRelease": true}'
+```
+
 ## Limitations
 
 The following CXL features are not yet supported:
 - **Port-Based Routing (PBR)**: PBR fabric discovery and Global Fabric-Attached Memory Devices
-- **Dynamic Capacity Devices (DCD)**: Dynamic capacity add/release. The FM-API (56h) to Redfish mapping is specified in [docs/DCD-FM-API.md](docs/DCD-FM-API.md)
+- **Dynamic Capacity events**: DC event records (host and FM side) are not polled yet, so an extent's `Pending` state only changes on rescan
 
 ## References
 

@@ -1,9 +1,10 @@
 # Dynamic Capacity Device (DCD) FM-API to Redfish Mapping
 
-This document proposes how cxl-fmd should expose the CXL Fabric Management API
-(FM-API) **DCD Management command set (56h)** through Redfish. Nothing in this
-document is implemented yet; it is the design target for the "Support DCD"
-item in `TODO`.
+This document specifies how cxl-fmd exposes the CXL Fabric Management API
+(FM-API) **DCD Management command set (56h)** through Redfish. The mapping is
+implemented in `src/dcd.c` (FM-API and mock state) and
+`src/redfish/dcd_handlers.c` (Redfish), and exercised by `tests/test_dcd.py`
+against `mock/dcd-device.json`.
 
 It fills a gap in the published DMTF material, which was checked on
 2026-10-21:
@@ -38,34 +39,34 @@ table is cxl-fmd's proposal, not DSP0288 text.
 
 | CXL Command | CXL Field | Redfish Resource | Redfish Property | Implemented |
 |-------------|-----------|------------------|------------------|:-----------:|
-| Get DCD Info (5600h) | Number of Hosts | `PCIeDevice` | `CXLDevice/DynamicCapacity/MaxHosts` | No |
-| Get DCD Info | Number of Supported DC Regions | `PCIeDevice` | `CXLDevice/DynamicCapacity/MaxDynamicCapacityRegions` | No |
-| Get DCD Info | Supported Add Capacity Selection Policies | `PCIeDevice` | `CXLDevice/DynamicCapacity/AddCapacityPoliciesSupported` | No |
-| Get DCD Info | Supported Release Capacity Removal Policies | `PCIeDevice` | `CXLDevice/DynamicCapacity/ReleaseCapacityPoliciesSupported` | No |
-| Get DCD Info | Sanitize on Release Configuration Mask | `PCIeDevice` | `CXLDevice/DynamicCapacity/SanitizationOnReleaseSupport[]` | No |
-| Get DCD Info | Total Dynamic Capacity | `PCIeDevice` | `CXLDevice/DynamicCapacity/TotalDynamicCapacityMiB` | No |
-| Get DCD Info | Region N Supported Block Size Mask | `PCIeDevice` | `CXLDevice/DynamicCapacity/MemoryBlockSizesSupported[]` | No |
-| Get Host DC Region Configuration (5601h) | Region Base | `MemoryRegion` | `RegionBaseOffsetMiB` | No |
-| Get Host DC Region Configuration | Region Length | `MemoryRegion` | `RegionSizeMiB` | No |
-| Get Host DC Region Configuration | Region Block Size | `MemoryRegion` | `BlockSizeMiB` | No |
-| Get Host DC Region Configuration | Region index | `MemoryRegion` | `RegionNumber`, `RegionType` = `Dynamic` | No |
-| Get Host DC Region Configuration | Flags | `MemoryRegion` | `ShareableRegion`, `NonVolatileRegion`, `HardwareManagedCoherencyRegion`, `ReadOnlyRegion` | No |
-| Get Host DC Region Configuration | Sanitize on Release | `MemoryRegion` | `SanitizeOnRelease` | No |
-| Get Host DC Region Configuration | Number of Extents Supported / Available | `CXLLogicalDevice` | `TotalSupportedExtents`, `AvailableExtents` | No |
-| Get Host DC Region Configuration | Number of Tags Supported / Available | `CXLLogicalDevice` | `TotalSupportedTags`, `AvailableTags` | No |
-| Set DC Region Configuration (5602h) | Region Block Size, Sanitize on Release | `MemoryRegion` | PATCH `BlockSizeMiB`, `SanitizeOnRelease` | No |
-| Get DC Region Extent Lists (5603h) | Extent Start DPA | `MemoryExtent` | `ExtentOffsetMiB` | No |
-| Get DC Region Extent Lists | Extent Length | `MemoryExtent` | `ExtentSizeMiB` | No |
-| Get DC Region Extent Lists | Extent Tag | `MemoryExtent` | `Tag` | No |
-| Get DC Region Extent Lists | Shared Extent Sequence | `MemoryExtent` | `SequenceNumber` | No |
-| Get DC Region Extent Lists | Total Extent Count (per region) | `MemoryRegion` | `ExtentsCount`, `MemoryExtents[].ExtentLink` | No |
-| Initiate Dynamic Capacity Add (5604h) | All | `CXLLogicalDevice` | `DynamicCapacityAdd` action | No |
-| Initiate Dynamic Capacity Release (5605h) | All | `CXLLogicalDevice` | `DynamicCapacityRelease` action | No |
-| Initiate Dynamic Capacity Release | Prescriptive, single extent | `MemoryExtent` | DELETE | No |
-| Dynamic Capacity Add Reference (5606h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `true` | No |
-| Dynamic Capacity Remove Reference (5607h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `false` | No |
-| Dynamic Capacity List Tags (5608h) | Tag Flags: FM reference | `MemoryExtent` | `FMReferencedExtent` | No |
-| Dynamic Capacity List Tags | Pending Reference Bitmap | `MemoryRegion` | `MemoryExtents[].Pending` | No |
+| Get DCD Info (5600h) | Number of Hosts | `PCIeDevice` | `CXLDevice/DynamicCapacity/MaxHosts` | Yes |
+| Get DCD Info | Number of Supported DC Regions | `PCIeDevice` | `CXLDevice/DynamicCapacity/MaxDynamicCapacityRegions` | Yes |
+| Get DCD Info | Supported Add Capacity Selection Policies | `PCIeDevice` | `CXLDevice/DynamicCapacity/AddCapacityPoliciesSupported` | Yes |
+| Get DCD Info | Supported Release Capacity Removal Policies | `PCIeDevice` | `CXLDevice/DynamicCapacity/ReleaseCapacityPoliciesSupported` | Yes |
+| Get DCD Info | Sanitize on Release Configuration Mask | `PCIeDevice` | `CXLDevice/DynamicCapacity/SanitizationOnReleaseSupport[]` | Yes |
+| Get DCD Info | Total Dynamic Capacity | `PCIeDevice` | `CXLDevice/DynamicCapacity/TotalDynamicCapacityMiB` | Yes |
+| Get DCD Info | Region N Supported Block Size Mask | `PCIeDevice` | `CXLDevice/DynamicCapacity/MemoryBlockSizesSupported[]` | Yes |
+| Get Host DC Region Configuration (5601h) | Region Base | `MemoryRegion` | `RegionBaseOffsetMiB` | Yes |
+| Get Host DC Region Configuration | Region Length | `MemoryRegion` | `RegionSizeMiB` | Yes |
+| Get Host DC Region Configuration | Region Block Size | `MemoryRegion` | `BlockSizeMiB` | Yes |
+| Get Host DC Region Configuration | Region index | `MemoryRegion` | `RegionNumber`, `RegionType` = `Dynamic` | Yes |
+| Get Host DC Region Configuration | Flags | `MemoryRegion` | `ShareableRegion`, `NonVolatileRegion`, `HardwareManagedCoherencyRegion`, `ReadOnlyRegion` | Yes |
+| Get Host DC Region Configuration | Sanitize on Release | `MemoryRegion` | `SanitizeOnRelease` | Yes |
+| Get Host DC Region Configuration | Number of Extents Supported / Available | `CXLLogicalDevice` | `TotalSupportedExtents`, `AvailableExtents` | Yes |
+| Get Host DC Region Configuration | Number of Tags Supported / Available | `CXLLogicalDevice` | `TotalSupportedTags`, `AvailableTags` | Yes |
+| Set DC Region Configuration (5602h) | Region Block Size, Sanitize on Release | `MemoryRegion` | PATCH `BlockSizeMiB`, `SanitizeOnRelease` | Yes |
+| Get DC Region Extent Lists (5603h) | Extent Start DPA | `MemoryExtent` | `ExtentOffsetMiB` | Yes |
+| Get DC Region Extent Lists | Extent Length | `MemoryExtent` | `ExtentSizeMiB` | Yes |
+| Get DC Region Extent Lists | Extent Tag | `MemoryExtent` | `Tag` | Yes |
+| Get DC Region Extent Lists | Shared Extent Sequence | `MemoryExtent` | `SequenceNumber` | Yes |
+| Get DC Region Extent Lists | Total Extent Count (per region) | `MemoryRegion` | `ExtentsCount`, `MemoryExtents[].ExtentLink` | Yes |
+| Initiate Dynamic Capacity Add (5604h) | All | `CXLLogicalDevice` | `DynamicCapacityAdd` action | Yes |
+| Initiate Dynamic Capacity Release (5605h) | All | `CXLLogicalDevice` | `DynamicCapacityRelease` action | Yes |
+| Initiate Dynamic Capacity Release | Prescriptive, single extent | `MemoryExtent` | DELETE | Yes |
+| Dynamic Capacity Add Reference (5606h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `true` | Yes |
+| Dynamic Capacity Remove Reference (5607h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `false` | Yes |
+| Dynamic Capacity List Tags (5608h) | Tag Flags: FM reference | `MemoryExtent` | `FMReferencedExtent` | Yes |
+| Dynamic Capacity List Tags | Pending Reference Bitmap | `MemoryRegion` | `MemoryExtents[].Pending` | Yes |
 | Dynamic Capacity List Tags | Reference Bitmap (per-host) | | No standard property, see Comment 4 | No |
 | Dynamic Capacity Event Record (via Get Event Records on the FM-owned LD) | All | `LogEntry` | `CXLEntryType` = `DynamicCapacity` | No |
 
@@ -407,10 +408,13 @@ curl -X POST .../CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRel
 ```
 
 `DELETE .../MemoryExtents/{ext}` is sugar for a Prescriptive release of that
-one extent with `ForcedRemoval = false` and `SanitizeOnRelease` taken from
-the owning region. This mirrors how `DELETE` on a `MemoryChunk` already maps
-to Set LD Allocations. An extent with `FMReferencedExtent = true` cannot be
-released; return `409 Conflict`.
+one extent from every host holding it, with `ForcedRemoval = false` and
+`SanitizeOnRelease` taken from the owning region. This mirrors how `DELETE`
+on a `MemoryChunk` already maps to Set LD Allocations. An extent with
+`FMReferencedExtent = true` survives the release of its last host with an
+empty `Links/MemoryRegions`; only `CXLReferenceDCMemory` with
+`FMReference = false` frees it, and a `DELETE` on such an orphan returns
+`409 Conflict`.
 
 ### Dynamic Capacity Add Reference (5606h) / Remove Reference (5607h)
 
@@ -491,10 +495,14 @@ the existing `Connection` for that LD; no new routing is needed.
 
 ### Schema bundle
 
-The bundle is already at DSP8010 2026.2 with `MemoryExtent` installed and
-the enums regenerated. Bump the `@odata.type` versions emitted by handlers
-to `MemoryRegion.v1_1_0`, `CXLLogicalDevice.v1_5_0`, `PCIeDevice.v1_23_0`,
-`MemoryChunks.v1_7_0`, and re-run the DMTF validator.
+The DSP8010 zip on dmtf.org sits behind a bot challenge, so the files that
+changed for DCD (`MemoryExtent`, `MemoryExtentCollection`, `MemoryRegion
+v1.1.0`, `CXLLogicalDevice v1.5.0`, `PCIeDevice v1.23.0`, `MemoryChunks
+v1.7.0`) were fetched individually from `https://redfish.dmtf.org/schemas/v1/`
+and installed with their symlinks. `scripts/update_schemas.py` lists the
+MemoryExtent schemas in its defaults so a future bundle update keeps them.
+Handlers emit `MemoryRegion.v1_1_0`, `MemoryExtent.v1_0_0`,
+`CXLLogicalDevice.v1_5_0` and `PCIeDevice.v1_23_0`.
 
 ### Data model (`include/cxl-fmd.h`)
 
@@ -586,7 +594,9 @@ Tag conversion (16 bytes to UUID string and back) belongs in
 ### Mock topology (`src/mock.c`, `docs/mock-topology.md`)
 
 A `dcd` object on any Type 3 device, so all of the above can be exercised
-and validated without hardware:
+and validated without hardware. The mock host accepts added capacity
+immediately, so `Pending` is only ever `true` for extents declared pending in
+the topology file:
 
 ```json
 "dcd": {
@@ -620,10 +630,10 @@ and validated without hardware:
 }
 ```
 
-Mock add/release should mutate the extent list in memory the way the
-`MemoryChunks` POST/DELETE path already does, so `tests/test_memory_lifecycle.py`
-can gain a DCD lifecycle test (add Free, observe `Pending`, release
-Prescriptive, confirm removal, reference/unreference a tag).
+Mock add/release mutate the extent list in memory the way the `MemoryChunks`
+POST/DELETE path does; `tests/test_dcd.py` covers the lifecycle (add Free,
+Contiguous and across gaps, release TagBased with trimming and Prescriptive,
+region reconfiguration, reference/unreference a tag, shared access).
 
 ---
 

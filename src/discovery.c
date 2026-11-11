@@ -670,6 +670,8 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 		rc = discover_mld(ctx, mld);
 		if (rc == 0)
 			fmd_create_mld_memory_resources(ctx, mld);
+		if (rc == 0)
+			fmd_dcd_discover(ctx, &mld->base);
 
 		fmd_info(ctx, "%s: discovered MLD %s on port %d (%d LDs)",
 			 port->base.parent->id, dev_id, port->port_number,
@@ -995,6 +997,8 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 			rc = discover_mhd(ctx, mhd);
 			if (rc == 0)
 				fmd_create_mhd_memory_resources(ctx, mhd);
+			if (rc == 0)
+				fmd_dcd_discover(ctx, &mhd->base);
 
 			fmd_info(ctx, "%s: MHD with %d heads, %d LDs",
 				 dev_id, mhd->num_heads, mhd->total_lds);
@@ -1015,6 +1019,8 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 			rc = discover_sld(ctx, sld);
 			if (rc == 0)
 				fmd_create_sld_memory_resources(ctx, sld);
+			if (rc == 0)
+				fmd_dcd_discover(ctx, &sld->base);
 
 			fmd_info(ctx, "%s: SLD with %" PRIu64 " MB",
 				 dev_id, (uint64_t)(sld->memory_size / (1024ULL * 1024)));
@@ -1031,6 +1037,8 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 			rc = discover_mld(ctx, mld);
 			if (rc == 0)
 				fmd_create_mld_memory_resources(ctx, mld);
+			if (rc == 0)
+				fmd_dcd_discover(ctx, &mld->base);
 
 			fmd_info(ctx, "%s: MLD with %d LDs",
 				 dev_id, mld->ld_count);
