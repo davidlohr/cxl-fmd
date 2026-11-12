@@ -4,6 +4,7 @@ builddir/
 
 # Meson subprojects (keep .wrap files)
 subprojects/*/
+subprojects/.wraplock
 
 # Editor files
 *.swp
