@@ -53,6 +53,8 @@ enum rf_map_from_condition {
 	MAP_FROM_CONDITION_GEQ = 4,
 	MAP_FROM_CONDITION_LSS = 5,
 	MAP_FROM_CONDITION_LEQ = 6,
+	MAP_FROM_CONDITION_BITAND = 7,
+	MAP_FROM_CONDITION_BITOR = 8,
 };
 
 static inline const char *rf_map_from_condition_to_str(enum rf_map_from_condition val)
@@ -65,6 +67,8 @@ static inline const char *rf_map_from_condition_to_str(enum rf_map_from_conditio
 	case MAP_FROM_CONDITION_GEQ: return "GEQ";
 	case MAP_FROM_CONDITION_LSS: return "LSS";
 	case MAP_FROM_CONDITION_LEQ: return "LEQ";
+	case MAP_FROM_CONDITION_BITAND: return "BITAND";
+	case MAP_FROM_CONDITION_BITOR: return "BITOR";
 	default: return NULL;
 	}
 }
@@ -109,6 +113,7 @@ enum rf_map_terms {
 	MAP_TERMS_INVALID = 0,
 	MAP_TERMS_AND = 1,
 	MAP_TERMS_OR = 2,
+	MAP_TERMS_NOT = 3,
 };
 
 static inline const char *rf_map_terms_to_str(enum rf_map_terms val)
@@ -117,6 +122,7 @@ static inline const char *rf_map_terms_to_str(enum rf_map_terms val)
 	case MAP_TERMS_INVALID: return "Invalid";
 	case MAP_TERMS_AND: return "AND";
 	case MAP_TERMS_OR: return "OR";
+	case MAP_TERMS_NOT: return "NOT";
 	default: return NULL;
 	}
 }

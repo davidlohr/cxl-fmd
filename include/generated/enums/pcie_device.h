@@ -31,6 +31,29 @@ static inline const char *rf_pcie_types_to_str(enum rf_pcie_types val)
 	}
 }
 
+/* PCIeDevice.CXLDynamicCapacityPolicies */
+enum rf_cxl_dynamic_capacity_policies {
+	CXL_DYNAMIC_CAPACITY_POLICIES_INVALID = 0,
+	CXL_DYNAMIC_CAPACITY_POLICIES_FREE = 1,
+	CXL_DYNAMIC_CAPACITY_POLICIES_CONTIGUOUS = 2,
+	CXL_DYNAMIC_CAPACITY_POLICIES_PRESCRIPTIVE = 3,
+	CXL_DYNAMIC_CAPACITY_POLICIES_TAG_BASED = 4,
+	CXL_DYNAMIC_CAPACITY_POLICIES_ENABLE_SHARED_ACCESS = 5,
+};
+
+static inline const char *rf_cxl_dynamic_capacity_policies_to_str(enum rf_cxl_dynamic_capacity_policies val)
+{
+	switch (val) {
+	case CXL_DYNAMIC_CAPACITY_POLICIES_INVALID: return "Invalid";
+	case CXL_DYNAMIC_CAPACITY_POLICIES_FREE: return "Free";
+	case CXL_DYNAMIC_CAPACITY_POLICIES_CONTIGUOUS: return "Contiguous";
+	case CXL_DYNAMIC_CAPACITY_POLICIES_PRESCRIPTIVE: return "Prescriptive";
+	case CXL_DYNAMIC_CAPACITY_POLICIES_TAG_BASED: return "TagBased";
+	case CXL_DYNAMIC_CAPACITY_POLICIES_ENABLE_SHARED_ACCESS: return "EnableSharedAccess";
+	default: return NULL;
+	}
+}
+
 /* PCIeDevice.v1_0_0.DeviceType */
 enum rf_device_type {
 	DEVICE_TYPE_INVALID = 0,
@@ -123,27 +146,6 @@ static inline const char *rf_cxl_device_type_to_str(enum rf_cxl_device_type val)
 	}
 }
 
-/* PCIeDevice.v1_12_0.CXLDynamicCapacityPolicies */
-enum rf_cxl_dynamic_capacity_policies {
-	CXL_DYNAMIC_CAPACITY_POLICIES_INVALID = 0,
-	CXL_DYNAMIC_CAPACITY_POLICIES_FREE = 1,
-	CXL_DYNAMIC_CAPACITY_POLICIES_CONTIGUOUS = 2,
-	CXL_DYNAMIC_CAPACITY_POLICIES_PRESCRIPTIVE = 3,
-	CXL_DYNAMIC_CAPACITY_POLICIES_TAG_BASED = 4,
-};
-
-static inline const char *rf_cxl_dynamic_capacity_policies_to_str(enum rf_cxl_dynamic_capacity_policies val)
-{
-	switch (val) {
-	case CXL_DYNAMIC_CAPACITY_POLICIES_INVALID: return "Invalid";
-	case CXL_DYNAMIC_CAPACITY_POLICIES_FREE: return "Free";
-	case CXL_DYNAMIC_CAPACITY_POLICIES_CONTIGUOUS: return "Contiguous";
-	case CXL_DYNAMIC_CAPACITY_POLICIES_PRESCRIPTIVE: return "Prescriptive";
-	case CXL_DYNAMIC_CAPACITY_POLICIES_TAG_BASED: return "TagBased";
-	default: return NULL;
-	}
-}
-
 /* PCIeDevice.v1_18_0.CXLProtocolVersion */
 enum rf_cxl_protocol_version {
 	CXL_PROTOCOL_VERSION_INVALID = 0,
@@ -163,6 +165,27 @@ static inline const char *rf_cxl_protocol_version_to_str(enum rf_cxl_protocol_ve
 	case CXL_PROTOCOL_VERSION_CXL3_0: return "CXL3_0";
 	case CXL_PROTOCOL_VERSION_CXL3_1: return "CXL3_1";
 	case CXL_PROTOCOL_VERSION_CXL3_2: return "CXL3_2";
+	default: return NULL;
+	}
+}
+
+/* PCIeDevice.v1_23_0.CXLDeviceClass */
+enum rf_cxl_device_class {
+	CXL_DEVICE_CLASS_INVALID = 0,
+	CXL_DEVICE_CLASS_SLD = 1,
+	CXL_DEVICE_CLASS_MLD = 2,
+	CXL_DEVICE_CLASS_MH_SLD = 3,
+	CXL_DEVICE_CLASS_MH_MLD = 4,
+};
+
+static inline const char *rf_cxl_device_class_to_str(enum rf_cxl_device_class val)
+{
+	switch (val) {
+	case CXL_DEVICE_CLASS_INVALID: return "Invalid";
+	case CXL_DEVICE_CLASS_SLD: return "SLD";
+	case CXL_DEVICE_CLASS_MLD: return "MLD";
+	case CXL_DEVICE_CLASS_MH_SLD: return "MH_SLD";
+	case CXL_DEVICE_CLASS_MH_MLD: return "MH_MLD";
 	default: return NULL;
 	}
 }

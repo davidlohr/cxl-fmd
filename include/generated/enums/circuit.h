@@ -106,15 +106,18 @@ enum rf_nominal_voltage_type {
 	NOMINAL_VOLTAGE_TYPE_AC400_V = 13,
 	NOMINAL_VOLTAGE_TYPE_AC480_V = 14,
 	NOMINAL_VOLTAGE_TYPE_DC48_V = 15,
-	NOMINAL_VOLTAGE_TYPE_DC240_V = 16,
-	NOMINAL_VOLTAGE_TYPE_DC380_V = 17,
-	NOMINAL_VOLTAGE_TYPE_DC_NEG48_V = 18,
-	NOMINAL_VOLTAGE_TYPE_DC16_V = 19,
-	NOMINAL_VOLTAGE_TYPE_DC12_V = 20,
-	NOMINAL_VOLTAGE_TYPE_DC9_V = 21,
-	NOMINAL_VOLTAGE_TYPE_DC5_V = 22,
-	NOMINAL_VOLTAGE_TYPE_DC3_3_V = 23,
-	NOMINAL_VOLTAGE_TYPE_DC1_8_V = 24,
+	NOMINAL_VOLTAGE_TYPE_OPEN_RACK_V3 = 16,
+	NOMINAL_VOLTAGE_TYPE_DC240_V = 17,
+	NOMINAL_VOLTAGE_TYPE_DC380_V = 18,
+	NOMINAL_VOLTAGE_TYPE_DC400_V = 19,
+	NOMINAL_VOLTAGE_TYPE_DC800_V = 20,
+	NOMINAL_VOLTAGE_TYPE_DC_NEG48_V = 21,
+	NOMINAL_VOLTAGE_TYPE_DC16_V = 22,
+	NOMINAL_VOLTAGE_TYPE_DC12_V = 23,
+	NOMINAL_VOLTAGE_TYPE_DC9_V = 24,
+	NOMINAL_VOLTAGE_TYPE_DC5_V = 25,
+	NOMINAL_VOLTAGE_TYPE_DC3_3_V = 26,
+	NOMINAL_VOLTAGE_TYPE_DC1_8_V = 27,
 };
 
 static inline const char *rf_nominal_voltage_type_to_str(enum rf_nominal_voltage_type val)
@@ -136,8 +139,11 @@ static inline const char *rf_nominal_voltage_type_to_str(enum rf_nominal_voltage
 	case NOMINAL_VOLTAGE_TYPE_AC400_V: return "AC400V";
 	case NOMINAL_VOLTAGE_TYPE_AC480_V: return "AC480V";
 	case NOMINAL_VOLTAGE_TYPE_DC48_V: return "DC48V";
+	case NOMINAL_VOLTAGE_TYPE_OPEN_RACK_V3: return "OpenRackV3";
 	case NOMINAL_VOLTAGE_TYPE_DC240_V: return "DC240V";
 	case NOMINAL_VOLTAGE_TYPE_DC380_V: return "DC380V";
+	case NOMINAL_VOLTAGE_TYPE_DC400_V: return "DC400V";
+	case NOMINAL_VOLTAGE_TYPE_DC800_V: return "DC800V";
 	case NOMINAL_VOLTAGE_TYPE_DC_NEG48_V: return "DCNeg48V";
 	case NOMINAL_VOLTAGE_TYPE_DC16_V: return "DC16V";
 	case NOMINAL_VOLTAGE_TYPE_DC12_V: return "DC12V";
@@ -262,6 +268,25 @@ static inline const char *rf_voltage_type_to_str(enum rf_voltage_type val)
 	case VOLTAGE_TYPE_INVALID: return "Invalid";
 	case VOLTAGE_TYPE_AC: return "AC";
 	case VOLTAGE_TYPE_DC: return "DC";
+	default: return NULL;
+	}
+}
+
+/* Circuit.v1_10_0.PowerFlowDirection */
+enum rf_power_flow_direction {
+	POWER_FLOW_DIRECTION_INVALID = 0,
+	POWER_FLOW_DIRECTION_SOURCE = 1,
+	POWER_FLOW_DIRECTION_LOAD = 2,
+	POWER_FLOW_DIRECTION_BIDIRECTIONAL = 3,
+};
+
+static inline const char *rf_power_flow_direction_to_str(enum rf_power_flow_direction val)
+{
+	switch (val) {
+	case POWER_FLOW_DIRECTION_INVALID: return "Invalid";
+	case POWER_FLOW_DIRECTION_SOURCE: return "Source";
+	case POWER_FLOW_DIRECTION_LOAD: return "Load";
+	case POWER_FLOW_DIRECTION_BIDIRECTIONAL: return "Bidirectional";
 	default: return NULL;
 	}
 }

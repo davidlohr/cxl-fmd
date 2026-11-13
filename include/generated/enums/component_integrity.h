@@ -71,6 +71,10 @@ enum rf_dmt_fmeasurement_types {
 	DMT_FMEASUREMENT_TYPES_MUTABLE_FIRMWARE_VERSION = 5,
 	DMT_FMEASUREMENT_TYPES_MUTABLE_FIRMWARE_SECURITY_VERSION_NUMBER = 6,
 	DMT_FMEASUREMENT_TYPES_MEASUREMENT_MANIFEST = 7,
+	DMT_FMEASUREMENT_TYPES_DEBUG_AND_DEVICE_MODE = 8,
+	DMT_FMEASUREMENT_TYPES_HASH_EXTEND_MEASUREMENT = 9,
+	DMT_FMEASUREMENT_TYPES_INFORMATIONAL = 10,
+	DMT_FMEASUREMENT_TYPES_STRUCTURED_MEASUREMENT_MANIFEST = 11,
 };
 
 static inline const char *rf_dmt_fmeasurement_types_to_str(enum rf_dmt_fmeasurement_types val)
@@ -84,6 +88,10 @@ static inline const char *rf_dmt_fmeasurement_types_to_str(enum rf_dmt_fmeasurem
 	case DMT_FMEASUREMENT_TYPES_MUTABLE_FIRMWARE_VERSION: return "MutableFirmwareVersion";
 	case DMT_FMEASUREMENT_TYPES_MUTABLE_FIRMWARE_SECURITY_VERSION_NUMBER: return "MutableFirmwareSecurityVersionNumber";
 	case DMT_FMEASUREMENT_TYPES_MEASUREMENT_MANIFEST: return "MeasurementManifest";
+	case DMT_FMEASUREMENT_TYPES_DEBUG_AND_DEVICE_MODE: return "DebugAndDeviceMode";
+	case DMT_FMEASUREMENT_TYPES_HASH_EXTEND_MEASUREMENT: return "HashExtendMeasurement";
+	case DMT_FMEASUREMENT_TYPES_INFORMATIONAL: return "Informational";
+	case DMT_FMEASUREMENT_TYPES_STRUCTURED_MEASUREMENT_MANIFEST: return "StructuredMeasurementManifest";
 	default: return NULL;
 	}
 }

@@ -598,4 +598,76 @@ static inline const char *rf_export_security_to_str(enum rf_export_security val)
 	}
 }
 
+/* ComputerSystem.v1_28_0.ImageChecksumAlgorithm */
+enum rf_image_checksum_algorithm {
+	IMAGE_CHECKSUM_ALGORITHM_INVALID = 0,
+	IMAGE_CHECKSUM_ALGORITHM_SHA256 = 1,
+};
+
+static inline const char *rf_image_checksum_algorithm_to_str(enum rf_image_checksum_algorithm val)
+{
+	switch (val) {
+	case IMAGE_CHECKSUM_ALGORITHM_INVALID: return "Invalid";
+	case IMAGE_CHECKSUM_ALGORITHM_SHA256: return "SHA256";
+	default: return NULL;
+	}
+}
+
+/* ComputerSystem.v1_29_0.ConsoleAuthenticationMethod */
+enum rf_console_authentication_method {
+	CONSOLE_AUTHENTICATION_METHOD_INVALID = 0,
+	CONSOLE_AUTHENTICATION_METHOD_EXPLICIT_LOGIN = 1,
+	CONSOLE_AUTHENTICATION_METHOD_ONE_TIME_URL = 2,
+	CONSOLE_AUTHENTICATION_METHOD_ONE_TIME_PASSWORD = 3,
+};
+
+static inline const char *rf_console_authentication_method_to_str(enum rf_console_authentication_method val)
+{
+	switch (val) {
+	case CONSOLE_AUTHENTICATION_METHOD_INVALID: return "Invalid";
+	case CONSOLE_AUTHENTICATION_METHOD_EXPLICIT_LOGIN: return "ExplicitLogin";
+	case CONSOLE_AUTHENTICATION_METHOD_ONE_TIME_URL: return "OneTimeURL";
+	case CONSOLE_AUTHENTICATION_METHOD_ONE_TIME_PASSWORD: return "OneTimePassword";
+	default: return NULL;
+	}
+}
+
+/* ComputerSystem.v1_29_0.ConsoleAccessMode */
+enum rf_console_access_mode {
+	CONSOLE_ACCESS_MODE_INVALID = 0,
+	CONSOLE_ACCESS_MODE_READ_WRITE = 1,
+	CONSOLE_ACCESS_MODE_READ_ONLY = 2,
+};
+
+static inline const char *rf_console_access_mode_to_str(enum rf_console_access_mode val)
+{
+	switch (val) {
+	case CONSOLE_ACCESS_MODE_INVALID: return "Invalid";
+	case CONSOLE_ACCESS_MODE_READ_WRITE: return "ReadWrite";
+	case CONSOLE_ACCESS_MODE_READ_ONLY: return "ReadOnly";
+	default: return NULL;
+	}
+}
+
+/* ComputerSystem.v1_29_0.GraphicalConsoleType */
+enum rf_graphical_console_type {
+	GRAPHICAL_CONSOLE_TYPE_INVALID = 0,
+	GRAPHICAL_CONSOLE_TYPE_VNC = 1,
+	GRAPHICAL_CONSOLE_TYPE_RDP = 2,
+	GRAPHICAL_CONSOLE_TYPE_HTML5 = 3,
+	GRAPHICAL_CONSOLE_TYPE_KVMIP = 4,
+};
+
+static inline const char *rf_graphical_console_type_to_str(enum rf_graphical_console_type val)
+{
+	switch (val) {
+	case GRAPHICAL_CONSOLE_TYPE_INVALID: return "Invalid";
+	case GRAPHICAL_CONSOLE_TYPE_VNC: return "VNC";
+	case GRAPHICAL_CONSOLE_TYPE_RDP: return "RDP";
+	case GRAPHICAL_CONSOLE_TYPE_HTML5: return "HTML5";
+	case GRAPHICAL_CONSOLE_TYPE_KVMIP: return "KVMIP";
+	default: return NULL;
+	}
+}
+
 #endif /* REDFISH_ENUM_COMPUTER_SYSTEM_H */

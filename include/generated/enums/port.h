@@ -243,6 +243,7 @@ enum rf_sfp_type {
 	SFP_TYPE_MINI_SASHD = 11,
 	SFP_TYPE_QSFPDD = 12,
 	SFP_TYPE_OSFP = 13,
+	SFP_TYPE_CDFP = 14,
 };
 
 static inline const char *rf_sfp_type_to_str(enum rf_sfp_type val)
@@ -262,6 +263,7 @@ static inline const char *rf_sfp_type_to_str(enum rf_sfp_type val)
 	case SFP_TYPE_MINI_SASHD: return "MiniSASHD";
 	case SFP_TYPE_QSFPDD: return "QSFPDD";
 	case SFP_TYPE_OSFP: return "OSFP";
+	case SFP_TYPE_CDFP: return "CDFP";
 	default: return NULL;
 	}
 }
@@ -425,6 +427,316 @@ static inline const char *rf_host_device_type_to_str(enum rf_host_device_type va
 	case HOST_DEVICE_TYPE_NONE: return "None";
 	case HOST_DEVICE_TYPE_SYSTEM: return "System";
 	case HOST_DEVICE_TYPE_MANAGER: return "Manager";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_18_0.TransceiverManagementInterfaceType */
+enum rf_transceiver_management_interface_type {
+	TRANSCEIVER_MANAGEMENT_INTERFACE_TYPE_INVALID = 0,
+	TRANSCEIVER_MANAGEMENT_INTERFACE_TYPE_SFP = 1,
+	TRANSCEIVER_MANAGEMENT_INTERFACE_TYPE_CMIS = 2,
+};
+
+static inline const char *rf_transceiver_management_interface_type_to_str(enum rf_transceiver_management_interface_type val)
+{
+	switch (val) {
+	case TRANSCEIVER_MANAGEMENT_INTERFACE_TYPE_INVALID: return "Invalid";
+	case TRANSCEIVER_MANAGEMENT_INTERFACE_TYPE_SFP: return "SFP";
+	case TRANSCEIVER_MANAGEMENT_INTERFACE_TYPE_CMIS: return "CMIS";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_18_0.UALinkGeneration */
+enum rf_ua_link_generation {
+	UA_LINK_GENERATION_INVALID = 0,
+	UA_LINK_GENERATION_UA_LINK128_G = 1,
+	UA_LINK_GENERATION_UA_LINK200_G = 2,
+};
+
+static inline const char *rf_ua_link_generation_to_str(enum rf_ua_link_generation val)
+{
+	switch (val) {
+	case UA_LINK_GENERATION_INVALID: return "Invalid";
+	case UA_LINK_GENERATION_UA_LINK128_G: return "UALink128G";
+	case UA_LINK_GENERATION_UA_LINK200_G: return "UALink200G";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_19_0.PCIeReferenceClockMode */
+enum rf_pcie_reference_clock_mode {
+	PCIE_REFERENCE_CLOCK_MODE_INVALID = 0,
+	PCIE_REFERENCE_CLOCK_MODE_COMMON_CLOCK = 1,
+	PCIE_REFERENCE_CLOCK_MODE_SEPARATE_CLOCK = 2,
+};
+
+static inline const char *rf_pcie_reference_clock_mode_to_str(enum rf_pcie_reference_clock_mode val)
+{
+	switch (val) {
+	case PCIE_REFERENCE_CLOCK_MODE_INVALID: return "Invalid";
+	case PCIE_REFERENCE_CLOCK_MODE_COMMON_CLOCK: return "CommonClock";
+	case PCIE_REFERENCE_CLOCK_MODE_SEPARATE_CLOCK: return "SeparateClock";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_19_0.PoEPowerMode */
+enum rf_po_e_power_mode {
+	PO_E_POWER_MODE_INVALID = 0,
+	PO_E_POWER_MODE_PSE = 1,
+	PO_E_POWER_MODE_PD = 2,
+	PO_E_POWER_MODE_NONE = 3,
+};
+
+static inline const char *rf_po_e_power_mode_to_str(enum rf_po_e_power_mode val)
+{
+	switch (val) {
+	case PO_E_POWER_MODE_INVALID: return "Invalid";
+	case PO_E_POWER_MODE_PSE: return "PSE";
+	case PO_E_POWER_MODE_PD: return "PD";
+	case PO_E_POWER_MODE_NONE: return "None";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_19_0.PoEStandard */
+enum rf_po_e_standard {
+	PO_E_STANDARD_INVALID = 0,
+	PO_E_STANDARD_IEEE8023AF = 1,
+	PO_E_STANDARD_IEEE8023AT = 2,
+	PO_E_STANDARD_IEEE8023BT = 3,
+};
+
+static inline const char *rf_po_e_standard_to_str(enum rf_po_e_standard val)
+{
+	switch (val) {
+	case PO_E_STANDARD_INVALID: return "Invalid";
+	case PO_E_STANDARD_IEEE8023AF: return "IEEE8023af";
+	case PO_E_STANDARD_IEEE8023AT: return "IEEE8023at";
+	case PO_E_STANDARD_IEEE8023BT: return "IEEE8023bt";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_19_0.PoEDetectionStatus */
+enum rf_po_e_detection_status {
+	PO_E_DETECTION_STATUS_INVALID = 0,
+	PO_E_DETECTION_STATUS_DISABLED = 1,
+	PO_E_DETECTION_STATUS_SEARCHING = 2,
+	PO_E_DETECTION_STATUS_DELIVERING_POWER = 3,
+	PO_E_DETECTION_STATUS_FAULT = 4,
+	PO_E_DETECTION_STATUS_TEST = 5,
+	PO_E_DETECTION_STATUS_OTHER_FAULT = 6,
+};
+
+static inline const char *rf_po_e_detection_status_to_str(enum rf_po_e_detection_status val)
+{
+	switch (val) {
+	case PO_E_DETECTION_STATUS_INVALID: return "Invalid";
+	case PO_E_DETECTION_STATUS_DISABLED: return "Disabled";
+	case PO_E_DETECTION_STATUS_SEARCHING: return "Searching";
+	case PO_E_DETECTION_STATUS_DELIVERING_POWER: return "DeliveringPower";
+	case PO_E_DETECTION_STATUS_FAULT: return "Fault";
+	case PO_E_DETECTION_STATUS_TEST: return "Test";
+	case PO_E_DETECTION_STATUS_OTHER_FAULT: return "OtherFault";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALink128GExtendedSpeedMode */
+enum rf_ua_link128_g_extended_speed_mode {
+	UA_LINK128_G_EXTENDED_SPEED_MODE_INVALID = 0,
+	UA_LINK128_G_EXTENDED_SPEED_MODE_NO_ESM = 1,
+	UA_LINK128_G_EXTENDED_SPEED_MODE__104_G = 2,
+	UA_LINK128_G_EXTENDED_SPEED_MODE__112_G = 3,
+	UA_LINK128_G_EXTENDED_SPEED_MODE__120_G = 4,
+	UA_LINK128_G_EXTENDED_SPEED_MODE__128_G = 5,
+};
+
+static inline const char *rf_ua_link128_g_extended_speed_mode_to_str(enum rf_ua_link128_g_extended_speed_mode val)
+{
+	switch (val) {
+	case UA_LINK128_G_EXTENDED_SPEED_MODE_INVALID: return "Invalid";
+	case UA_LINK128_G_EXTENDED_SPEED_MODE_NO_ESM: return "NoESM";
+	case UA_LINK128_G_EXTENDED_SPEED_MODE__104_G: return "104G";
+	case UA_LINK128_G_EXTENDED_SPEED_MODE__112_G: return "112G";
+	case UA_LINK128_G_EXTENDED_SPEED_MODE__120_G: return "120G";
+	case UA_LINK128_G_EXTENDED_SPEED_MODE__128_G: return "128G";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALink200GSerialRate */
+enum rf_ua_link200_g_serial_rate {
+	UA_LINK200_G_SERIAL_RATE_INVALID = 0,
+	UA_LINK200_G_SERIAL_RATE__100_G = 1,
+	UA_LINK200_G_SERIAL_RATE__200_G = 2,
+};
+
+static inline const char *rf_ua_link200_g_serial_rate_to_str(enum rf_ua_link200_g_serial_rate val)
+{
+	switch (val) {
+	case UA_LINK200_G_SERIAL_RATE_INVALID: return "Invalid";
+	case UA_LINK200_G_SERIAL_RATE__100_G: return "100G";
+	case UA_LINK200_G_SERIAL_RATE__200_G: return "200G";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALink200GCodewordInterleave */
+enum rf_ua_link200_g_codeword_interleave {
+	UA_LINK200_G_CODEWORD_INTERLEAVE_INVALID = 0,
+	UA_LINK200_G_CODEWORD_INTERLEAVE_ONE_WAY = 1,
+	UA_LINK200_G_CODEWORD_INTERLEAVE_TWO_WAY = 2,
+	UA_LINK200_G_CODEWORD_INTERLEAVE_FOUR_WAY = 3,
+};
+
+static inline const char *rf_ua_link200_g_codeword_interleave_to_str(enum rf_ua_link200_g_codeword_interleave val)
+{
+	switch (val) {
+	case UA_LINK200_G_CODEWORD_INTERLEAVE_INVALID: return "Invalid";
+	case UA_LINK200_G_CODEWORD_INTERLEAVE_ONE_WAY: return "OneWay";
+	case UA_LINK200_G_CODEWORD_INTERLEAVE_TWO_WAY: return "TwoWay";
+	case UA_LINK200_G_CODEWORD_INTERLEAVE_FOUR_WAY: return "FourWay";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALinkPLState */
+enum rf_ua_link_pl_state {
+	UA_LINK_PL_STATE_INVALID = 0,
+	UA_LINK_PL_STATE_IDLE = 1,
+	UA_LINK_PL_STATE_TRAINING_IN_PROGRESS = 2,
+	UA_LINK_PL_STATE_TRAINING_FAILED = 3,
+	UA_LINK_PL_STATE_TRAINING_TIMEOUT = 4,
+	UA_LINK_PL_STATE_UP = 5,
+};
+
+static inline const char *rf_ua_link_pl_state_to_str(enum rf_ua_link_pl_state val)
+{
+	switch (val) {
+	case UA_LINK_PL_STATE_INVALID: return "Invalid";
+	case UA_LINK_PL_STATE_IDLE: return "Idle";
+	case UA_LINK_PL_STATE_TRAINING_IN_PROGRESS: return "TrainingInProgress";
+	case UA_LINK_PL_STATE_TRAINING_FAILED: return "TrainingFailed";
+	case UA_LINK_PL_STATE_TRAINING_TIMEOUT: return "TrainingTimeout";
+	case UA_LINK_PL_STATE_UP: return "Up";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALinkDLState */
+enum rf_ua_link_dl_state {
+	UA_LINK_DL_STATE_INVALID = 0,
+	UA_LINK_DL_STATE_IDLE = 1,
+	UA_LINK_DL_STATE_NOP = 2,
+	UA_LINK_DL_STATE_FAULT = 3,
+	UA_LINK_DL_STATE_POWER_DOWN = 4,
+	UA_LINK_DL_STATE_UP = 5,
+};
+
+static inline const char *rf_ua_link_dl_state_to_str(enum rf_ua_link_dl_state val)
+{
+	switch (val) {
+	case UA_LINK_DL_STATE_INVALID: return "Invalid";
+	case UA_LINK_DL_STATE_IDLE: return "Idle";
+	case UA_LINK_DL_STATE_NOP: return "NOP";
+	case UA_LINK_DL_STATE_FAULT: return "Fault";
+	case UA_LINK_DL_STATE_POWER_DOWN: return "PowerDown";
+	case UA_LINK_DL_STATE_UP: return "Up";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALinkTLState */
+enum rf_ua_link_tl_state {
+	UA_LINK_TL_STATE_INVALID = 0,
+	UA_LINK_TL_STATE_DROP_MODE = 1,
+	UA_LINK_TL_STATE_ENABLED = 2,
+};
+
+static inline const char *rf_ua_link_tl_state_to_str(enum rf_ua_link_tl_state val)
+{
+	switch (val) {
+	case UA_LINK_TL_STATE_INVALID: return "Invalid";
+	case UA_LINK_TL_STATE_DROP_MODE: return "DropMode";
+	case UA_LINK_TL_STATE_ENABLED: return "Enabled";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALinkUPLIOriginatorState */
+enum rf_ua_link_upli_originator_state {
+	UA_LINK_UPLI_ORIGINATOR_STATE_INVALID = 0,
+	UA_LINK_UPLI_ORIGINATOR_STATE_DROP_MODE = 1,
+	UA_LINK_UPLI_ORIGINATOR_STATE_ISOLATION_MODE = 2,
+	UA_LINK_UPLI_ORIGINATOR_STATE_ENABLED = 3,
+};
+
+static inline const char *rf_ua_link_upli_originator_state_to_str(enum rf_ua_link_upli_originator_state val)
+{
+	switch (val) {
+	case UA_LINK_UPLI_ORIGINATOR_STATE_INVALID: return "Invalid";
+	case UA_LINK_UPLI_ORIGINATOR_STATE_DROP_MODE: return "DropMode";
+	case UA_LINK_UPLI_ORIGINATOR_STATE_ISOLATION_MODE: return "IsolationMode";
+	case UA_LINK_UPLI_ORIGINATOR_STATE_ENABLED: return "Enabled";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.UALinkUPLICompleterState */
+enum rf_ua_link_upli_completer_state {
+	UA_LINK_UPLI_COMPLETER_STATE_INVALID = 0,
+	UA_LINK_UPLI_COMPLETER_STATE_DROP_MODE = 1,
+	UA_LINK_UPLI_COMPLETER_STATE_ENABLED = 2,
+};
+
+static inline const char *rf_ua_link_upli_completer_state_to_str(enum rf_ua_link_upli_completer_state val)
+{
+	switch (val) {
+	case UA_LINK_UPLI_COMPLETER_STATE_INVALID: return "Invalid";
+	case UA_LINK_UPLI_COMPLETER_STATE_DROP_MODE: return "DropMode";
+	case UA_LINK_UPLI_COMPLETER_STATE_ENABLED: return "Enabled";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.PartnerDeviceType */
+enum rf_partner_device_type {
+	PARTNER_DEVICE_TYPE_INVALID = 0,
+	PARTNER_DEVICE_TYPE_SWITCH = 1,
+	PARTNER_DEVICE_TYPE_ENDPOINT = 2,
+};
+
+static inline const char *rf_partner_device_type_to_str(enum rf_partner_device_type val)
+{
+	switch (val) {
+	case PARTNER_DEVICE_TYPE_INVALID: return "Invalid";
+	case PARTNER_DEVICE_TYPE_SWITCH: return "Switch";
+	case PARTNER_DEVICE_TYPE_ENDPOINT: return "Endpoint";
+	default: return NULL;
+	}
+}
+
+/* Port.v1_20_0.PartnerValidationState */
+enum rf_partner_validation_state {
+	PARTNER_VALIDATION_STATE_DISABLED = 0,
+	PARTNER_VALIDATION_STATE_LINK_DOWN = 1,
+	PARTNER_VALIDATION_STATE_DISCOVERING = 2,
+	PARTNER_VALIDATION_STATE_INVALID = 3,
+	PARTNER_VALIDATION_STATE_VALIDATED = 4,
+};
+
+static inline const char *rf_partner_validation_state_to_str(enum rf_partner_validation_state val)
+{
+	switch (val) {
+	case PARTNER_VALIDATION_STATE_DISABLED: return "Disabled";
+	case PARTNER_VALIDATION_STATE_LINK_DOWN: return "LinkDown";
+	case PARTNER_VALIDATION_STATE_DISCOVERING: return "Discovering";
+	case PARTNER_VALIDATION_STATE_INVALID: return "Invalid";
+	case PARTNER_VALIDATION_STATE_VALIDATED: return "Validated";
 	default: return NULL;
 	}
 }

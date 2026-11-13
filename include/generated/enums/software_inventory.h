@@ -44,4 +44,27 @@ static inline const char *rf_release_type_to_str(enum rf_release_type val)
 	}
 }
 
+/* SoftwareInventory.v1_15_0.ImageState */
+enum rf_image_state {
+	IMAGE_STATE_INVALID = 0,
+	IMAGE_STATE_ACTIVE = 1,
+	IMAGE_STATE_STAGED = 2,
+	IMAGE_STATE_ARMED = 3,
+	IMAGE_STATE_TARGET_SPECIFIC = 4,
+	IMAGE_STATE_OEM = 5,
+};
+
+static inline const char *rf_image_state_to_str(enum rf_image_state val)
+{
+	switch (val) {
+	case IMAGE_STATE_INVALID: return "Invalid";
+	case IMAGE_STATE_ACTIVE: return "Active";
+	case IMAGE_STATE_STAGED: return "Staged";
+	case IMAGE_STATE_ARMED: return "Armed";
+	case IMAGE_STATE_TARGET_SPECIFIC: return "TargetSpecific";
+	case IMAGE_STATE_OEM: return "OEM";
+	default: return NULL;
+	}
+}
+
 #endif /* REDFISH_ENUM_SOFTWARE_INVENTORY_H */

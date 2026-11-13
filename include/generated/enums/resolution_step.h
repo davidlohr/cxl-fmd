@@ -17,6 +17,7 @@ enum rf_resolution_type {
 	RESOLUTION_TYPE_RESET_TO_DEFAULTS = 6,
 	RESOLUTION_TYPE_COLLECT_DIAGNOSTIC_DATA = 7,
 	RESOLUTION_TYPE_OEM = 8,
+	RESOLUTION_TYPE_RETRY_OPERATION = 9,
 };
 
 static inline const char *rf_resolution_type_to_str(enum rf_resolution_type val)
@@ -31,6 +32,7 @@ static inline const char *rf_resolution_type_to_str(enum rf_resolution_type val)
 	case RESOLUTION_TYPE_RESET_TO_DEFAULTS: return "ResetToDefaults";
 	case RESOLUTION_TYPE_COLLECT_DIAGNOSTIC_DATA: return "CollectDiagnosticData";
 	case RESOLUTION_TYPE_OEM: return "OEM";
+	case RESOLUTION_TYPE_RETRY_OPERATION: return "RetryOperation";
 	default: return NULL;
 	}
 }

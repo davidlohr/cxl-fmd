@@ -98,6 +98,7 @@ enum rf_reset_to_defaults_type {
 	RESET_TO_DEFAULTS_TYPE_RESET_ALL = 1,
 	RESET_TO_DEFAULTS_TYPE_PRESERVE_NETWORK_AND_USERS = 2,
 	RESET_TO_DEFAULTS_TYPE_PRESERVE_NETWORK = 3,
+	RESET_TO_DEFAULTS_TYPE_SENSOR_THRESHOLDS = 4,
 };
 
 static inline const char *rf_reset_to_defaults_type_to_str(enum rf_reset_to_defaults_type val)
@@ -107,6 +108,7 @@ static inline const char *rf_reset_to_defaults_type_to_str(enum rf_reset_to_defa
 	case RESET_TO_DEFAULTS_TYPE_RESET_ALL: return "ResetAll";
 	case RESET_TO_DEFAULTS_TYPE_PRESERVE_NETWORK_AND_USERS: return "PreserveNetworkAndUsers";
 	case RESET_TO_DEFAULTS_TYPE_PRESERVE_NETWORK: return "PreserveNetwork";
+	case RESET_TO_DEFAULTS_TYPE_SENSOR_THRESHOLDS: return "SensorThresholds";
 	default: return NULL;
 	}
 }
@@ -119,6 +121,7 @@ enum rf_date_time_source {
 	DATE_TIME_SOURCE_HOST = 3,
 	DATE_TIME_SOURCE_NTP = 4,
 	DATE_TIME_SOURCE_PTP = 5,
+	DATE_TIME_SOURCE_DHCP = 6,
 };
 
 static inline const char *rf_date_time_source_to_str(enum rf_date_time_source val)
@@ -130,6 +133,7 @@ static inline const char *rf_date_time_source_to_str(enum rf_date_time_source va
 	case DATE_TIME_SOURCE_HOST: return "Host";
 	case DATE_TIME_SOURCE_NTP: return "NTP";
 	case DATE_TIME_SOURCE_PTP: return "PTP";
+	case DATE_TIME_SOURCE_DHCP: return "DHCP";
 	default: return NULL;
 	}
 }

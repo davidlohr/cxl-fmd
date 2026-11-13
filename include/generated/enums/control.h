@@ -25,6 +25,7 @@ enum rf_control_type {
 	CONTROL_TYPE_ROTATIONAL_VELOCITY = 14,
 	CONTROL_TYPE_ROTATIONAL_ACCELERATION = 15,
 	CONTROL_TYPE_LIQUID_FLOW_LPM = 16,
+	CONTROL_TYPE_VOLTAGE = 17,
 };
 
 static inline const char *rf_control_type_to_str(enum rf_control_type val)
@@ -47,6 +48,7 @@ static inline const char *rf_control_type_to_str(enum rf_control_type val)
 	case CONTROL_TYPE_ROTATIONAL_VELOCITY: return "RotationalVelocity";
 	case CONTROL_TYPE_ROTATIONAL_ACCELERATION: return "RotationalAcceleration";
 	case CONTROL_TYPE_LIQUID_FLOW_LPM: return "LiquidFlowLPM";
+	case CONTROL_TYPE_VOLTAGE: return "Voltage";
 	default: return NULL;
 	}
 }

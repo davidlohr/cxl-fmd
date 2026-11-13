@@ -29,6 +29,7 @@ The project includes pre-built mock topologies for testing:
 | `switch-attached.json` | Switch-attached topology with VCS |
 | `multi-host-vcs.json` | Multi-host fabric with VCS partitioning |
 | `degraded-device.json` | Devices with various health states |
+| `dcd-device.json` | Dynamic Capacity Devices (SLD DCD and two-host MLD DCD with a shared region) |
 
 ### Unit Test Topologies (`mock/unit/`)
 
@@ -398,6 +399,94 @@ If `logical_devices` array is not provided but `ld_count > 1`, LDs are automatic
 - Equal memory distribution: `total_capacity / ld_count`
 - Default QoS: 100% allocated and limit
 - Inherited health status from device level
+
+### Dynamic Capacity (FM-API 0x5600-0x5608)
+
+A `dcd` object on any Type 3 device (SLD, MLD or MHD) makes it a Dynamic
+Capacity Device. It mirrors the FM-API DCD Management responses; see
+[DCD-FM-API.md](DCD-FM-API.md) for the Redfish mapping.
+
+```json
+{
+    "dcd": {
+        "num_hosts": 1,
+        "add_policies": ["Free", "Contiguous", "Prescriptive"],
+        "release_policies": ["TagBased", "Prescriptive"],
+        "max_extents": 64,
+        "max_tags": 16,
+        "regions": [
+            {
+                "region_id": 0,
+                "base_mb": 16384,
+                "region_len_mb": 32768,
+                "block_size_mb": 256,
+                "supported_block_sizes_mb": [256, 512, 1024],
+                "sanitize_on_release": true,
+                "sanitize_configurable": true,
+                "shareable": false
+            }
+        ],
+        "extents": [
+            {
+                "start_mb": 16384,
+                "len_mb": 4096,
+                "tag": "6f1a2c3e-0000-4000-8000-000000000001",
+                "host_id": 0
+            }
+        ]
+    }
+}
+```
+
+#### DCD Fields (Get DCD Info 0x5600)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `num_hosts` | integer | 1 (SLD), `ld_count` (MLD), `num_heads` (MHD) | Number of hosts the device serves |
+| `add_policies` | array | Free, Contiguous, Prescriptive | Supported add policies; `EnableSharedAccess` for shared regions |
+| `release_policies` | array | TagBased, Prescriptive | Supported release policies |
+| `max_extents` | integer | 256 | Extents supported per host (`TotalSupportedExtents`) |
+| `max_tags` | integer | 64 | Tags supported per host (`TotalSupportedTags`) |
+| `total_capacity_mb` | integer | sum of region lengths | `TotalDynamicCapacityMiB` |
+| `regions` | array | [] | DC region configurations |
+| `extents` | array | [] | Extents already allocated |
+
+#### Region Fields (Get Host DC Region Configuration 0x5601)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `region_id` | integer | array index | Region number (0-7) |
+| `base_mb` | integer | 0 | Region base in the device address space (DPA) |
+| `region_len_mb` | integer | - | Region length; a region of length 0 is skipped |
+| `decode_len_mb` | integer | `region_len_mb` | HDM decode length |
+| `block_size_mb` | integer | 256 | Current block size |
+| `supported_block_sizes_mb` | array | [`block_size_mb`] | Block sizes accepted by PATCH |
+| `sanitize_on_release` | boolean | false | Current Sanitize on Release setting |
+| `sanitize_configurable` | boolean | true | Whether PATCH may change `SanitizeOnRelease` |
+| `shareable` | boolean | false | Region can be shared between hosts |
+| `nonvolatile` | boolean | false | Non-volatile region |
+| `hw_coherency` | boolean | false | Hardware-managed coherency |
+| `interconnect_dcm` | boolean | false | Interconnect-specific dynamic capacity management (CDAT DSMAS flag) |
+| `read_only` | boolean | false | Read-only region |
+| `hosts` | array | all hosts | Hosts that see this region. Host IDs are the LD-ID (MLD) or head (MHD) |
+
+Each host listed gets its own view of the region under its
+`CXLLogicalDevice`, which is how FM-API 0x5601 reports them.
+
+#### Extent Fields (Get DC Region Extent Lists 0x5603, List Tags 0x5608)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `start_mb` | integer | - | Extent start (DPA); must fall inside a region |
+| `len_mb` | integer | - | Extent length |
+| `tag` | string | all zeros | 16-byte tag as a UUID string |
+| `shared_seq` | integer | 0 | Shared extent sequence number |
+| `host_id` / `hosts` | integer / array | 0 | Host(s) the extent is allocated to |
+| `pending` | boolean | false | Host has not accepted the extent yet |
+| `fm_referenced` | boolean | false | Fabric Manager holds a reference on the tag |
+
+Mock add and release operate on this state. The mock host accepts added
+capacity immediately, so new extents are never pending.
 
 ### Switch Attachment
 
@@ -1123,8 +1212,7 @@ Validation errors are logged and may cause the topology to fail loading.
 
 The following features are planned for future releases:
 
-- **Dynamic Capacity (DC)**: Support for DC region configuration
-- **Memory Regions**: Fine-grained memory region definitions
+- **Dynamic Capacity events**: Simulated host acceptance of pending extents
 - **Event Injection**: Simulate device events and errors
 - **Port-Based Routing (PBR)**: Full PBR fabric topologies (vPPB binding status exists)
 

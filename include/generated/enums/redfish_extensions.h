@@ -6,6 +6,25 @@
 
 #include <stddef.h>
 
+/* RedfishExtensions.v1_0_0.ClientContextStatusType */
+enum rf_client_context_status_type {
+	CLIENT_CONTEXT_STATUS_TYPE_APPLIED = 0,
+	CLIENT_CONTEXT_STATUS_TYPE_INVALID = 1,
+	CLIENT_CONTEXT_STATUS_TYPE_NOT_FOUND = 2,
+	CLIENT_CONTEXT_STATUS_TYPE_UNSUPPORTED = 3,
+};
+
+static inline const char *rf_client_context_status_type_to_str(enum rf_client_context_status_type val)
+{
+	switch (val) {
+	case CLIENT_CONTEXT_STATUS_TYPE_APPLIED: return "Applied";
+	case CLIENT_CONTEXT_STATUS_TYPE_INVALID: return "Invalid";
+	case CLIENT_CONTEXT_STATUS_TYPE_NOT_FOUND: return "NotFound";
+	case CLIENT_CONTEXT_STATUS_TYPE_UNSUPPORTED: return "Unsupported";
+	default: return NULL;
+	}
+}
+
 /* RedfishExtensions.v1_0_0.ReleaseStatusType */
 enum rf_release_status_type {
 	RELEASE_STATUS_TYPE_INVALID = 0,

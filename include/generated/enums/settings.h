@@ -38,6 +38,7 @@ enum rf_apply_time {
 	APPLY_TIME_ON_RESET = 2,
 	APPLY_TIME_AT_MAINTENANCE_WINDOW_START = 3,
 	APPLY_TIME_IN_MAINTENANCE_WINDOW_ON_RESET = 4,
+	APPLY_TIME_DEFERRED = 5,
 };
 
 static inline const char *rf_apply_time_to_str(enum rf_apply_time val)
@@ -48,6 +49,7 @@ static inline const char *rf_apply_time_to_str(enum rf_apply_time val)
 	case APPLY_TIME_ON_RESET: return "OnReset";
 	case APPLY_TIME_AT_MAINTENANCE_WINDOW_START: return "AtMaintenanceWindowStart";
 	case APPLY_TIME_IN_MAINTENANCE_WINDOW_ON_RESET: return "InMaintenanceWindowOnReset";
+	case APPLY_TIME_DEFERRED: return "Deferred";
 	default: return NULL;
 	}
 }

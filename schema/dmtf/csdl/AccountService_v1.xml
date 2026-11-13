@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!---->
 <!--################################################################################       -->
-<!--# Redfish Schema:  AccountService v1.18.0                                              -->
+<!--# Redfish Schema:  AccountService v1.19.0                                              -->
 <!--#                                                                                      -->
 <!--# For a detailed change log, see the README file contained in the DSP8010 bundle,      -->
 <!--# available at http://www.dmtf.org/standards/redfish                                   -->
-<!--# Copyright 2014-2025 DMTF.                                                            -->
+<!--# Copyright 2014-2026 DMTF.                                                            -->
 <!--# For the full DMTF copyright policy, see http://www.dmtf.org/about/policies/copyright -->
 <!--################################################################################       -->
 <!---->
@@ -507,7 +507,7 @@
           <Annotation Term="OData.Description" String="The first Active Directory external account provider that this account service supports."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain the first Active Directory external account provider that this account service supports.  If the account service supports one or more Active Directory services as an external account provider, this entity shall be populated by default.  This entity shall not be present in the additional external account providers resource collection."/>
         </Property>
-        <NavigationProperty Name="AdditionalExternalAccountProviders" Type="ExternalAccountProviderCollection.ExternalAccountProviderCollection" ContainsTarget="true"  Nullable="false">
+        <NavigationProperty Name="AdditionalExternalAccountProviders" Type="ExternalAccountProviderCollection.ExternalAccountProviderCollection" ContainsTarget="true" Nullable="false">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
           <Annotation Term="OData.Description" String="The additional external account providers that this account service uses."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain a link to a resource collection of type `ExternalAccountProviderCollection` that represents the additional external account providers that this account service uses."/>
@@ -579,7 +579,7 @@
         </Property>
         <Property Name="RemoteRoleMapping" Type="Collection(AccountService.v1_3_0.RoleMapping)">
           <Annotation Term="OData.Description" String="The mapping rules to convert the external account providers account information to the local Redfish role."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain a set of the mapping rules that are used to convert the external account providers account information to the local Redfish role."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain a set of the mapping rules that are used to convert the external account providers account information to the local Redfish role.  The service shall return the HTTP `401 Unauthorized` status code to requests from accounts that do not map to a Redfish role in this property."/>
         </Property>
       </ComplexType>
 
@@ -594,7 +594,7 @@
         </Member>
         <Member Name="LDAPService">
           <Annotation Term="OData.Description" String="A generic external LDAP service."/>
-          <Annotation Term="OData.LongDescription" String="The external account provider shall be an RFC4511-conformant service.  The `ServiceAddresses` property shall contain RFC3986-defined URIs in the format `scheme://host:port`, where `scheme://` and `:port` are optional, that link to the LDAP servers for the service.  If the scheme is not specified, services shall assume it is `ldaps://`.  If the port is not specified, services shall assume it is `636`.  For example, `ldaps://contoso.com:636` or `contoso.com`."/>
+          <Annotation Term="OData.LongDescription" String="The external account provider shall be an RFC4511-conformant service.  The `ServiceAddresses` property shall contain RFC3986-defined URIs in the format `scheme://host:port`, where `scheme://` and `:port` are optional, that link to the LDAP servers for the service.  If the scheme is not specified, services shall assume it is `ldaps://`.  If the port is not specified, services shall assume it is `636`.  For example, `ldaps://contoso.com:636` or `contoso.com`.  If `ldap://` is specified as the scheme, services shall upgrade to an encrypted connection with `STARTTLS`."/>
         </Member>
         <Member Name="OEM">
           <Annotation Term="OData.Description" String="An OEM-specific external authentication or directory service."/>
@@ -718,12 +718,12 @@
         <Property Name="RemoteGroup" Type="Edm.String">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/ReadWrite"/>
           <Annotation Term="OData.Description" String="The name of the remote group, or the remote role in the case of a Redfish service, that maps to the local Redfish role to which this entity links."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain the name of the remote group, or the remote role in the case of a Redfish service, that maps to the local Redfish role to which this entity links."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the name of the remote group, or the remote role in the case of a Redfish service, that maps to the local Redfish role to which this entity links.  If within the `ActiveDirectory` property, this property shall contain the value of the 'Group Name' attribute from the Active Directory service.  If within the `LDAP` property, this property shall contain the distinguished name for the group or the value of the attribute specified by the `GroupNameAttribute` property from the LDAP service."/>
         </Property>
         <Property Name="RemoteUser" Type="Edm.String">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/ReadWrite"/>
           <Annotation Term="OData.Description" String="The name of the remote user that maps to the local Redfish role to which this entity links."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain the name of the remote user that maps to the local Redfish role to which this entity links."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the name of the remote user that maps to the local Redfish role to which this entity links.  If within the `ActiveDirectory` property, this property shall contain the value of the 'Username' attribute, with optional domain, from the Active Directory service.  If within the `LDAP` property, this property shall contain the distinguished name for the user or the value of the attribute specified by the `UsernameAttribute` property from the LDAP service."/>
         </Property>
         <Property Name="LocalRole" Type="Edm.String">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/ReadWrite"/>
@@ -827,6 +827,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_3_14.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_3_16">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_3_15.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_3_17">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_3_16.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_4_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2018.3"/>
@@ -921,6 +933,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_4_12.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_4_14">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_4_13.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_4_15">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_4_14.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_5_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2019.1"/>
@@ -1007,6 +1031,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_5_11.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_5_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_5_12.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_5_14">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_5_13.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_6_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2019.2"/>
@@ -1079,6 +1115,18 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to clarify that Base64-encoded string properties include padding characters."/>
       <EntityType Name="AccountService" BaseType="AccountService.v1_6_10.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_6_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_6_11.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_6_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_6_12.AccountService"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_7_0">
@@ -1162,6 +1210,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_7_10.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_7_12">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_7_11.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_7_13">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_7_12.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_8_0">
       <Annotation Term="Redfish.Release" String="2020.4"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -1213,7 +1273,7 @@
           <Annotation Term="OData.LongDescription" String="This property shall contain the value of a symmetric encryption key for account services that support some form of encryption, obfuscation, or authentication such as TACACS+.  The value shall be `null` in responses.  The property shall accept a hexadecimal string whose length depends on the external account service, such as TACACS+.  A TACACS+ service shall use this property to specify the secret key as defined in RFC8907."/>
           <Annotation Term="Validation.Pattern" String="^[0-9a-fA-F]+$"/>
         </Property>
-       <Property Name="EncryptionKeySet" Type="Edm.Boolean">
+        <Property Name="EncryptionKeySet" Type="Edm.Boolean">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
           <Annotation Term="OData.Description" String="Indicates if the `EncryptionKey` property is set."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain `true` if a valid value was provided for the `EncryptionKey` property.  Otherwise, the property shall contain `false`.  For a TACACS+ service, the value `false` shall indicate data obfuscation, as defined in section 4.5 of RFC8907, is disabled."/>
@@ -1314,6 +1374,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_8_8.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_8_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_8_9.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_8_11">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_8_10.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_9_0">
       <Annotation Term="Redfish.Release" String="2021.1"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -1373,6 +1445,18 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to clarify that Base64-encoded string properties include padding characters."/>
       <EntityType Name="AccountService" BaseType="AccountService.v1_9_7.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_9_9">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_9_8.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_9_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_9_9.AccountService"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_10_0">
@@ -1485,6 +1569,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_10_8.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_10_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_10_9.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_10_11">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_10_10.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_11_0">
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="Redfish.Release" String="2022.1"/>
@@ -1552,6 +1648,18 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to clarify that Base64-encoded string properties include padding characters."/>
       <EntityType Name="AccountService" BaseType="AccountService.v1_11_8.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_11_10">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_11_9.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_11_11">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_11_10.AccountService"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_12_0">
@@ -1767,6 +1875,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_12_6.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_12_8">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_12_7.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_12_9">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_12_8.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_13_0">
       <Annotation Term="Redfish.Release" String="2023.1"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -1842,6 +1962,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_13_5.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_13_7">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_13_6.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_13_8">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_13_7.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_14_0">
       <Annotation Term="Redfish.Release" String="2023.2"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -1910,6 +2042,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_14_3.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_14_5">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_14_4.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_14_6">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_14_5.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_15_0">
       <Annotation Term="Redfish.Release" String="2023.3"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -1933,7 +2077,7 @@
         </Member>
         <Member Name="Disabled">
           <Annotation Term="OData.Description" String="HTTP Basic authentication is disabled."/>
-           <Annotation Term="OData.LongDescription" String="This value shall indicate that HTTP Basic authentication is disabled for the service."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate that HTTP Basic authentication is disabled for the service."/>
         </Member>
       </EnumType>
     </Schema>
@@ -1954,6 +2098,18 @@
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
       <Annotation Term="OData.Description" String="This version was created to clarify that Base64-encoded string properties include padding characters."/>
       <EntityType Name="AccountService" BaseType="AccountService.v1_15_2.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_15_4">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_15_3.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_15_5">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_15_4.AccountService"/>
     </Schema>
 
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_16_0">
@@ -2013,6 +2169,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_16_1.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_16_3">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_16_2.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_16_4">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_16_3.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_17_0">
       <Annotation Term="Redfish.Release" String="2024.4"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -2033,6 +2201,18 @@
       <EntityType Name="AccountService" BaseType="AccountService.v1_17_0.AccountService"/>
     </Schema>
 
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_17_2">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_17_1.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_17_3">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_17_2.AccountService"/>
+    </Schema>
+
     <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_18_0">
       <Annotation Term="Redfish.Release" String="2025.1"/>
       <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
@@ -2049,6 +2229,43 @@
           <Annotation Term="OData.LongDescription" String="This property shall contain a `MessageId` value that contains guidance for creating passwords that meet the password complexity or other related requirements for this service.  The value shall contain a `MessageId`, as defined in the 'MessageId format' clause of the Redfish Specification."/>
         </Property>
       </EntityType>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_18_1">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to clarify the expected values for the `RemoteGroup` and `RemoteUser` for different account providers.  It was also created to clarify the behavior when a user from an external provider does not map to any roles specified by the `RemoteRoleMapping` property."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_18_0.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_18_2">
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+      <Annotation Term="OData.Description" String="This version was created to specify the usage of `STARTTLS` with LDAP."/>
+      <EntityType Name="AccountService" BaseType="AccountService.v1_18_1.AccountService"/>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="AccountService.v1_19_0">
+      <Annotation Term="Redfish.Release" String="2026.2"/>
+      <Annotation Term="Redfish.OwningEntity" String="DMTF"/>
+
+      <EntityType Name="AccountService" BaseType="AccountService.v1_18_2.AccountService"/>
+
+      <ComplexType Name="Authentication" BaseType="AccountService.v1_8_0.Authentication">
+        <Property Name="PasswordSet" Type="Edm.Boolean">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Indicates if the `Password` property is set."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain `true` if a valid value was provided for the `Password` property.  Otherwise, the property shall contain `false`."/>
+        </Property>
+        <Property Name="TokenSet" Type="Edm.Boolean">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Indicates if the `Password` property is set."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain `true` if a valid value was provided for the `Token` property.  Otherwise, the property shall contain `false`."/>
+        </Property>
+        <Property Name="KerberosKeytabSet" Type="Edm.Boolean">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Indicates if the `Password` property is set."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain `true` if a valid value was provided for the `KerberosKeytab` property.  Otherwise, the property shall contain `false`."/>
+        </Property>
+      </ComplexType>
     </Schema>
 
   </edmx:DataServices>

@@ -24,7 +24,7 @@ import requests
 import generate_enums
 
 # DMTF Schema version to download
-VERSION = "DSP8010_2025.3"
+VERSION = "DSP8010_2026.2"
 
 # Default schemas to install if no symlinks exist
 # These are the schemas used by cxl-fmd for CXL device management
@@ -75,6 +75,8 @@ DEFAULT_INSTALLED_SCHEMAS = [
     "Connection_v1.xml",
     "MemoryRegionCollection_v1.xml",
     "MemoryRegion_v1.xml",
+    "MemoryExtentCollection_v1.xml",
+    "MemoryExtent_v1.xml",
 
     # Virtual CXL Switch (VCS) resources
     "VirtualCXLSwitchCollection_v1.xml",

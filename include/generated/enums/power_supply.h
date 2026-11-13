@@ -13,6 +13,7 @@ enum rf_power_supply_type {
 	POWER_SUPPLY_TYPE_DC = 2,
 	POWER_SUPPLY_TYPE_A_COR_DC = 3,
 	POWER_SUPPLY_TYPE_DC_REGULATOR = 4,
+	POWER_SUPPLY_TYPE_PSU = 5,
 };
 
 static inline const char *rf_power_supply_type_to_str(enum rf_power_supply_type val)
@@ -23,6 +24,7 @@ static inline const char *rf_power_supply_type_to_str(enum rf_power_supply_type 
 	case POWER_SUPPLY_TYPE_DC: return "DC";
 	case POWER_SUPPLY_TYPE_A_COR_DC: return "ACorDC";
 	case POWER_SUPPLY_TYPE_DC_REGULATOR: return "DCRegulator";
+	case POWER_SUPPLY_TYPE_PSU: return "PSU";
 	default: return NULL;
 	}
 }

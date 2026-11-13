@@ -58,13 +58,16 @@ cxl-fmd/
 │   ├── mock.c                    # Mock topology JSON parser
 │   ├── topology.c                # In-memory device tree management
 │   ├── cci_redfish_map.c         # CXL CCI to Redfish enum mapping
+│   ├── dcd.c                     # Dynamic Capacity (FM-API 56h): libcxlmi + mock state
 │   └── redfish/
 │       ├── server.c              # microhttpd HTTP server, routing
-│       └── handlers.c            # Redfish JSON response generators
+│       ├── handlers.c            # Redfish JSON response generators
+│       └── dcd_handlers.c        # MemoryRegions, MemoryExtents, DC actions
 ├── mock/                         # Mock topology JSON files
 │   ├── single-sld.json           # Single SLD (16GB)
 │   ├── mld-device.json           # Multiple MLDs with various configs
 │   ├── degraded-device.json      # Device with health issues
+│   ├── dcd-device.json           # Dynamic Capacity Devices
 │   └── unit/                     # Unit test topologies (all 8 combinations)
 ├── schema/dmtf/
 │   ├── csdl/                     # DMTF CSDL (XML) schemas
@@ -80,6 +83,7 @@ cxl-fmd/
 │   └── libcxlmi/                 # CXL MI library (CCI commands)
 └── docs/
     ├── discovery.md              # Discovery process documentation
+    ├── DCD-FM-API.md             # DCD (FM-API 56h) to Redfish mapping
     └── mock-topology.md          # Mock topology language reference
 ```
 
@@ -124,6 +128,10 @@ GET /redfish/v1/Chassis/{id}/PCIeDevices                     PCIeDevices Collect
 GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}               PCIeDevice
 GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices
 GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}
+GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions        DC regions (PATCH)
+POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd|Release        DCD actions
+GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents                                DC extents (DELETE)
+POST /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory
 GET /redfish/v1/Chassis/{id}/MemoryDomains                   MemoryDomains Collection
 GET /redfish/v1/Chassis/{id}/MemoryDomains/{dom}             MemoryDomain
 GET /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks
@@ -149,6 +157,8 @@ GET /redfish/v1/Systems                                      Systems Collection 
    - For MLD: `cxlmi_cmd_fmapi_get_ld_allocations()` (0x5401), QoS info
    - For MHD: `cxlmi_cmd_fmapi_get_head_info()` (0x5501), LD pool bindings
    - For Switch: `cxlmi_cmd_fmapi_identify_sw_device()` (0x5100), VCS/port info
+   - For any Type 3: `cxlmi_cmd_fmapi_get_dcd_info()` (0x5600); on success
+     per host 0x5601/0x5603 and device-wide 0x5608 (src/dcd.c)
 
 ## CCI Tunneling
 
