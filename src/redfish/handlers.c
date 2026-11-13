@@ -4562,6 +4562,17 @@ int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
 	}
 	const char *new_str = json_string_value(new_j);
 
+	/*
+	 * Build CXL request - passphrases are 32 bytes, zero-padded.
+	 * The strings belong to the JSON document: copy them before it is freed.
+	 */
+	struct cxlmi_cmd_memdev_set_passphrase_req req = {0};
+	req.passphrase_type = 1;  /* 01h = User */
+	strncpy((char *)req.current_passphrase, current_str,
+		sizeof(req.current_passphrase));
+	strncpy((char *)req.new_passphrase, new_str,
+		sizeof(req.new_passphrase));
+
 	json_decref(root);
 
 	if (fmd_is_mock(ctx))
@@ -4571,14 +4582,6 @@ int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
 	struct cxlmi_tunnel_info ti_buf, *ti;
 	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
-
-	/* Build CXL request - passphrases are 32 bytes, zero-padded */
-	struct cxlmi_cmd_memdev_set_passphrase_req req = {0};
-	req.passphrase_type = 1;  /* 01h = User */
-	strncpy((char *)req.current_passphrase, current_str,
-		sizeof(req.current_passphrase));
-	strncpy((char *)req.new_passphrase, new_str,
-		sizeof(req.new_passphrase));
 
 	if (cxlmi_cmd_memdev_set_passphrase(ep, ti, &req) != 0)
 		return -1;
@@ -4627,6 +4630,17 @@ int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
 	}
 	const char *new_str = json_string_value(new_j);
 
+	/*
+	 * Build CXL request - passphrases are 32 bytes, zero-padded.
+	 * The strings belong to the JSON document: copy them before it is freed.
+	 */
+	struct cxlmi_cmd_memdev_set_passphrase_req req = {0};
+	req.passphrase_type = 0;  /* 00h = Master */
+	strncpy((char *)req.current_passphrase, current_str,
+		sizeof(req.current_passphrase));
+	strncpy((char *)req.new_passphrase, new_str,
+		sizeof(req.new_passphrase));
+
 	json_decref(root);
 
 	if (fmd_is_mock(ctx))
@@ -4636,14 +4650,6 @@ int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
 	struct cxlmi_tunnel_info ti_buf, *ti;
 	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
-
-	/* Build CXL request - passphrases are 32 bytes, zero-padded */
-	struct cxlmi_cmd_memdev_set_passphrase_req req = {0};
-	req.passphrase_type = 0;  /* 00h = Master */
-	strncpy((char *)req.current_passphrase, current_str,
-		sizeof(req.current_passphrase));
-	strncpy((char *)req.new_passphrase, new_str,
-		sizeof(req.new_passphrase));
 
 	if (cxlmi_cmd_memdev_set_passphrase(ep, ti, &req) != 0)
 		return -1;
@@ -4683,6 +4689,14 @@ int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
 	}
 	const char *pass_str = json_string_value(pass_j);
 
+	/*
+	 * Build CXL request - passphrase is 32 bytes, zero-padded.
+	 * The strings belong to the JSON document: copy them before it is freed.
+	 */
+	struct cxlmi_cmd_memdev_disable_passphrase_req req = {0};
+	req.passphrase_type = 1;  /* 01h = User */
+	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
+
 	json_decref(root);
 
 	if (fmd_is_mock(ctx))
@@ -4692,11 +4706,6 @@ int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
 	struct cxlmi_tunnel_info ti_buf, *ti;
 	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
-
-	/* Build CXL request - passphrase is 32 bytes, zero-padded */
-	struct cxlmi_cmd_memdev_disable_passphrase_req req = {0};
-	req.passphrase_type = 1;  /* 01h = User */
-	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
 
 	if (cxlmi_cmd_memdev_disable_passphrase(ep, ti, &req) != 0)
 		return -1;
@@ -4736,6 +4745,14 @@ int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
 	}
 	const char *pass_str = json_string_value(pass_j);
 
+	/*
+	 * Build CXL request - passphrase is 32 bytes, zero-padded.
+	 * The strings belong to the JSON document: copy them before it is freed.
+	 */
+	struct cxlmi_cmd_memdev_disable_passphrase_req req = {0};
+	req.passphrase_type = 0;  /* 00h = Master */
+	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
+
 	json_decref(root);
 
 	if (fmd_is_mock(ctx))
@@ -4745,11 +4762,6 @@ int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
 	struct cxlmi_tunnel_info ti_buf, *ti;
 	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
-
-	/* Build CXL request - passphrase is 32 bytes, zero-padded */
-	struct cxlmi_cmd_memdev_disable_passphrase_req req = {0};
-	req.passphrase_type = 0;  /* 00h = Master */
-	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
 
 	if (cxlmi_cmd_memdev_disable_passphrase(ep, ti, &req) != 0)
 		return -1;
@@ -4838,6 +4850,14 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
 
 	/* TODO: RegionId parameter - not currently mapped to CXL command */
 
+	/*
+	 * Build CXL request - passphrase is 32 bytes, zero-padded.
+	 * The strings belong to the JSON document: copy them before it is freed.
+	 */
+	struct cxlmi_cmd_memdev_passphrase_secure_erase_req req = {0};
+	req.passphrase_type = passphrase_type;
+	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
+
 	json_decref(root);
 
 	if (fmd_is_mock(ctx))
@@ -4847,11 +4867,6 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
 	struct cxlmi_tunnel_info ti_buf, *ti;
 	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
-
-	/* Build CXL request - passphrase is 32 bytes, zero-padded */
-	struct cxlmi_cmd_memdev_passphrase_secure_erase_req req = {0};
-	req.passphrase_type = passphrase_type;
-	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
 
 	if (cxlmi_cmd_memdev_passphrase_secure_erase(ep, ti, &req) != 0)
 		return -1;
