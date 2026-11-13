@@ -47,7 +47,7 @@ static const uint8_t dc_event_uuid[0x10] = {
 
 static inline bool dev_is_hw(struct fmd_component *dev)
 {
-	return dev && dev->fabric && dev->fabric->ep;
+	return dev && dev->ep;
 }
 
 /*
@@ -1030,7 +1030,7 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 	if (!dev_is_hw(dev) || !fmd_memdev_dcd(dev))
 		return 0;
 
-	ep = dev->fabric->ep;
+	ep = dev->ep;
 	ti = dcd_tunnel(dev, &tbuf);
 
 	if (host_id >= 0) {
@@ -1077,7 +1077,7 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 	ti = dcd_tunnel(dev, &tbuf);
 
 	/* Get DCD Info (5600h) - failure simply means not a DCD */
-	rc = cxlmi_cmd_fmapi_get_dcd_info(dev->fabric->ep, ti, &info);
+	rc = cxlmi_cmd_fmapi_get_dcd_info(dev->ep, ti, &info);
 	if (rc) {
 		fmd_dbg(ctx, "%s: no dynamic capacity support (%d)", dev->id, rc);
 		return 0;
@@ -1122,11 +1122,11 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 	 * Ask for an Event Notification whenever the DC event log goes
 	 * non-empty, keeping whatever the other logs were already set to.
 	 */
-	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(dev->fabric->ep, ti, &cur);
+	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(dev->ep, ti, &cur);
 	if (rc == 0 && !(cur.event_interrupt_settings & DC_EVENT_LOG_NOTIFY)) {
 		pol.event_interrupt_settings = cur.event_interrupt_settings |
 					       DC_EVENT_LOG_NOTIFY;
-		rc = cxlmi_cmd_set_mctp_event_interrupt_policy(dev->fabric->ep, ti, &pol);
+		rc = cxlmi_cmd_set_mctp_event_interrupt_policy(dev->ep, ti, &pol);
 	}
 	if (rc)
 		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", dev->id, rc);
@@ -1144,7 +1144,7 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_cmd_get_event_records_rsp *rsp;
 	struct cxlmi_cmd_clear_event_records_req *clr;
 	struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
-	struct cxlmi_endpoint *ep = dev->fabric->ep;
+	struct cxlmi_endpoint *ep = dev->ep;
 	uint64_t hosts = 0;
 	bool overflow = false;
 	int rc = 0;
@@ -1278,7 +1278,7 @@ static int dc_set_region_config_locked(struct fmd_ctx *ctx, struct fmd_component
 		req.block_sz = block_size;
 		req.sanitize_on_release = sanitize_on_release ? 1 : 0;
 
-		rc = cxlmi_cmd_fmapi_set_dc_region_config(dev->fabric->ep, ti, &req);
+		rc = cxlmi_cmd_fmapi_set_dc_region_config(dev->ep, ti, &req);
 		if (rc) {
 			fmd_warn(ctx, "%s: set DC region %u config failed: %d",
 				 dev->id, region->region_id, rc);
@@ -1356,7 +1356,7 @@ static int dc_add_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 			req->extents[i].shared_seq = extents[i]->shared_seq;
 		}
 
-		rc = cxlmi_cmd_fmapi_initiate_dc_add(dev->fabric->ep, ti, req);
+		rc = cxlmi_cmd_fmapi_initiate_dc_add(dev->ep, ti, req);
 		free(req);
 		if (rc) {
 			fmd_warn(ctx, "%s: initiate DC add (host %d) failed: %d",
@@ -1432,7 +1432,7 @@ static int dc_release_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int
 			req->extents[i].shared_seq = extents[i]->shared_seq;
 		}
 
-		rc = cxlmi_cmd_fmapi_initiate_dc_release(dev->fabric->ep, ti, req);
+		rc = cxlmi_cmd_fmapi_initiate_dc_release(dev->ep, ti, req);
 		free(req);
 		if (rc) {
 			fmd_warn(ctx, "%s: initiate DC release (host %d) failed: %d",
@@ -1474,11 +1474,11 @@ static int dc_reference_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
 		if (add) {
 			struct cxlmi_cmd_fmapi_dc_add_ref_req req;
 			memcpy(req.tag, tag, FMD_DC_TAG_LEN);
-			rc = cxlmi_cmd_fmapi_dc_add_reference(dev->fabric->ep, ti, &req);
+			rc = cxlmi_cmd_fmapi_dc_add_reference(dev->ep, ti, &req);
 		} else {
 			struct cxlmi_cmd_fmapi_dc_remove_ref_req req;
 			memcpy(req.tag, tag, FMD_DC_TAG_LEN);
-			rc = cxlmi_cmd_fmapi_dc_remove_reference(dev->fabric->ep, ti, &req);
+			rc = cxlmi_cmd_fmapi_dc_remove_reference(dev->ep, ti, &req);
 		}
 
 		if (rc) {
@@ -1487,7 +1487,7 @@ static int dc_reference_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
 			return -EIO;
 		}
 
-		return hw_refresh_tags(ctx, dev, dev->fabric->ep, ti);
+		return hw_refresh_tags(ctx, dev, dev->ep, ti);
 	}
 }
 

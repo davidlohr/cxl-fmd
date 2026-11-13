@@ -181,7 +181,7 @@ static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	struct cxlmi_endpoint *ep;
 	int rc;
 
-	ep = sld->base.fabric->ep;
+	ep = sld->base.ep;
 	if (!ep)
 		return -1;
 
@@ -237,7 +237,7 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 	struct cxlmi_tunnel_info *ti;
 	int rc;
 
-	ep = mld->base.fabric->ep;
+	ep = mld->base.ep;
 	if (!ep)
 		return -1;
 
@@ -308,7 +308,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	int rc;
 	int i;
 
-	ep = mld->base.fabric->ep;
+	ep = mld->base.ep;
 	if (!ep)
 		return -1;
 
@@ -452,7 +452,7 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	int rc;
 	int i;
 
-	ep = mhd->base.fabric->ep;
+	ep = mhd->base.ep;
 	if (!ep)
 		return -1;
 
@@ -695,7 +695,7 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
  */
 static int discover_switch_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw)
 {
-	struct cxlmi_endpoint *ep = sw->base.fabric->ep;
+	struct cxlmi_endpoint *ep = sw->base.ep;
 	int rc;
 
 	/* Query each active VCS per active_vcs_bitmask */
@@ -786,7 +786,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	int num_ports;
 	int port_index;
 
-	ep = sw->base.fabric->ep;
+	ep = sw->base.ep;
 	if (!ep)
 		return -1;
 
@@ -952,9 +952,6 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 		 dev_id, identify.vendor_id, identify.device_id,
 		 identify.component_type);
 
-	/* Store endpoint on fabric root */
-	ctx->topology.root->ep = ep;
-
 	switch (identify.component_type) {
 	case CXL_COMPONENT_SWITCH: {
 		struct fmd_switch *sw = fmd_switch_create(dev_id);
@@ -962,6 +959,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 			return -1;
 
 		sw->identify = identify;
+		sw->base.ep = ep;
 		fmd_topology_add(&ctx->topology, &sw->base, NULL);
 
 		rc = discover_switch(ctx, sw);
@@ -992,6 +990,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 				return -1;
 
 			mhd->identify = identify;
+			mhd->base.ep = ep;
 			fmd_topology_add(&ctx->topology, &mhd->base, NULL);
 
 			rc = discover_mhd(ctx, mhd);
@@ -1014,6 +1013,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 				return -1;
 
 			sld->identify = identify;
+			sld->base.ep = ep;
 			fmd_topology_add(&ctx->topology, &sld->base, NULL);
 
 			rc = discover_sld(ctx, sld);
@@ -1032,6 +1032,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 
 			mld->identify = identify;
 			mld->switch_port = -1;  /* Direct-attached */
+			mld->base.ep = ep;
 			fmd_topology_add(&ctx->topology, &mld->base, NULL);
 
 			rc = discover_mld(ctx, mld);
@@ -1229,7 +1230,7 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		/* If port not found in topology, let hardware validate */
 	}
 
-	ep = sw->base.fabric->ep;
+	ep = sw->base.ep;
 	if (!ep) {
 		/* Mock mode - update local state only */
 		fmd_info(ctx, "%s: mock bind vPPB %d in VCS %d to port %d%s",
@@ -1324,7 +1325,7 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		return -EPERM;
 	}
 
-	ep = sw->base.fabric->ep;
+	ep = sw->base.ep;
 	if (!ep) {
 		/* Mock mode - update local state only */
 		const char *option_str = (option == FMD_UNBIND_SURPRISE_HOT_REMOVE)
@@ -1400,19 +1401,19 @@ uint64_t fmd_get_device_timestamp(struct fmd_component *comp)
 		return 0;
 
 	/* Real hardware: call CCI command */
-	if (comp->fabric->ep) {
+	if (comp->ep) {
 		struct cxlmi_cmd_get_timestamp_rsp rsp = {0};
 
 		/* Use switch tunneling if device is behind a switch port */
 		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
 			struct fmd_port *port = fmd_to_port(comp->parent);
 			DEFINE_CXLMI_TUNNEL_SWITCH(ti, port->port_number);
-			if (cxlmi_cmd_get_timestamp(comp->fabric->ep, &ti, &rsp) == 0)
+			if (cxlmi_cmd_get_timestamp(comp->ep, &ti, &rsp) == 0)
 				return rsp.timestamp;
 			return 0;
 		}
 
-		if (cxlmi_cmd_get_timestamp(comp->fabric->ep, CXLMI_NO_TUNNEL, &rsp) == 0)
+		if (cxlmi_cmd_get_timestamp(comp->ep, CXLMI_NO_TUNNEL, &rsp) == 0)
 			return rsp.timestamp;
 
 		return 0;
@@ -1439,7 +1440,7 @@ int fmd_set_device_timestamp(struct fmd_component *comp, uint64_t timestamp_ns)
 		return -1;
 
 	/* Real hardware: call CCI command */
-	if (comp->fabric->ep) {
+	if (comp->ep) {
 		struct cxlmi_cmd_set_timestamp_req req = {
 			.timestamp = timestamp_ns
 		};
@@ -1448,10 +1449,10 @@ int fmd_set_device_timestamp(struct fmd_component *comp, uint64_t timestamp_ns)
 		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
 			struct fmd_port *port = fmd_to_port(comp->parent);
 			DEFINE_CXLMI_TUNNEL_SWITCH(ti, port->port_number);
-			return cxlmi_cmd_set_timestamp(comp->fabric->ep, &ti, &req);
+			return cxlmi_cmd_set_timestamp(comp->ep, &ti, &req);
 		}
 
-		return cxlmi_cmd_set_timestamp(comp->fabric->ep, CXLMI_NO_TUNNEL, &req);
+		return cxlmi_cmd_set_timestamp(comp->ep, CXLMI_NO_TUNNEL, &req);
 	}
 
 	/* Mock mode: accept silently (no persistence needed) */
@@ -1478,7 +1479,7 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 	struct cxlmi_cmd_memdev_get_security_state_rsp rsp = {0};
 	struct cxlmi_tunnel_info *ti = CXLMI_NO_TUNNEL;
 
-	if (!comp || !comp->fabric || !comp->fabric->ep)
+	if (!comp || !comp->ep)
 		return 0;
 
 	if (comp->type == FMD_COMPONENT_MLD) {
@@ -1488,7 +1489,7 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 			: CXLMI_TUNNEL_SWITCH_MLD(mld->switch_port, ld_id);
 	}
 
-	if (cxlmi_cmd_memdev_get_security_state(comp->fabric->ep, ti, &rsp) != 0)
+	if (cxlmi_cmd_memdev_get_security_state(comp->ep, ti, &rsp) != 0)
 		return 0;
 
 	return rsp.security_state;
@@ -1541,7 +1542,7 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 	allocation_mult = size_bytes / granularity_bytes;
 
 	/* Mock mode: update local state only */
-	ep = mld->base.fabric->ep;
+	ep = mld->base.ep;
 	if (!ep) {
 		fmd_info(ctx, "%s: mock set LD %d allocation to %lu MB",
 			 mld->base.id, ld_id,
@@ -1689,8 +1690,8 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		}
 	}
 
-	/* Get endpoint from head, or fall back to fabric */
-	ep = head && head->ep ? head->ep : (mhd->base.fabric ? mhd->base.fabric->ep : NULL);
+	/* Get endpoint from head, or fall back to the MHD's own */
+	ep = head && head->ep ? head->ep : mhd->base.ep;
 	if (!ep) {
 		fmd_warn(ctx, "%s: no endpoint for hardware mode", mhd->base.id);
 		return -1;
@@ -1810,7 +1811,7 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 	volatile_capacity = volatile_bytes / CXL_CAPACITY_UNIT;
 
 	/* Mock mode: update local state only */
-	ep = sld->base.fabric->ep;
+	ep = sld->base.ep;
 	if (!ep) {
 		fmd_info(ctx, "%s: mock set partition volatile=%lu MB",
 			 sld->base.id,

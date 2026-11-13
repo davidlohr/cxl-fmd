@@ -4433,7 +4433,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 		if (strcmp(chassis_id, mem_id) != 0)
 			return -1;
 
-		ep = sld->base.fabric->ep;
+		ep = sld->base.ep;
 		if (!ep)
 			return -1;
 
@@ -4452,7 +4452,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 		if (ld_id < 0)
 			return -1;
 
-		ep = mld->base.fabric->ep;
+		ep = mld->base.ep;
 		if (!ep)
 			return -1;
 
@@ -4491,9 +4491,9 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
 		if (strcmp(mem_id, chassis_id) != 0)
 			return -1;
 
-		if (!comp->fabric || !comp->fabric->ep)
+		if (!comp->ep)
 			return -1;
-		*ep_out = comp->fabric->ep;
+		*ep_out = comp->ep;
 
 	} else if (comp->type == FMD_COMPONENT_MLD) {
 		/* MLD: mem_id should be chassis_id_ld{n} */
@@ -4506,9 +4506,9 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
 			return -1;
 
 		struct fmd_mld *mld = fmd_to_mld(comp);
-		if (!mld->base.fabric || !mld->base.fabric->ep)
+		if (!mld->base.ep)
 			return -1;
-		*ep_out = mld->base.fabric->ep;
+		*ep_out = mld->base.ep;
 
 		*ti_out = (mld->switch_port < 0)
 			? CXLMI_TUNNEL_MLD(ld_id)
@@ -4894,14 +4894,14 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 		return 0;
 
 	/* Need switch endpoint to send FM-API command */
-	if (!sw->base.fabric || !sw->base.fabric->ep)
+	if (!sw->base.ep)
 		return -1;
 
 	struct cxlmi_cmd_fmapi_phys_port_control_req req = {0};
 	req.ppb_id = port->port_number;
 	req.port_opcode = 0x02;  /* Reset PPB */
 
-	if (cxlmi_cmd_fmapi_phys_port_control(sw->base.fabric->ep,
+	if (cxlmi_cmd_fmapi_phys_port_control(sw->base.ep,
 					      CXLMI_NO_TUNNEL, &req) != 0)
 		return -1;
 

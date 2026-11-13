@@ -212,8 +212,12 @@ int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 
 	pthread_rwlock_wrlock(&topo->lock);
 
-	/* Set fabric pointer for direct access to root/ep */
+	/* Set fabric pointer for direct access to root */
 	comp->fabric = topo->root;
+
+	/* Reached through the same endpoint as its parent, unless it has its own */
+	if (!comp->ep)
+		comp->ep = parent->ep;
 
 	/* Add to tree */
 	tree_add_child(parent, comp);

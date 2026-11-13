@@ -167,6 +167,14 @@ struct fmd_component {
 	/* Direct pointer to fabric root (set by fmd_topology_add) */
 	struct fmd_fabric *fabric;
 
+	/*
+	 * libcxlmi endpoint that commands for this component are sent on
+	 * (NULL for mock, and for components with no CCI such as hosts).
+	 * Set on the component discovered from an endpoint before it is
+	 * added to the topology; everything added beneath it inherits it.
+	 */
+	struct cxlmi_endpoint *ep;
+
 	/* Hash table linkage for O(1) lookup, hash by string ID */
 	uint32_t hash;
 	struct fmd_component *hash_next; /* handle collisions */
@@ -236,16 +244,14 @@ static inline bool fmd_is_mhd(struct fmd_component *c)
 /*
  * Fabric root - top-level container for the CXL topology
  *
- * Each libcxlmi endpoint discovers one fabric. The endpoint is stored
- * here and shared by all devices in this topology.
+ * One fabric holds everything discovered, from any number of libcxlmi
+ * endpoints. The endpoint to reach a component is on the component
+ * itself (base.ep), not here.
  */
 struct fmd_fabric {
 	struct fmd_component base;
 
 	char description[256];
-
-	/* libcxlmi endpoint for this fabric (NULL for mock) */
-	struct cxlmi_endpoint *ep;
 
 	/* Statistics */
 	int switch_count;
@@ -612,7 +618,7 @@ struct fmd_head {
 	/* Host attachment info */
 	char attached_host_id[FMD_MAX_ID_LEN]; /* Connected host, if known */
 
-	/* Per-head MCTP endpoint for FM access (NULL if using fabric's ep) */
+	/* Per-head MCTP endpoint for FM access (NULL if using the MHD's ep) */
 	struct cxlmi_endpoint *ep;
 };
 
@@ -1150,8 +1156,9 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd);
 
 /*
  * CCI Tunneling
- * Every component has a direct pointer to the fabric root (comp->fabric),
- * which holds the MCTP endpoint (fabric->ep). No tree walking needed.
+ * Every component has a pointer to the endpoint it is reached through
+ * (comp->ep), inherited from the component that was discovered on that
+ * endpoint. No tree walking needed.
  *
  * Tunneling logic:
  * - SLD: No tunneling (switch is transparent)
@@ -1159,9 +1166,9 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd);
  * - LD commands: CXLMI_TUNNEL_MLD(ld) or CXLMI_TUNNEL_SWITCH_MLD(port, ld)
  *
  * Usage (with libcxlmi inline macros):
- *   cxlmi_cmd_identify(comp->fabric->ep, CXLMI_NO_TUNNEL, &rsp);
- *   cxlmi_cmd_fmapi_get_ld_info(mld->base.fabric->ep, CXLMI_TUNNEL_SWITCH(port), &rsp);
- *   cxlmi_cmd_memdev_identify(ld->base.fabric->ep, CXLMI_TUNNEL_SWITCH_MLD(port, ld), &rsp);
+ *   cxlmi_cmd_identify(comp->ep, CXLMI_NO_TUNNEL, &rsp);
+ *   cxlmi_cmd_fmapi_get_ld_info(mld->base.ep, CXLMI_TUNNEL_SWITCH(port), &rsp);
+ *   cxlmi_cmd_memdev_identify(ld->base.ep, CXLMI_TUNNEL_SWITCH_MLD(port, ld), &rsp);
  */
 
 
