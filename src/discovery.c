@@ -1477,17 +1477,13 @@ int fmd_set_device_timestamp(struct fmd_component *comp, uint64_t timestamp_ns)
 uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 {
 	struct cxlmi_cmd_memdev_get_security_state_rsp rsp = {0};
-	struct cxlmi_tunnel_info *ti = CXLMI_NO_TUNNEL;
+	struct cxlmi_tunnel_info ti_buf, *ti = CXLMI_NO_TUNNEL;
 
 	if (!comp || !comp->ep)
 		return 0;
 
-	if (comp->type == FMD_COMPONENT_MLD) {
-		struct fmd_mld *mld = fmd_to_mld(comp);
-		ti = (mld->switch_port < 0)
-			? CXLMI_TUNNEL_MLD(ld_id)
-			: CXLMI_TUNNEL_SWITCH_MLD(mld->switch_port, ld_id);
-	}
+	if (comp->type == FMD_COMPONENT_MLD)
+		ti = fmd_mld_ld_tunnel(fmd_to_mld(comp), ld_id, &ti_buf);
 
 	if (cxlmi_cmd_memdev_get_security_state(comp->ep, ti, &rsp) != 0)
 		return 0;

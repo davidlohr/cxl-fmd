@@ -24,6 +24,7 @@ static json_t *build_mld_semantics_array(struct fmd_mld *mld);
 static json_t *build_mhd_semantics_array(struct fmd_mhd *mhd);
 static int memory_endpoint_setup(struct fmd_ctx *ctx, const char *chassis_id,
 				 const char *mem_id, struct cxlmi_endpoint **ep_out,
+				 struct cxlmi_tunnel_info *ti_buf,
 				 struct cxlmi_tunnel_info **ti_out);
 
 /*
@@ -4333,8 +4334,8 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 	}
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	struct cxlmi_cmd_memdev_set_partition_info_req req = {
@@ -4419,7 +4420,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 
 	/* For real hardware, issue the CXL Scan Media command (4304h) */
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
+	struct cxlmi_tunnel_info ti_buf, *ti;
 
 	struct cxlmi_cmd_memdev_scan_media_req req = {
 		.scan_media_physaddr = phys_addr,
@@ -4457,9 +4458,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 			return -1;
 
 		/* LDs need tunneling based on MLD topology */
-		ti = (mld->switch_port < 0)
-			? CXLMI_TUNNEL_MLD(ld_id)
-			: CXLMI_TUNNEL_SWITCH_MLD(mld->switch_port, ld_id);
+		ti = fmd_mld_ld_tunnel(mld, ld_id, &ti_buf);
 	} else {
 		return -1;
 	}
@@ -4473,11 +4472,15 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 /*
  * Helper to setup endpoint and tunneling from Memory resource mem_id
  * Returns 0 on success with ep and ti populated, -1 on error
+ *
+ * *ti_out is either CXLMI_NO_TUNNEL or ti_buf, which the caller provides
+ * and must keep alive until it is done with the tunnel.
  */
 static int memory_endpoint_setup(struct fmd_ctx *ctx,
 				   const char *chassis_id,
 				   const char *mem_id,
 				   struct cxlmi_endpoint **ep_out,
+				   struct cxlmi_tunnel_info *ti_buf,
 				   struct cxlmi_tunnel_info **ti_out)
 {
 	struct fmd_component *comp = fmd_topology_find(&ctx->topology, chassis_id);
@@ -4510,9 +4513,7 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
 			return -1;
 		*ep_out = mld->base.ep;
 
-		*ti_out = (mld->switch_port < 0)
-			? CXLMI_TUNNEL_MLD(ld_id)
-			: CXLMI_TUNNEL_SWITCH_MLD(mld->switch_port, ld_id);
+		*ti_out = fmd_mld_ld_tunnel(mld, ld_id, ti_buf);
 	} else {
 		return -1;
 	}
@@ -4567,8 +4568,8 @@ int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
 		return 0;
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	/* Build CXL request - passphrases are 32 bytes, zero-padded */
@@ -4632,8 +4633,8 @@ int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
 		return 0;
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	/* Build CXL request - passphrases are 32 bytes, zero-padded */
@@ -4688,8 +4689,8 @@ int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
 		return 0;
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	/* Build CXL request - passphrase is 32 bytes, zero-padded */
@@ -4741,8 +4742,8 @@ int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
 		return 0;
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	/* Build CXL request - passphrase is 32 bytes, zero-padded */
@@ -4774,8 +4775,8 @@ int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx,
 		return 0;
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	if (cxlmi_cmd_memdev_freeze_security_state(ep, ti) != 0)
@@ -4843,8 +4844,8 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
 		return 0;
 
 	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti) != 0)
+	struct cxlmi_tunnel_info ti_buf, *ti;
+	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
 	/* Build CXL request - passphrase is 32 bytes, zero-padded */

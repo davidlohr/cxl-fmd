@@ -1172,6 +1172,32 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd);
  */
 
 
+/*
+ * Tunnel to LD @ld_id of @mld: straight to the LD if the MLD is attached
+ * directly, through the switch port otherwise.
+ *
+ * The tunnel info is written to @buf, which the caller provides and which
+ * must stay alive for as long as the returned pointer is used. Do not keep
+ * the pointer that CXLMI_TUNNEL_MLD() and friends evaluate to instead: it
+ * points to a compound literal that is gone at the end of the enclosing
+ * block.
+ */
+static inline struct cxlmi_tunnel_info *
+fmd_mld_ld_tunnel(const struct fmd_mld *mld, int ld_id,
+		  struct cxlmi_tunnel_info *buf)
+{
+	if (mld->switch_port < 0) {
+		DEFINE_CXLMI_TUNNEL_MLD(ti, ld_id);
+		*buf = ti;
+	} else {
+		DEFINE_CXLMI_TUNNEL_SWITCH_MLD(ti, mld->switch_port, ld_id);
+		*buf = ti;
+	}
+
+	return buf;
+}
+
+
 int fmd_discover(struct fmd_ctx *ctx);
 
 /*
