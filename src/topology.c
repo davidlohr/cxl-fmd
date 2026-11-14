@@ -218,6 +218,8 @@ int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 	/* Reached through the same endpoint as its parent, unless it has its own */
 	if (!comp->ep)
 		comp->ep = parent->ep;
+	if (!comp->msg_limit)
+		comp->msg_limit = parent->msg_limit;
 
 	/* Add to tree */
 	tree_add_child(parent, comp);

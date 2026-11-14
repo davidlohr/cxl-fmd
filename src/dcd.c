@@ -804,41 +804,58 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 	if (!owner)
 		return -ENOENT;
 
-	req.host_id = host_id;
-	req.region_cnt = FMD_MAX_DC_REGIONS;
-	req.start_region_id = 0;
+	/*
+	 * Region Count regions from Starting Region Index on, as many at a
+	 * time as fit a response: 4h + regions * 28h + 10h (Table 7-67), and
+	 * all eight do not fit the 256 bytes every CCI supports.
+	 */
+	for (int start = 0; start < FMD_MAX_DC_REGIONS; ) {
+		int want = fmd_cci_list_fit(dev, 0x4 + 0x10, 0x28,
+					    FMD_MAX_DC_REGIONS - start);
 
-	rc = cxlmi_cmd_fmapi_get_dc_reg_config(ep, ti, &req, rsp);
-	if (rc) {
-		fmd_warn(ctx, "%s: get host %d DC region config failed: %d",
-			 dev->id, host_id, rc);
-		return -EIO;
-	}
-	/* past the regions asked for, the counts after them are overwritten */
-	if (rsp->regions_returned > FMD_MAX_DC_REGIONS) {
-		fmd_warn(ctx, "%s: host %d: %d DC regions returned, %d requested",
-			 dev->id, host_id, rsp->regions_returned, FMD_MAX_DC_REGIONS);
-		return -EIO;
-	}
+		req.host_id = host_id;
+		req.region_cnt = want;
+		req.start_region_id = start;
 
-	clear_host_regions(ctx, dev, host_id);
+		rc = cxlmi_cmd_fmapi_get_dc_reg_config(ep, ti, &req, rsp);
+		if (rc) {
+			fmd_warn(ctx, "%s: get host %d DC region config failed: %d",
+				 dev->id, host_id, rc);
+			return -EIO;
+		}
+		/* past the regions asked for, the counts after them are overwritten */
+		if (rsp->regions_returned > want) {
+			fmd_warn(ctx, "%s: host %d: %d DC regions returned, %d requested",
+				 dev->id, host_id, rsp->regions_returned, want);
+			return -EIO;
+		}
 
-	for (int i = 0; i < rsp->regions_returned && i < FMD_MAX_DC_REGIONS; i++) {
-		struct fmd_dc_region *r;
+		/* the old regions go once the device has answered for the new */
+		if (start == 0)
+			clear_host_regions(ctx, dev, host_id);
 
-		if (rsp->region_configs[i].region_len == 0)
-			continue;
+		for (int i = 0; i < rsp->regions_returned; i++) {
+			struct fmd_dc_region *r;
 
-		r = fmd_dc_region_add(ctx, owner, i, host_id);
-		if (!r)
-			return -ENOMEM;
+			if (rsp->region_configs[i].region_len == 0)
+				continue;
 
-		r->base_dpa = rsp->region_configs[i].base;
-		r->decode_len = rsp->region_configs[i].decode_len;
-		r->region_len = rsp->region_configs[i].region_len;
-		r->block_size = rsp->region_configs[i].block_size;
-		r->flags = rsp->region_configs[i].flags;
-		r->sanitize_on_release = rsp->region_configs[i].sanitize_on_release & 0x01;
+			r = fmd_dc_region_add(ctx, owner, start + i, host_id);
+			if (!r)
+				return -ENOMEM;
+
+			r->base_dpa = rsp->region_configs[i].base;
+			r->decode_len = rsp->region_configs[i].decode_len;
+			r->region_len = rsp->region_configs[i].region_len;
+			r->block_size = rsp->region_configs[i].block_size;
+			r->flags = rsp->region_configs[i].flags;
+			r->sanitize_on_release = rsp->region_configs[i].sanitize_on_release & 0x01;
+		}
+
+		start += rsp->regions_returned;
+		/* Number of Available Regions, and a device with nothing more */
+		if (rsp->regions_returned == 0 || start >= rsp->num_regions)
+			break;
 	}
 
 	if (owner->type == FMD_COMPONENT_LD) {
@@ -884,7 +901,9 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 	for (;;) {
 		memset(&req, 0, sizeof(req));
 		req.host_id = host_id;
-		req.extent_count = DC_EXT_LIST_PAGE;
+		req.extent_count = fmd_cci_list_fit(dev, sizeof(*rsp),
+						    sizeof(rsp->extents[0]),
+						    DC_EXT_LIST_PAGE);
 		req.start_ext_index = start;
 
 		rc = cxlmi_cmd_fmapi_get_dc_region_ext_list(ep, ti, &req, rsp);
@@ -995,7 +1014,9 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 	for (;;) {
 		memset(&req, 0, sizeof(req));
 		req.start_idx = start;
-		req.tags_count = DC_TAG_LIST_PAGE;
+		req.tags_count = fmd_cci_list_fit(dev, sizeof(*rsp),
+						  sizeof(rsp->tags_list[0]),
+						  DC_TAG_LIST_PAGE);
 
 		rc = cxlmi_cmd_fmapi_dc_list_tags(ep, ti, &req, rsp);
 		if (rc) {

@@ -71,6 +71,18 @@ static uint64_t opcode_to_cmd_bit(uint16_t opcode)
 	}
 }
 
+/*
+ * The limit of a component reached through one more tunnel than @parent.
+ * What it accepts itself is not known without asking it, so it is held to
+ * the minimum, and to what its parent can carry.
+ */
+static uint16_t tunnelled_msg_limit(const struct fmd_component *parent)
+{
+	size_t limit = fmd_cci_msg_limit(parent) - FMD_CCI_TUNNEL_OVERHEAD;
+
+	return limit < FMD_CCI_MSG_MIN ? limit : FMD_CCI_MSG_MIN;
+}
+
 /* A CEL entry is 4 bytes and there are 2^16 opcodes */
 #define CEL_MAX_SIZE (4 * 65536)
 
@@ -82,14 +94,16 @@ static uint64_t opcode_to_cmd_bit(uint16_t opcode)
  * a reasonable default.
  */
 static int get_supported_commands(struct fmd_ctx *ctx,
-				  struct cxlmi_endpoint *ep,
+				  const struct fmd_component *comp,
 				  struct cxlmi_tunnel_info *ti,
 				  uint64_t *supported_cmds)
 {
+	struct cxlmi_endpoint *ep = comp->ep;
 	struct cxlmi_cmd_get_supported_logs_rsp *logs_rsp = NULL;
 	struct cxlmi_cmd_get_log_cel_rsp *cel_rsp = NULL;
 	struct cxlmi_cmd_get_log_req log_req;
 	uint32_t cel_size = 0;
+	uint32_t chunk;
 	int num_entries;
 	int rc;
 
@@ -136,15 +150,24 @@ static int get_supported_commands(struct fmd_ctx *ctx,
 	}
 
 	/* Get Log (0401h) - fetch CEL */
-	memset(&log_req, 0, sizeof(log_req));
-	memcpy(log_req.uuid, cel_uuid, sizeof(cel_uuid));
-	log_req.offset = 0;
-	log_req.length = cel_size;
+	/*
+	 * Get Log returns Length bytes from Offset: read the CEL in parts
+	 * that fit a response, a whole number of entries each.
+	 */
+	chunk = fmd_cci_msg_limit(comp);
+	chunk -= chunk % sizeof(*cel_rsp);
+	for (uint32_t off = 0; off < cel_size; off += chunk) {
+		memset(&log_req, 0, sizeof(log_req));
+		memcpy(log_req.uuid, cel_uuid, sizeof(cel_uuid));
+		log_req.offset = off;
+		log_req.length = cel_size - off < chunk ? cel_size - off : chunk;
 
-	rc = cxlmi_cmd_get_log_cel(ep, ti, &log_req, cel_rsp);
-	if (rc) {
-		fmd_dbg(ctx, "Get Log (CEL) failed: %d", rc);
-		goto out;
+		rc = cxlmi_cmd_get_log_cel(ep, ti, &log_req,
+					   cel_rsp + off / sizeof(*cel_rsp));
+		if (rc) {
+			fmd_dbg(ctx, "Get Log (CEL) failed: %d", rc);
+			goto out;
+		}
 	}
 
 	/* Parse CEL entries and build supported_cmds bitmask */
@@ -228,7 +251,7 @@ static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	sld->persistent_size = CXL_TO_BYTES(sld->memdev.persistent_capacity);
 
 	/* Get supported commands from CEL */
-	get_supported_commands(ctx, ep, CXLMI_NO_TUNNEL, &sld->supported_cmds);
+	get_supported_commands(ctx, &sld->base, CXLMI_NO_TUNNEL, &sld->supported_cmds);
 
 	fmd_dbg(ctx, "%s: FW=%.16s total=%" PRIu64 "MB volatile=%" PRIu64 "MB persistent=%" PRIu64 "MB",
 		sld->base.id, sld->memdev.fw_revision,
@@ -284,7 +307,7 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 			mld->base.id, ld->ld_id, rc);
 
 	/* Get supported commands from CEL */
-	get_supported_commands(ctx, ep, ti, &ld->supported_cmds);
+	get_supported_commands(ctx, &ld->base, ti, &ld->supported_cmds);
 
 	/* Memdev Identify (4000h) */
 	rc = cxlmi_cmd_memdev_identify(ep, ti, &ld->memdev);
@@ -336,7 +359,8 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	size_t rsp_size;
 	size_t bw_rsp_size;
 	uint64_t granularity = CXL_CAPACITY_UNIT; /* until 5401h says otherwise */
-	uint8_t nld;
+	uint64_t ld_units[FMD_MAX_LD_COUNT];	/* allocation of each LD */
+	uint8_t nld, nalloc = 0;
 	int rc;
 	int i;
 
@@ -368,8 +392,6 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 
 	/* Get LD Allocations (5401h) */
 	nld = mld->ld_count < FMD_MAX_LD_COUNT ? mld->ld_count : FMD_MAX_LD_COUNT;
-	alloc_req.start_ld_id = 0;
-	alloc_req.ld_allocation_list_limit = nld;
 
 	rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_ld_allocations_rsp) +
 		   FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
@@ -379,18 +401,31 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		return -1;
 	}
 
-	rc = cxlmi_cmd_fmapi_get_ld_allocations(ep, ti, &alloc_req, alloc_rsp);
-	if (rc) {
-		fmd_warn(ctx, "%s: get ld allocations failed: %d", mld->base.id, rc);
-		free(alloc_rsp);
-		alloc_rsp = NULL;
-	} else if (alloc_rsp->memory_granularity > 2) {
-		/* without the unit, the multipliers mean nothing */
-		fmd_warn(ctx, "%s: reserved memory granularity %d, LD sizes unknown",
-			 mld->base.id, alloc_rsp->memory_granularity);
-		free(alloc_rsp);
-		alloc_rsp = NULL;
-	} else {
+	/*
+	 * As many LDs at a time as fit a response, from Start LD ID on. The
+	 * device returns min(limit, LDs left), so no more is asked for than
+	 * there are: 16 LDs do not fit the 256 bytes every CCI supports.
+	 */
+	while (nalloc < nld) {
+		uint8_t want = fmd_cci_list_fit(&mld->base, 4, 16, nld - nalloc);
+
+		alloc_req.start_ld_id = nalloc;
+		alloc_req.ld_allocation_list_limit = want;
+		memset(alloc_rsp, 0, rsp_size);
+
+		rc = cxlmi_cmd_fmapi_get_ld_allocations(ep, ti, &alloc_req, alloc_rsp);
+		if (rc) {
+			fmd_warn(ctx, "%s: get ld allocations failed: %d", mld->base.id, rc);
+			break;
+		}
+		if (alloc_rsp->memory_granularity > 2) {
+			/* without the unit, the multipliers mean nothing */
+			fmd_warn(ctx, "%s: reserved memory granularity %d, LD sizes unknown",
+				 mld->base.id, alloc_rsp->memory_granularity);
+			nalloc = 0;
+			break;
+		}
+
 		/*
 		 * Memory Granularity: 0h = 256 MB, 1h = 512 MB, 2h = 1 GB
 		 * (CXL r4.0 Table 7-48). Kept as a count of 256 MB units,
@@ -398,8 +433,16 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		 */
 		mld->memory_granularity = 1 << alloc_rsp->memory_granularity;
 		granularity = mld->memory_granularity * CXL_CAPACITY_UNIT;
-		FMD_CCI_LIST_CLAMP(alloc_rsp->ld_allocation_list_len, nld);
+
+		FMD_CCI_LIST_CLAMP(alloc_rsp->ld_allocation_list_len, want);
+		if (alloc_rsp->ld_allocation_list_len == 0)
+			break;
+		for (i = 0; i < alloc_rsp->ld_allocation_list_len; i++)
+			ld_units[nalloc++] =
+				alloc_rsp->ld_allocation_list[i].range_1_allocation_mult +
+				alloc_rsp->ld_allocation_list[i].range_2_allocation_mult;
 	}
+	free(alloc_rsp);
 
 	/* Get QoS Control (5403h) */
 	rc = cxlmi_cmd_fmapi_get_qos_control(ep, ti, &qos_ctrl);
@@ -454,14 +497,11 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		ld = fmd_ld_create(ld_id_str, i);
 		if (!ld)
 			continue;
+		ld->base.msg_limit = tunnelled_msg_limit(&mld->base);
 
 		/* Memory size from allocations */
-		if (alloc_rsp && i < alloc_rsp->ld_allocation_list_len) {
-			ld->memory_size =
-				(alloc_rsp->ld_allocation_list[i].range_1_allocation_mult +
-				 alloc_rsp->ld_allocation_list[i].range_2_allocation_mult) *
-				granularity;
-		}
+		if (i < nalloc)
+			ld->memory_size = ld_units[i] * granularity;
 
 		/* QoS from bandwidth responses */
 		if (alloc_bw && i < alloc_bw->number_ld)
@@ -476,7 +516,6 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		discover_ld(ctx, ld, mld);
 	}
 
-	free(alloc_rsp);
 	free(alloc_bw);
 	free(limit_bw);
 
@@ -534,8 +573,10 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 		 mhd->base.id, mhd->num_heads, mhd->total_lds);
 
 	/* Get Head Info (5501h) for all heads */
+	/* no more heads than are kept: 8 blocks fit any response */
 	head_req.start_head = 0;
-	head_req.num_heads = mhd->num_heads;
+	head_req.num_heads = mhd->num_heads < FMD_MAX_HEADS ?
+			     mhd->num_heads : FMD_MAX_HEADS;
 
 	head_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_head_info_rsp) +
 			FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_get_head_info_blkfmt);
@@ -718,6 +759,7 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 
 		/* MLD behind switch - store port for tunneling */
 		mld->switch_port = port->port_number;
+		mld->base.msg_limit = tunnelled_msg_limit(&port->base);
 
 		fmd_topology_add(&ctx->topology, &mld->base, &port->base);
 
@@ -753,7 +795,7 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 	struct cxlmi_cmd_fmapi_get_vcs_info_req *req;
 	struct cxlmi_cmd_fmapi_get_vcs_info_rsp *rsp;
 	struct cxlmi_cmd_fmapi_vcs_info_block *block;
-	int rc, count;
+	int total = FMD_MAX_VPPB, got = 0, rc = 0;
 
 	req = calloc(1, sizeof(*req) + 1);
 	rsp = calloc(1, sizeof(*rsp) + sizeof(*block) +
@@ -763,51 +805,70 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 		free(rsp);
 		return -ENOMEM;
 	}
-
-	req->start_vppb = 0;
-	req->vppb_list_limit = FMD_MAX_VPPB;
-	req->num_vcs = 1;
-	req->vcs_id_list[0] = vcs_id;
-
-	rc = cxlmi_cmd_fmapi_get_vcs_info(sw->base.ep, CXLMI_NO_TUNNEL, req, rsp);
-	free(req);
-	if (rc || rsp->num_vcs == 0) {
-		fmd_dbg(ctx, "%s: VCS %d query failed", sw->base.id, vcs_id);
-		free(rsp);
-		return -EIO;
-	}
-
 	block = &rsp->vcs_info_list[0];
-	/* FFh: Invalid VCS ID, all subsequent field values are invalid */
-	if (block->vcs_state == 0xff) {
-		free(rsp);
-		return -ENOENT;
+
+	/*
+	 * Start vPPB and vPPB List Limit are there for "devices that have
+	 * small maximum command message sizes": read the vPPBs as many at a
+	 * time as fit a response. The list holds min(vPPB List Limit, Number
+	 * of vPPBs) entries from Start vPPB on.
+	 */
+	while (got < total) {
+		int want = fmd_cci_list_fit(&sw->base, 4 + sizeof(*block),
+					    sizeof(block->vppbs[0]), total - got);
+		int count;
+
+		req->start_vppb = got;
+		req->vppb_list_limit = want;
+		req->num_vcs = 1;
+		req->vcs_id_list[0] = vcs_id;
+
+		rc = cxlmi_cmd_fmapi_get_vcs_info(sw->base.ep, CXLMI_NO_TUNNEL, req, rsp);
+		if (rc || rsp->num_vcs == 0) {
+			fmd_dbg(ctx, "%s: VCS %d query failed", sw->base.id, vcs_id);
+			rc = -EIO;
+			break;
+		}
+
+		/* FFh: Invalid VCS ID, all subsequent field values are invalid */
+		if (block->vcs_state == 0xff) {
+			rc = -ENOENT;
+			break;
+		}
+
+		if (got == 0) {
+			memset(vcs, 0, sizeof(*vcs));
+			vcs->vcs_id = block->vcs_id;
+			vcs->state = block->vcs_state;
+			vcs->upstream_port_id = block->usp_id;
+			vcs->hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
+			if (block->num_vppbs < total)
+				total = block->num_vppbs;
+		}
+
+		count = total - got < want ? total - got : want;
+		for (int i = 0; i < count; i++) {
+			struct cxlmi_cmd_fmapi_vppb_info *src = &block->vppbs[i];
+			struct fmd_vppb *vppb = &vcs->vppbs[vcs->num_vppbs++];
+
+			vppb->vppb_id = got + i;
+			vppb->binding_status = src->binding_status;
+			vppb->bound_port_id = src->bound_port_id;
+			vppb->bound_ld_id = src->bound_ld_id;
+		}
+		got += count;
+		if (count == 0)
+			break;
 	}
 
-	memset(vcs, 0, sizeof(*vcs));
-	vcs->vcs_id = block->vcs_id;
-	vcs->state = block->vcs_state;
-	vcs->upstream_port_id = block->usp_id;
-	vcs->hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
-
-	/* the list holds min(vPPB List Limit, Number of vPPBs) entries */
-	count = block->num_vppbs < FMD_MAX_VPPB ? block->num_vppbs : FMD_MAX_VPPB;
-	for (int i = 0; i < count; i++) {
-		struct cxlmi_cmd_fmapi_vppb_info *src = &block->vppbs[i];
-		struct fmd_vppb *vppb = &vcs->vppbs[vcs->num_vppbs++];
-
-		/* Start vPPB is 0, so the index is the vPPB ID */
-		vppb->vppb_id = i;
-		vppb->binding_status = src->binding_status;
-		vppb->bound_port_id = src->bound_port_id;
-		vppb->bound_ld_id = src->bound_ld_id;
-	}
+	free(req);
+	free(rsp);
+	if (rc)
+		return rc;
 
 	fmd_dbg(ctx, "%s: VCS %d state=%d USP=%d vPPBs=%d",
 		sw->base.id, vcs->vcs_id, vcs->state,
 		vcs->upstream_port_id, vcs->num_vppbs);
-
-	free(rsp);
 	return 0;
 }
 
@@ -890,16 +951,75 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
  * 2. Get Physical Port State (5101h) - for each enabled port
  * 3. Get Virtual CXL Switch Info (5200h) - for each enabled VCS
  */
+/* A port of a switch, from its Get Physical Port State information block */
+static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			    struct cxlmi_cmd_fmapi_port_state_info_block *pinfo)
+{
+	char port_id[128];
+	struct fmd_port *port;
+
+	(void)snprintf(port_id, sizeof(port_id), "%.50s_dsp%d", sw->base.id, pinfo->port_id);
+
+	port = fmd_port_create(port_id, pinfo->port_id);
+	if (!port)
+		return;
+
+	/* Map port state info to our structures */
+	port->conn_dev_type = pinfo->conn_dev_type;
+	port->link_status = ltssm_to_link_status(pinfo->ltssm_state);
+	port->max_link_width = pinfo->max_link_width;
+	port->negotiated_link_width = pinfo->negotiated_link_width;
+	port->supported_ld_count = pinfo->supported_ld_count;
+
+	/*
+	 * Current Port Configuration State is Bits[3:0]; Bit[4] is GAE
+	 * Support. A port that is not a DSP or a USP must not be left
+	 * in the state fmd_port_create() starts it in, which is DSP.
+	 */
+	switch (pinfo->config_state & 0xf) {
+	case 0x1: /* Bind in progress */
+		port->state = FMD_PORT_BIND_IN_PROGRESS;
+		break;
+	case 0x2: /* Unbind in progress */
+		port->state = FMD_PORT_UNBIND_IN_PROGRESS;
+		break;
+	case 0x3: /* DSP */
+		port->state = FMD_PORT_DSP;
+		sw->num_dsps++;
+		break;
+	case 0x4: /* USP */
+		port->state = FMD_PORT_USP;
+		sw->num_usps++;
+		break;
+	case 0x0: /* Disabled */
+	default:  /* Fabric Port (PBR), Invalid Port_ID, reserved */
+		port->state = FMD_PORT_DISABLED;
+		break;
+	}
+
+	/* Add to topology */
+	fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+
+	fmd_dbg(ctx, "%s: port %d conn_type=%d link=%s width=%d",
+		sw->base.id, port->port_number,
+		port->conn_dev_type,
+		port->link_status == FMD_LINK_UP ? "up" : "down",
+		port->negotiated_link_width);
+
+	/* Connected Device Type is reserved unless the port is a DSP */
+	if (port->state == FMD_PORT_DSP)
+		discover_port_device(ctx, port);
+}
+
 static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 {
 	struct cxlmi_cmd_fmapi_get_phys_port_state_req *port_req;
 	struct cxlmi_cmd_fmapi_get_phys_port_state_rsp *port_rsp;
 	struct cxlmi_endpoint *ep;
-	size_t req_size;
-	size_t rsp_size;
+	uint8_t port_ids[256];
 	int rc;
 	int num_ports;
-	int port_index;
+	int nports;
 
 	ep = sw->base.ep;
 	if (!ep)
@@ -918,99 +1038,55 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		 sw->base.id, num_ports,
 		 sw->sw_identify.num_vcs, sw->sw_identify.num_total_vppb);
 
-	/* Get Physical Port State (5101h) - query only active ports from bitmask */
-	req_size = sizeof(*port_req) + num_ports * sizeof(uint8_t);
-	port_req = calloc(1, req_size);
-	if (!port_req)
-		return -1;
-
-	/* Build port list from active_port_bitmask */
-	port_index = 0;
-	for (int byte_idx = 0; byte_idx < 32 && port_index < num_ports; byte_idx++) {
-		uint8_t byte = sw->sw_identify.active_port_bitmask[byte_idx];
-		for (int bit_idx = 0; bit_idx < 8 && port_index < num_ports; bit_idx++) {
-			if (byte & (1 << bit_idx))
-				port_req->ports[port_index++] = byte_idx * 8 + bit_idx;
-		}
+	/*
+	 * Get Physical Port State (5101h) for the ports in the Active Port
+	 * Bitmask, as many at a time as fit a request and its response.
+	 */
+	nports = 0;
+	for (int id = 0; id < 256 && nports < num_ports; id++) {
+		if (sw->sw_identify.active_port_bitmask[id / 8] & (1 << (id % 8)))
+			port_ids[nports++] = id;
 	}
-	port_req->num_ports = port_index;
 
-	rsp_size = sizeof(*port_rsp) +
-		   FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_port_state_info_block);
-	port_rsp = calloc(1, rsp_size);
-	if (!port_rsp) {
+	port_req = calloc(1, sizeof(*port_req) + FMD_CCI_LIST_MAX);
+	port_rsp = calloc(1, sizeof(*port_rsp) + FMD_CCI_LIST_MAX *
+			  sizeof(struct cxlmi_cmd_fmapi_port_state_info_block));
+	if (!port_req || !port_rsp) {
 		free(port_req);
+		free(port_rsp);
 		return -1;
 	}
 
-	rc = cxlmi_cmd_fmapi_get_phys_port_state(ep, CXLMI_NO_TUNNEL, port_req, port_rsp);
-	free(port_req);
-	if (rc) {
-		fmd_warn(ctx, "%s: get physical port state failed: %d", sw->base.id, rc);
-		free(port_rsp);
-		return rc;
-	}
-	FMD_CCI_LIST_CLAMP(port_rsp->num_ports, port_index);
+	for (int done = 0; done < nports; ) {
+		int want = fmd_cci_list_fit(&sw->base, 4,
+				sizeof(struct cxlmi_cmd_fmapi_port_state_info_block),
+				nports - done);
 
-	/* Create port children */
-	for (int i = 0; i < port_rsp->num_ports; i++) {
-		struct cxlmi_cmd_fmapi_port_state_info_block *pinfo = &port_rsp->ports[i];
-		char port_id[128];
-		struct fmd_port *port;
+		port_req->num_ports = want;
+		memcpy(port_req->ports, port_ids + done, want);
+		memset(port_rsp, 0, sizeof(*port_rsp));
 
-		(void)snprintf(port_id, sizeof(port_id), "%.50s_dsp%d", sw->base.id, pinfo->port_id);
-
-		port = fmd_port_create(port_id, pinfo->port_id);
-		if (!port)
-			continue;
-
-		/* Map port state info to our structures */
-		port->conn_dev_type = pinfo->conn_dev_type;
-		port->link_status = ltssm_to_link_status(pinfo->ltssm_state);
-		port->max_link_width = pinfo->max_link_width;
-		port->negotiated_link_width = pinfo->negotiated_link_width;
-		port->supported_ld_count = pinfo->supported_ld_count;
-
-		/*
-		 * Current Port Configuration State is Bits[3:0]; Bit[4] is GAE
-		 * Support. A port that is not a DSP or a USP must not be left
-		 * in the state fmd_port_create() starts it in, which is DSP.
-		 */
-		switch (pinfo->config_state & 0xf) {
-		case 0x1: /* Bind in progress */
-			port->state = FMD_PORT_BIND_IN_PROGRESS;
-			break;
-		case 0x2: /* Unbind in progress */
-			port->state = FMD_PORT_UNBIND_IN_PROGRESS;
-			break;
-		case 0x3: /* DSP */
-			port->state = FMD_PORT_DSP;
-			sw->num_dsps++;
-			break;
-		case 0x4: /* USP */
-			port->state = FMD_PORT_USP;
-			sw->num_usps++;
-			break;
-		case 0x0: /* Disabled */
-		default:  /* Fabric Port (PBR), Invalid Port_ID, reserved */
-			port->state = FMD_PORT_DISABLED;
+		rc = cxlmi_cmd_fmapi_get_phys_port_state(ep, CXLMI_NO_TUNNEL,
+							 port_req, port_rsp);
+		if (rc) {
+			fmd_warn(ctx, "%s: get physical port state failed: %d",
+				 sw->base.id, rc);
+			/* the ports read so far are still ports of the switch */
+			if (done == 0) {
+				free(port_req);
+				free(port_rsp);
+				return rc;
+			}
 			break;
 		}
+		FMD_CCI_LIST_CLAMP(port_rsp->num_ports, want);
 
-		/* Add to topology */
-		fmd_topology_add(&ctx->topology, &port->base, &sw->base);
-
-		fmd_dbg(ctx, "%s: port %d conn_type=%d link=%s width=%d",
-			sw->base.id, port->port_number,
-			port->conn_dev_type,
-			port->link_status == FMD_LINK_UP ? "up" : "down",
-			port->negotiated_link_width);
-
-		/* Connected Device Type is reserved unless the port is a DSP */
-		if (port->state == FMD_PORT_DSP)
-			discover_port_device(ctx, port);
+		for (int i = 0; i < port_rsp->num_ports; i++)
+			add_switch_port(ctx, sw, &port_rsp->ports[i]);
+		done += want;
 	}
 
+	free(port_req);
 	free(port_rsp);
 
 	/* Step 3: Discover VCS configuration */
@@ -1057,10 +1133,34 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
  * Sends Identify command, then dispatches to appropriate discovery function
  * based on component type.
  */
+/*
+ * The Message Payload limit of a component on its own endpoint: the smaller
+ * of what it accepts in a request, from Identify, and what it sends in a
+ * response, from Get Response Message Limit (0003h). A component that will
+ * not say is held to the 256 bytes all of them support.
+ */
+static uint16_t endpoint_msg_limit(struct cxlmi_endpoint *ep,
+				   const struct cxlmi_cmd_identify_rsp *identify)
+{
+	struct cxlmi_cmd_get_response_msg_limit_rsp rsp = { 0 };
+	unsigned int req_n = identify->max_msg_size, rsp_n = 8;
+
+	if (cxlmi_cmd_get_response_msg_limit(ep, NULL, &rsp) == 0)
+		rsp_n = rsp.limit;
+
+	if (req_n < 8 || req_n > 10)	/* 2^8 to 2^10; anything else is not a size */
+		req_n = 8;
+	if (rsp_n < 8 || rsp_n > 10)
+		rsp_n = 8;
+
+	return 1 << (req_n < rsp_n ? req_n : rsp_n);
+}
+
 static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 {
 	struct cxlmi_cmd_identify_rsp identify = {0};
 	char dev_id[FMD_MAX_ID_LEN];
+	uint16_t msg_limit;
 	int rc;
 
 	/* Identify (0001h) */
@@ -1069,6 +1169,8 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 		fmd_err(ctx, "Identify command failed: %d", rc);
 		return rc;
 	}
+
+	msg_limit = endpoint_msg_limit(ep, &identify);
 
 	/* Generate device ID from serial number */
 	(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64, identify.serial_num);
@@ -1085,6 +1187,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 
 		sw->identify = identify;
 		sw->base.ep = ep;
+		sw->base.msg_limit = msg_limit;
 		fmd_topology_add(&ctx->topology, &sw->base, NULL);
 
 		rc = discover_switch(ctx, sw);
@@ -1125,6 +1228,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 
 			mhd->identify = identify;
 			mhd->base.ep = ep;
+			mhd->base.msg_limit = msg_limit;
 			fmd_topology_add(&ctx->topology, &mhd->base, NULL);
 
 			rc = discover_mhd(ctx, mhd);
@@ -1148,6 +1252,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 
 			sld->identify = identify;
 			sld->base.ep = ep;
+			sld->base.msg_limit = msg_limit;
 			fmd_topology_add(&ctx->topology, &sld->base, NULL);
 
 			rc = discover_sld(ctx, sld);
@@ -1167,6 +1272,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 			mld->identify = identify;
 			mld->switch_port = -1;  /* Direct-attached */
 			mld->base.ep = ep;
+			mld->base.msg_limit = msg_limit;
 			fmd_topology_add(&ctx->topology, &mld->base, NULL);
 
 			rc = discover_mld(ctx, mld);

@@ -87,6 +87,21 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  * whose entry count is a single byte gets room for the most that byte can
  * hold, and no more entries are read from it than were requested.
  */
+/*
+ * Message Payload limits, CXL r4.0 Section 8.2.10.1. A component takes
+ * requests of up to its Maximum Supported Message Size (Identify, Table
+ * 8-216) and limits its responses to its Response Message Limit (Table
+ * 8-218). Both are 2^n bytes, from 256 to 1024. A command with a list in
+ * either direction is asked a part at a time so that neither is exceeded.
+ *
+ * A command tunnelled with Tunnel Management Command (5300h) is carried in
+ * the payload of another, after 4 bytes of tunnel header and its own 12-byte
+ * CCI message header (Tables 7-39 and 7-40).
+ */
+#define FMD_CCI_MSG_MIN          256
+#define FMD_CCI_MSG_MAX          1024
+#define FMD_CCI_TUNNEL_OVERHEAD  16
+
 #define FMD_CCI_LIST_MAX   UINT8_MAX
 #define FMD_CCI_LIST_CLAMP(count, asked) \
 	do { if ((count) > (asked)) (count) = (asked); } while (0)
@@ -184,6 +199,14 @@ struct fmd_component {
 	 * added to the topology; everything added beneath it inherits it.
 	 */
 	struct cxlmi_endpoint *ep;
+
+	/*
+	 * Largest Message Payload, in bytes, of a request to this component
+	 * or of a response from it; 0 if not known. See fmd_cci_msg_limit().
+	 * Inherited like ep, less the tunnel overhead where a component is
+	 * reached through one more Tunnel Management Command than its parent.
+	 */
+	uint16_t msg_limit;
 
 	/* Hash table linkage for O(1) lookup, hash by string ID */
 	uint32_t hash;
@@ -1161,6 +1184,29 @@ void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_swit
  */
 struct fmd_vcs *fmd_switch_find_vcs(struct fmd_switch *sw, uint8_t vcs_id);
 struct fmd_vppb *fmd_vcs_find_vppb(struct fmd_vcs *vcs, uint8_t vppb_id);
+
+/* Largest Message Payload to send to @comp or to ask of it: the minimum
+ * every component supports unless discovery learnt better. */
+static inline size_t fmd_cci_msg_limit(const struct fmd_component *comp)
+{
+	return comp && comp->msg_limit ? comp->msg_limit : FMD_CCI_MSG_MIN;
+}
+
+/*
+ * How many list entries of @entry bytes to ask @comp for at once, in a
+ * payload that has @fixed bytes besides the list: at least 1, at most @max.
+ */
+static inline unsigned int fmd_cci_list_fit(const struct fmd_component *comp,
+					    size_t fixed, size_t entry,
+					    unsigned int max)
+{
+	size_t limit = fmd_cci_msg_limit(comp);
+	size_t n = limit > fixed ? (limit - fixed) / entry : 0;
+
+	if (n < 1)
+		n = 1;
+	return n < max ? (unsigned int)n : max;
+}
 
 /*
  * The vPPB that physical port @port_id is bound to, or that LD @ld_id of the

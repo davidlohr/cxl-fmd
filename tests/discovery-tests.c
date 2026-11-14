@@ -889,6 +889,109 @@ static void test_mhd(bool overcount)
 			   "multi-headed device", before);
 }
 
+/*
+ * Message sizes, Section 8.2.10.1. A component takes requests of up to its
+ * Maximum Supported Message Size (Identify) and limits its responses to its
+ * Response Message Limit (0003h): 256 bytes unless it says otherwise. A list
+ * that does not fit is asked for a part at a time.
+ */
+static void test_paging_ports(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t id[0x49] = { 0 }, ports[4 + 15 * 16] = { 0 };
+	uint8_t set = 0, cmd = 0, pl[64] = { 0 };
+	size_t size = sizeof(pl);
+	int before = failures, found = 0;
+	char name[FMD_MAX_ID_LEN];
+
+	answer_identify(ep, 0x5004, 0x00);
+
+	/* 20 ports and no VCS; a block is 16 bytes, so 15 fit 256 */
+	id[0x02] = 20;				/* Number of Physical Ports */
+	id[0x04] = 0xff;			/* Active Port Bitmask: 0 to 19 */
+	id[0x05] = 0xff;
+	id[0x06] = 0x0f;
+	answer(ep, 0x5100, id, sizeof(id));
+
+	ports[0] = 15;
+	for (int i = 0; i < 15; i++)
+		port_block(ports + 4 + i * 16, i, 0x03, 0, 0x00, 0x00, 0);
+	answer(ep, 0x5101, ports, 4 + 15 * 16);
+	ports[0] = 5;
+	for (int i = 0; i < 5; i++)
+		port_block(ports + 4 + i * 16, 15 + i, 0x03, 0, 0x00, 0x00, 0);
+	answer(ep, 0x5101, ports, 4 + 5 * 16);
+
+	fmd_discover(ctx);
+
+	device_id(name, sizeof(name), 0x5004);
+	for (int i = 0; i < 20; i++)
+		if (fmd_topology_find_port(&ctx->topology, name, i))
+			found++;
+	CHECK(found == 20, "%d of 20 ports", found);
+
+	/* the second request is for the 5 ports the first had no room for */
+	cxlmi_mock_get_last_command(ep, &set, &cmd, pl, &size);
+	CHECK(set == 0x51 && cmd == 0x01, "last command %02x%02xh", set, cmd);
+	CHECK(pl[0] == 5 && pl[1] == 15 && pl[5] == 19,
+	      "last request: %d ports from port %d", pl[0], pl[1]);
+
+	fmd_ctx_free(ctx);
+	report("more ports than fit a response", before);
+}
+
+static void test_paging_lds(bool large)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t id[0x12] = { 0 }, alloc[4 + 16 * 16] = { 0 };
+	int before = failures;
+	char name[FMD_MAX_ID_LEN];
+	uint64_t serial = large ? 0xf1 : 0xf0;
+	struct fmd_ld *ld;
+
+	put64(id + 0x08, serial);
+	id[0x10] = large ? 10 : 8;		/* Maximum Supported Message Size */
+	id[0x11] = 0x03;
+	answer(ep, 0x0001, id, sizeof(id));
+	if (large)				/* Response Message Limit: 2^10 */
+		answer(ep, 0x0003, (uint8_t[1]){ 10 }, 1);
+
+	answer_ld_info(ep, 136ULL << 28, 16);
+	answer_ld_info(ep, 136ULL << 28, 16);
+
+	/* 16 LDs of 1 to 16 units; an entry is 16 bytes, so 15 fit 256 */
+	alloc[0] = 16;				/* Number of LDs */
+	for (int i = 0; i < 16; i++)
+		put64(alloc + 4 + 16 * i, i + 1);
+	if (large) {
+		alloc[3] = 16;			/* LD Allocation List Length */
+		answer(ep, 0x5401, alloc, sizeof(alloc));
+	} else {
+		alloc[3] = 15;
+		answer(ep, 0x5401, alloc, 4 + 15 * 16);
+		alloc[2] = 15;			/* Start LD ID */
+		alloc[3] = 1;
+		put64(alloc + 4, 16);
+		answer(ep, 0x5401, alloc, 4 + 16);
+	}
+
+	fmd_discover(ctx);
+
+	device_id(name, sizeof(name), serial);
+	ld = fmd_topology_find_ld(&ctx->topology, name, 0);
+	CHECK(ld && ld->memory_size == 1ULL << 28, "LD 0: %" PRIu64 " bytes",
+	      ld ? ld->memory_size : 0);
+	ld = fmd_topology_find_ld(&ctx->topology, name, 15);
+	CHECK(ld && ld->memory_size == 16ULL << 28, "LD 15: %" PRIu64 " bytes",
+	      ld ? ld->memory_size : 0);
+
+	fmd_ctx_free(ctx);
+	report(large ? "16 LDs in one response of 1024 bytes" :
+		       "more LDs than fit a response", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -920,6 +1023,9 @@ int main(void)
 	test_switch_unbind();
 	test_overcount_switch();
 	test_overcount_mld();
+	test_paging_ports();
+	test_paging_lds(false);
+	test_paging_lds(true);
 	test_mhd(false);
 	test_mhd(true);
 	test_not_ready();
