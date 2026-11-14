@@ -1044,6 +1044,10 @@ void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_swit
 		for (p = 0; p < vcs->num_vppbs; p++) {
 			struct fmd_vppb *vppb = &vcs->vppbs[p];
 
+			/* nothing is left pointing at what it was bound to */
+			vppb->port = NULL;
+			vppb->ld = NULL;
+
 			/* Resolve port reference */
 			if (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
 			    vppb->binding_status == FMD_VPPB_BOUND_LD) {

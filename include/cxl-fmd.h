@@ -1155,6 +1155,23 @@ void fmd_component_free(struct fmd_component *comp);
 void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_switch *sw);
 
 /*
+ * A VCS of a switch by its Virtual CXL Switch ID, and a vPPB of a VCS by its
+ * vPPB ID. sw->vcs holds the VCSs that are active, in the order they were
+ * read: a VCS ID is not an index into it.
+ */
+struct fmd_vcs *fmd_switch_find_vcs(struct fmd_switch *sw, uint8_t vcs_id);
+struct fmd_vppb *fmd_vcs_find_vppb(struct fmd_vcs *vcs, uint8_t vppb_id);
+
+/*
+ * The vPPB that physical port @port_id is bound to, or that LD @ld_id of the
+ * MLD on it is bound to when @ld_id is not FFFFh, with its VCS in @user.
+ * NULL if the port, or that LD, is unused and so may be bound.
+ */
+struct fmd_vppb *fmd_switch_bind_target_user(struct fmd_switch *sw,
+					     uint8_t port_id, uint16_t ld_id,
+					     struct fmd_vcs **user);
+
+/*
  * Memory Resource Creation
  *
  * Create memory domain and chunk resources for devices.

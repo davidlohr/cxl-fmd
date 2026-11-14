@@ -743,84 +743,145 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 }
 
 /*
- * Discover VCS configuration on a switch (Step 3 of 7.6.6.2)
- *
- * Commands: Get Virtual CXL Switch Info (5200h)
+ * Get Virtual CXL Switch Info (5200h) for one VCS, CXL r4.0 Tables 7-32 to
+ * 7-34. Returns 0 with @vcs filled in, -ENOENT if the switch says the VCS ID
+ * is invalid, -EIO if it could not be asked.
  */
-static int discover_switch_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw)
+static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
+		     struct fmd_vcs *vcs)
 {
-	struct cxlmi_endpoint *ep = sw->base.ep;
-	int rc;
+	struct cxlmi_cmd_fmapi_get_vcs_info_req *req;
+	struct cxlmi_cmd_fmapi_get_vcs_info_rsp *rsp;
+	struct cxlmi_cmd_fmapi_vcs_info_block *block;
+	int rc, count;
 
-	/* Query each active VCS per active_vcs_bitmask */
-	for (int vcs_idx = 0; vcs_idx < sw->sw_identify.num_vcs && sw->num_vcs < FMD_MAX_VCS; vcs_idx++) {
-		/* Check if VCS is active */
-		if (!(sw->sw_identify.active_vcs_bitmask[vcs_idx / 8] & (1 << (vcs_idx % 8))))
-			continue;
-
-		/* Allocate request with one VCS ID */
-		size_t req_size = sizeof(struct cxlmi_cmd_fmapi_get_vcs_info_req) + 1;
-		struct cxlmi_cmd_fmapi_get_vcs_info_req *vcs_req = calloc(1, req_size);
-		if (!vcs_req)
-			continue;
-
-		vcs_req->start_vppb = 0;
-		vcs_req->vppb_list_limit = FMD_MAX_VPPB;
-		vcs_req->num_vcs = 1;
-		vcs_req->vcs_id_list[0] = vcs_idx;
-
-		/* Allocate response buffer */
-		size_t vcs_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_vcs_info_rsp) +
-				     sizeof(struct cxlmi_cmd_fmapi_vcs_info_block) +
-				     FMD_MAX_VPPB * sizeof(struct cxlmi_cmd_fmapi_vppb_info);
-		struct cxlmi_cmd_fmapi_get_vcs_info_rsp *vcs_rsp = calloc(1, vcs_rsp_size);
-		if (!vcs_rsp) {
-			free(vcs_req);
-			continue;
-		}
-
-		rc = cxlmi_cmd_fmapi_get_vcs_info(ep, CXLMI_NO_TUNNEL, vcs_req, vcs_rsp);
-		if (rc || vcs_rsp->num_vcs == 0) {
-			fmd_dbg(ctx, "%s: VCS %d query failed", sw->base.id, vcs_idx);
-			free(vcs_req);
-			free(vcs_rsp);
-			continue;
-		}
-
-		/* Parse the VCS info block */
-		struct cxlmi_cmd_fmapi_vcs_info_block *vcs_block = &vcs_rsp->vcs_info_list[0];
-		struct fmd_vcs *vcs = &sw->vcs[sw->num_vcs];
-
-		vcs->vcs_id = vcs_block->vcs_id;
-		vcs->state = vcs_block->vcs_state;
-		vcs->upstream_port_id = vcs_block->usp_id;
-		vcs->hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
-		vcs->num_vppbs = 0;
-
-		/* Parse vPPB bindings */
-		int vppb_count = (vcs_block->num_vppbs < FMD_MAX_VPPB) ?
-				 vcs_block->num_vppbs : FMD_MAX_VPPB;
-		for (int i = 0; i < vppb_count; i++) {
-			struct cxlmi_cmd_fmapi_vppb_info *vppb_src = &vcs_block->vppbs[i];
-			struct fmd_vppb *vppb = &vcs->vppbs[vcs->num_vppbs++];
-
-			vppb->vppb_id = i;
-			vppb->binding_status = vppb_src->binding_status;
-			vppb->bound_port_id = vppb_src->bound_port_id;
-			vppb->bound_ld_id = vppb_src->bound_ld_id;
-		}
-
-		fmd_dbg(ctx, "%s: VCS %d state=%d USP=%d vPPBs=%d",
-			sw->base.id, vcs->vcs_id, vcs->state,
-			vcs->upstream_port_id, vcs->num_vppbs);
-
-		sw->num_vcs++;
-		free(vcs_req);
-		free(vcs_rsp);
+	req = calloc(1, sizeof(*req) + 1);
+	rsp = calloc(1, sizeof(*rsp) + sizeof(*block) +
+		     FMD_MAX_VPPB * sizeof(struct cxlmi_cmd_fmapi_vppb_info));
+	if (!req || !rsp) {
+		free(req);
+		free(rsp);
+		return -ENOMEM;
 	}
+
+	req->start_vppb = 0;
+	req->vppb_list_limit = FMD_MAX_VPPB;
+	req->num_vcs = 1;
+	req->vcs_id_list[0] = vcs_id;
+
+	rc = cxlmi_cmd_fmapi_get_vcs_info(sw->base.ep, CXLMI_NO_TUNNEL, req, rsp);
+	free(req);
+	if (rc || rsp->num_vcs == 0) {
+		fmd_dbg(ctx, "%s: VCS %d query failed", sw->base.id, vcs_id);
+		free(rsp);
+		return -EIO;
+	}
+
+	block = &rsp->vcs_info_list[0];
+	/* FFh: Invalid VCS ID, all subsequent field values are invalid */
+	if (block->vcs_state == 0xff) {
+		free(rsp);
+		return -ENOENT;
+	}
+
+	memset(vcs, 0, sizeof(*vcs));
+	vcs->vcs_id = block->vcs_id;
+	vcs->state = block->vcs_state;
+	vcs->upstream_port_id = block->usp_id;
+	vcs->hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
+
+	/* the list holds min(vPPB List Limit, Number of vPPBs) entries */
+	count = block->num_vppbs < FMD_MAX_VPPB ? block->num_vppbs : FMD_MAX_VPPB;
+	for (int i = 0; i < count; i++) {
+		struct cxlmi_cmd_fmapi_vppb_info *src = &block->vppbs[i];
+		struct fmd_vppb *vppb = &vcs->vppbs[vcs->num_vppbs++];
+
+		/* Start vPPB is 0, so the index is the vPPB ID */
+		vppb->vppb_id = i;
+		vppb->binding_status = src->binding_status;
+		vppb->bound_port_id = src->bound_port_id;
+		vppb->bound_ld_id = src->bound_ld_id;
+	}
+
+	fmd_dbg(ctx, "%s: VCS %d state=%d USP=%d vPPBs=%d",
+		sw->base.id, vcs->vcs_id, vcs->state,
+		vcs->upstream_port_id, vcs->num_vppbs);
+
+	free(rsp);
+	return 0;
+}
+
+struct fmd_vcs *fmd_switch_find_vcs(struct fmd_switch *sw, uint8_t vcs_id)
+{
+	for (int i = 0; i < sw->num_vcs; i++) {
+		if (sw->vcs[i].vcs_id == vcs_id)
+			return &sw->vcs[i];
+	}
+	return NULL;
+}
+
+struct fmd_vppb *fmd_vcs_find_vppb(struct fmd_vcs *vcs, uint8_t vppb_id)
+{
+	for (int i = 0; i < vcs->num_vppbs; i++) {
+		if (vcs->vppbs[i].vppb_id == vppb_id)
+			return &vcs->vppbs[i];
+	}
+	return NULL;
+}
+
+/*
+ * Read the VCSs of a switch: every VCS set in the Active VCS Bitmask of
+ * Identify Switch Device.
+ *
+ * The table is replaced only once it has been read. A VCS that cannot be
+ * asked about keeps what was last known of it, so a failed command does not
+ * make its bindings look unbound, and one the switch calls invalid goes.
+ * The table is in the order the VCSs were read, not indexed by VCS ID: use
+ * fmd_switch_find_vcs().
+ */
+int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
+{
+	struct fmd_vcs *table;
+	int n = 0;
+
+	if (!ctx || !sw)
+		return -EINVAL;
+	if (!sw->base.ep)
+		return 0;	/* mock: the table is all there is */
+
+	table = calloc(FMD_MAX_VCS, sizeof(*table));
+	if (!table)
+		return -ENOMEM;
+
+	for (int id = 0; id < sw->sw_identify.num_vcs && n < FMD_MAX_VCS; id++) {
+		struct fmd_vcs *old;
+		int rc;
+
+		if (!(sw->sw_identify.active_vcs_bitmask[id / 8] & (1 << (id % 8))))
+			continue;
+
+		rc = query_vcs(ctx, sw, id, &table[n]);
+		if (rc == -ENOENT)
+			continue;
+		if (rc) {
+			old = fmd_switch_find_vcs(sw, id);
+			if (!old)
+				continue;
+			table[n] = *old;
+		}
+		n++;
+	}
+
+	memcpy(sw->vcs, table, sizeof(sw->vcs));
+	sw->num_vcs = n;
+	free(table);
+
+	/* the port and LD each bound vPPB points at */
+	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
 
 	return 0;
 }
+
 
 /*
  * Discover switch - enumerate ports and devices attached to them
@@ -953,7 +1014,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	free(port_rsp);
 
 	/* Step 3: Discover VCS configuration */
-	discover_switch_vcs(ctx, sw);
+	fmd_vcs_refresh(ctx, sw);
 
 	/*
 	 * Step 4: Create host entries for each VCS
@@ -1197,120 +1258,145 @@ int fmd_discover(struct fmd_ctx *ctx)
 	return count;
 }
 
+
 /*
- * Refresh VCS configuration from switch
+ * The vPPB that a bind target is already bound to, NULL if it is unused.
  *
- * Re-queries Get Virtual CXL Switch Info (5200h) for all active VCSs
- * and updates the local fmd_vcs/fmd_vppb structures.
+ * The target is a physical port, or one LD of the MLD on it when @ld_id is
+ * not FFFFh. A port bound as a whole is in use whatever is asked for, and an
+ * LD is in use when that LD is bound. Asking for the whole of a port that has
+ * an LD bound finds that LD.
  */
-int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
+struct fmd_vppb *fmd_switch_bind_target_user(struct fmd_switch *sw,
+					     uint8_t port_id, uint16_t ld_id,
+					     struct fmd_vcs **user)
 {
-	if (!ctx || !sw)
-		return -EINVAL;
+	for (int v = 0; v < sw->num_vcs; v++) {
+		struct fmd_vcs *vcs = &sw->vcs[v];
 
-	/* Clear existing VCS data */
-	sw->num_vcs = 0;
-	memset(sw->vcs, 0, sizeof(sw->vcs));
+		for (int i = 0; i < vcs->num_vppbs; i++) {
+			struct fmd_vppb *vppb = &vcs->vppbs[i];
 
-	/* Re-discover VCS configuration */
-	return discover_switch_vcs(ctx, sw);
+			/* Bound Port ID is valid only for these two */
+			if (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
+			    vppb->binding_status != FMD_VPPB_BOUND_LD)
+				continue;
+			if (vppb->bound_port_id != port_id)
+				continue;
+			if (vppb->binding_status == FMD_VPPB_BOUND_LD &&
+			    ld_id != 0xFFFF && vppb->bound_ld_id != ld_id)
+				continue;
+
+			*user = vcs;
+			return vppb;
+		}
+	}
+	return NULL;
 }
 
 /*
- * Bind a physical port (or MLD LD) to a vPPB
+ * Bind a physical port (or MLD LD) to a vPPB: Bind vPPB (5201h), CXL r4.0
+ * Section 7.6.7.2.2.
  *
- * - FM issues Bind vPPB command (5201h) specifying port, VCS ID, vPPB index
- * - For MLD, LD-ID must also be specified
+ * What the specification asks of a bind, and is checked here before the
+ * switch is asked:
+ *  - @vcs_id is a Virtual CXL Switch ID and @vppb_id the index of the vPPB
+ *    within that VCS (Table 7-35). Neither is an index into sw->vcs.
+ *  - The vPPB is unbound, and the port is unused: "The Fabric Manager can
+ *    bind any unused physical port to the unbound vPPB" (Section 7.2.3.1).
+ *    An SLD port is bound to only one VCS; an LD is bound to a host or is
+ *    unbound (Section 7.3.4).
+ *  - LD ID is the LD-ID if the target port is an MLD port and FFFFh for
+ *    other endpoint types (Table 7-35).
+ *
+ * Returns 0 once the switch has accepted the bind, -EINVAL for a VCS, vPPB
+ * or LD that does not exist, -EBUSY if the vPPB or the target is in use,
+ * -EIO if the switch refused.
  */
 int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		  uint8_t vcs_id, uint8_t vppb_id,
 		  uint8_t port_id, uint16_t ld_id)
 {
 	struct cxlmi_cmd_fmapi_bind_vppb_req req;
-	struct cxlmi_endpoint *ep;
+	struct fmd_vcs *vcs, *user_vcs = NULL;
+	struct fmd_vppb *vppb, *user;
+	struct fmd_port *target_port;
 	int rc;
 
 	if (!ctx || !sw)
 		return -EINVAL;
 
-	/* Validate VCS ID */
-	if (vcs_id >= sw->num_vcs) {
-		fmd_err(ctx, "%s: invalid VCS ID %d (max %d)",
-			sw->base.id, vcs_id, sw->num_vcs - 1);
+	/* decide on what the switch has now, not on what discovery found */
+	fmd_vcs_refresh(ctx, sw);
+
+	vcs = fmd_switch_find_vcs(sw, vcs_id);
+	if (!vcs) {
+		fmd_err(ctx, "%s: no VCS %d", sw->base.id, vcs_id);
 		return -EINVAL;
 	}
 
-	/* Validate vPPB ID */
-	if (vppb_id >= sw->vcs[vcs_id].num_vppbs) {
-		fmd_err(ctx, "%s: invalid vPPB ID %d in VCS %d (max %d)",
-			sw->base.id, vppb_id, vcs_id,
-			sw->vcs[vcs_id].num_vppbs - 1);
+	vppb = fmd_vcs_find_vppb(vcs, vppb_id);
+	if (!vppb) {
+		fmd_err(ctx, "%s: no vPPB %d in VCS %d (%d vPPBs)",
+			sw->base.id, vppb_id, vcs_id, vcs->num_vppbs);
 		return -EINVAL;
 	}
 
-	/* Check if vPPB is already bound */
-	if (sw->vcs[vcs_id].vppbs[vppb_id].binding_status != FMD_VPPB_UNBOUND) {
+	if (vppb->binding_status != FMD_VPPB_UNBOUND) {
 		fmd_warn(ctx, "%s: vPPB %d in VCS %d is already bound (status=%d)",
-			 sw->base.id, vppb_id, vcs_id,
-			 sw->vcs[vcs_id].vppbs[vppb_id].binding_status);
+			 sw->base.id, vppb_id, vcs_id, vppb->binding_status);
 		return -EBUSY;
 	}
 
-	/*
-	 * Validate LD-ID:
-	 * - LD-ID must be FFFFh for non-MLD endpoints (SLD, PCIe, Type1, Type2)
-	 * - LD-ID specifies the specific LD for MLD binding
-	 *
-	 * Find the target port and check its connected device type.
-	 */
-	{
-		struct fmd_port *target_port = NULL;
-		struct fmd_component *child;
+	/* If the port is not in the topology, the switch validates the LD ID */
+	target_port = fmd_topology_find_port(&ctx->topology, sw->base.id, port_id);
+	if (target_port) {
+		bool is_mld = (target_port->conn_dev_type == FMD_CONN_MLD);
 
-		fmd_for_each_child(&sw->base, child) {
-			if (child->type == FMD_COMPONENT_PORT) {
-				struct fmd_port *port = fmd_to_port(child);
-				if (port->port_number == port_id) {
-					target_port = port;
-					break;
-				}
-			}
+		if (is_mld && ld_id == 0xFFFF) {
+			fmd_err(ctx, "%s: MLD port %d requires specific LD-ID (not FFFFh)",
+				sw->base.id, port_id);
+			return -EINVAL;
 		}
 
-		if (target_port) {
-			bool is_mld = (target_port->conn_dev_type == FMD_CONN_MLD);
-
-			if (is_mld && ld_id == 0xFFFF) {
-				fmd_err(ctx, "%s: MLD port %d requires specific LD-ID (not FFFFh)",
-					sw->base.id, port_id);
-				return -EINVAL;
-			}
-
-			if (!is_mld && ld_id != 0xFFFF) {
-				fmd_err(ctx, "%s: non-MLD port %d requires LD-ID=FFFFh (got %d)",
-					sw->base.id, port_id, ld_id);
-				return -EINVAL;
-			}
-
-			/* For MLD, validate LD-ID is within range */
-			if (is_mld && ld_id >= target_port->supported_ld_count) {
-				fmd_err(ctx, "%s: LD-ID %d exceeds port %d supported LD count (%d)",
-					sw->base.id, ld_id, port_id,
-					target_port->supported_ld_count);
-				return -EINVAL;
-			}
+		if (!is_mld && ld_id != 0xFFFF) {
+			fmd_err(ctx, "%s: non-MLD port %d requires LD-ID=FFFFh (got %d)",
+				sw->base.id, port_id, ld_id);
+			return -EINVAL;
 		}
-		/* If port not found in topology, let hardware validate */
+
+		/*
+		 * Supported LD Count is the number of additional LDs the port
+		 * supports, every port supporting at least one (Table 7-21):
+		 * LD-IDs 0 to Supported LD Count.
+		 */
+		if (is_mld && ld_id > target_port->supported_ld_count) {
+			fmd_err(ctx, "%s: LD-ID %d is past the %d LDs port %d supports",
+				sw->base.id, ld_id,
+				target_port->supported_ld_count + 1, port_id);
+			return -EINVAL;
+		}
 	}
 
-	ep = sw->base.ep;
-	if (!ep) {
+	user = fmd_switch_bind_target_user(sw, port_id, ld_id, &user_vcs);
+	if (user) {
+		if (user->binding_status == FMD_VPPB_BOUND_LD)
+			fmd_warn(ctx, "%s: LD %d of port %d is bound to vPPB %d in VCS %d",
+				 sw->base.id, user->bound_ld_id, port_id,
+				 user->vppb_id, user_vcs->vcs_id);
+		else
+			fmd_warn(ctx, "%s: port %d is bound to vPPB %d in VCS %d",
+				 sw->base.id, port_id, user->vppb_id,
+				 user_vcs->vcs_id);
+		return -EBUSY;
+	}
+
+	if (!sw->base.ep) {
 		/* Mock mode - update local state only */
 		fmd_info(ctx, "%s: mock bind vPPB %d in VCS %d to port %d%s",
 			 sw->base.id, vppb_id, vcs_id, port_id,
 			 ld_id != 0xFFFF ? " (MLD)" : "");
 
-		struct fmd_vppb *vppb = &sw->vcs[vcs_id].vppbs[vppb_id];
 		vppb->bound_port_id = port_id;
 		vppb->bound_ld_id = (ld_id != 0xFFFF) ? ld_id : 0;
 
@@ -1319,6 +1405,7 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		else
 			vppb->binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT;
 
+		fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
 		return 0;
 	}
 
@@ -1334,7 +1421,7 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		 ld_id != 0xFFFF ? " (MLD LD)" : "");
 
 	/* the switch may bind in the background: that is not a failure */
-	rc = cxlmi_cmd_fmapi_bind_vppb(ep, CXLMI_NO_TUNNEL, &req);
+	rc = cxlmi_cmd_fmapi_bind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: bind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
@@ -1344,49 +1431,51 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	/* Refresh VCS state to reflect the binding */
 	fmd_vcs_refresh(ctx, sw);
 
-	fmd_info(ctx, "%s: vPPB %d in VCS %d bound successfully",
+	fmd_info(ctx, "%s: bind of vPPB %d in VCS %d accepted",
 		 sw->base.id, vppb_id, vcs_id);
 
 	return 0;
 }
 
 /*
- * Unbind a vPPB from its physical port/LD
+ * Unbind a vPPB from its physical port/LD: Unbind vPPB (5202h), CXL r4.0
+ * Section 7.6.7.2.3. As for bind, @vcs_id and @vppb_id are the switch's IDs.
  *
- * - FM issues Unbind vPPB command (5202h) specifying VCS ID, vPPB index, option
- * - Option determines Hot-Remove type:
- *   0: Wait for host to perform clean removal
- *   1: Managed Hot-Remove
- *   2: Surprise Hot-Remove
+ * @option is the Unbind Option of Table 7-36:
+ *   0: Wait for port Link Down before unbinding
+ *   1: Simulate Managed Hot-Remove
+ *   2: Simulate Surprise Hot-Remove
  */
 int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		    uint8_t vcs_id, uint8_t vppb_id,
 		    enum fmd_unbind_option option)
 {
 	struct cxlmi_cmd_fmapi_unbind_vppb_req req;
-	struct cxlmi_endpoint *ep;
+	const char *option_str;
+	struct fmd_vcs *vcs;
+	struct fmd_vppb *vppb;
 	int rc;
 
 	if (!ctx || !sw)
 		return -EINVAL;
 
-	/* Validate VCS ID */
-	if (vcs_id >= sw->num_vcs) {
-		fmd_err(ctx, "%s: invalid VCS ID %d (max %d)",
-			sw->base.id, vcs_id, sw->num_vcs - 1);
+	fmd_vcs_refresh(ctx, sw);
+
+	vcs = fmd_switch_find_vcs(sw, vcs_id);
+	if (!vcs) {
+		fmd_err(ctx, "%s: no VCS %d", sw->base.id, vcs_id);
 		return -EINVAL;
 	}
 
-	/* Validate vPPB ID */
-	if (vppb_id >= sw->vcs[vcs_id].num_vppbs) {
-		fmd_err(ctx, "%s: invalid vPPB ID %d in VCS %d (max %d)",
-			sw->base.id, vppb_id, vcs_id,
-			sw->vcs[vcs_id].num_vppbs - 1);
+	vppb = fmd_vcs_find_vppb(vcs, vppb_id);
+	if (!vppb) {
+		fmd_err(ctx, "%s: no vPPB %d in VCS %d (%d vPPBs)",
+			sw->base.id, vppb_id, vcs_id, vcs->num_vppbs);
 		return -EINVAL;
 	}
 
 	/* Check if vPPB is bound */
-	if (sw->vcs[vcs_id].vppbs[vppb_id].binding_status == FMD_VPPB_UNBOUND) {
+	if (vppb->binding_status == FMD_VPPB_UNBOUND) {
 		fmd_warn(ctx, "%s: vPPB %d in VCS %d is not bound",
 			 sw->base.id, vppb_id, vcs_id);
 		return -ENOENT;
@@ -1399,15 +1488,26 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		return -EPERM;
 	}
 
-	ep = sw->base.ep;
-	if (!ep) {
+	switch (option) {
+	case FMD_UNBIND_WAIT_FOR_CLEAN:
+		option_str = "wait-for-clean";
+		break;
+	case FMD_UNBIND_MANAGED_HOT_REMOVE:
+		option_str = "managed";
+		break;
+	case FMD_UNBIND_SURPRISE_HOT_REMOVE:
+		option_str = "surprise";
+		break;
+	default:
+		/* all other encodings are reserved */
+		return -EINVAL;
+	}
+
+	if (!sw->base.ep) {
 		/* Mock mode - update local state only */
-		const char *option_str = (option == FMD_UNBIND_SURPRISE_HOT_REMOVE)
-					 ? "surprise" : "managed";
 		fmd_info(ctx, "%s: mock unbind vPPB %d in VCS %d (%s hot-remove)",
 			 sw->base.id, vppb_id, vcs_id, option_str);
 
-		struct fmd_vppb *vppb = &sw->vcs[vcs_id].vppbs[vppb_id];
 		vppb->binding_status = FMD_VPPB_UNBOUND;
 		vppb->bound_port_id = 0;
 		vppb->bound_ld_id = 0;
@@ -1424,27 +1524,11 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	req.vppb_id = vppb_id;
 	req.option = (uint8_t)option;
 
-	const char *option_str;
-	switch (option) {
-	case FMD_UNBIND_WAIT_FOR_CLEAN:
-		option_str = "wait-for-clean";
-		break;
-	case FMD_UNBIND_MANAGED_HOT_REMOVE:
-		option_str = "managed";
-		break;
-	case FMD_UNBIND_SURPRISE_HOT_REMOVE:
-		option_str = "surprise";
-		break;
-	default:
-		option_str = "unknown";
-		break;
-	}
-
 	fmd_info(ctx, "%s: unbinding vPPB %d in VCS %d (%s hot-remove)",
 		 sw->base.id, vppb_id, vcs_id, option_str);
 
 	/* as for bind, the switch may do this in the background */
-	rc = cxlmi_cmd_fmapi_unbind_vppb(ep, CXLMI_NO_TUNNEL, &req);
+	rc = cxlmi_cmd_fmapi_unbind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: unbind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
@@ -1454,7 +1538,7 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	/* Refresh VCS state to reflect the unbinding */
 	fmd_vcs_refresh(ctx, sw);
 
-	fmd_info(ctx, "%s: vPPB %d in VCS %d unbound successfully",
+	fmd_info(ctx, "%s: unbind of vPPB %d in VCS %d accepted",
 		 sw->base.id, vppb_id, vcs_id);
 
 	return 0;

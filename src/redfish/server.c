@@ -994,6 +994,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -8)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Cross-head access denied: host cannot access this memory");
+		if (rc == -9)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "The device or logical device is already bound to another host");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create connection");
 	}

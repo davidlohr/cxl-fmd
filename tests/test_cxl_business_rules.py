@@ -93,6 +93,86 @@ class TestMultiVCSRules:
         assert bound_count >= 2
 
 
+    # Binding, CXL r4.0 Section 7.2.3: "The Fabric Manager can bind any unused
+    # physical port to the unbound vPPB". An SLD port is bound to only one
+    # VCS, and each LD of an MLD is bound to one host or is unbound (7.3.4).
+    #
+    # In this topology VCS 0 has dev0 (port 2), dev1 (port 3) and LDs 0 and 1
+    # of mld0 (port 5); VCS 1 has dev2 (port 4) and LDs 2 and 3.
+
+    SWITCH = "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0"
+
+    def _chunk(self, api_client, dev, ld=None):
+        status, data = api_client.get(f"/redfish/v1/Chassis/{dev}/MemoryDomains")
+        assert status == 200
+        for domain in data["Members"]:
+            status, chunks = api_client.get(domain["@odata.id"] + "/MemoryChunks")
+            assert status == 200
+            for member in chunks["Members"]:
+                if ld is None or f"_ld{ld}_" in member["@odata.id"]:
+                    return member["@odata.id"]
+        pytest.skip(f"no memory chunk on {dev}")
+
+    def _connect(self, api_client, host, dev, ld=None):
+        status, data, _ = api_client.post(
+            "/redfish/v1/Fabrics/CXL/Connections",
+            {
+                "ConnectionType": "Memory",
+                "Links": {
+                    "InitiatorEndpoints": [{"@odata.id": f"/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host{host}"}],
+                    "TargetEndpoints": [{"@odata.id": f"/redfish/v1/Fabrics/CXL/Endpoints/{dev}"}]
+                },
+                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": self._chunk(api_client, dev, ld)}}]
+            }
+        )
+        return status, data
+
+    def _bindings(self, api_client):
+        """Binding status of every vPPB of the switch, by (VCS, vPPB)."""
+        out = {}
+        status, vcss = api_client.get(self.SWITCH + "/VCSs")
+        assert status == 200
+        for vcs in vcss["Members"]:
+            status, vppbs = api_client.get(vcs["@odata.id"] + "/VPPBs")
+            assert status == 200
+            for vppb in vppbs["Members"]:
+                status, data = api_client.get(vppb["@odata.id"])
+                assert status == 200
+                out[vppb["@odata.id"]] = data.get("BindingStatus")
+        return out
+
+    def test_port_bound_to_another_vcs_is_refused(self, api_client):
+        """dev2 is bound to VCS 1: host0, on VCS 0, cannot be given it."""
+        before = self._bindings(api_client)
+        status, data = self._connect(api_client, 0, "dev2")
+        assert status == 409
+        assert self._bindings(api_client) == before
+
+    def test_ld_bound_to_another_vcs_is_refused(self, api_client):
+        """LD 2 of mld0 is bound to VCS 1: host0 cannot be given it."""
+        before = self._bindings(api_client)
+        status, data = self._connect(api_client, 0, "mld0", 2)
+        assert status == 409
+        assert self._bindings(api_client) == before
+
+    def test_port_bound_to_the_hosts_vcs_is_not_bound_again(self, api_client):
+        """dev0 is already bound to host0's VCS: connecting them binds no
+        second vPPB to the port, and removing the connection unbinds none."""
+        before = self._bindings(api_client)
+        status, data = self._connect(api_client, 0, "dev0")
+        assert status == 201
+        assert self._bindings(api_client) == before
+        assert api_client.delete(data["@odata.id"]) == 204
+        assert self._bindings(api_client) == before
+
+    def test_ld_bound_to_the_hosts_vcs_is_not_bound_again(self, api_client):
+        """Likewise for LD 3 of mld0, already bound to host1's VCS."""
+        before = self._bindings(api_client)
+        status, data = self._connect(api_client, 1, "mld0", 3)
+        assert status == 201
+        assert self._bindings(api_client) == before
+
+
 # =============================================================================
 # LD Count Limits Tests
 # =============================================================================

@@ -603,7 +603,7 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 					if (sw_comp->type != FMD_COMPONENT_SWITCH)
 						continue;
 					struct fmd_switch *sw = fmd_to_switch(sw_comp);
-					if (host->vcs_id < sw->num_vcs) {
+					if (fmd_switch_find_vcs(sw, host->vcs_id)) {
 						json_object_set_new(result, "Links",
 							rf_links_array_single("Zones",
 								"/redfish/v1/Fabrics/CXL/Zones/%s_vcs%d",
@@ -4933,9 +4933,10 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 static int find_available_vppb(struct fmd_vcs *vcs)
 {
 	/* Skip vPPB 0 which is the USP */
-	for (int i = 1; i < vcs->num_vppbs; i++) {
-		if (vcs->vppbs[i].binding_status == FMD_VPPB_UNBOUND)
-			return i;
+	for (int i = 0; i < vcs->num_vppbs; i++) {
+		if (vcs->vppbs[i].vppb_id != 0 &&
+		    vcs->vppbs[i].binding_status == FMD_VPPB_UNBOUND)
+			return vcs->vppbs[i].vppb_id;
 	}
 	return -1;
 }
@@ -5152,19 +5153,17 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			goto done;
 		}
 
-		/* Validate VCS ID */
-		if (host->vcs_id >= sw->num_vcs) {
+		/* decide on what the switch has now */
+		fmd_vcs_refresh(ctx, sw);
+
+		/* The host's VCS, by its VCS ID */
+		struct fmd_vcs *vcs = fmd_switch_find_vcs(sw, host->vcs_id);
+		struct fmd_vcs *user_vcs = NULL;
+		struct fmd_vppb *user;
+
+		if (!vcs) {
 			fmd_err(ctx, "Connection %s: host VCS %d invalid for switch %s",
 				conn->id, host->vcs_id, sw->base.id);
-			fmd_connection_remove(ctx, conn);
-			return -7;
-		}
-
-		/* Find an available vPPB in the host's VCS */
-		vppb_id = find_available_vppb(&sw->vcs[host->vcs_id]);
-		if (vppb_id < 0) {
-			fmd_err(ctx, "Connection %s: no available vPPB in VCS %d",
-				conn->id, host->vcs_id);
 			fmd_connection_remove(ctx, conn);
 			return -7;
 		}
@@ -5174,6 +5173,43 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		    target->type == FMD_COMPONENT_MHD)
 			ld_id = extract_ld_id_from_chunk(chunk);
 
+		/*
+		 * A port is bound to one VCS, and an LD to one host (CXL r4.0
+		 * Sections 7.2.3.1 and 7.3.4): only an unused port or LD can
+		 * be bound. If the host's own VCS has it already there is
+		 * nothing to bind, and nothing for the connection to unbind
+		 * when it goes. If another VCS has it, it is not this host's
+		 * to have.
+		 */
+		user = fmd_switch_bind_target_user(sw, port_id, ld_id, &user_vcs);
+		if (user && user_vcs != vcs) {
+			fmd_warn(ctx, "Connection %s: port %d%s is bound to VCS %d, "
+				 "not to VCS %d of host %s",
+				 conn->id, port_id, ld_id != 0xFFFF ? " (LD)" : "",
+				 user_vcs->vcs_id, vcs->vcs_id, initiator_id);
+			fmd_connection_remove(ctx, conn);
+			return -9;
+		}
+		if (user) {
+			conn->vcs_id = vcs->vcs_id;
+			conn->vppb_id = user->vppb_id;
+			conn->bound = false;
+			fmd_info(ctx, "Connection %s: port %d%s is already bound "
+				 "to vPPB %d in VCS %d",
+				 conn->id, port_id, ld_id != 0xFFFF ? " (LD)" : "",
+				 user->vppb_id, vcs->vcs_id);
+			goto done;
+		}
+
+		/* Find an available vPPB in the host's VCS */
+		vppb_id = find_available_vppb(vcs);
+		if (vppb_id < 0) {
+			fmd_err(ctx, "Connection %s: no available vPPB in VCS %d",
+				conn->id, host->vcs_id);
+			fmd_connection_remove(ctx, conn);
+			return -7;
+		}
+
 		/* Perform the vPPB bind */
 		rc = fmd_vppb_bind(ctx, sw, host->vcs_id, (uint8_t)vppb_id,
 				   port_id, ld_id);
@@ -5181,7 +5217,8 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			fmd_err(ctx, "Connection %s: vPPB bind failed: %d",
 				conn->id, rc);
 			fmd_connection_remove(ctx, conn);
-			return -7;
+			/* the port or LD belongs to another host's VCS */
+			return rc == -EBUSY ? -9 : -7;
 		}
 
 		/* Record binding info in connection */

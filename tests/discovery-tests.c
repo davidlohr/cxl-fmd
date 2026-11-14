@@ -20,6 +20,7 @@
  * turned into a CHECK().
  */
 #include <inttypes.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -398,22 +399,56 @@ static void port_block(uint8_t *b, uint8_t port, uint8_t state, uint8_t mode,
  *   port 2  DSP, link up, PCIe device, bound to vPPB 1 of VCS 0
  *   port 3  disabled
  */
+/*
+ * Get Virtual CXL Switch Info (5200h) for one VCS of three vPPBs, Tables 7-33
+ * and 7-34: vPPB 0 bound to the USP, then vPPBs 1 and 2 as given, each
+ * { Binding Status, Bound Port ID, Bound LD ID }.
+ */
+static const uint8_t unbound[3] = { 0x00, 0x00, 0xff };
+
+static void answer_vcs(struct cxlmi_endpoint *ep, uint8_t vcs_id, uint8_t usp,
+		       const uint8_t *vppb1, const uint8_t *vppb2)
+{
+	uint8_t pl[4 + 4 + 3 * 4] = { 0 }, *b = pl + 4;
+
+	pl[0] = 1;				/* Number of VCSs */
+	b[0] = vcs_id;				/* Virtual CXL Switch ID */
+	b[1] = 0x01;				/* VCS State: enabled */
+	b[2] = usp;				/* USP ID */
+	b[3] = 3;				/* Number of vPPBs */
+	b[4] = 0x02;				/* vPPB 0: bound physical port */
+	b[5] = usp;
+	b[6] = 0xff;
+	memcpy(b + 8, vppb1, 3);
+	memcpy(b + 12, vppb2, 3);
+	answer(ep, 0x5200, pl, sizeof(pl));
+}
+
+/*
+ * A switch with six ports and two VCSs, whose IDs are 0 and 2:
+ *
+ *   port 0  USP of VCS 0             port 3  disabled
+ *   port 1  USP of VCS 2             port 4  DSP, nothing attached
+ *   port 2  DSP, PCIe device,        port 5  DSP, MLD, LD-IDs 0 and 1
+ *           bound to VCS 0 vPPB 1
+ */
+static const uint8_t port2[3] = { 0x02, 2, 0xff };
+
 static struct cxlmi_endpoint *new_switch_claiming(struct fmd_ctx *ctx,
 						  uint64_t serial,
 						  uint8_t claimed_ports)
 {
 	struct cxlmi_endpoint *ep = new_device(ctx);
-	uint8_t id[0x49] = { 0 }, ports[4 + 4 * 16] = { 0 };
-	uint8_t vcs[2][4 + 4 + 2 * 4] = { { 0 } };
+	uint8_t id[0x49] = { 0 }, ports[4 + 6 * 16] = { 0 };
 
 	answer_identify(ep, serial, 0x00);
 
 	/* Identify Switch Device (5100h), Table 7-18 */
-	id[0x02] = 4;				/* Number of Physical Ports */
-	id[0x03] = 2;				/* Number of VCSs */
-	id[0x04] = 0x0f;			/* Active Port Bitmask */
-	id[0x24] = 0x03;			/* Active VCS Bitmask */
-	put16(id + 0x44, 4);			/* Total Number of vPPBs */
+	id[0x02] = 6;				/* Number of Physical Ports */
+	id[0x03] = 3;				/* Number of VCSs */
+	id[0x04] = 0x3f;			/* Active Port Bitmask */
+	id[0x24] = 0x05;			/* Active VCS Bitmask: 0 and 2 */
+	put16(id + 0x44, 6);			/* Total Number of vPPBs */
 	put16(id + 0x46, 3);			/* Number of Bound vPPBs */
 	id[0x48] = 2;				/* Number of HDM Decoders */
 	answer(ep, 0x5100, id, sizeof(id));
@@ -424,34 +459,20 @@ static struct cxlmi_endpoint *new_switch_claiming(struct fmd_ctx *ctx,
 	port_block(ports + 4 + 1 * 16, 1, 0x14, 0, 0x00, 0x04, 0x0000);
 	port_block(ports + 4 + 2 * 16, 2, 0x03, 0x02, 0x01, 0x04, 0x0004);
 	port_block(ports + 4 + 3 * 16, 3, 0x00, 0, 0x00, 0x00, 0x0004);
+	port_block(ports + 4 + 4 * 16, 4, 0x03, 0, 0x00, 0x00, 0x0000);
+	port_block(ports + 4 + 5 * 16, 5, 0x03, 0x02, 0x05, 0x04, 0x0004);
+	ports[4 + 5 * 16 + 0xf] = 1;		/* Supported LD Count: 1 more */
 	answer(ep, 0x5101, ports, sizeof(ports));
 
-	/* Get Virtual CXL Switch Info (5200h), Tables 7-33 and 7-34 */
-	for (int v = 0; v < 2; v++) {
-		uint8_t *b = vcs[v] + 4;
-
-		vcs[v][0] = 1;			/* Number of VCSs */
-		b[0] = v;			/* Virtual CXL Switch ID */
-		b[1] = 0x01;			/* VCS State: enabled */
-		b[2] = v;			/* USP ID */
-		b[3] = 2;			/* Number of vPPBs */
-		b[4] = 0x02;			/* vPPB 0: bound physical port */
-		b[5] = v;			/*   the USP */
-		b[6] = 0xff;
-		if (v == 0) {
-			b[8] = 0x02;		/* vPPB 1: bound physical port */
-			b[9] = 2;		/*   port 2 */
-		}
-		b[10] = 0xff;
-		answer(ep, 0x5200, vcs[v], sizeof(vcs[v]));
-	}
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 
 	return ep;
 }
 
 static struct cxlmi_endpoint *new_switch(struct fmd_ctx *ctx, uint64_t serial)
 {
-	return new_switch_claiming(ctx, serial, 4);
+	return new_switch_claiming(ctx, serial, 6);
 }
 
 static void test_switch(void)
@@ -473,13 +494,13 @@ static void test_switch(void)
 		goto out;
 
 	CHECK(sw->base.ep == ep, "switch is not on its endpoint");
-	CHECK(ctx->topology.root->port_count == 4, "%d ports",
+	CHECK(ctx->topology.root->port_count == 6, "%d ports",
 	      ctx->topology.root->port_count);
 	CHECK(sw->num_vcs == 2, "%d VCSs", sw->num_vcs);
-	CHECK(sw->num_usps == 2 && sw->num_dsps == 1, "%d USPs, %d DSPs",
+	CHECK(sw->num_usps == 2 && sw->num_dsps == 3, "%d USPs, %d DSPs",
 	      sw->num_usps, sw->num_dsps);
 	CHECK(sw->vcs[0].vcs_id == 0 && sw->vcs[0].upstream_port_id == 0 &&
-	      sw->vcs[0].num_vppbs == 2, "VCS 0: id %d, USP %d, %d vPPBs",
+	      sw->vcs[0].num_vppbs == 3, "VCS 0: id %d, USP %d, %d vPPBs",
 	      sw->vcs[0].vcs_id, sw->vcs[0].upstream_port_id,
 	      sw->vcs[0].num_vppbs);
 	CHECK(sw->vcs[0].vppbs[1].bound_port_id == 2,
@@ -543,18 +564,136 @@ static void test_switch(void)
 		CHECK(port->state == FMD_PORT_DISABLED, "port 3 state %d",
 		      port->state);
 
-	/*
-	 * Bind vPPB (5201h) runs in the background: "Background Command
-	 * Started" is how a switch accepts it (Section 7.6.7.2.2).
-	 */
-	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
-	rc = fmd_vppb_bind(ctx, sw, 1, 1, 2, 0xffff);
-	CHECK(last_opcode(ep) == 0x5201 || last_opcode(ep) == 0x5200,
-	      "bind not sent: last command %04xh", last_opcode(ep));
-	CHECK(rc == 0, "bind returns %d for Background Command Started", rc);
 out:
 	fmd_ctx_free(ctx);
 	report("switch with two VCSs", before);
+}
+
+/* bind, and say whether Bind vPPB (5201h) went to the switch */
+static int try_bind(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+		    struct fmd_switch *sw, uint8_t vcs_id, uint8_t vppb_id,
+		    uint8_t port_id, uint16_t ld_id, bool *sent)
+{
+	int rc = fmd_vppb_bind(ctx, sw, vcs_id, vppb_id, port_id, ld_id);
+
+	*sent = (last_opcode(ep) == 0x5201);
+	return rc;
+}
+
+/*
+ * Bind vPPB (5201h), Section 7.6.7.2.2 and Table 7-35, and what Section
+ * 7.2.3 says may be bound: "The Fabric Manager can bind any unused physical
+ * port to the unbound vPPB". An SLD port is bound to only one VCS, and each
+ * LD of an MLD is bound to one host or is unbound (Section 7.3.4).
+ */
+static void test_switch_bind(void)
+{
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5003);
+	int before = failures, rc;
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	char id[FMD_MAX_ID_LEN];
+	bool sent;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x5003);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (!sw)
+		goto out;
+
+	/* the VCS IDs are 0 and 2: 2 is a VCS, 1 is not */
+	CHECK(sw->num_vcs == 2 && fmd_switch_find_vcs(sw, 2) &&
+	      !fmd_switch_find_vcs(sw, 1), "%d VCSs", sw->num_vcs);
+	rc = try_bind(ctx, ep, sw, 1, 1, 4, 0xffff, &sent);
+	CHECK(rc == -EINVAL && !sent, "bind in VCS 1, which is no VCS: %d", rc);
+
+	/* port 2 is bound to VCS 0: it is not an unused port */
+	rc = try_bind(ctx, ep, sw, 2, 1, 2, 0xffff, &sent);
+	CHECK(rc == -EBUSY && !sent, "bind of a port bound to another VCS: %d",
+	      rc);
+
+	/* nor is port 0, the USP of VCS 0 */
+	rc = try_bind(ctx, ep, sw, 2, 1, 0, 0xffff, &sent);
+	CHECK(rc == -EBUSY && !sent, "bind of a USP: %d", rc);
+
+	/* a vPPB that is bound is not an unbound vPPB */
+	rc = try_bind(ctx, ep, sw, 0, 1, 4, 0xffff, &sent);
+	CHECK(rc == -EBUSY && !sent, "bind of a bound vPPB: %d", rc);
+
+	/*
+	 * LD ID: the LD-ID if the target port is an MLD port, FFFFh for
+	 * other EP types (Table 7-35). Port 5 has Supported LD Count 1, the
+	 * number of additional LDs: LD-IDs 0 and 1.
+	 */
+	rc = try_bind(ctx, ep, sw, 2, 1, 5, 0xffff, &sent);
+	CHECK(rc == -EINVAL && !sent, "bind of an MLD port without an LD: %d",
+	      rc);
+	rc = try_bind(ctx, ep, sw, 2, 1, 4, 0, &sent);
+	CHECK(rc == -EINVAL && !sent, "bind of an LD of a port with no MLD: %d",
+	      rc);
+	rc = try_bind(ctx, ep, sw, 2, 1, 5, 2, &sent);
+	CHECK(rc == -EINVAL && !sent, "bind of LD 2 of an MLD with LDs 0 and 1: %d",
+	      rc);
+
+	/*
+	 * LD 1 of port 5 to vPPB 1 of VCS 2. The switch starts the bind in
+	 * the background, and then reports the vPPB bound. The VCSs are read
+	 * before the bind and after it.
+	 */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld1, unbound);
+	rc = try_bind(ctx, ep, sw, 2, 1, 5, 1, &sent);
+	CHECK(rc == 0, "bind of LD 1 of port 5: %d", rc);
+
+	vcs = fmd_switch_find_vcs(sw, 2);
+	CHECK(vcs, "VCS 2 is gone after a bind");
+	if (vcs) {
+		struct fmd_vppb *vppb = fmd_vcs_find_vppb(vcs, 1);
+
+		CHECK(vppb && vppb->binding_status == FMD_VPPB_BOUND_LD &&
+		      vppb->bound_port_id == 5 && vppb->bound_ld_id == 1,
+		      "vPPB 1 of VCS 2 after the bind: status %d",
+		      vppb ? (int)vppb->binding_status : -1);
+		/* and it points at the port it is now bound to */
+		CHECK(vppb && vppb->port ==
+		      fmd_topology_find_port(&ctx->topology, id, 5),
+		      "vPPB 1 of VCS 2 does not point at port 5");
+	}
+
+	/* LD 1 is now bound to a host; LD 0 of the same MLD is not */
+	rc = try_bind(ctx, ep, sw, 0, 2, 5, 1, &sent);
+	CHECK(rc == -EBUSY && !sent, "bind of an LD bound to another VCS: %d",
+	      rc);
+	answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+	rc = try_bind(ctx, ep, sw, 0, 2, 5, 0, &sent);
+	CHECK(rc == 0, "bind of the other LD of the MLD: %d", rc);
+
+	/*
+	 * A switch that cannot be asked about its VCSs has not unbound
+	 * anything: what was last known stays.
+	 */
+	fmd_vcs_refresh(ctx, sw);
+	vcs = fmd_switch_find_vcs(sw, 2);
+	CHECK(sw->num_vcs == 2 && vcs &&
+	      vcs->vppbs[1].binding_status == FMD_VPPB_BOUND_LD,
+	      "bindings lost when Get Virtual CXL Switch Info failed");
+
+	/* Unbind vPPB (5202h) takes the VCS ID as well (Table 7-36) */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_unbind(ctx, sw, 2, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
+	CHECK(rc == 0, "unbind in VCS 2: %d", rc);
+	/* all other encodings of the Unbind Option are reserved */
+	rc = fmd_vppb_unbind(ctx, sw, 2, 1, (enum fmd_unbind_option)3);
+	CHECK(rc == -EINVAL, "unbind with a reserved option: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("binding on a switch", before);
 }
 
 /* Unbind vPPB (5202h) runs in the background too (Section 7.6.7.2.3) */
@@ -609,7 +748,7 @@ static void test_overcount_switch(void)
 	int before = failures, ports = 0;
 	char id[FMD_MAX_ID_LEN];
 
-	new_switch_claiming(ctx, 0x5002, 255);	/* 4 ports asked for */
+	new_switch_claiming(ctx, 0x5002, 255);	/* 6 ports asked for */
 	fmd_discover(ctx);
 
 	device_id(id, sizeof(id), 0x5002);
@@ -617,7 +756,7 @@ static void test_overcount_switch(void)
 	for (int i = 0; i < 256; i++)
 		if (fmd_topology_find_port(&ctx->topology, id, i))
 			ports++;
-	CHECK(ports <= 4, "%d ports from a response to a request for 4", ports);
+	CHECK(ports <= 6, "%d ports from a response to a request for 6", ports);
 
 	fmd_ctx_free(ctx);
 	report("switch returning more ports than asked", before);
@@ -777,6 +916,7 @@ int main(void)
 	test_two_mlds();
 	test_mld_granularity();
 	test_switch();
+	test_switch_bind();
 	test_switch_unbind();
 	test_overcount_switch();
 	test_overcount_mld();
