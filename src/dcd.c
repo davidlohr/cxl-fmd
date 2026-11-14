@@ -1130,7 +1130,8 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 	dcd->add_policies = info.capacity_selection_policies;
 	dcd->release_policies = info.capacity_removal_policies;
 	dcd->sanitize_cfg_mask = info.sanitize_on_release_config_mask;
-	dcd->total_dc_capacity = CXL_TO_BYTES(info.total_dynamic_capacity);
+	/* libcxlmi returns Total Dynamic Capacity in bytes, not in 256 MB units */
+	dcd->total_dc_capacity = info.total_dynamic_capacity;
 	/* region_0..7_supported_blk_sz_mask are contiguous in the packed response */
 	memcpy(dcd->blk_sz_mask, &info.region_0_supported_blk_sz_mask,
 	       sizeof(dcd->blk_sz_mask));
@@ -1344,7 +1345,19 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 
 	if (!dcd || host_id < 0 || host_id >= FMD_MAX_DC_HOSTS)
 		return -ENOENT;
-	if (!cap_bit || !(dcd->add_policies & cap_bit))
+	/*
+	 * The policies a device supports are Bits[2:0] of Supported Add
+	 * Capacity Selection Policies: Free, Contiguous and Prescriptive.
+	 * Bit[3] "must be 0" (CXL r4.0 Table 7-65), so a device has no way to
+	 * say it supports Enable Shared Access, and one that follows the
+	 * table would have every such request refused here. On a device it
+	 * is the device that refuses it, with Invalid Input, as when the
+	 * region is not Sharable (Section 7.6.7.6.5).
+	 */
+	if (!cap_bit)
+		return -EINVAL;
+	if (!(dcd->add_policies & cap_bit) &&
+	    !(dev_is_hw(dev) && policy == FMD_DC_POLICY_SHARED_ACCESS))
 		return -EINVAL;
 	if (!fmd_dc_host_component(dev, host_id))
 		return -ENOENT;

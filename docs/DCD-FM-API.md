@@ -158,7 +158,7 @@ int cxlmi_cmd_fmapi_get_dcd_info(struct cxlmi_endpoint *ep,
 |----------------|----------|---------|
 | `num_hosts` | count | `MaxHosts` |
 | `num_supported_dc_regions` | count, 1..8 | `MaxDynamicCapacityRegions` |
-| `capacity_selection_policies` | bitmask: bit 0 Free, bit 1 Contiguous, bit 2 Prescriptive, bit 3 Enable Shared Access | `AddCapacityPoliciesSupported[]` with `Free`, `Contiguous`, `Prescriptive`, `EnableSharedAccess` |
+| `capacity_selection_policies` | bitmask: bit 0 Free, bit 1 Contiguous, bit 2 Prescriptive; bit 3 "must be 0" in CXL r4.0 Table 7-65, so a device cannot advertise Enable Shared Access | `AddCapacityPoliciesSupported[]` with `Free`, `Contiguous`, `Prescriptive` (`EnableSharedAccess` only where a mock topology lists it). An `EnableSharedAccess` request to a device is sent whatever the mask says: the device refuses it with Invalid Input if the region is not Sharable |
 | `capacity_removal_policies` | bitmask: bit 0 Tag-based, bit 1 Prescriptive | `ReleaseCapacityPoliciesSupported[]` with `TagBased`, `Prescriptive` |
 | `sanitize_on_release_config_mask` | bit N set = region N's Sanitize on Release is configurable | `SanitizationOnReleaseSupport[]` of `{RegionNumber, SanitizationOnReleaseSupported}` |
 | `total_dynamic_capacity` | multiples of 256 MB | `TotalDynamicCapacityMiB` = value * 256 |
