@@ -1366,6 +1366,29 @@ static void test_dcd_info(void)
 		json_decref(cap);
 	}
 
+	/*
+	 * Draining the Dynamic Capacity Event Log. In the Flags of Get Event
+	 * Records, Bit[1] is More Event Records: there are more to get, and
+	 * the log is read again. Bit[0] is Overflow. One record, more to
+	 * come; then none.
+	 */
+	if (sld && sld->dcd) {
+		uint8_t page[0x20 + 0x80] = { 0 };
+
+		page[0x00] = 0x02;			/* More Event Records */
+		put16(page + 0x14, 1);			/* Event Record Count */
+		put16(page + 0x20 + 0x14, 7);		/* Event Record Handle */
+		answer(ep, 0x0100, page, sizeof(page));
+		answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+		memset(page, 0, sizeof(page));
+		answer(ep, 0x0100, page, 0x20);
+
+		fmd_dcd_poll_events(ctx);
+		CHECK(last_opcode(ep) == 0x0100,
+		      "the log was not read again after More Event Records: "
+		      "last command %04xh", last_opcode(ep));
+	}
+
 	fmd_ctx_free(ctx);
 	report("Get DCD Info", before);
 }

@@ -35,8 +35,9 @@
 #define DC_EVENT_LOG_NOTIFY	(1 << 4)	/* Event Interrupt Settings bit */
 #define DC_EVENT_ADD_RESPONSE	0x04
 #define DC_EVENT_RELEASED	0x05
-#define EVENT_FLAG_MORE		(1 << 0)
-#define EVENT_FLAG_OVERFLOW	(1 << 1)
+/* Flags of Get Event Records, Table 8-232: Bit[0] Overflow, Bit[1] More */
+#define EVENT_FLAG_OVERFLOW	(1 << 0)
+#define EVENT_FLAG_MORE		(1 << 1)
 #define DC_EVENT_MAX_PAGES	16
 #define DC_EVENT_MAX_DEVS	64
 
