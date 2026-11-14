@@ -1309,6 +1309,56 @@ static void test_health_mapping(void)
 	report("health and media status", before);
 }
 
+/*
+ * Get DCD Info (5600h), Table 7-65. Total Dynamic Capacity is "in multiples
+ * of 256 MB"; libcxlmi returns it in bytes.
+ */
+static void test_dcd_info(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t info[0x54] = { 0 };
+	int before = failures;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_sld *sld;
+
+	answer_identify(ep, 0xdc, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+
+	info[0x00] = 1;				/* Number of Hosts */
+	info[0x01] = 1;				/* Number of Supported DC Regions */
+	put16(info + 0x04, 0x07);		/* Free, Contiguous, Prescriptive */
+	put16(info + 0x08, 0x03);		/* Tag-based, Prescriptive */
+	put64(info + 0x0c, 4);			/* Total Dynamic Capacity: 1 GiB */
+	put64(info + 0x14, 1ULL << 28);		/* Region 0: 256 MB blocks */
+	answer(ep, 0x5600, info, sizeof(info));
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xdc);
+	sld = fmd_topology_find_sld(&ctx->topology, id);
+	CHECK(sld && sld->dcd, "no DCD %s", id);
+	if (sld && sld->dcd) {
+		json_t *cap = fmd_redfish_dc_capabilities(ctx, &sld->base, id, id);
+
+		CHECK(sld->dcd->total_dc_capacity == 4ULL << 28,
+		      "total dynamic capacity %" PRIu64 " bytes",
+		      sld->dcd->total_dc_capacity);
+		CHECK(cap && json_integer_value(json_object_get(cap,
+		      "TotalDynamicCapacityMiB")) == 1024,
+		      "TotalDynamicCapacityMiB %lld", cap ? (long long)
+		      json_integer_value(json_object_get(cap,
+		      "TotalDynamicCapacityMiB")) : -1);
+		/* Bit[3] of the add policies must be 0: three are supported */
+		CHECK(cap && json_array_size(json_object_get(cap,
+		      "AddCapacityPoliciesSupported")) == 3, "add policies");
+		json_decref(cap);
+	}
+
+	fmd_ctx_free(ctx);
+	report("Get DCD Info", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1343,6 +1393,7 @@ int main(void)
 	test_overcount_mld();
 	test_mld_ld_counts();
 	test_health_mapping();
+	test_dcd_info();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);

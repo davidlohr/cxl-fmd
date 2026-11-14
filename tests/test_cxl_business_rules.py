@@ -178,6 +178,52 @@ class TestMultiVCSRules:
         assert data["PCIeInterface"] == {"PCIeType": "Gen5", "LanesInUse": 16}
         assert data["CXLDevice"]["DeviceClass"] == "MLD"
 
+    def test_logical_device_of_an_mld(self, api_client):
+        """LD 1 of mld0."""
+        status, data = api_client.get(
+            "/redfish/v1/Chassis/mld0/PCIeDevices/mld0/CXLLogicalDevices/1")
+        assert status == 200
+        # its durable name is its GCXLID: the serial number of the MLD,
+        # most significant octet first, and the LD-ID
+        assert data["Identifiers"] == [{
+            "DurableNameFormat": "GCXLID",
+            "DurableName": "4D-4C-44-30-30-30-30-30:0001"}]
+        # an LD of an MLD has bandwidth fractions
+        assert set(data["QoS"]) == {"AllocatedBandwidth", "LimitPercent"}
+        # what the device supports, not what is enabled
+        assert set(data["QoSTelemetryCapabilities"]) == {
+            "EgressPortBackpressureSupported",
+            "TemporaryThroughputReductionSupported"}
+
+    def test_logical_device_of_an_sld(self, api_client):
+        """An SLD has no bandwidth fractions: those are commands of an MLD."""
+        status, data = api_client.get(
+            "/redfish/v1/Chassis/dev0/PCIeDevices/dev0/CXLLogicalDevices/0")
+        assert status == 200
+        assert "QoS" not in data
+        assert "Identifiers" not in data
+
+    def _chunks(self, api_client, dev):
+        status, data = api_client.get(f"/redfish/v1/Chassis/{dev}/MemoryDomains")
+        assert status == 200
+        out = []
+        for domain in data["Members"]:
+            status, chunks = api_client.get(domain["@odata.id"] + "/MemoryChunks")
+            assert status == 200
+            for member in chunks["Members"]:
+                status, chunk = api_client.get(member["@odata.id"])
+                assert status == 200
+                out.append(chunk)
+        return out
+
+    def test_chunk_offset_is_reported_only_where_it_is_known(self, api_client):
+        """The chunk of an SLD is the device, from offset 0. The chunk of an
+        LD is its allocation, and no command says where in the MLD that is."""
+        sld = self._chunks(api_client, "dev0")
+        assert sld and all(c["AddressRangeOffsetMiB"] == 0 for c in sld)
+        mld = self._chunks(api_client, "mld0")
+        assert mld and all("AddressRangeOffsetMiB" not in c for c in mld)
+
     def test_port_bound_to_another_vcs_is_refused(self, api_client):
         """dev2 is bound to VCS 1: host0, on VCS 0, cannot be given it."""
         before = self._bindings(api_client)

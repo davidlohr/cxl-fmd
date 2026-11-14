@@ -1939,10 +1939,9 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 				if (dev_child->type == FMD_COMPONENT_SLD) {
 					struct fmd_sld *sld = fmd_to_sld(dev_child);
 					total_capacity_mb += sld->memory_size / (1024ULL * 1024);
-					if (sld->health.health_status > worst_health)
-						worst_health = sld->health.health_status;
-					if (sld->health.media_status > worst_media)
-						worst_media = sld->health.media_status;
+					worst_health |= sld->health.health_status;
+					worst_media = fmd_worse_media_status(worst_media,
+									     sld->health.media_status);
 				} else if (dev_child->type == FMD_COMPONENT_MLD) {
 					struct fmd_mld *mld = fmd_to_mld(dev_child);
 					/* Sum LD capacities for MLD */
@@ -1951,10 +1950,9 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 						if (ld_child->type == FMD_COMPONENT_LD) {
 							struct fmd_ld *ld = fmd_to_ld(ld_child);
 							total_capacity_mb += ld->memory_size / (1024ULL * 1024);
-							if (ld->health.health_status > worst_health)
-								worst_health = ld->health.health_status;
-							if (ld->health.media_status > worst_media)
-								worst_media = ld->health.media_status;
+							worst_health |= ld->health.health_status;
+							worst_media = fmd_worse_media_status(worst_media,
+											     ld->health.media_status);
 						}
 					}
 				}
@@ -2561,8 +2559,11 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	uint64_t mem_size_mib;
 	uint8_t health_status;
 	uint8_t media_status;
-	uint8_t qos_allocated = 100;
-	uint8_t qos_limit = 100;
+	uint8_t qos_allocated = 0;
+	uint8_t qos_limit = 0;
+	uint8_t qos_caps = 0;		/* QoS Telemetry Capabilities */
+	uint64_t serial = 0;
+	bool has_qos = false;		/* an LD of an MLD has bandwidth fractions */
 	json_t *semantics;
 
 	(void)snprintf(uri, sizeof(uri),
@@ -2578,6 +2579,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		mem_size_mib = sld->memdev.total_capacity * 256;
 		health_status = sld->health.health_status;
 		media_status = sld->health.media_status;
+		qos_caps = sld->memdev.qos_telemetry_caps;
 		snprintf(name, sizeof(name), "CXL Logical Device 0");
 		semantics = build_sld_semantics_array(sld);
 	} else if (comp->type == FMD_COMPONENT_MLD) {
@@ -2608,6 +2610,10 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		/* Convert CXL format (fraction * 256) back to percentage with rounding */
 		qos_allocated = (ld->qos_allocated_bw * 100 + 128) / 256;
 		qos_limit = (ld->qos_limit_bw * 100 + 128) / 256;
+		has_qos = true;
+		qos_caps = ld->memdev.qos_telemetry_caps ?
+			   ld->memdev.qos_telemetry_caps : mld->qos_telemetry_capability;
+		serial = mld->identify.serial_num;
 
 		snprintf(name, sizeof(name), "CXL Logical Device %d", ld_idx);
 		semantics = build_mld_semantics_array(mld);
@@ -2639,6 +2645,9 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		/* Convert CXL format (fraction * 256) back to percentage with rounding */
 		qos_allocated = (ld->qos_allocated_bw * 100 + 128) / 256;
 		qos_limit = (ld->qos_limit_bw * 100 + 128) / 256;
+		has_qos = true;
+		qos_caps = ld->memdev.qos_telemetry_caps ?
+			   ld->memdev.qos_telemetry_caps : mhd->qos_telemetry_capability;
 
 		snprintf(name, sizeof(name), "CXL Logical Device %d", ld_idx);
 		semantics = build_mhd_semantics_array(mhd);
@@ -2657,8 +2666,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"  s:s,"   /* Name */
 		"  s:I,"   /* MemorySizeMiB */
 		"  s:o,"   /* SemanticsSupported */
-		"  s:{s:s, s:s},"  /* Status */
-		"  s:{s:I, s:I}"   /* QoS */
+		"  s:{s:s, s:s}"   /* Status */
 		"}",
 		"@odata.id", uri,
 		"@odata.type", "#CXLLogicalDevice.v1_5_0.CXLLogicalDevice",
@@ -2667,32 +2675,55 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"MemorySizeMiB", (json_int_t)mem_size_mib,
 		"SemanticsSupported", semantics,
 		"Status", "State", rf_state_to_str(state),
-		         "Health", rf_health_to_str(health),
-		"QoS", "AllocatedBandwidth", (json_int_t)qos_allocated,
-		       "LimitPercent", (json_int_t)qos_limit
+		         "Health", rf_health_to_str(health)
 	);
 
-	/* Add QoSTelemetryCapabilities */
-	bool backpressure_supported = false;
-	if (comp->type == FMD_COMPONENT_MLD) {
-		struct fmd_mld *mld = fmd_to_mld(comp);
-		backpressure_supported = mld->qos_control.enabled;
-	} else if (comp->type == FMD_COMPONENT_MHD) {
-		struct fmd_mhd *mhd = fmd_to_mhd(comp);
-		backpressure_supported = mhd->qos_control.enabled;
-	}
-	json_object_set_new(result, "QoSTelemetryCapabilities",
-		json_pack("{s:b}",
-			  "EgressPortBackpressureSupported", backpressure_supported));
+	/*
+	 * QoS: the bandwidth fractions of Get QoS Allocated BW and Get QoS
+	 * BW Limit (DSP0288 Table 2). Those are commands of an MLD, and
+	 * prohibited for an SLD, which has no fraction to report.
+	 */
+	if (has_qos)
+		json_object_set_new(result, "QoS",
+			json_pack("{s:I, s:I}",
+				  "AllocatedBandwidth", (json_int_t)qos_allocated,
+				  "LimitPercent", (json_int_t)qos_limit));
 
-	/* Add MLD/MHD-specific fields (Identifiers for each LD) */
-	if (comp->type == FMD_COMPONENT_MLD || comp->type == FMD_COMPONENT_MHD) {
+	/*
+	 * QoSTelemetryCapabilities are what the device supports: Bit[0] and
+	 * Bit[1] of the QoS Telemetry Capabilities of Identify Memory Device
+	 * (Table 8-309), or of Get LD Info (Table 7-46) for an MLD. Whether
+	 * a mechanism is enabled is a setting, reported elsewhere.
+	 */
+	json_object_set_new(result, "QoSTelemetryCapabilities",
+		json_pack("{s:b, s:b}",
+			  "EgressPortBackpressureSupported", (qos_caps & 0x01) ? 1 : 0,
+			  "TemporaryThroughputReductionSupported", (qos_caps & 0x02) ? 1 : 0));
+
+	/*
+	 * Identifiers: the durable name of an LD is its GCXLID, the PCIe
+	 * serial number of the device, most significant octet first, and
+	 * the LD-ID (Resource schema, DurableNameFormat GCXLID). It needs
+	 * the serial number of the MLD. A pool LD of a Multi-Headed device
+	 * has a pool index, and its LD-ID depends on the head it is mapped
+	 * to: no name is made up for it.
+	 */
+	if (comp->type == FMD_COMPONENT_MLD && serial) {
 		char durable_name[64];
+
 		snprintf(durable_name, sizeof(durable_name),
-			 "00000000-0000-0000-0000-%012d", ld_idx);
+			 "%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X:%04X",
+			 (unsigned)((serial >> 56) & 0xFF),
+			 (unsigned)((serial >> 48) & 0xFF),
+			 (unsigned)((serial >> 40) & 0xFF),
+			 (unsigned)((serial >> 32) & 0xFF),
+			 (unsigned)((serial >> 24) & 0xFF),
+			 (unsigned)((serial >> 16) & 0xFF),
+			 (unsigned)((serial >> 8) & 0xFF),
+			 (unsigned)(serial & 0xFF), ld_idx);
 		json_object_set_new(result, "Identifiers",
 			json_pack("[{s:s, s:s}]",
-				  "DurableNameFormat", "UUID",
+				  "DurableNameFormat", "GCXLID",
 				  "DurableName", durable_name));
 	}
 
@@ -3160,10 +3191,9 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 				if (dev_child->type == FMD_COMPONENT_SLD) {
 					struct fmd_sld *sld = fmd_to_sld(dev_child);
 					capacity_mib += sld->memory_size / (1024ULL * 1024);
-					if (sld->health.health_status > worst_health)
-						worst_health = sld->health.health_status;
-					if (sld->health.media_status > worst_media)
-						worst_media = sld->health.media_status;
+					worst_health |= sld->health.health_status;
+					worst_media = fmd_worse_media_status(worst_media,
+									     sld->health.media_status);
 				} else if (dev_child->type == FMD_COMPONENT_MLD) {
 					struct fmd_mld *mld = fmd_to_mld(dev_child);
 					struct fmd_component *ld_child;
@@ -3171,10 +3201,9 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 						if (ld_child->type == FMD_COMPONENT_LD) {
 							struct fmd_ld *ld = fmd_to_ld(ld_child);
 							capacity_mib += ld->memory_size / (1024ULL * 1024);
-							if (ld->health.health_status > worst_health)
-								worst_health = ld->health.health_status;
-							if (ld->health.media_status > worst_media)
-								worst_media = ld->health.media_status;
+							worst_health |= ld->health.health_status;
+							worst_media = fmd_worse_media_status(worst_media,
+											     ld->health.media_status);
 						}
 					}
 				}
@@ -3210,11 +3239,23 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 			fmd_for_each_child(&mld->base, child) {
 				if (child->type == FMD_COMPONENT_LD) {
 					struct fmd_ld *ld = fmd_to_ld(child);
-					if (ld->health.health_status > worst_health)
-						worst_health = ld->health.health_status;
-					if (ld->health.media_status > worst_media)
-						worst_media = ld->health.media_status;
+					worst_health |= ld->health.health_status;
+					worst_media = fmd_worse_media_status(worst_media,
+									     ld->health.media_status);
 				}
+			}
+			fmd_topology_rdunlock(&ctx->topology);
+		} else if (chassis->type == FMD_COMPONENT_MHD) {
+			struct fmd_component *child;
+
+			/* the LDs of the pool, as for the LDs of an MLD */
+			fmd_topology_rdlock(&ctx->topology);
+			fmd_for_each_child_type(chassis, child, FMD_COMPONENT_LD) {
+				struct fmd_ld *ld = fmd_to_ld(child);
+
+				worst_health |= ld->health.health_status;
+				worst_media = fmd_worse_media_status(worst_media,
+								     ld->health.media_status);
 			}
 			fmd_topology_rdunlock(&ctx->topology);
 		}
@@ -3493,6 +3534,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 
 	uint64_t size_mib = 0;
 	uint64_t offset_mib = 0;
+	bool offset_known = false;
 	const char *address_range_type = "PMEM";
 	uint8_t health_status = 0;
 	uint8_t media_status = 0;
@@ -3547,6 +3589,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		if (device->type == FMD_COMPONENT_SLD) {
 			struct fmd_sld *sld = fmd_to_sld(device);
 			size_mib = sld->memory_size / (1024ULL * 1024);
+			offset_known = true;	/* the whole device, from 0 */
 			health_status = sld->health.health_status;
 			media_status = sld->health.media_status;
 
@@ -3560,20 +3603,6 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		} else if (device->type == FMD_COMPONENT_MLD) {
 			struct fmd_mld *mld = fmd_to_mld(device);
 			struct fmd_component *child;
-
-			/*
-			 * Calculate offset within device: sum of sizes of LDs
-			 * with ld_id < target. LDs may not be stored in order.
-			 */
-			uint64_t cumulative_offset = 0;
-			fmd_for_each_child(&mld->base, child) {
-				if (child->type == FMD_COMPONENT_LD) {
-					struct fmd_ld *ld = fmd_to_ld(child);
-					if (ld->ld_id < ld_idx)
-						cumulative_offset += ld->memory_size;
-				}
-			}
-			offset_mib = cumulative_offset / (1024ULL * 1024);
 
 			/* Now find the target LD for other properties */
 			fmd_for_each_child(&mld->base, child) {
@@ -3623,6 +3652,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 
 		size_mib = chunk->size / (1024ULL * 1024);
 		offset_mib = chunk->base_address / (1024ULL * 1024);
+		offset_known = chassis->type == FMD_COMPONENT_SLD;
 		int ld_idx = 0;
 
 		/* Extract LD index from chunk_id */
@@ -3680,7 +3710,6 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"  s:s,"   /* Id */
 		"  s:s,"   /* Name */
 		"  s:I,"   /* MemoryChunkSizeMiB */
-		"  s:I,"   /* AddressRangeOffsetMiB */
 		"  s:s,"   /* AddressRangeType */
 		"  s:b,"   /* IsMirrorEnabled */
 		"  s:{s:s, s:s}"  /* Status */
@@ -3690,12 +3719,22 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"Id", chunk_id,
 		"Name", chunk_name,
 		"MemoryChunkSizeMiB", (json_int_t)size_mib,
-		"AddressRangeOffsetMiB", (json_int_t)offset_mib,
 		"AddressRangeType", address_range_type,
 		"IsMirrorEnabled", false,
 		"Status", "State", rf_state_to_str(state),
 		         "Health", rf_health_to_str(health)
 	);
+
+	/*
+	 * AddressRangeOffsetMiB is where the chunk lies in the device's
+	 * address range. The chunk of an SLD is given one. The chunk of an
+	 * LD is that LD's allocation, and nothing says where in the device
+	 * an allocation is: Get LD Allocations gives sizes only. Adding up
+	 * the sizes of the LDs before it would be a guess.
+	 */
+	if (offset_known)
+		json_object_set_new(result, "AddressRangeOffsetMiB",
+				    json_integer((json_int_t)offset_mib));
 
 	/* Add Links.CXLLogicalDevices back-reference */
 	if (ld_link_uri[0] != '\0') {
