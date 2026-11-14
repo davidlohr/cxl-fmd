@@ -1114,6 +1114,8 @@ static enum fmd_vppb_binding_status parse_binding_status(const char *str)
 		return FMD_VPPB_BOUND_PBR;
 	if (strcmp(str, "busy") == 0)
 		return FMD_VPPB_BUSY;
+	load_error("binding_status \"%s\" is not unbound, busy, "
+		   "bound_physical_port, bound_ld or bound_pbr", str);
 	return FMD_VPPB_UNBOUND;
 }
 
@@ -1228,7 +1230,15 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 				continue;
 
 			const char *link = json_str_or(jport, "link_status", is_upstream ? "up" : "down");
-			port->link_status = (strcmp(link, "up") == 0) ? FMD_LINK_UP : FMD_LINK_DOWN;
+			if (strcmp(link, "up") == 0)
+				port->link_status = FMD_LINK_UP;
+			else if (strcmp(link, "training") == 0)
+				port->link_status = FMD_LINK_TRAINING;
+			else if (strcmp(link, "down") == 0)
+				port->link_status = FMD_LINK_DOWN;
+			else
+				load_error("port %d: link_status \"%s\" is not up, down "
+					   "or training", port_num, link);
 			/* PCIe encoding: 5 is 32.0 GT/s */
 			port->max_link_speed = (uint8_t)json_int_or(jport, "max_link_speed", 5);
 			port->current_link_speed = (port->link_status == FMD_LINK_UP) ?
@@ -1248,15 +1258,23 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			}
 
 			/* DSP configuration */
+			/* Connected Device Type, Get Physical Port State (Table 7-21) */
 			const char *conn = json_str_or(jport, "conn_dev_type", "none");
-			if (strcmp(conn, "sld") == 0)
+			if (strcmp(conn, "none") == 0)
+				port->conn_dev_type = FMD_CONN_NONE;
+			else if (strcmp(conn, "pcie") == 0)
+				port->conn_dev_type = FMD_CONN_PCIE;
+			else if (strcmp(conn, "type1") == 0)
+				port->conn_dev_type = FMD_CONN_TYPE1;
+			else if (strcmp(conn, "type2") == 0)
+				port->conn_dev_type = FMD_CONN_TYPE2;
+			else if (strcmp(conn, "sld") == 0)
 				port->conn_dev_type = FMD_CONN_SLD;
 			else if (strcmp(conn, "mld") == 0)
 				port->conn_dev_type = FMD_CONN_MLD;
-			else if (strcmp(conn, "switch") == 0)
-				port->conn_dev_type = FMD_CONN_PCIE; /* Use for cascaded */
 			else
-				port->conn_dev_type = FMD_CONN_NONE;
+				load_error("port %d: conn_dev_type \"%s\" is not none, "
+					   "pcie, type1, type2, sld or mld", port_num, conn);
 
 			port->max_link_width = (uint8_t)json_int_or(jport, "max_link_width", 16);
 			port->negotiated_link_width = (uint8_t)json_int_or(jport, "negotiated_link_width", 16);
@@ -1390,6 +1408,7 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 		if (host) {
 			snprintf(host->name, sizeof(host->name), "Host via %s VCS %d",
 				 id, vcs->vcs_id);
+			snprintf(host->switch_id, sizeof(host->switch_id), "%s", id);
 			host->vcs_id = vcs->vcs_id;
 			host->usp_port_id = vcs->upstream_port_id;
 			host->direct_attached = false;
@@ -1438,6 +1457,17 @@ static int parse_host(struct fmd_ctx *ctx, json_t *jhost)
 		host->direct_attached = false;
 	else if (!json_object_get(jhost, "direct_attached"))
 		host->direct_attached = true;  /* Default to direct-attached */
+
+	/* a host on a VCS is on a VCS of some switch: which one */
+	if (!host->direct_attached) {
+		const char *sw_id = json_str_or(jhost, "switch", NULL);
+
+		if (!sw_id)
+			load_error("host %s is on VCS %d and does not say of which "
+				   "\"switch\"", id, host->vcs_id);
+		else
+			snprintf(host->switch_id, sizeof(host->switch_id), "%s", sw_id);
+	}
 
 	fmd_topology_add(&ctx->topology, &host->base, NULL);
 

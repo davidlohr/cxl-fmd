@@ -587,16 +587,21 @@ static void check_hosts(struct validation *v)
 			continue;
 
 		fmd_for_each_type(&v->ctx->topology, sw_comp, FMD_COMPONENT_SWITCH) {
-			struct fmd_vcs *vcs = fmd_switch_find_vcs(fmd_to_switch(sw_comp),
-								  host->vcs_id);
+			struct fmd_vcs *vcs;
 
+			/* a VCS ID is one switch's */
+			if (strcmp(sw_comp->id, host->switch_id) != 0)
+				continue;
+			vcs = fmd_switch_find_vcs(fmd_to_switch(sw_comp), host->vcs_id);
 			if (vcs && vcs->upstream_port_id == host->usp_port_id)
 				found = true;
 		}
 		if (!found)
 			invalid(v, "Virtual CXL Switch, Section 7.1", "host %s is on "
-				"VCS %d with upstream port %d, which no switch has",
-				host->base.id, host->vcs_id, host->usp_port_id);
+				"VCS %d of switch %s with upstream port %d, which is "
+				"no VCS of the topology", host->base.id, host->vcs_id,
+				host->switch_id[0] ? host->switch_id : "(none)",
+				host->usp_port_id);
 	}
 }
 

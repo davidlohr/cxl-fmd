@@ -603,7 +603,8 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 					if (sw_comp->type != FMD_COMPONENT_SWITCH)
 						continue;
 					struct fmd_switch *sw = fmd_to_switch(sw_comp);
-					if (fmd_switch_find_vcs(sw, host->vcs_id)) {
+					if (!strcmp(sw->base.id, host->switch_id) &&
+					    fmd_switch_find_vcs(sw, host->vcs_id)) {
 						json_object_set_new(result, "Links",
 							rf_links_array_single("Zones",
 								"/redfish/v1/Fabrics/CXL/Zones/%s_vcs%d",
@@ -995,15 +996,10 @@ json_t *fmd_redfish_zone(struct fmd_ctx *ctx, const char *fabric_id,
 		fmd_for_each_child(&fabric->base, child) {
 			if (child->type == FMD_COMPONENT_HOST) {
 				struct fmd_host *host = fmd_to_host(child);
-				/*
-				 * Include hosts connected via this VCS on this switch.
-				 * Host IDs are formatted as "{switch_id}_host{N}", so
-				 * check that the host belongs to this switch.
-				 */
+				/* the host on this VCS of this switch */
 				if (!host->direct_attached &&
 				    host->vcs_id == vcs_num &&
-				    strncmp(host->base.id, switch_id, switch_len) == 0 &&
-				    host->base.id[switch_len] == '_') {
+				    strcmp(host->switch_id, switch_id) == 0) {
 					json_array_append_new(endpoints,
 						rf_link("/redfish/v1/Fabrics/CXL/Endpoints/%s",
 							host->base.id));
@@ -5294,6 +5290,20 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				 conn->id, target_id);
 			/* Continue without binding - may be direct-attached device */
 			goto done;
+		}
+
+		/*
+		 * A host reaches devices through the switch its root port is
+		 * on: its VCS is a VCS of that switch. The device's switch
+		 * has a VCS with the same ID, which is another host's.
+		 */
+		if (strcmp(host->switch_id, sw->base.id) != 0) {
+			fmd_warn(ctx, "Connection %s: host %s is on switch %s, "
+				 "device %s on switch %s", conn->id, initiator_id,
+				 host->switch_id[0] ? host->switch_id : "(none)",
+				 target_id, sw->base.id);
+			fmd_connection_remove(ctx, conn);
+			return -10;
 		}
 
 		/* decide on what the switch has now */

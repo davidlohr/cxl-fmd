@@ -1251,6 +1251,8 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		if (host) {
 			snprintf(host->name, sizeof(host->name), "Host via %.46s VCS %d",
 				 sw->base.id, vcs->vcs_id);
+			snprintf(host->switch_id, sizeof(host->switch_id), "%s",
+				 sw->base.id);
 			host->vcs_id = vcs->vcs_id;
 			host->usp_port_id = vcs->upstream_port_id;
 			host->direct_attached = false;  /* Switch-attached */

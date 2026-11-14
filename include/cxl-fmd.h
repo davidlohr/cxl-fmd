@@ -890,7 +890,12 @@ struct fmd_host {
 
 	char name[64];               /* Human-readable name */
 
-	/* Switch attachment (for switch-attached hosts) */
+	/*
+	 * Switch attachment (for switch-attached hosts). A VCS ID is the
+	 * switch's: VCS 0 of one switch and VCS 0 of another are two hosts,
+	 * and a host is given only what is on the switch its root port is on.
+	 */
+	char switch_id[FMD_MAX_ID_LEN]; /* switch whose VCS this host is on */
 	uint8_t vcs_id;              /* VCS this host connects through */
 	uint8_t usp_port_id;         /* USP port number */
 
