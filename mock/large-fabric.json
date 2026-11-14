@@ -1,0 +1,835 @@
+{
+    "version": 1,
+    "id": "large_fabric",
+    "description": "Two switches and six hosts: SLDs, MLDs of 4, 8 and 16 LDs, bound and unbound capacity",
+    "_comment": [
+        "switch_a: four hosts (VCS 0-3), each with an SLD and two LDs of the 16-LD MLD on port 8. The",
+        "other eight LDs of that MLD and all eight of the MLD on port 9 are FM-owned and can be bound.",
+        "Ports 10 and 11 have no device: one link is down, one is training.",
+        "switch_b: two hosts. Host 0 has an SLD and LD 0 of the MLD on port 4, host 1 has LD 1; LDs 2",
+        "and 3 and the SLD on port 3, which needs maintenance, are unbound. Port 5 holds a PCIe device.",
+        "An SLD port is bound to one VCS, and each LD to one host or to none (Sections 7.2.3.1, 7.3.4)."
+    ],
+    "switches": [
+        {
+            "id": "switch_a",
+            "vendor_id": "0x8086",
+            "device_id": "0x0e00",
+            "serial_number": "0x5357495443480001",
+            "max_vcs": 8,
+            "ports": [
+                {
+                    "port_number": 0,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 1,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 2,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 3,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 4,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 5,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 6,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 7,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "_comment": "16 LDs: 8 bound two to a host, 8 FM-owned",
+                    "port_number": 8,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "mld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 15
+                },
+                {
+                    "_comment": "8 of 16 LDs enabled, 1 GB granularity, none bound",
+                    "port_number": 9,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "mld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 15
+                },
+                {
+                    "port_number": 10,
+                    "type": "downstream",
+                    "link_status": "down",
+                    "conn_dev_type": "none",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 0,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 11,
+                    "type": "downstream",
+                    "link_status": "training",
+                    "conn_dev_type": "none",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 0,
+                    "supported_ld_count": 0
+                }
+            ],
+            "vcs": [
+                {
+                    "vcs_id": 0,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 0,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 0
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 4
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 0
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 1
+                        },
+                        {
+                            "vppb_id": 4,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 5,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 6,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 7,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                },
+                {
+                    "vcs_id": 1,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 1,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 1
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 5
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 2
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 3
+                        },
+                        {
+                            "vppb_id": 4,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 5,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 6,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 7,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                },
+                {
+                    "vcs_id": 2,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 2,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 2
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 6
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 4
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 5
+                        },
+                        {
+                            "vppb_id": 4,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 5,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 6,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 7,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                },
+                {
+                    "vcs_id": 3,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 3,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 3
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 7
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 6
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 8,
+                            "bound_ld_id": 7
+                        },
+                        {
+                            "vppb_id": 4,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 5,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 6,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 7,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "switch_b",
+            "vendor_id": "0x8086",
+            "device_id": "0x0e00",
+            "serial_number": "0x5357495443480002",
+            "max_vcs": 8,
+            "ports": [
+                {
+                    "port_number": 0,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 1,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 2,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 3,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 4,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "mld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 15
+                },
+                {
+                    "port_number": 5,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "pcie",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                }
+            ],
+            "vcs": [
+                {
+                    "vcs_id": 0,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 0,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 0
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 2
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 4,
+                            "bound_ld_id": 0
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 4,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 5,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                },
+                {
+                    "vcs_id": 1,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 1,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 1
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 4,
+                            "bound_ld_id": 1
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 4,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 5,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "devices": [
+        {
+            "id": "a_sld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300003",
+            "component_type": 3,
+            "parent_switch": "switch_a",
+            "parent_port": 4,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 32768,
+                "volatile_capacity_mb": 32768,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "a_sld_1",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300004",
+            "component_type": 3,
+            "parent_switch": "switch_a",
+            "parent_port": 5,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 32768,
+                "volatile_capacity_mb": 32768,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "a_sld_2",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300005",
+            "component_type": 3,
+            "parent_switch": "switch_a",
+            "parent_port": 6,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 32768,
+                "volatile_capacity_mb": 32768,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "a_sld_3",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300006",
+            "component_type": 3,
+            "parent_switch": "switch_a",
+            "parent_port": 7,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 32768,
+                "volatile_capacity_mb": 32768,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "a_mld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d94",
+            "serial_number": "0x4d4c443030300002",
+            "component_type": 3,
+            "parent_switch": "switch_a",
+            "parent_port": 8,
+            "ld_count": 16,
+            "max_ld_count": 16,
+            "memory_granularity": 1,
+            "identify_memory_device": {
+                "fw_revision": "2.0.0",
+                "total_capacity_mb": 65536,
+                "volatile_capacity_mb": 65536,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+            "logical_devices": [
+                {
+                    "ld_id": 0,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 1,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 2,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 3,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 4,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 5,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 6,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 7,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 8,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 9,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 10,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 11,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 12,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 13,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 14,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 15,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 6,
+                    "qos_limit_bw": 100
+                }
+            ]
+        },
+        {
+            "id": "a_mld_1",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d94",
+            "serial_number": "0x4d4c443030300003",
+            "component_type": 3,
+            "parent_switch": "switch_a",
+            "parent_port": 9,
+            "ld_count": 8,
+            "max_ld_count": 16,
+            "memory_granularity": 4,
+            "identify_memory_device": {
+                "fw_revision": "2.0.0",
+                "total_capacity_mb": 65536,
+                "volatile_capacity_mb": 65536,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+            "logical_devices": [
+                {
+                    "ld_id": 0,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 1,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 2,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 3,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 4,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 5,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 6,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 7,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 12,
+                    "qos_limit_bw": 100
+                }
+            ]
+        },
+        {
+            "id": "b_sld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300007",
+            "component_type": 3,
+            "parent_switch": "switch_b",
+            "parent_port": 2,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 16384,
+                "volatile_capacity_mb": 16384,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "_comment": "Maintenance Needed",
+            "id": "b_sld_1",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300008",
+            "component_type": 3,
+            "parent_switch": "switch_b",
+            "parent_port": 3,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 16384,
+                "volatile_capacity_mb": 0,
+                "persistent_capacity_mb": 16384
+            },
+            "health_info": {
+                "health_status": 1,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "b_mld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d94",
+            "serial_number": "0x4d4c443030300004",
+            "component_type": 3,
+            "parent_switch": "switch_b",
+            "parent_port": 4,
+            "ld_count": 4,
+            "max_ld_count": 8,
+            "memory_granularity": 2,
+            "identify_memory_device": {
+                "fw_revision": "2.0.0",
+                "total_capacity_mb": 32768,
+                "volatile_capacity_mb": 32768,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+            "logical_devices": [
+                {
+                    "ld_id": 0,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 1,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 2,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 3,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                }
+            ]
+        }
+    ]
+}

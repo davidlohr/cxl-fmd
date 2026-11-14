@@ -2,6 +2,11 @@
 
 This document describes the JSON-based topology language used by cxl-fmd's mock mode to define simulated CXL fabrics for testing and development.
 
+> A topology file is read strictly and checked against the CXL specification
+> before it is served; one that is not a valid fabric is refused. See
+> [mock/README.md](../mock/README.md) for the topologies that ship and the
+> rules, and `cxl-fmd --mock FILE --check` to check a file.
+
 ## Overview
 
 The mock topology language allows you to declaratively define CXL device configurations that mirror real hardware behavior. When cxl-fmd runs with `--mock <file.json>`, it bypasses hardware discovery and instead creates a virtual topology from the JSON specification.
@@ -536,6 +541,7 @@ Hosts represent computing systems that can access CXL memory. For direct-attache
 | `id` | string | **Required** | Unique host identifier |
 | `name` | string | id | Human-readable host name |
 | `direct_attached` | boolean | true | True for direct-attached, false for switch-attached |
+| `switch` | string | **Required** for a switch-attached host | ID of the switch whose VCS the host is on |
 | `vcs_id` | integer | 0 | VCS ID for switch-attached hosts |
 | `usp_port_id` | integer | 0 | Upstream port ID for switch-attached hosts |
 
@@ -613,11 +619,11 @@ Each port in the `ports` array defines a physical switch port.
 |-------|------|---------|-------------|
 | `port_number` | integer | array index | Physical port number |
 | `type` | string | "downstream" | Port type: "upstream" or "downstream" |
-| `link_status` | string | "down" | Link status: "up" or "down" |
+| `link_status` | string | "down" | Link status: "up", "down" or "training" |
 | `conn_dev_type` | string | "none" | Connected device type (see below) |
 | `max_link_width` | integer | 16 | Maximum link width (lanes) |
 | `negotiated_link_width` | integer | 0 | Negotiated link width |
-| `supported_ld_count` | integer | 16 | Supported LD count for MLD |
+| `supported_ld_count` | integer | 16 | Supported LD Count of Get Physical Port State: the number of *additional* LDs the port supports, so LD-IDs 0 to this value |
 | `conn_dev_cxl_ver` | integer | 0 | Connected device CXL version |
 | `port_cxl_ver_bitmask` | integer | 0x06 | Port CXL version support bitmask |
 | `supported_link_speeds` | integer | 0x1F | Supported link speeds bitmask |
@@ -628,9 +634,13 @@ Each port in the `ports` array defines a physical switch port.
 |-------|-------------|
 | `"none"` | No device connected |
 | `"pcie"` | PCIe device |
-| `"switch"` | CXL Switch (CXL.io only) |
-| `"sld"` | Single Logical Device |
-| `"mld"` | Multi-Logical Device |
+| `"type1"` | CXL Type 1 device |
+| `"type2"` | CXL Type 2 device or HBR switch |
+| `"sld"` | CXL Type 3 Single Logical Device |
+| `"mld"` | CXL Type 3 Multi-Logical Device |
+
+Any other value is an error. A port with a memory device in `devices` has
+`"sld"` or `"mld"`, the type of that device, and a link that is up.
 
 ### VCS Configuration
 
@@ -660,7 +670,7 @@ Virtual PCI-to-PCI Bridges (vPPBs) bind physical ports/LDs to a VCS.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `vppb_id` | integer | array index | vPPB identifier (0 = USP, 1+ = DSP) |
-| `binding_status` | string | "bound_physical_port" | Binding status (see below) |
+| `binding_status` | string | "unbound" | Binding status (see below) |
 | `bound_port_id` | integer | - | Physical port number being bound |
 | `bound_ld_id` | integer | - | Logical device ID for MLD bindings |
 | `bound_pbr_id` | integer | - | PBR route ID for PBR bindings |
@@ -670,12 +680,12 @@ Virtual PCI-to-PCI Bridges (vPPBs) bind physical ports/LDs to a VCS.
 | Value | Description |
 |-------|-------------|
 | `"unbound"` | vPPB not bound (available for dynamic binding) |
-| `"bind_in_progress"` | Binding in progress |
-| `"unbind_in_progress"` | Unbinding in progress |
 | `"bound_physical_port"` | vPPB bound to entire port (SLD, PCIe, or USP) |
 | `"bound_ld"` | vPPB bound to specific LD within MLD |
 | `"bound_pbr"` | vPPB bound to PBR route (future PBR fabric support) |
 | `"busy"` | vPPB binding/unbinding operation in progress |
+
+Any other value is an error.
 
 ## Complete Examples
 

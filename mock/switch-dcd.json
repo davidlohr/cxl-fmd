@@ -1,0 +1,273 @@
+{
+    "version": 1,
+    "id": "switch_dcd",
+    "description": "Dynamic capacity behind a switch: an MLD whose two LDs go to two hosts, and an SLD",
+    "_comment": [
+        "For an LD-FAM device the Host ID of the DCD Management commands is the LD-ID of the host",
+        "interface (CXL r4.0 Table 7-66): host 0 is LD 0, bound to VCS 0, and host 1 is LD 1, bound to",
+        "VCS 1. Region 0 of the MLD is Sharable and has an extent both hosts hold (Section 9.13.3.2);",
+        "region 1 is not, and its extent is host 1's alone. The SLD on port 3 has one host."
+    ],
+    "switches": [
+        {
+            "id": "switch_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0e00",
+            "serial_number": "0x5357495443480001",
+            "max_vcs": 8,
+            "ports": [
+                {
+                    "port_number": 0,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 1,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 2,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "mld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 15
+                },
+                {
+                    "port_number": 3,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                }
+            ],
+            "vcs": [
+                {
+                    "vcs_id": 0,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 0,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 0
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 2,
+                            "bound_ld_id": 0
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 3
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                },
+                {
+                    "vcs_id": 1,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 1,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 1
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "bound_ld",
+                            "bound_port_id": 2,
+                            "bound_ld_id": 1
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "devices": [
+        {
+            "id": "dcd_mld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d94",
+            "serial_number": "0x4d4c443030300005",
+            "component_type": 3,
+            "parent_switch": "switch_0",
+            "parent_port": 2,
+            "ld_count": 2,
+            "max_ld_count": 4,
+            "memory_granularity": 1,
+            "identify_memory_device": {
+                "fw_revision": "2.0.0",
+                "total_capacity_mb": 8192,
+                "volatile_capacity_mb": 8192,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+            "logical_devices": [
+                {
+                    "ld_id": 0,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 50,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 1,
+                    "memory_size_mb": 4096,
+                    "volatile_capacity_mb": 4096,
+                    "qos_allocated_bw": 50,
+                    "qos_limit_bw": 100
+                }
+            ],
+            "dcd": {
+                "num_hosts": 2,
+                "add_policies": [
+                    "Free",
+                    "Contiguous",
+                    "Prescriptive"
+                ],
+                "release_policies": [
+                    "TagBased",
+                    "Prescriptive"
+                ],
+                "max_extents": 64,
+                "max_tags": 16,
+                "regions": [
+                    {
+                        "_comment": "Sharable: both hosts may be given the same extents",
+                        "region_id": 0,
+                        "base_mb": 8192,
+                        "region_len_mb": 16384,
+                        "block_size_mb": 256,
+                        "supported_block_sizes_mb": [
+                            256,
+                            512
+                        ],
+                        "shareable": true,
+                        "hw_coherency": true,
+                        "hosts": [
+                            0,
+                            1
+                        ]
+                    },
+                    {
+                        "_comment": "Not sharable: an extent here belongs to one host",
+                        "region_id": 1,
+                        "base_mb": 24576,
+                        "region_len_mb": 8192,
+                        "block_size_mb": 256,
+                        "hosts": [
+                            0,
+                            1
+                        ]
+                    }
+                ],
+                "extents": [
+                    {
+                        "_comment": "shared by both hosts",
+                        "start_mb": 8192,
+                        "len_mb": 2048,
+                        "tag": "6f1a2c3e-0000-4000-8000-00000000000a",
+                        "hosts": [
+                            0,
+                            1
+                        ]
+                    },
+                    {
+                        "_comment": "host 1 only",
+                        "start_mb": 24576,
+                        "len_mb": 1024,
+                        "tag": "6f1a2c3e-0000-4000-8000-00000000000b",
+                        "hosts": [
+                            1
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "id": "dcd_sld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x4443443030300009",
+            "component_type": 3,
+            "parent_switch": "switch_0",
+            "parent_port": 3,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 16384,
+                "volatile_capacity_mb": 16384,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+            "dcd": {
+                "num_hosts": 1,
+                "add_policies": [
+                    "Free",
+                    "Contiguous",
+                    "Prescriptive"
+                ],
+                "release_policies": [
+                    "TagBased",
+                    "Prescriptive"
+                ],
+                "max_extents": 64,
+                "max_tags": 16,
+                "regions": [
+                    {
+                        "region_id": 0,
+                        "base_mb": 16384,
+                        "region_len_mb": 32768,
+                        "block_size_mb": 256,
+                        "supported_block_sizes_mb": [
+                            256,
+                            512,
+                            1024
+                        ],
+                        "sanitize_on_release": true,
+                        "sanitize_configurable": true
+                    }
+                ],
+                "extents": [
+                    {
+                        "start_mb": 16384,
+                        "len_mb": 4096,
+                        "tag": "6f1a2c3e-0000-4000-8000-00000000000c",
+                        "host_id": 0
+                    }
+                ]
+            }
+        }
+    ]
+}

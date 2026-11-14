@@ -1,0 +1,227 @@
+{
+    "version": 1,
+    "id": "fm_boots_first",
+    "description": "A pool before any host has memory: two hosts on one switch, every downstream vPPB unbound",
+    "_comment": [
+        "CXL r4.0 Section 7.2.1.2, Fabric Manager Boots First: the switch comes up with the USP vPPB of",
+        "each VCS bound and every DS vPPB unbound, and the FM binds ports and LDs to the hosts.",
+        "This is where an orchestrator starts. Port 2 and 3 hold SLDs, port 4 an MLD whose four LDs are",
+        "all FM-owned, port 5 is empty and port 6 holds a PCIe device, which is not memory."
+    ],
+    "switches": [
+        {
+            "id": "switch_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0e00",
+            "serial_number": "0x5357495443480001",
+            "max_vcs": 8,
+            "ports": [
+                {
+                    "port_number": 0,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 1,
+                    "type": "upstream",
+                    "link_status": "up",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16
+                },
+                {
+                    "port_number": 2,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 3,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 4,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "mld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 15
+                },
+                {
+                    "port_number": 5,
+                    "type": "downstream",
+                    "link_status": "down",
+                    "conn_dev_type": "none",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 0,
+                    "supported_ld_count": 0
+                },
+                {
+                    "port_number": 6,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "pcie",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
+                }
+            ],
+            "vcs": [
+                {
+                    "vcs_id": 0,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 0,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 0
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                },
+                {
+                    "vcs_id": 1,
+                    "state": 1,
+                    "hdm_decoders": 8,
+                    "upstream_port_id": 1,
+                    "vppbs": [
+                        {
+                            "vppb_id": 0,
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 1
+                        },
+                        {
+                            "vppb_id": 1,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 2,
+                            "binding_status": "unbound"
+                        },
+                        {
+                            "vppb_id": 3,
+                            "binding_status": "unbound"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "devices": [
+        {
+            "id": "sld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300001",
+            "component_type": 3,
+            "parent_switch": "switch_0",
+            "parent_port": 2,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 16384,
+                "volatile_capacity_mb": 16384,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "sld_1",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d93",
+            "serial_number": "0x534c443030300002",
+            "component_type": 3,
+            "parent_switch": "switch_0",
+            "parent_port": 3,
+            "ld_count": 1,
+            "identify_memory_device": {
+                "fw_revision": "1.0.0",
+                "total_capacity_mb": 16384,
+                "volatile_capacity_mb": 0,
+                "persistent_capacity_mb": 16384
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            }
+        },
+        {
+            "id": "mld_0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d94",
+            "serial_number": "0x4d4c443030300001",
+            "component_type": 3,
+            "parent_switch": "switch_0",
+            "parent_port": 4,
+            "ld_count": 4,
+            "max_ld_count": 16,
+            "memory_granularity": 1,
+            "identify_memory_device": {
+                "fw_revision": "2.0.0",
+                "total_capacity_mb": 32768,
+                "volatile_capacity_mb": 32768,
+                "persistent_capacity_mb": 0
+            },
+            "health_info": {
+                "health_status": 0,
+                "media_status": 0
+            },
+            "logical_devices": [
+                {
+                    "ld_id": 0,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 1,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 2,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                },
+                {
+                    "ld_id": 3,
+                    "memory_size_mb": 8192,
+                    "volatile_capacity_mb": 8192,
+                    "qos_allocated_bw": 25,
+                    "qos_limit_bw": 100
+                }
+            ]
+        }
+    ]
+}

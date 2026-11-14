@@ -40,7 +40,7 @@ def test_shipped_topology_is_valid(cxl_fmd_executable, path):
 
 
 def test_there_are_topologies():
-    assert len(TOPOLOGIES) >= 16
+    assert len(TOPOLOGIES) >= 19
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +138,15 @@ def duplicate_device_id(t):
     device(t, "dev1")["id"] = "dev0"
 
 
+def misspelt_binding_status(t):
+    # used to load as unbound
+    t["switches"][0]["vcs"][0]["vppbs"][1]["binding_status"] = "bound_port"
+
+
+def unknown_port_device_type(t):
+    port(t, 2)["conn_dev_type"] = "ssd"
+
+
 # single-sld.json
 def capacity_not_256mb(t):
     ident = t["devices"][0]["identify_memory_device"]
@@ -233,6 +242,8 @@ BROKEN = [
     ("multi-host-vcs.json", vendor_is_not_a_number, "is not a number that fits"),
     ("multi-host-vcs.json", device_on_a_missing_switch, "which the topology does not have"),
     ("multi-host-vcs.json", duplicate_device_id, "two components with ID"),
+    ("multi-host-vcs.json", misspelt_binding_status, "is not unbound, busy"),
+    ("multi-host-vcs.json", unknown_port_device_type, "is not none, pcie"),
     ("single-sld.json", capacity_not_256mb, "is not a multiple of 256 MB"),
     ("single-sld.json", capacity_parts_exceed_total, "is more than the total capacity"),
     ("mld-device.json", mld_with_17_lds, "more than 16 LDs in an MLD"),
