@@ -166,6 +166,28 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 		       struct fmd_mld *mld);
 static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
+/*
+ * Link status from the LTSSM State of Get Physical Port State and of Get
+ * Head Info (CXL r4.0 Tables 7-21 and 7-64, same encoding). The Link State
+ * Flags field next to it is not the link state: it holds lane reversal,
+ * PERST#, PRSNT# and power control.
+ */
+static enum fmd_link_status ltssm_to_link_status(uint8_t ltssm)
+{
+	switch (ltssm) {
+	case 0x04: /* L0 */
+	case 0x05: /* L0s */
+	case 0x06: /* L1 */
+		return FMD_LINK_UP;
+	case 0x01: /* Polling */
+	case 0x02: /* Configuration */
+	case 0x03: /* Recovery */
+		return FMD_LINK_TRAINING;
+	default:   /* Detect, L2, Disabled, Loopback, Hot Reset, reserved */
+		return FMD_LINK_DOWN;
+	}
+}
+
 
 /*
  * Discover SLD - Simple memory device with single LD
@@ -521,8 +543,8 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 			head->max_link_width = hi->field_1;
 			head->negotiated_link_width = hi->field_2;
 
-			/* Check link state - LTSSM L0 means link is up */
-			if (hi->ltssm_state != 0x10)  /* Not in L0 */
+			/* A head whose link is not up is not in use */
+			if (ltssm_to_link_status(hi->ltssm_state) != FMD_LINK_UP)
 				head->state = FMD_HEAD_DISABLED;
 		}
 
@@ -849,7 +871,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 		/* Map port state info to our structures */
 		port->conn_dev_type = pinfo->conn_dev_type;
-		port->link_status = (pinfo->link_state == 0) ? FMD_LINK_DOWN : FMD_LINK_UP;
+		port->link_status = ltssm_to_link_status(pinfo->ltssm_state);
 		port->max_link_width = pinfo->max_link_width;
 		port->negotiated_link_width = pinfo->negotiated_link_width;
 		port->supported_ld_count = pinfo->supported_ld_count;

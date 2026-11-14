@@ -395,7 +395,7 @@ static struct cxlmi_endpoint *new_switch(struct fmd_ctx *ctx, uint64_t serial)
 	port_block(ports + 4 + 0 * 16, 0, 0x04, 0, 0x00, 0x04, 0x0004);
 	port_block(ports + 4 + 1 * 16, 1, 0x14, 0, 0x00, 0x04, 0x0000);
 	port_block(ports + 4 + 2 * 16, 2, 0x03, 0x02, 0x01, 0x04, 0x0004);
-	port_block(ports + 4 + 3 * 16, 3, 0x00, 0, 0x00, 0x00, 0x0000);
+	port_block(ports + 4 + 3 * 16, 3, 0x00, 0, 0x00, 0x00, 0x0004);
 	answer(ep, 0x5101, ports, sizeof(ports));
 
 	/* Get Virtual CXL Switch Info (5200h), Tables 7-33 and 7-34 */
@@ -493,14 +493,19 @@ static void test_switch(void)
 		 * Flags are lane reversal, PERST#, PRSNT# and power, and are
 		 * all 0 for this port.
 		 */
-		XFAIL(port->link_status == FMD_LINK_UP,
-		      "port 1 link %d: taken from Link State Flags, not from "
-		      "LTSSM State 04h (L0)", port->link_status);
+		CHECK(port->link_status == FMD_LINK_UP, "port 1 link %d",
+		      port->link_status);
 	}
 
-	/* a disabled port is not a DSP */
+	/*
+	 * A disabled port is not a DSP. It is in Detect (00h) with PRSNT#
+	 * set in Link State Flags: present, but the link is down.
+	 */
 	port = fmd_topology_find_port(&ctx->topology, id, 3);
 	CHECK(port, "no port 3");
+	if (port)
+		CHECK(port->link_status == FMD_LINK_DOWN, "port 3 link %d",
+		      port->link_status);
 	if (port)
 		CHECK(port->state == FMD_PORT_DISABLED, "port 3 state %d",
 		      port->state);
