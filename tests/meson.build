@@ -62,6 +62,26 @@ if pytest_available
     )
 endif
 
+# The man page says what the program does
+if pytest_available
+    test(
+        'manpage',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            meson.current_source_dir() / 'test_manpage.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 60,
+        suite: 'unit',
+    )
+endif
+
 # Quick endpoint tests (always run if pytest available)
 if pytest_available
     test(

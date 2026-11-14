@@ -1,0 +1,254 @@
+.\" SPDX-License-Identifier: LGPL-2.1
+.TH CXL-FMD 8 "November 2026" "cxl-fmd 0.1.0" "System Administration"
+.SH NAME
+cxl-fmd \- CXL Fabric Manager daemon with a Redfish API
+.SH SYNOPSIS
+.B cxl-fmd
+.RB [ \-p
+.IR port ]
+.RB [ \-m ]
+.RB [ \-i ]
+.RB [ \-e
+.IR secs ]
+.RB [ \-r
+.IR secs ]
+.RB [ \-N
+.IR threads ]
+.RB [ \-v ...]
+.br
+.B cxl-fmd
+.B \-M
+.I file
+.RB [ \-c ]
+.RB [ \-p
+.IR port ]
+.RB [ \-N
+.IR threads ]
+.RB [ \-v ...]
+.br
+.B cxl-fmd
+.BR \-h " | " \-V
+.SH DESCRIPTION
+.B cxl-fmd
+is a Fabric Manager for Compute Express Link (CXL) memory fabrics.
+It discovers CXL switches and Type 3 memory devices by sending them Component
+Command Interface (CCI) commands, including the Fabric Management API, through
+.BR libcxlmi ,
+and serves what it finds, and the means to change it, as a DMTF Redfish
+service over HTTP.
+.PP
+It represents switches with their ports, Virtual CXL Switches (VCSs) and
+vPPBs; Single Logical Devices (SLDs), Multi-Logical Devices (MLDs) with their
+Logical Devices, and Multi-Headed devices; the hosts on each VCS; and dynamic
+capacity regions and extents.
+A client provisions memory by creating and removing Redfish resources:
+a connection between a host and a device binds a switch port or a Logical
+Device to a vPPB of the host's VCS, memory chunks set Logical Device
+allocations, and actions add and release dynamic capacity.
+.PP
+The service root is at
+.IR http://host:port/redfish/v1 .
+.SH OPTIONS
+.TP
+.BI \-p\  port \fR,\ \fB\-\-port\  port
+Listen for HTTP requests on
+.IR port ,
+from 1 to 65535.
+The default is 8080.
+.TP
+.BR \-m ", " \-\-mctp
+Look for devices on MCTP, through the
+.BR mctpd (8)
+D-Bus service.
+This is the default when neither
+.B \-m
+nor
+.B \-i
+is given.
+.TP
+.BR \-i ", " \-\-ioctl
+Look for devices through the kernel's CXL mailbox character devices in
+.IR /dev/cxl .
+May be combined with
+.BR \-m ;
+a device reached both ways is one component.
+.TP
+.BI \-M\  file \fR,\ \fB\-\-mock\  file
+Serve the fabric described in the JSON topology
+.I file
+and send no commands to hardware.
+See
+.B MOCK MODE
+below.
+.TP
+.BR \-c ", " \-\-check
+Check that the topology is a valid CXL fabric, report, and exit without
+serving it.
+With
+.B \-M
+this checks a topology file.
+The exit status is 0 if the topology is valid.
+.TP
+.BI \-e\  secs \fR,\ \fB\-\-event\-poll\  secs
+Read the event logs every
+.I secs
+seconds: the event logs of each switch, and the Dynamic Capacity event log of
+each dynamic capacity device.
+The default is 10; 0 disables it.
+The logs are also read when a component sends an MCTP Event Notification.
+.TP
+.BI \-r\  secs \fR,\ \fB\-\-rescan\  secs
+Look at the whole fabric again every
+.I secs
+seconds, from 0 to 86400.
+The default is 30; 0 disables it.
+See
+.B KEEPING UP WITH THE FABRIC
+below.
+.TP
+.BI \-N\  threads \fR,\ \fB\-\-threads\  threads
+Serve requests on
+.I threads
+threads, from 1 to 256.
+The default is 8.
+This is how many requests can be in hand at once.
+Requests that only read (GET) run together; a request that changes the fabric
+runs alone.
+.TP
+.BR \-v ", " \-\-verbose
+Log more.
+May be repeated.
+.TP
+.BR \-h ", " \-\-help
+Print a summary of the options and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH MOCK MODE
+With
+.B \-M
+.B cxl-fmd
+builds its topology from a JSON file and serves that.
+Nothing is discovered and no commands are sent, so it needs no hardware and
+no privileges; it is meant for developing and testing clients.
+.PP
+A topology file is read strictly, and the topology is then checked against the
+CXL specification: what is bound to what, what a port sees of the device on
+it, capacities, Logical Device counts, the heads of a Multi-Headed device,
+dynamic capacity regions and extents.
+A file that cannot be read, or a topology that could not be a real fabric, is
+refused with the rule it breaks, and
+.B cxl-fmd
+exits.
+.PP
+The topologies that ship with
+.BR cxl-fmd ,
+and the format, are described in
+.I mock/README.md
+and
+.I docs/mock-topology.md
+in the source.
+.SH KEEPING UP WITH THE FABRIC
+The fabric is discovered when
+.B cxl-fmd
+starts.
+After that, on hardware:
+.IP \(bu 2
+The event logs of each switch are read and cleared.
+A port whose link or presence has changed is read again, and a device that has
+appeared on it is discovered.
+.IP \(bu 2
+Every
+.B \-\-rescan
+seconds the switches are read again in full and new endpoints are looked for,
+including any that was not ready before.
+.IP \(bu 2
+The Dynamic Capacity event log of each dynamic capacity device is read, and
+the extents of the hosts it names are brought up to date.
+.PP
+Components are added and never removed.
+A device that has been unplugged stays, with the link of its port down, until
+.B cxl-fmd
+is restarted.
+.SH BINDING IN THE BACKGROUND
+A switch carries out a bind or an unbind as a background command.
+When it has started one and not finished it,
+.B cxl-fmd
+answers the request with
+.B 202 Accepted
+and a Redfish task, and the connection is made, or removed, when the switch is
+done.
+The
+.I Location
+header of the answer is a task monitor; a GET of it answers 202 while the
+operation runs, and then with the outcome.
+A switch runs one such command at a time: a request for another is answered
+with
+.B 503
+and is to be tried again.
+.SH SIGNALS
+.TP
+.BR SIGINT ", " SIGTERM
+Stop serving and exit with status 0.
+.SH EXIT STATUS
+.TP
+.B 0
+Stopped by a signal, or with
+.B \-c
+the topology is valid, or
+.B \-h
+or
+.B \-V
+was given.
+.TP
+.B 1
+An option is invalid, the topology file could not be read or is not a valid
+fabric, discovery failed, or the HTTP port could not be opened.
+.SH SECURITY
+.B cxl-fmd
+serves plain HTTP on every interface and does not authenticate clients.
+Anything that can reach the port can reconfigure the fabric.
+Run it on a management network, or behind a reverse proxy that provides TLS
+and authentication.
+.SH EXAMPLES
+Serve the devices found on MCTP on port 8080:
+.PP
+.RS 4
+.EX
+cxl-fmd
+.EE
+.RE
+.PP
+Serve devices found on MCTP and through the kernel, on port 8443, with eight
+times as many threads and more logging:
+.PP
+.RS 4
+.EX
+cxl-fmd \-m \-i \-p 8443 \-N 64 \-v
+.EE
+.RE
+.PP
+Check a mock topology:
+.PP
+.RS 4
+.EX
+cxl-fmd \-\-mock mock/large-fabric.json \-\-check
+.EE
+.RE
+.PP
+Serve it, and list the switches:
+.PP
+.RS 4
+.EX
+cxl-fmd \-\-mock mock/large-fabric.json &
+curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches
+.EE
+.RE
+.SH SEE ALSO
+.BR mctpd (8)
+.PP
+Compute Express Link Specification; DMTF DSP0266, Redfish Specification;
+DMTF DSP0288, CXL to Redfish Mapping Specification.
+.PP
+.I docs/Redfish-API.md
+in the source lists the resources served and the CXL commands behind them.

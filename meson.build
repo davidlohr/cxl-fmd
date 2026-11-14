@@ -74,6 +74,9 @@ executable(
     install: true,
 )
 
+# cxl-fmd(8)
+install_man('man/cxl-fmd.8')
+
 # Tests
 if get_option('tests').enabled() or (get_option('tests').auto() and not meson.is_subproject())
     subdir('tests')

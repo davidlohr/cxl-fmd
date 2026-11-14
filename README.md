@@ -28,6 +28,9 @@ meson compile -C build
 sudo meson install -C build
 ```
 
+Installing also installs the manual page, `cxl-fmd(8)`. To read it from the
+source tree: `man -l man/cxl-fmd.8`.
+
 ### Build Options
 
 | Option | Type | Default | Description |
