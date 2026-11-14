@@ -176,6 +176,30 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 					reg->block_size, ext->region_id);
 		}
 
+		/*
+		 * Capacity that one host has can be given to another only
+		 * through a Sharable region: Initiate Dynamic Capacity Add
+		 * fails "when the tagged capacity is already mapped to any
+		 * Host ID via a non-Sharable region" (Section 7.6.7.6.5).
+		 */
+		if (ext->host_mask & (ext->host_mask - 1)) {
+			for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
+				struct fmd_dc_region *reg;
+
+				if (!(ext->host_mask & fmd_dc_host_bit(h)))
+					continue;
+				reg = fmd_dc_find_region(dev, h, ext->region_id);
+				if (reg && !(reg->flags & FMD_DC_REGION_SHAREABLE)) {
+					invalid(v, "Initiate Dynamic Capacity Add, "
+						"Section 7.6.7.6.5", "%s: extent at %#"
+						PRIx64 " is held by more than one host "
+						"and region %d is not Sharable",
+						dev->id, ext->start_dpa, ext->region_id);
+					break;
+				}
+			}
+		}
+
 		/* one DPA range is one extent */
 		for (other = child->next_sibling; other; other = other->next_sibling) {
 			struct fmd_dc_extent *o;

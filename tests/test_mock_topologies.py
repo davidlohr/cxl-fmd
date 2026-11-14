@@ -255,6 +255,12 @@ def extents_overlap(t):
     extents.append(dict(extents[0], start_mb=extents[0]["start_mb"] + 256))
 
 
+# switch-dcd.json: region 0 of the MLD is Sharable, region 1 is not
+def shared_extent_in_a_region_that_is_not_sharable(t):
+    extent = t["devices"][0]["dcd"]["extents"][1]      # in region 1, host 1's
+    extent["hosts"] = [0, 1]
+
+
 BROKEN = [
     # (base topology, what to break, part of the message that names the rule)
     ("multi-host-vcs.json", port_bound_twice, "is bound to vPPB"),
@@ -295,6 +301,8 @@ BROKEN = [
     ("dcd-device.json", extent_not_block_aligned, "is not aligned to the block size"),
     ("dcd-device.json", region_base_not_256mb, "is not aligned to 256 MB"),
     ("dcd-device.json", extents_overlap, "overlap"),
+    ("switch-dcd.json", shared_extent_in_a_region_that_is_not_sharable,
+     "is not Sharable"),
 ]
 
 
