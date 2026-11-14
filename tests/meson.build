@@ -29,9 +29,15 @@ pytest_available = pytest_check.returncode() == 0
 requests_check = run_command(python, '-c', 'import requests', check: false)
 requests_available = requests_check.returncode() == 0
 
-# Check for redfish_service_validator
-validator_check = run_command(python, '-c', 'import redfish_service_validator', check: false)
-validator_available = validator_check.returncode() == 0
+# The DMTF Redfish Service Validator. The tests run it from the virtual
+# environment in .venv-validator, and make it there if it is not (see
+# validator_venv in conftest.py), which needs network. So: run them when
+# asked to, or when that environment is there already.
+fs = import('fs')
+validator_venv = meson.project_source_root() / '.venv-validator'
+validator_available = fs.is_file(validator_venv / 'bin' / 'rf_service_validator')
+run_validator = get_option('validator').enabled() or \
+    (get_option('validator').auto() and validator_available)
 
 if not pytest_available
     warning('pytest not found - tests will be skipped')
@@ -340,52 +346,39 @@ if pytest_available and requests_available
     )
 endif
 
-# Full validator tests (only if validator installed)
-if pytest_available and validator_available
-    test(
-        'redfish-validator-sld',
-        python,
-        args: [
-            '-m', 'pytest',
-            '-v',
-            '--tb=short',
-            '-k', 'test_single_sld',
-            meson.current_source_dir(),
-        ],
-        env: {
-            'MESON_BUILD_ROOT': meson.project_build_root(),
-            'MESON_SOURCE_ROOT': meson.project_source_root(),
-        },
-        timeout: 300,
-        suite: 'validator',
-    )
-
-    test(
-        'redfish-validator-mld',
-        python,
-        args: [
-            '-m', 'pytest',
-            '-v',
-            '--tb=short',
-            '-k', 'test_mld',
-            meson.current_source_dir(),
-        ],
-        env: {
-            'MESON_BUILD_ROOT': meson.project_build_root(),
-            'MESON_SOURCE_ROOT': meson.project_source_root(),
-        },
-        timeout: 300,
-        suite: 'validator',
-    )
-else
-    if not validator_available
-        warning('redfish-service-validator not found - install with "pip install redfish-service-validator" or run ./scripts/run_redfish_validator.py manually')
-    endif
+# The validator over mock topologies: one for each, by its test
+if pytest_available and run_validator
+    foreach t : [
+        ['redfish-validator-sld', 'test_single_sld_validation'],
+        ['redfish-validator-mld', 'test_mld_validation'],
+        ['redfish-validator-event-logs', 'test_event_logs_validation'],
+    ]
+        test(
+            t[0],
+            python,
+            args: [
+                '-m', 'pytest',
+                '-v',
+                '--tb=short',
+                '-k', t[1],
+                meson.current_source_dir() / 'test_redfish_validator.py',
+            ],
+            env: {
+                'MESON_BUILD_ROOT': meson.project_build_root(),
+                'MESON_SOURCE_ROOT': meson.project_source_root(),
+            },
+            timeout: 600,
+            suite: 'validator',
+            is_parallel: false,
+        )
+    endforeach
+elif pytest_available and not validator_available
+    message('the DMTF Redfish Service Validator is not run: -Dvalidator=enabled to install it in .venv-validator and run it')
 endif
 
 # Summary
 summary({
     'pytest': pytest_available,
     'requests': requests_available,
-    'redfish_service_validator': validator_available,
+    'redfish_service_validator': run_validator,
 }, section: 'Test Dependencies')

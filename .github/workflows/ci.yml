@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: LGPL-2.1
 #
 # Build cxl-fmd and run everything that needs no hardware: the discovery
-# harness against libcxlmi mock endpoints, the mock topology checks, and
-# the Redfish API suites against the daemon in --mock mode.
+# harness against libcxlmi mock endpoints, the mock topology checks, the
+# Redfish API suites against the daemon in --mock mode, and the DMTF
+# Redfish Service Validator over it.
 
 name: CI
 
@@ -121,4 +122,43 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: testlog-tsan
+          path: build/meson-logs/testlog.txt
+
+  # The DMTF Redfish Service Validator over mock topologies: every resource
+  # it can reach from the service root, against the schemas in schema/dmtf.
+  # It follows every link, so a resource that crashes the daemon or does not
+  # match its schema fails here.
+  redfish-validator:
+    name: Redfish Service Validator
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config gcc \
+            libmicrohttpd-dev libjansson-dev libdbus-1-dev \
+            python3-pytest python3-requests python3-venv
+
+      # the version tests/conftest.py names
+      - name: Install the validator
+        run: |
+          version=$(sed -n 's/^VALIDATOR_VERSION = "\(.*\)"/\1/p' tests/conftest.py)
+          python3 -m venv .venv-validator
+          .venv-validator/bin/python -m pip install -q "redfish-service-validator==$version"
+
+      - name: Build
+        run: |
+          meson setup build -Dtests=enabled -Dvalidator=enabled
+          meson compile -C build
+
+      - name: Validate
+        run: meson test -C build --suite validator --print-errorlogs
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-redfish-validator
           path: build/meson-logs/testlog.txt

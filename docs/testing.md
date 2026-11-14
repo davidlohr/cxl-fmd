@@ -38,19 +38,23 @@ Install Python dependencies:
 
 ```bash
 pip install pytest requests
-# Optional: for DMTF validator tests
-pip install redfish-service-validator
 ```
 
-Meson will warn about missing dependencies during configuration:
+The DMTF Redfish Service Validator runs from its own virtual environment,
+`.venv-validator` in the source tree, at the version `tests/conftest.py`
+names (`VALIDATOR_VERSION`). Its tests run when that environment is there, or
+when asked for with `-Dvalidator=enabled`, in which case the first of them
+makes it, which needs network:
 
 ```bash
-meson setup build
+meson setup build -Dvalidator=enabled
 # Shows: Test Dependencies
 #   pytest                    : YES
 #   requests                  : YES
-#   redfish_service_validator : YES/NO
+#   redfish_service_validator : YES
 ```
+
+`-Dvalidator=disabled` leaves them out. CI runs them in a job of their own.
 
 ### Running Meson Tests
 
@@ -83,7 +87,7 @@ meson test -C build --list
 | `api` | topology-inventory, memory-lifecycle, connections, cxl-business-rules, error-handling | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
 | `unit` | unit-topologies | All 8 CXL topology combinations | pytest, requests |
-| `validator` | redfish-validator-sld, redfish-validator-mld | DMTF schema validation | pytest, redfish-service-validator |
+| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json` and `event-logs.json` (a switch, its VCSs, connections, tasks and log services) | pytest, `.venv-validator` |
 
 ### Test Timeouts
 
@@ -91,7 +95,7 @@ meson test -C build --list
 |-------|---------|
 | redfish | 120s |
 | api | 180s |
-| validator | 300s |
+| validator | 600s |
 
 Override timeouts:
 

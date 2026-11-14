@@ -37,6 +37,11 @@ STARTUP_TIMEOUT = 30
 # Virtual environment for validator
 VENV_DIR = PROJECT_ROOT / ".venv-validator"
 
+# the version of the DMTF Redfish Service Validator that is installed there:
+# one that a test passed with, so that a new release does not change what
+# passes without anything here having changed
+VALIDATOR_VERSION = "3.1.8"
+
 
 class ValidatorVenv:
     """Manages virtual environment for Redfish validator."""
@@ -58,7 +63,7 @@ class ValidatorVenv:
         print("Installing redfish-service-validator...")
         subprocess.run(
             [str(self.python), "-m", "pip", "install", "-q",
-             "redfish-service-validator"],
+             "redfish-service-validator==" + VALIDATOR_VERSION],
             check=True,
         )
 

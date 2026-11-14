@@ -36,6 +36,9 @@ STARTUP_TIMEOUT = 30   # 30 seconds for daemon startup
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 DEFAULT_MOCK_TOPOLOGY = PROJECT_ROOT / "mock" / "single-sld.json"
 SCHEMA_DIR = PROJECT_ROOT / "schema" / "dmtf" / "csdl"  # CSDL/XML schemas for validator
+
+# the version the tests use (tests/conftest.py)
+VALIDATOR_VERSION = "3.1.8"
 VENV_DIR = PROJECT_ROOT / ".venv-validator"
 
 
@@ -59,7 +62,7 @@ class VenvManager:
         print("Installing redfish-service-validator...")
         subprocess.run(
             [str(self.python), "-m", "pip", "install", "-q",
-             "redfish-service-validator"],
+             "redfish-service-validator==" + VALIDATOR_VERSION],
             check=True,
         )
 
