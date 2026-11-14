@@ -99,6 +99,37 @@ Override timeouts:
 meson test -C build --timeout-multiplier 2
 ```
 
+## Discovery Tests
+
+The pytest suites run the daemon in `--mock` mode, which builds the topology
+straight from JSON and never executes `src/discovery.c` or any libcxlmi
+command. `tests/discovery-tests.c` covers that code: each device is a libcxlmi
+mock endpoint (`cxlmi_open_mock()`) that answers CCI commands with responses
+the test queued, and `fmd_discover()` and the functions that act on its result
+are the daemon's own.
+
+```bash
+meson test -C build discovery
+./build/tests/discovery-tests
+```
+
+The responses are written byte by byte from the payload tables of the CXL
+specification, with the table number next to each, so the decoding is checked
+against the specification and not against libcxlmi's structures.
+
+A check for a known defect is written with `XFAIL()`. It is reported as
+`xfail` and does not fail the run. When the defect is fixed it reports `XPASS`,
+which does fail, so that the check is turned into a `CHECK()`. The `xfail`
+lines are therefore the list of discovery defects the tests currently pin down.
+
+Limits, from the libcxlmi mock endpoint:
+
+- It matches a command by opcode only, so the tunnel a command is sent through
+  (to an LD, or through a switch port) is not verified.
+- A queued response is used once. A command the code sends twice needs two
+  responses; one that has none gets "Unsupported".
+- It keeps only the last command it received.
+
 ## DMTF Redfish Service Validator
 
 The [DMTF Redfish Service Validator](https://github.com/DMTF/Redfish-Service-Validator) validates that cxl-fmd's Redfish responses conform to the official DMTF schemas.

@@ -41,6 +41,9 @@ python scripts/run_redfish_validator.py --mock-topology mock/mld-device.json
 
 # Run meson tests
 meson test -C build
+
+# Discovery code against scripted libcxlmi mock endpoints (no --mock JSON)
+./build/tests/discovery-tests
 ```
 
 ## Architecture

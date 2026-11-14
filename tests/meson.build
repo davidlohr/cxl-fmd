@@ -1,6 +1,23 @@
 # SPDX-License-Identifier: LGPL-2.1
 # cxl-fmd test configuration
 
+# Discovery against libcxlmi mock endpoints. This is the daemon's own code,
+# main() included (renamed), with the test's main() in its place.
+discovery_tests = executable(
+    'discovery-tests',
+    [src, files('discovery-tests.c')],
+    include_directories: inc,
+    c_args: ['-Dmain=fmd_daemon_main'],
+    dependencies: [
+        libcxlmi_dep,
+        microhttpd_dep,
+        jansson_dep,
+        threads_dep,
+    ],
+)
+
+test('discovery', discovery_tests, suite: 'unit')
+
 # Find Python
 python = find_program('python3', required: true)
 
