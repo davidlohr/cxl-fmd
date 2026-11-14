@@ -320,6 +320,15 @@ class TestDynamicCapacityRelease:
         assert status == 200
         assert extent_ids(api_client) == []
 
+    def test_release_prescriptive_same_extent_twice_400(self, api_client):
+        """Listing an extent twice is refused, and releases nothing."""
+        link = {"@odata.id": SLD + "/MemoryExtents/ext_400000000"}
+        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+            "Prescriptive", ExtentList=[link, link]))
+        assert status == 400
+        # the daemon is still there, and so is the extent
+        assert extent_ids(api_client) == ["ext_400000000"]
+
     def test_delete_extent(self, api_client):
         status = api_client.delete(SLD + "/MemoryExtents/ext_400000000")
         assert status == 204

@@ -1416,6 +1416,19 @@ static int dc_release_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int
 	if (!fmd_dc_host_component(dev, host_id))
 		return -ENOENT;
 
+	/*
+	 * Releasing an extent can free it, so one that is listed twice
+	 * would be used after that, and freed again.
+	 */
+	if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE && extents) {
+		for (int i = 1; i < ext_count; i++) {
+			for (int j = 0; j < i; j++) {
+				if (extents[i] && extents[i] == extents[j])
+					return -EINVAL;
+			}
+		}
+	}
+
 	if (!dev_is_hw(dev))
 		return mock_dc_release(ctx, dev, host_id, policy, length, tag,
 				       extents, ext_count);

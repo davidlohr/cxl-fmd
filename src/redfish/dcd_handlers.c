@@ -105,7 +105,8 @@ static void extent_uri(const char *chassis_id, const char *dev_id,
 
 /*
  * Parse an ExtentList action parameter into an array of extents.
- * Returns the count, 0 if the parameter is absent, -1 on a bad link.
+ * Returns the count, 0 if the parameter is absent, -1 on a bad link or
+ * on an extent that is listed twice.
  */
 static int parse_extent_list(struct fmd_component *dev, json_t *root,
 			     struct fmd_dc_extent ***out)
@@ -136,6 +137,13 @@ static int parse_extent_list(struct fmd_component *dev, json_t *root,
 		if (!extents[idx]) {
 			free(extents);
 			return -1;
+		}
+		/* each extent once: it may be freed when it is released */
+		for (size_t prev = 0; prev < idx; prev++) {
+			if (extents[prev] == extents[idx]) {
+				free(extents);
+				return -1;
+			}
 		}
 	}
 
@@ -735,7 +743,7 @@ int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
 	ext_count = parse_extent_list(dev, root, &extents);
 	if (ext_count < 0) {
 		json_decref(root);
-		*msg = "ExtentList must be a non-empty array of MemoryExtent links on this device";
+		*msg = "ExtentList must be a non-empty array of distinct MemoryExtent links on this device";
 		return -EINVAL;
 	}
 	json_decref(root);
@@ -873,7 +881,7 @@ int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
 	ext_count = parse_extent_list(dev, root, &extents);
 	if (ext_count < 0) {
 		json_decref(root);
-		*msg = "ExtentList must be a non-empty array of MemoryExtent links on this device";
+		*msg = "ExtentList must be a non-empty array of distinct MemoryExtent links on this device";
 		return -EINVAL;
 	}
 	json_decref(root);
