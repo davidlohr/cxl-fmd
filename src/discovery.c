@@ -1577,6 +1577,28 @@ static void endpoint_mark_known(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 	ctx->known_eps[ctx->nknown_eps++] = ep;
 }
 
+static void endpoint_mark_ioctl(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
+	struct cxlmi_endpoint **tmp = realloc(ctx->ioctl_eps,
+			(ctx->nioctl_eps + 1) * sizeof(*tmp));
+
+	if (!tmp)
+		return;
+	ctx->ioctl_eps = tmp;
+	ctx->ioctl_eps[ctx->nioctl_eps++] = ep;
+}
+
+bool fmd_endpoint_owns_events(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
+	if (!ep)
+		return false;
+	for (int i = 0; i < ctx->nioctl_eps; i++) {
+		if (ctx->ioctl_eps[i] == ep)
+			return false;
+	}
+	return true;
+}
+
 /* Look for endpoints. libcxlmi does not open one that is open already */
 static void scan_endpoints(struct fmd_ctx *ctx)
 {
@@ -1595,6 +1617,19 @@ static void scan_endpoints(struct fmd_ctx *ctx)
 
 	/* Scan for ioctl endpoints */
 	if (ctx->config.scan_ioctl) {
+		struct cxlmi_endpoint *ep, **before = NULL;
+		int nbefore = 0;
+
+		/* what was open before: the rest is what the scan opened */
+		cxlmi_for_each_endpoint(ctx->cxlmi, ep)
+			nbefore++;
+		before = calloc(nbefore ? nbefore : 1, sizeof(*before));
+		nbefore = 0;
+		if (before) {
+			cxlmi_for_each_endpoint(ctx->cxlmi, ep)
+				before[nbefore++] = ep;
+		}
+
 		fmd_dbg(ctx, "Scanning /dev/cxl/ for CXL devices...");
 		rc = cxlmi_scan(ctx->cxlmi);
 		if (rc < 0) {
@@ -1602,6 +1637,16 @@ static void scan_endpoints(struct fmd_ctx *ctx)
 		} else {
 			fmd_dbg(ctx, "ioctl scan found %d endpoint(s)", rc);
 		}
+
+		cxlmi_for_each_endpoint(ctx->cxlmi, ep) {
+			bool old = false;
+
+			for (int i = 0; i < nbefore && !old; i++)
+				old = before[i] == ep;
+			if (!old)
+				endpoint_mark_ioctl(ctx, ep);
+		}
+		free(before);
 	}
 }
 

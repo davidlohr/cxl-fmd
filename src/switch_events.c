@@ -202,7 +202,9 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx)
 		return -1;
 	}
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SWITCH) {
-		if (comp->ep && n < ctx->topology.root->switch_count)
+		/* a log that is the host's is not drained */
+		if (comp->ep && fmd_endpoint_owns_events(ctx, comp->ep) &&
+		    n < ctx->topology.root->switch_count)
 			switches[n++] = fmd_to_switch(comp);
 	}
 

@@ -1268,7 +1268,9 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 	fmd_topology_rdlock(&ctx->topology);
 	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
 		fmd_for_each_type(&ctx->topology, comp, types[t]) {
+			/* a log that is the host's is not drained */
 			if (dev_is_hw(comp) && fmd_memdev_dcd(comp) &&
+			    fmd_endpoint_owns_events(ctx, comp->ep) &&
 			    n < DC_EVENT_MAX_DEVS)
 				devs[n++] = comp;
 		}

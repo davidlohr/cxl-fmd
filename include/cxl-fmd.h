@@ -1039,6 +1039,13 @@ struct fmd_ctx {
 	/* Endpoints that have been discovered (src/discovery.c) */
 	struct cxlmi_endpoint **known_eps;
 	int nknown_eps;
+
+	/*
+	 * Endpoints opened through the kernel's mailbox (/dev/cxl). Their
+	 * event logs are not the FM's: see fmd_endpoint_owns_events().
+	 */
+	struct cxlmi_endpoint **ioctl_eps;
+	int nioctl_eps;
 	/*
 	 * Serializes DCD state changes (refresh, event drain, add/release)
 	 * across the event loop and the Redfish threads. The topology rwlock
@@ -1439,6 +1446,17 @@ int fmd_discover(struct fmd_ctx *ctx);
  * removes. Takes fabric_lock. Returns how many components were added.
  */
 int fmd_rescan(struct fmd_ctx *ctx);
+
+/*
+ * Whether cxl-fmd may read and clear the event logs of a component reached
+ * through @ep. "The Primary and Secondary Mailbox register's CCI instance
+ * pairs shall share the context, but the MCTP CCI within a component shall
+ * have a unique context" for events, "including reading contents, clearing
+ * entries, and configuring interrupt settings" (CXL r4.0 Section 9.20.1).
+ * The logs of an endpoint opened through the kernel's mailbox are the
+ * host's: records cleared there would be taken from the kernel's driver.
+ */
+bool fmd_endpoint_owns_events(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
 
 /* One switch: some of its ports, or all of it. fabric_lock held exclusively */
 int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,

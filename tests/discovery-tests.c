@@ -1761,6 +1761,36 @@ out:
 	report("event logs of a switch", before);
 }
 
+/*
+ * The event logs of a component reached through the kernel's mailbox are
+ * shared with the kernel's driver (Section 9.20.1): they are not drained.
+ */
+static void test_mailbox_events_are_the_hosts(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x500d);
+	int before = failures;
+	unsigned int sent;
+
+	fmd_discover(ctx);
+
+	/* as if the scan of /dev/cxl had opened it */
+	ctx->ioctl_eps = calloc(1, sizeof(*ctx->ioctl_eps));
+	if (ctx->ioctl_eps)
+		ctx->ioctl_eps[ctx->nioctl_eps++] = ep;
+	CHECK(!fmd_endpoint_owns_events(ctx, ep), "a mailbox endpoint owns its events");
+
+	sent = commands_sent(ep);
+	answer_event(ep, physical_switch_event, 0x21, (uint8_t[2]){ 4, 0 }, 2);
+	fmd_switch_events_poll(ctx);
+	CHECK(commands_sent(ep) == sent,
+	      "%u commands sent to a switch whose logs are the host's",
+	      commands_sent(ep) - sent);
+
+	fmd_ctx_free(ctx);
+	report("event logs behind the kernel's mailbox", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1796,6 +1826,7 @@ int main(void)
 	test_bind_busy();
 	test_rescan();
 	test_switch_events();
+	test_mailbox_events_are_the_hosts();
 	test_overcount_switch();
 	test_overcount_mld();
 	test_mld_ld_counts();
