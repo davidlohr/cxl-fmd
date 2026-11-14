@@ -185,6 +185,11 @@ def mhd_with_one_head(t):
     del dev["heads"][1]
 
 
+def head_presents_wrongly(t):
+    # one LD mapped: the head presents an SLD
+    mhd(t)["heads"][0]["presentation"] = "MLD"
+
+
 # dcd-device.json
 def dcd(t):
     return t["devices"][0]["dcd"]
@@ -236,6 +241,7 @@ BROKEN = [
     ("mld-device.json", mld_duplicate_ld_id, "two LDs with LD-ID"),
     ("mhd-device.json", head_without_lds, "a head has 1 to 16"),
     ("mhd-device.json", mhd_with_one_head, "has more than one"),
+    ("mhd-device.json", head_presents_wrongly, "does not present as an SLD"),
     ("dcd-device.json", extent_outside_its_region, "is outside region base"),
     ("dcd-device.json", extent_not_block_aligned, "is not aligned to the block size"),
     ("dcd-device.json", region_base_not_256mb, "is not aligned to 256 MB"),

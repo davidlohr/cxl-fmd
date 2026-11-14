@@ -300,6 +300,26 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 				"1 to 16", mhd->base.id, h, per_head[h]);
 	}
 
+	/*
+	 * "A head with one LD mapped shall present itself as an SLD and a
+	 * head with more than one LD mapped shall present itself as an MLD."
+	 */
+	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+		struct fmd_head *head = fmd_to_head(child);
+		int lds;
+
+		if (head->head_id >= FMD_MAX_HEADS)
+			continue;
+		lds = per_head[head->head_id];
+		if (lds == 1 && head->presentation != FMD_HEAD_SLD)
+			invalid(v, rule, "%s: head %d has one LD mapped and does "
+				"not present as an SLD", mhd->base.id, head->head_id);
+		if (lds > 1 && head->presentation != FMD_HEAD_MLD)
+			invalid(v, rule, "%s: head %d has %d LDs mapped and does "
+				"not present as an MLD", mhd->base.id,
+				head->head_id, lds);
+	}
+
 	check_dcd(v, &mhd->base);
 }
 
