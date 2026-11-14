@@ -531,7 +531,7 @@ struct fmd_mld {
 		uint8_t egress_moderate_pct;
 		uint8_t egress_severe_pct;
 		uint8_t backpressure_sample_interval;
-		uint8_t reqcmp_basis;                   /* ReqCmpBasis */
+		uint16_t reqcmp_basis;                   /* ReqCmpBasis */
 		uint16_t completion_collection_interval;
 	} qos_control;
 
@@ -713,7 +713,7 @@ struct fmd_mhd {
 		uint8_t egress_moderate_pct;
 		uint8_t egress_severe_pct;
 		uint8_t backpressure_sample_interval;
-		uint8_t reqcmp_basis;
+		uint16_t reqcmp_basis;
 		uint16_t completion_collection_interval;
 	} qos_control;
 

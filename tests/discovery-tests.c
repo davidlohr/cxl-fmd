@@ -185,13 +185,22 @@ static void answer_ld_allocations(struct cxlmi_endpoint *ep, uint8_t nr,
 {
 	uint8_t pl[4 + 16 * 16] = { 0 };
 
+	/*
+	 * Asked twice: for one LD, to learn how many are enabled, then for
+	 * the rest. The list is min(limit, Number of LDs) entries long.
+	 */
 	pl[0] = nr;				/* Number of LDs: enabled */
 	pl[1] = granularity;			/* Memory Granularity */
 	pl[2] = 0;				/* Start LD ID */
-	pl[3] = nr;				/* LD Allocation List Length */
+	pl[3] = 1;				/* LD Allocation List Length */
 	for (int i = 0; i < nr; i++)
 		put64(pl + 4 + 16 * i, mult);	/* Range 1 Allocation Multiplier */
-	answer(ep, 0x5401, pl, 4 + 16 * nr);
+	answer(ep, 0x5401, pl, 4 + 16);
+	if (nr > 1) {
+		pl[2] = 1;
+		pl[3] = nr - 1;
+		answer(ep, 0x5401, pl, 4 + 16 * (nr - 1));
+	}
 }
 
 /* a directly attached MLD with @nr LDs of @mult allocation units each */
@@ -1065,21 +1074,19 @@ static void test_paging_lds(bool large)
 	answer_ld_info(ep, 136ULL << 28, 16);
 	answer_ld_info(ep, 136ULL << 28, 16);
 
-	/* 16 LDs of 1 to 16 units; an entry is 16 bytes, so 15 fit 256 */
+	/*
+	 * 16 LDs of 1 to 16 units. The first request is for one LD; an
+	 * entry is 16 bytes, so the other 15 fit a response of 256 bytes.
+	 */
 	alloc[0] = 16;				/* Number of LDs */
-	for (int i = 0; i < 16; i++)
-		put64(alloc + 4 + 16 * i, i + 1);
-	if (large) {
-		alloc[3] = 16;			/* LD Allocation List Length */
-		answer(ep, 0x5401, alloc, sizeof(alloc));
-	} else {
-		alloc[3] = 15;
-		answer(ep, 0x5401, alloc, 4 + 15 * 16);
-		alloc[2] = 15;			/* Start LD ID */
-		alloc[3] = 1;
-		put64(alloc + 4, 16);
-		answer(ep, 0x5401, alloc, 4 + 16);
-	}
+	alloc[3] = 1;				/* LD Allocation List Length */
+	put64(alloc + 4, 1);
+	answer(ep, 0x5401, alloc, 4 + 16);
+	alloc[2] = 1;				/* Start LD ID */
+	alloc[3] = 15;
+	for (int i = 0; i < 15; i++)
+		put64(alloc + 4 + 16 * i, i + 2);
+	answer(ep, 0x5401, alloc, 4 + 15 * 16);
 
 	fmd_discover(ctx);
 
@@ -1190,6 +1197,86 @@ static void test_mld_on_switch_and_alone(void)
 	report("MLD on a switch port and on its own endpoint", before);
 }
 
+/*
+ * What an MLD is, and how many LDs it has.
+ *
+ * Get LD Info is mandatory for an MLD and prohibited for an SLD (Table
+ * 8-397): a device that answers it is an MLD, even with a single LD. Its LD
+ * Count is the number of LDs supported (Table 7-46); the number that exist
+ * is the Number of LDs enabled, from Get LD Allocations (Table 7-48).
+ */
+static void test_mld_ld_counts(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *one = new_device(ctx), *some = new_device(ctx);
+	uint8_t info[0x0b] = { 0 }, qos[7] = { 0 };
+	int before = failures;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mld *mld;
+
+	/* an MLD that supports one LD */
+	answer_identify(one, 0xa1, 0x03);
+	answer_ld_info(one, 4ULL << 28, 1);
+	answer_ld_info(one, 4ULL << 28, 1);
+	answer_ld_allocations(one, 1, 0, 4);
+
+	/* an MLD that supports 8 LDs and has 2 enabled */
+	answer_identify(some, 0xa2, 0x03);
+	for (int i = 0; i < 2; i++) {
+		put64(info + 0x00, 32ULL << 28);	/* Memory Size */
+		put16(info + 0x08, 8);			/* LD Count: supported */
+		info[0x0a] = 0x03;			/* QoS Telemetry Capability */
+		answer(some, 0x5400, info, sizeof(info));
+	}
+	answer_ld_allocations(some, 2, 0, 4);
+
+	/* Get QoS Control (5403h), Table 7-52 */
+	qos[0] = 0x03;				/* both mechanisms enabled */
+	qos[1] = 10;				/* Egress Moderate Percentage */
+	qos[2] = 25;				/* Egress Severe Percentage */
+	qos[3] = 8;				/* Backpressure Sample Interval */
+	put16(qos + 4, 1000);			/* ReqCmpBasis */
+	qos[6] = 64;				/* Completion Collection Interval */
+	answer(some, 0x5403, qos, sizeof(qos));
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xa1);
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	CHECK(mld, "a device with one LD that answers Get LD Info is not an MLD");
+	CHECK(!fmd_topology_find_sld(&ctx->topology, id),
+	      "an MLD with one LD was taken for an SLD");
+	if (mld)
+		CHECK(mld->ld_count == 1 && mld->max_ld_count == 1,
+		      "%d LDs of %d", mld->ld_count, mld->max_ld_count);
+
+	device_id(id, sizeof(id), 0xa2);
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	CHECK(mld, "no MLD %s", id);
+	if (mld) {
+		CHECK(mld->ld_count == 2 && mld->max_ld_count == 8,
+		      "%d LDs enabled of %d supported", mld->ld_count,
+		      mld->max_ld_count);
+		CHECK(fmd_topology_find_ld(&ctx->topology, id, 1) &&
+		      !fmd_topology_find_ld(&ctx->topology, id, 2),
+		      "an LD that is supported and not enabled was created");
+		CHECK(mld->qos_telemetry_capability == 0x03,
+		      "QoS Telemetry Capability %#x",
+		      mld->qos_telemetry_capability);
+		CHECK(mld->qos_control.enabled &&
+		      mld->qos_control.temp_throughput_reduction_enabled,
+		      "QoS Telemetry Control bits");
+		CHECK(mld->qos_control.reqcmp_basis == 1000 &&
+		      mld->qos_control.completion_collection_interval == 64,
+		      "ReqCmpBasis %d, Completion Collection Interval %d",
+		      mld->qos_control.reqcmp_basis,
+		      mld->qos_control.completion_collection_interval);
+	}
+
+	fmd_ctx_free(ctx);
+	report("MLD LD counts and QoS control", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1222,6 +1309,7 @@ int main(void)
 	test_switch_unbind();
 	test_overcount_switch();
 	test_overcount_mld();
+	test_mld_ld_counts();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);

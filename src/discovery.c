@@ -383,15 +383,21 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		return rc;
 	}
 
-	mld->ld_count = ld_info.ld_count;
-	mld->max_ld_count = FMD_MAX_LD_COUNT;  /* Spec max for MLD */
+	/*
+	 * LD Count is the "number of logical devices supported" (Table
+	 * 7-46). How many of them exist is the Number of LDs "enabled in the
+	 * device" of Get LD Allocations (Table 7-48), read below; until then
+	 * every supported LD is taken to.
+	 */
+	mld->max_ld_count = ld_info.ld_count < FMD_MAX_LD_COUNT ?
+			    ld_info.ld_count : FMD_MAX_LD_COUNT;
+	mld->ld_count = mld->max_ld_count;
+	mld->qos_telemetry_capability = ld_info.qos_telemetry_capability;
 	mld->memory_granularity = 1; /* 256 MB, until 5401h says otherwise */
 	mld->total_memory_ranges = 0; /* Not available in this response */
 
-	fmd_info(ctx, "%s: MLD with %d logical devices", mld->base.id, mld->ld_count);
-
 	/* Get LD Allocations (5401h) */
-	nld = mld->ld_count < FMD_MAX_LD_COUNT ? mld->ld_count : FMD_MAX_LD_COUNT;
+	nld = mld->ld_count;
 
 	rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_ld_allocations_rsp) +
 		   FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
@@ -403,11 +409,14 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 
 	/*
 	 * As many LDs at a time as fit a response, from Start LD ID on. The
-	 * device returns min(limit, LDs left), so no more is asked for than
-	 * there are: 16 LDs do not fit the 256 bytes every CCI supports.
+	 * device returns min(limit, LDs enabled), so no more is asked for
+	 * than there are: the first request is for one LD, whose response
+	 * says how many are enabled. 16 LDs do not fit the 256 bytes every
+	 * CCI supports.
 	 */
 	while (nalloc < nld) {
-		uint8_t want = fmd_cci_list_fit(&mld->base, 4, 16, nld - nalloc);
+		uint8_t want = nalloc ? fmd_cci_list_fit(&mld->base, 4, 16,
+							 nld - nalloc) : 1;
 
 		alloc_req.start_ld_id = nalloc;
 		alloc_req.ld_allocation_list_limit = want;
@@ -434,6 +443,12 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		mld->memory_granularity = 1 << alloc_rsp->memory_granularity;
 		granularity = mld->memory_granularity * CXL_CAPACITY_UNIT;
 
+		/* Number of LDs: those enabled, of the ones supported */
+		if (nalloc == 0 && alloc_rsp->number_ld < nld) {
+			nld = alloc_rsp->number_ld;
+			mld->ld_count = nld;
+		}
+
 		FMD_CCI_LIST_CLAMP(alloc_rsp->ld_allocation_list_len, want);
 		if (alloc_rsp->ld_allocation_list_len == 0)
 			break;
@@ -444,13 +459,22 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	}
 	free(alloc_rsp);
 
+	fmd_info(ctx, "%s: MLD with %d logical devices of %d supported",
+		 mld->base.id, mld->ld_count, mld->max_ld_count);
+
 	/* Get QoS Control (5403h) */
 	rc = cxlmi_cmd_fmapi_get_qos_control(ep, ti, &qos_ctrl);
 	if (rc == 0) {
+		/* Table 7-52, all of it */
 		mld->qos_control.enabled = qos_ctrl.qos_telemetry_control & 0x01;
+		mld->qos_control.temp_throughput_reduction_enabled =
+			qos_ctrl.qos_telemetry_control & 0x02;
 		mld->qos_control.egress_moderate_pct = qos_ctrl.egress_moderate_percentage;
 		mld->qos_control.egress_severe_pct = qos_ctrl.egress_severe_percentage;
 		mld->qos_control.backpressure_sample_interval = qos_ctrl.backpressure_sample_interval;
+		mld->qos_control.reqcmp_basis = qos_ctrl.recmpbasis;
+		mld->qos_control.completion_collection_interval =
+			qos_ctrl.completion_collection_interval;
 	}
 
 	/* Get QoS Status (5405h) */
@@ -901,6 +925,10 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 			vcs->hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
 			if (block->num_vppbs < total)
 				total = block->num_vppbs;
+			else if (block->num_vppbs > total)
+				fmd_warn(ctx, "%s: VCS %d has %d vPPBs, only the "
+					 "first %d are managed", sw->base.id,
+					 vcs_id, block->num_vppbs, total);
 		}
 
 		count = total - got < want ? total - got : want;
@@ -971,7 +999,8 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	if (!table)
 		return -ENOMEM;
 
-	for (int id = 0; id < sw->sw_identify.num_vcs && n < FMD_MAX_VCS; id++) {
+	/* every bit of the Active VCS Bitmask is a VCS ID */
+	for (int id = 0; id < 256 && n < FMD_MAX_VCS; id++) {
 		struct fmd_vcs *old;
 		int rc;
 
@@ -988,6 +1017,22 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 			table[n] = *old;
 		}
 		n++;
+	}
+
+	/* an active VCS that was passed over because there was no room */
+	for (int id = 0; id < 256; id++) {
+		bool have = false;
+
+		if (!(sw->sw_identify.active_vcs_bitmask[id / 8] & (1 << (id % 8))))
+			continue;
+		for (int i = 0; i < n; i++)
+			have |= table[i].vcs_id == id;
+		if (!have && n == FMD_MAX_VCS) {
+			fmd_warn(ctx, "%s: VCS %d is active and is not managed "
+				 "(at most %d VCSs are)", sw->base.id, id,
+				 FMD_MAX_VCS);
+			break;
+		}
 	}
 
 	memcpy(sw->vcs, table, sizeof(sw->vcs));
@@ -1301,7 +1346,7 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		/*
 		 * Direct-attached Type 3 - determine device type:
 		 * 1. Try Get Multi-Headed Info (5500h) - if num_heads > 1, it's MHD
-		 * 2. Otherwise, use Get LD Info (5400h) - ld_count > 1 means MLD
+		 * 2. Otherwise, try Get LD Info (5400h) - an MLD answers it
 		 * 3. Otherwise it's an SLD
 		 */
 		struct cxlmi_cmd_fmapi_get_multiheaded_info_req mh_req = {0};
@@ -1345,9 +1390,13 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			break;
 		}
 
-		/* Not MHD - check SLD vs MLD via LD count */
+		/*
+		 * Not multi-headed. Get LD Info is mandatory for an MLD and
+		 * prohibited for an SLD (Table 8-397, MM and MMS): a device
+		 * that answers it is an MLD, however many LDs it supports.
+		 */
 		rc = cxlmi_cmd_fmapi_get_ld_info(ep, CXLMI_NO_TUNNEL, &ld_info);
-		if (rc || ld_info.ld_count <= 1) {
+		if (rc) {
 			/* SLD - direct-attached, no tunneling ever */
 			struct fmd_sld *sld = fmd_sld_create(dev_id);
 			if (!sld)

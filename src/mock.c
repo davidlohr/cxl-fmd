@@ -360,7 +360,7 @@ static struct fmd_mld *parse_mld(struct fmd_ctx *ctx, json_t *jdev,
 		mld->qos_control.backpressure_sample_interval =
 			(uint8_t)json_int_or(obj, "backpressure_sample_interval", 0);
 		mld->qos_control.reqcmp_basis =
-			(uint8_t)json_int_or(obj, "reqcmp_basis", 0);
+			(uint16_t)json_int_or(obj, "reqcmp_basis", 0);
 		mld->qos_control.completion_collection_interval =
 			(uint16_t)json_int_or(obj, "completion_collection_interval", 0);
 	}

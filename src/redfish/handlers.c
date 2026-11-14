@@ -1139,6 +1139,23 @@ json_t *fmd_redfish_switch(struct fmd_ctx *ctx, const char *fabric_id, const cha
 	 */
 	int total_vppbs = sw->sw_identify.num_total_vppb;
 	int bound_vppbs = sw->sw_identify.num_active_vppb;
+
+	/*
+	 * Number of Bound vPPBs is the "total number of vPPBs, across all
+	 * VCSs, that are bound". Identify Switch Device said how many were
+	 * when the switch was discovered; the VCSs say how many are now.
+	 */
+	if (sw->num_vcs) {
+		bound_vppbs = 0;
+		for (int v = 0; v < sw->num_vcs; v++) {
+			for (int b = 0; b < sw->vcs[v].num_vppbs; b++) {
+				if (sw->vcs[v].vppbs[b].binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
+				    sw->vcs[v].vppbs[b].binding_status == FMD_VPPB_BOUND_LD ||
+				    sw->vcs[v].vppbs[b].binding_status == FMD_VPPB_BOUND_PBR)
+					bound_vppbs++;
+			}
+		}
+	}
 	int hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
 
 	/* Build VCSs collection URI */
@@ -2290,10 +2307,16 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		has_qos_control = true;
 		temp_throughput_reduction_enabled = mld->qos_control.temp_throughput_reduction_enabled;
 
-		/* Get QoS telemetry caps from first LD */
+		/*
+		 * DSP0288 maps these from Get LD Info for an MLD. A mock
+		 * topology may give them only on its LDs.
+		 */
+		qos_telemetry_caps = mld->qos_telemetry_capability;
 		struct fmd_component *child;
 		fmd_topology_rdlock(&ctx->topology);
 		fmd_for_each_child(&mld->base, child) {
+			if (qos_telemetry_caps)
+				break;
 			if (child->type == FMD_COMPONENT_LD) {
 				struct fmd_ld *ld = fmd_to_ld(child);
 				qos_telemetry_caps = ld->memdev.qos_telemetry_caps;
