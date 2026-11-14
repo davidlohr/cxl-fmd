@@ -1419,6 +1419,14 @@ int fmd_events_poll(struct fmd_ctx *ctx, int timeout_ms);
 int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id);
 
 /*
+ * The four operations below are called with ctx->dcd_lock held. The regions
+ * and extents they are given, and those the caller looked at to decide on
+ * the call, are freed and rebuilt under that lock whenever a device is
+ * refreshed, which the event thread does on its own: look them up, use them
+ * and call in a single hold of the lock.
+ */
+
+/*
  * Set DC Region Configuration (5602h)
  * Returns 0, -EINVAL (unsupported value), -EBUSY (extents allocated), -EIO.
  */

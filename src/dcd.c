@@ -1261,9 +1261,9 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
  * ============================================================================
  */
 
-static int dc_set_region_config_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
-				       struct fmd_dc_region *region, uint64_t block_size,
-				       bool sanitize_on_release)
+int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
+			     struct fmd_dc_region *region, uint64_t block_size,
+			     bool sanitize_on_release)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 
@@ -1313,23 +1313,10 @@ static int dc_set_region_config_locked(struct fmd_ctx *ctx, struct fmd_component
 	return 0;
 }
 
-int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
-			     struct fmd_dc_region *region, uint64_t block_size,
-			     bool sanitize_on_release)
-{
-	int rc;
-
-	pthread_mutex_lock(&ctx->dcd_lock);
-	rc = dc_set_region_config_locked(ctx, dev, region, block_size,
-					 sanitize_on_release);
-	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
-}
-
-static int dc_add_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
-			 uint8_t policy, uint8_t region_id, uint64_t length,
-			 const uint8_t tag[FMD_DC_TAG_LEN],
-			 struct fmd_dc_extent **extents, int ext_count)
+int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+	       uint8_t policy, uint8_t region_id, uint64_t length,
+	       const uint8_t tag[FMD_DC_TAG_LEN],
+	       struct fmd_dc_extent **extents, int ext_count)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	uint16_t cap_bit = fmd_dc_policy_cap_bit(false, policy);
@@ -1387,24 +1374,10 @@ static int dc_add_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 	}
 }
 
-int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
-	       uint8_t policy, uint8_t region_id, uint64_t length,
-	       const uint8_t tag[FMD_DC_TAG_LEN],
-	       struct fmd_dc_extent **extents, int ext_count)
-{
-	int rc;
-
-	pthread_mutex_lock(&ctx->dcd_lock);
-	rc = dc_add_locked(ctx, dev, host_id, policy, region_id, length, tag,
-			   extents, ext_count);
-	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
-}
-
-static int dc_release_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
-			     uint8_t policy, bool forced, bool sanitize, uint64_t length,
-			     const uint8_t tag[FMD_DC_TAG_LEN],
-			     struct fmd_dc_extent **extents, int ext_count)
+int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+		   uint8_t policy, bool forced, bool sanitize, uint64_t length,
+		   const uint8_t tag[FMD_DC_TAG_LEN],
+		   struct fmd_dc_extent **extents, int ext_count)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	uint16_t cap_bit = fmd_dc_policy_cap_bit(true, policy);
@@ -1476,22 +1449,8 @@ static int dc_release_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int
 	}
 }
 
-int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
-		   uint8_t policy, bool forced, bool sanitize, uint64_t length,
-		   const uint8_t tag[FMD_DC_TAG_LEN],
-		   struct fmd_dc_extent **extents, int ext_count)
-{
-	int rc;
-
-	pthread_mutex_lock(&ctx->dcd_lock);
-	rc = dc_release_locked(ctx, dev, host_id, policy, forced, sanitize, length,
-			       tag, extents, ext_count);
-	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
-}
-
-static int dc_reference_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
-			       const uint8_t tag[FMD_DC_TAG_LEN], bool add)
+int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
+		     const uint8_t tag[FMD_DC_TAG_LEN], bool add)
 {
 	if (!fmd_memdev_dcd(dev))
 		return -ENOENT;
@@ -1521,15 +1480,4 @@ static int dc_reference_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 		return hw_refresh_tags(ctx, dev, dev->ep, ti);
 	}
-}
-
-int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
-		     const uint8_t tag[FMD_DC_TAG_LEN], bool add)
-{
-	int rc;
-
-	pthread_mutex_lock(&ctx->dcd_lock);
-	rc = dc_reference_locked(ctx, dev, tag, add);
-	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
 }

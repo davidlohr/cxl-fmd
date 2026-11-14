@@ -299,8 +299,8 @@ void fmd_redfish_dc_logical_device_props(struct fmd_ctx *ctx, struct fmd_compone
  * ============================================================================
  */
 
-json_t *fmd_redfish_dc_memory_extents(struct fmd_ctx *ctx, const char *chassis_id,
-				      const char *dev_id)
+static json_t *dc_memory_extents_locked(struct fmd_ctx *ctx, const char *chassis_id,
+					const char *dev_id)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_component *child;
@@ -328,8 +328,8 @@ json_t *fmd_redfish_dc_memory_extents(struct fmd_ctx *ctx, const char *chassis_i
 	return rf_collection_finish(&coll);
 }
 
-json_t *fmd_redfish_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
-				     const char *dev_id, const char *ext_id)
+static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_id,
+				       const char *dev_id, const char *ext_id)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dcd_info *dcd;
@@ -389,9 +389,9 @@ json_t *fmd_redfish_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id
  * DELETE on an extent releases it from every host that holds it
  * (Initiate DC Release, Prescriptive, one extent per host).
  */
-int fmd_redfish_delete_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
-					const char *dev_id, const char *ext_id,
-					const char **msg)
+static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_id,
+					  const char *dev_id, const char *ext_id,
+					  const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dcd_info *dcd;
@@ -462,8 +462,8 @@ static int resolve_host(struct fmd_component *dev, const char *ld_id)
 	return fmd_dc_host_id(dev, ld_idx);
 }
 
-json_t *fmd_redfish_dc_memory_regions(struct fmd_ctx *ctx, const char *chassis_id,
-				      const char *dev_id, const char *ld_id)
+static json_t *dc_memory_regions_locked(struct fmd_ctx *ctx, const char *chassis_id,
+					const char *dev_id, const char *ld_id)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_component *owner, *child;
@@ -500,9 +500,9 @@ json_t *fmd_redfish_dc_memory_regions(struct fmd_ctx *ctx, const char *chassis_i
 	return rf_collection_finish(&coll);
 }
 
-json_t *fmd_redfish_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id,
-				     const char *dev_id, const char *ld_id,
-				     const char *region_id)
+static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_id,
+				       const char *dev_id, const char *ld_id,
+				       const char *region_id)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_component *child;
@@ -582,10 +582,10 @@ json_t *fmd_redfish_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id
  * PATCH MemoryRegion -> Set DC Region Configuration (5602h)
  * Writable: BlockSizeMiB, SanitizeOnRelease.
  */
-int fmd_redfish_patch_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id,
-				       const char *dev_id, const char *ld_id,
-				       const char *region_id, const char *body,
-				       size_t body_size, const char **msg)
+static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_id,
+					 const char *dev_id, const char *ld_id,
+					 const char *region_id, const char *body,
+					 size_t body_size, const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dc_region *region;
@@ -672,9 +672,9 @@ int fmd_redfish_patch_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_
 /*
  * POST CXLLogicalDevice.DynamicCapacityAdd -> Initiate DC Add (5604h)
  */
-int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
-			      const char *dev_id, const char *ld_id,
-			      const char *body, size_t body_size, const char **msg)
+static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
+				const char *dev_id, const char *ld_id,
+				const char *body, size_t body_size, const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dc_extent **extents = NULL;
@@ -804,9 +804,9 @@ int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
 /*
  * POST CXLLogicalDevice.DynamicCapacityRelease -> Initiate DC Release (5605h)
  */
-int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
-				  const char *dev_id, const char *ld_id,
-				  const char *body, size_t body_size, const char **msg)
+static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
+				    const char *dev_id, const char *ld_id,
+				    const char *body, size_t body_size, const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dc_extent **extents = NULL;
@@ -919,9 +919,9 @@ int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
  * POST PCIeDevice.CXLReferenceDCMemory -> DC Add Reference (5606h) when
  * FMReference is true, DC Remove Reference (5607h) when false.
  */
-int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
-				    const char *dev_id, const char *body,
-				    size_t body_size, const char **msg)
+static int action_dc_reference_locked(struct fmd_ctx *ctx, const char *chassis_id,
+				      const char *dev_id, const char *body,
+				      size_t body_size, const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	json_t *root, *val;
@@ -963,5 +963,126 @@ int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
 		*msg = "No extents carry the given Tag";
 	else if (rc)
 		*msg = "Dynamic Capacity reference update failed";
+	return rc;
+}
+
+/*
+ * ============================================================================
+ * Entry points
+ * ============================================================================
+ *
+ * Regions and extents are freed and rebuilt under ctx->dcd_lock when the
+ * event thread refreshes a device. Everything above that looks one up does
+ * so with the lock held by its entry point here, from the lookup to the last
+ * use.
+ */
+
+json_t *fmd_redfish_dc_memory_extents(struct fmd_ctx *ctx, const char *chassis_id,
+				      const char *dev_id)
+{
+	json_t *res;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	res = dc_memory_extents_locked(ctx, chassis_id, dev_id);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return res;
+}
+
+json_t *fmd_redfish_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
+				     const char *dev_id, const char *ext_id)
+{
+	json_t *res;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	res = dc_memory_extent_locked(ctx, chassis_id, dev_id, ext_id);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return res;
+}
+
+int fmd_redfish_delete_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
+					const char *dev_id, const char *ext_id,
+					const char **msg)
+{
+	int rc;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	rc = delete_dc_memory_extent_locked(ctx, chassis_id, dev_id, ext_id, msg);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return rc;
+}
+
+json_t *fmd_redfish_dc_memory_regions(struct fmd_ctx *ctx, const char *chassis_id,
+				      const char *dev_id, const char *ld_id)
+{
+	json_t *res;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	res = dc_memory_regions_locked(ctx, chassis_id, dev_id, ld_id);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return res;
+}
+
+json_t *fmd_redfish_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id,
+				     const char *dev_id, const char *ld_id,
+				     const char *region_id)
+{
+	json_t *res;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	res = dc_memory_region_locked(ctx, chassis_id, dev_id, ld_id, region_id);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return res;
+}
+
+int fmd_redfish_patch_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_id,
+				       const char *dev_id, const char *ld_id,
+				       const char *region_id, const char *body,
+				       size_t body_size, const char **msg)
+{
+	int rc;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	rc = patch_dc_memory_region_locked(ctx, chassis_id, dev_id, ld_id,
+			region_id, body, body_size, msg);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return rc;
+}
+
+int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
+			      const char *dev_id, const char *ld_id,
+			      const char *body, size_t body_size, const char **msg)
+{
+	int rc;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	rc = action_dc_add_locked(ctx, chassis_id, dev_id,
+			ld_id, body, body_size, msg);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return rc;
+}
+
+int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
+				  const char *dev_id, const char *ld_id,
+				  const char *body, size_t body_size, const char **msg)
+{
+	int rc;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	rc = action_dc_release_locked(ctx, chassis_id, dev_id,
+			ld_id, body, body_size, msg);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return rc;
+}
+
+int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
+				    const char *dev_id, const char *body,
+				    size_t body_size, const char **msg)
+{
+	int rc;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	rc = action_dc_reference_locked(ctx, chassis_id, dev_id,
+			body, body_size, msg);
+	pthread_mutex_unlock(&ctx->dcd_lock);
 	return rc;
 }
