@@ -200,6 +200,23 @@ void fmd_topology_cleanup(struct fmd_topology *topo)
 }
 
 
+
+/* The components fmd_rescan() says it added or removed */
+static bool counted_change(const struct fmd_component *comp)
+{
+	switch (comp->type) {
+	case FMD_COMPONENT_SWITCH:
+	case FMD_COMPONENT_PORT:
+	case FMD_COMPONENT_SLD:
+	case FMD_COMPONENT_MLD:
+	case FMD_COMPONENT_MHD:
+	case FMD_COMPONENT_LD:
+	case FMD_COMPONENT_HOST:
+		return true;
+	default:
+		return false;
+	}
+}
 int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 		     struct fmd_component *parent)
 {
@@ -259,6 +276,8 @@ int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 		break;
 	}
 
+	if (counted_change(comp))
+		topo->added++;
 	topo->generation++;
 
 	pthread_rwlock_unlock(&topo->lock);
@@ -269,15 +288,48 @@ int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 /*
  * Remove helper - removes from hash table recursively
  */
-static void remove_from_hash(struct fmd_hash_table *ht, struct fmd_component *comp)
+static void remove_from_hash(struct fmd_topology *topo, struct fmd_component *comp)
 {
+	if (counted_change(comp))
+		topo->removed++;
+
+	struct fmd_fabric *root = topo->root;
 	struct fmd_component *child;
 
 	fmd_for_each_child(comp, child) {
-		remove_from_hash(ht, child);
+		remove_from_hash(topo, child);
 	}
 
-	hash_table_remove(ht, comp);
+	hash_table_remove(&topo->components, comp);
+
+	/* the statistics fmd_topology_add() keeps */
+	switch (comp->type) {
+	case FMD_COMPONENT_SWITCH:
+		root->switch_count--;
+		break;
+	case FMD_COMPONENT_PORT:
+		root->port_count--;
+		break;
+	case FMD_COMPONENT_SLD:
+	case FMD_COMPONENT_MLD:
+	case FMD_COMPONENT_MHD:
+		root->device_count--;
+		break;
+	case FMD_COMPONENT_LD:
+		root->ld_count--;
+		break;
+	case FMD_COMPONENT_DOMAIN:
+		root->domain_count--;
+		break;
+	case FMD_COMPONENT_CHUNK:
+		root->chunk_count--;
+		break;
+	case FMD_COMPONENT_HOST:
+		root->host_count--;
+		break;
+	default:
+		break;
+	}
 }
 
 int fmd_topology_remove(struct fmd_topology *topo, struct fmd_component *comp)
@@ -292,7 +344,7 @@ int fmd_topology_remove(struct fmd_topology *topo, struct fmd_component *comp)
 	pthread_rwlock_wrlock(&topo->lock);
 
 	/* Remove from hash table (recursively for all children) */
-	remove_from_hash(&topo->components, comp);
+	remove_from_hash(topo, comp);
 
 	/* Remove from parent's children list */
 	if (comp->parent)

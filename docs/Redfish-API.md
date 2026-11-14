@@ -717,6 +717,26 @@ The complete memory lifecycle is:
 
 For direct-attached hosts (`host.direct_attached = true`), connections track the host-to-device association but no vPPB binding occurs.
 
+### When a Device Is Removed
+
+A device pulled out of a switch port is removed: the switch records it as a
+Physical Switch Event Record, and the port then reports no device, or one of
+another kind (CXL r4.0 Section 7.6.6.7). Its `Endpoint`, `PCIeDevice`,
+`CXLLogicalDevice`s, `Memory`, `MemoryDomains` and `MemoryChunks` go, and the
+event records kept for it with them. A port whose link is down and that still
+reports its device keeps it (a surprise Link Down).
+
+Its connections are the switch's to decide, and can change without a request:
+
+| The device was | The switch | The connection |
+|----------------|------------|------------|
+| An MLD | "will automatically unbind any existing LD bindings" (Section 7.6.6.8) | Goes, once the vPPBs are read as unbound. Nothing deletes it |
+| An SLD on a bound port | keeps the vPPB bound to the port: "the FM can be notified but is not involved" | Stands, with `Status.State` `Absent` and no `TargetEndpoints` or `MemoryChunkInfo`. `DELETE` unbinds the vPPB as usual. A device plugged back into the port is the host's again, and the connection has its device again |
+| Being bound or unbound | finishes the operation | Its task decides, as for any other |
+
+A device attached directly to an MCTP endpoint of its own, and a Multi-Headed
+device, are not removed.
+
 ---
 
 ## Known Gaps

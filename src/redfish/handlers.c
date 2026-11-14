@@ -961,7 +961,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		if (conn->access_caps & FMD_ACCESS_WRITE)
 			json_array_append_new(access_caps, json_string("Write"));
 
-		return json_pack(
+		json_t *result = json_pack(
 			"{"
 			"  s:s,"   /* @odata.id */
 			"  s:s,"   /* @odata.type */
@@ -990,6 +990,20 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				"MemoryChunk", "@odata.id", chunk_uri,
 				"AccessCapabilities", access_caps
 		);
+
+		/*
+		 * Its device has been removed from the switch port, and the
+		 * vPPB is still bound to the port: "This function or resource
+		 * is either not present or detected". Deleting it unbinds the
+		 * vPPB; the device and its memory are not there to link to.
+		 */
+		if (result && !fmd_topology_find(&ctx->topology, conn->target_id)) {
+			json_object_set_new(result, "Status", rf_status("Absent", "OK"));
+			json_object_del(json_object_get(result, "Links"),
+					"TargetEndpoints");
+			json_object_del(result, "MemoryChunkInfo");
+		}
+		return result;
 	}
 
 	/* Connection ID matches the device ID (implicit switch-attached) */
@@ -5736,47 +5750,56 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 							       conn->initiator_id);
 		struct fmd_component *target = fmd_topology_find(&ctx->topology,
 								 conn->target_id);
+		struct fmd_switch *sw = NULL;
 
 		struct fmd_port *port = (host && target) ?
 			connection_port(ctx, target,
 				fmd_topology_find_chunk(&ctx->topology, conn->chunk_id)) : NULL;
 
-		if (port) {
-			if (port->base.parent &&
-			    port->base.parent->type == FMD_COMPONENT_SWITCH) {
-				struct fmd_switch *sw = fmd_to_switch(port->base.parent);
-				int rc;
+		if (port && port->base.parent &&
+		    port->base.parent->type == FMD_COMPONENT_SWITCH)
+			sw = fmd_to_switch(port->base.parent);
 
-				fmd_info(ctx, "Connection %s: unbinding vPPB %d in VCS %d",
-					 conn->id, conn->vppb_id, conn->vcs_id);
+		/*
+		 * Its device has been removed, and the vPPB is still bound
+		 * to the port it was on: the host's switch is where to
+		 * unbind it.
+		 */
+		if (!target && host && host->switch_id[0])
+			sw = fmd_topology_find_switch(&ctx->topology, host->switch_id);
 
-				rc = fmd_vppb_unbind(ctx, sw, conn->vcs_id,
-						     conn->vppb_id,
-						     FMD_UNBIND_MANAGED_HOT_REMOVE);
-				if (rc == -EAGAIN)
-					return -3;
-				if (rc < 0 && rc != -ENOENT) {
-					fmd_err(ctx, "Connection %s: vPPB unbind failed: %d",
-						conn->id, rc);
+		if (sw) {
+			int rc;
+
+			fmd_info(ctx, "Connection %s: unbinding vPPB %d in VCS %d",
+				 conn->id, conn->vppb_id, conn->vcs_id);
+
+			rc = fmd_vppb_unbind(ctx, sw, conn->vcs_id,
+					     conn->vppb_id,
+					     FMD_UNBIND_MANAGED_HOT_REMOVE);
+			if (rc == -EAGAIN)
+				return -3;
+			if (rc < 0 && rc != -ENOENT) {
+				fmd_err(ctx, "Connection %s: vPPB unbind failed: %d",
+					conn->id, rc);
+				return -2;
+			}
+
+			/*
+			 * Started and not finished: the connection
+			 * stands until the vPPB is unbound.
+			 */
+			if (rc == FMD_OP_STARTED) {
+				struct fmd_task *task;
+
+				conn->pending = FMD_CONN_UNBINDING;
+				task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw,
+						      conn->vcs_id, conn->vppb_id,
+						      conn->id);
+				if (!task)
 					return -2;
-				}
-
-				/*
-				 * Started and not finished: the connection
-				 * stands until the vPPB is unbound.
-				 */
-				if (rc == FMD_OP_STARTED) {
-					struct fmd_task *task;
-
-					conn->pending = FMD_CONN_UNBINDING;
-					task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw,
-							      conn->vcs_id, conn->vppb_id,
-							      conn->id);
-					if (!task)
-						return -2;
-					*response = fmd_redfish_task(ctx, task->id);
-					return FMD_OP_STARTED;
-				}
+				*response = fmd_redfish_task(ctx, task->id);
+				return FMD_OP_STARTED;
 			}
 		}
 	}

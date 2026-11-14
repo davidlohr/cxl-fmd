@@ -1524,6 +1524,7 @@ static void test_rescan(void)
 	struct cxlmi_endpoint *sw_ep = new_switch(ctx, 0x500a), *late, *slow;
 	struct fmd_fabric *root = ctx->topology.root;
 	int before = failures, rc, ports, devices;
+	unsigned int removed;
 	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
 	struct fmd_port *port;
 
@@ -1565,13 +1566,21 @@ static void test_rescan(void)
 	}
 	CHECK(root->port_count == ports, "%d ports after a re-scan", root->port_count);
 
-	/* and is pulled out: the port says so, and the device is kept */
+	/*
+	 * and is pulled out: the port reports no device (Connected Device
+	 * Type 00h), and the device is removed
+	 */
 	answer_rc(slow, 0x0001, CXLMI_RET_RETRY);
 	answer_switch_ports(sw_ep, 6, 0x00, 0x00);
+	removed = ctx->topology.removed;
 	rc = fmd_rescan(ctx);
 	CHECK(rc == 0, "%d components added when a device is removed", rc);
-	CHECK(fmd_topology_find_sld(&ctx->topology, id),
-	      "a device that is gone was removed");
+	CHECK(!fmd_topology_find_sld(&ctx->topology, id),
+	      "a device that is gone was kept");
+	CHECK(ctx->topology.removed == removed + 1, "%u components removed",
+	      ctx->topology.removed - removed);
+	CHECK(root->device_count == devices, "%d devices, %d to begin with",
+	      root->device_count, devices);
 	if (port)
 		CHECK(port->link_status == FMD_LINK_DOWN &&
 		      port->conn_dev_type == FMD_CONN_NONE,
@@ -1592,13 +1601,13 @@ static void test_rescan(void)
 	device_id(id, sizeof(id), 0x1004);
 	CHECK(fmd_topology_find_sld(&ctx->topology, id),
 	      "an endpoint that was not ready was not asked again");
-	CHECK(root->device_count == devices + 3, "%d devices, %d to begin with",
+	CHECK(root->device_count == devices + 2, "%d devices, %d to begin with",
 	      root->device_count, devices);
 
 	/* and once known, an endpoint is not discovered again */
 	answer_switch_ports(sw_ep, 6, 0x00, 0x00);
 	rc = fmd_rescan(ctx);
-	CHECK(rc == 0 && root->device_count == devices + 3,
+	CHECK(rc == 0 && root->device_count == devices + 2,
 	      "%d components added by a second look at the same endpoints", rc);
 
 	fmd_ctx_free(ctx);
@@ -1951,6 +1960,256 @@ out:
 	report("records kept, and their memory", before);
 }
 
+/* Get Physical Port State (5101h) of one port */
+static void answer_one_port(struct cxlmi_endpoint *ep, uint8_t id,
+			    uint8_t type, uint8_t ltssm)
+{
+	uint8_t ports[4 + 16] = { 1 };
+
+	port_block(ports + 4, id, 0x03, type ? 0x02 : 0, type, ltssm,
+		   type ? 0x0004 : 0x0000);
+	answer(ep, 0x5101, ports, sizeof(ports));
+}
+
+/* the host on VCS @vcs_id of a switch */
+static struct fmd_host *vcs_host(struct fmd_ctx *ctx, const char *sw_id, int vcs_id)
+{
+	struct fmd_component *comp;
+
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_HOST) {
+		struct fmd_host *host = fmd_to_host(comp);
+
+		if (!strcmp(host->switch_id, sw_id) && host->vcs_id == vcs_id)
+			return host;
+	}
+	return NULL;
+}
+
+static struct fmd_connection *bound_connection(struct fmd_ctx *ctx,
+					       struct fmd_host *host,
+					       const char *target, uint8_t vppb)
+{
+	struct fmd_connection *conn = fmd_connection_create(ctx, host->base.id,
+							    target, "chunk", 0);
+
+	if (conn) {
+		conn->vcs_id = host->vcs_id;
+		conn->vppb_id = vppb;
+		conn->bound = true;
+	}
+	return conn;
+}
+
+/* a switch event for @port, which then reads as @type */
+static void port_event(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+		       uint16_t handle, uint8_t port, uint8_t type, uint8_t ltssm,
+		       const uint8_t *vcs2_vppb1)
+{
+	answer_event(ep, physical_switch_event, handle, (uint8_t[2]){ port, 0x00 }, 2);
+	answer_one_port(ep, port, type, ltssm);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vcs2_vppb1, unbound);
+	fmd_switch_events_poll(ctx);
+}
+
+/* GET of a connection: its Status.State, and whether it links to its device */
+static const char *connection_state(struct fmd_ctx *ctx, const char *id,
+				    bool *has_target, char *buf, size_t len)
+{
+	json_t *c = fmd_redfish_connection(ctx, "CXL", id);
+	const char *state;
+
+	if (!c)
+		return NULL;
+	state = json_string_value(json_object_get(json_object_get(c, "Status"), "State"));
+	snprintf(buf, len, "%s", state ? state : "");
+	*has_target = json_object_get(json_object_get(c, "Links"), "TargetEndpoints") &&
+		      json_object_get(c, "MemoryChunkInfo");
+	json_decref(c);
+	return buf;
+}
+
+/*
+ * A device that is removed from a switch port (CXL r4.0 Sections 7.6.6.7
+ * and 7.6.6.8): the switch records it, the port is read again, and what
+ * the device was goes. Its connections are the switch's to decide: one
+ * whose vPPB the switch unbinds goes, and one whose vPPB stays bound stands,
+ * absent, until it is deleted.
+ */
+static void test_device_removal(void)
+{
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	static const uint8_t port4[3] = { 0x02, 4, 0xff };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x500f);
+	struct fmd_fabric *root = ctx->topology.root;
+	char sw_id[FMD_MAX_ID_LEN], mld_id[FMD_MAX_ID_LEN + 16];
+	char sld_id[FMD_MAX_ID_LEN + 16], a_id[FMD_MAX_ID_LEN], b_id[FMD_MAX_ID_LEN];
+	char c_id[FMD_MAX_ID_LEN], state[32];
+	int before = failures, devices, lds, domains, chunks, rc;
+	struct fmd_connection *conn;
+	struct fmd_component *dev;
+	struct fmd_host *host;
+	struct fmd_switch *sw;
+	struct fmd_task *task;
+	struct fmd_vcs *vcs;
+	struct fmd_port *port;
+	struct fmd_vppb *vppb;
+	json_t *resp = NULL;
+	bool linked;
+
+	/* the MLD on port 5 has 2 LDs of 4 x 256 MiB (Get LD Info, Allocations) */
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x500f);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	host = vcs_host(ctx, sw_id, 2);
+	snprintf(mld_id, sizeof(mld_id), "%.32s_port5_dev", sw_id);
+	snprintf(sld_id, sizeof(sld_id), "%.32s_port4_dev", sw_id);
+	CHECK(sw && host && fmd_topology_find_mld(&ctx->topology, mld_id),
+	      "no switch, host of VCS 2 or MLD %s", mld_id);
+	if (!sw || !host || !fmd_topology_find_mld(&ctx->topology, mld_id))
+		goto out;
+	CHECK(fmd_topology_find_ld(&ctx->topology, mld_id, 1), "no LD 1");
+
+	/* LD 1 of it is bound to vPPB 1 of VCS 2, for a connection */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld1, unbound);
+	fmd_vcs_refresh(ctx, sw);
+	vcs = fmd_switch_find_vcs(sw, 2);
+	vppb = vcs ? fmd_vcs_find_vppb(vcs, 1) : NULL;
+	CHECK(vppb && vppb->ld, "the vPPB does not point at LD 1");
+	conn = bound_connection(ctx, host, mld_id, 1);
+	CHECK(conn, "no connection");
+	if (!conn)
+		goto out;
+	snprintf(a_id, sizeof(a_id), "%s", conn->id);
+
+	/* and one the switch is still binding, with its task */
+	conn = bound_connection(ctx, host, mld_id, 2);
+	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 2, conn->id) : NULL;
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	snprintf(b_id, sizeof(b_id), "%s", conn->id);
+	conn->bound = false;
+	conn->pending = FMD_CONN_BINDING;
+
+	devices = root->device_count;
+	lds = root->ld_count;
+	domains = root->domain_count;
+	chunks = root->chunk_count;
+
+	/*
+	 * The MLD is pulled out: a Physical Switch Event Record for port 5,
+	 * which then reports no device (00h). The VCSs cannot be read after
+	 * it, so their tables are kept as they were: the vPPB that pointed at
+	 * LD 1 must not still point at it, and the connection, whose vPPB the
+	 * switch has not said is unbound, stands.
+	 */
+	answer_event(ep, physical_switch_event, 0x31, (uint8_t[2]){ 5, 0x00 }, 2);
+	answer_one_port(ep, 5, 0x00, 0x00);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	fmd_switch_events_poll(ctx);
+
+	CHECK(!fmd_topology_find(&ctx->topology, mld_id), "the MLD is still there");
+	CHECK(!fmd_topology_find_ld(&ctx->topology, mld_id, 1), "LD 1 is still there");
+	CHECK(root->device_count == devices - 1, "%d devices, %d before",
+	      root->device_count, devices);
+	CHECK(root->ld_count < lds && root->domain_count < domains &&
+	      root->chunk_count < chunks, "LDs %d/%d, domains %d/%d, chunks %d/%d",
+	      root->ld_count, lds, root->domain_count, domains,
+	      root->chunk_count, chunks);
+	vcs = fmd_switch_find_vcs(sw, 2);
+	vppb = vcs ? fmd_vcs_find_vppb(vcs, 1) : NULL;
+	CHECK(vppb && !vppb->ld, "the vPPB still points at an LD that was removed");
+	CHECK(connection_state(ctx, a_id, &linked, state, sizeof(state)) &&
+	      !strcmp(state, "Absent") && !linked,
+	      "connection to the removed MLD: %s, %slinked to it",
+	      state, linked ? "" : "not ");
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 5);
+	CHECK(port && !port->base.first_child && port->conn_dev_type == FMD_CONN_NONE,
+	      "port 5 is not empty");
+
+	/*
+	 * "The switch will automatically unbind any existing LD bindings":
+	 * read again, VCS 2 says so, and the connection is gone with them.
+	 * The one being made is its task's to settle.
+	 */
+	port_event(ctx, ep, 0x32, 5, 0x00, 0x00, unbound);
+	CHECK(!fmd_connection_find(ctx, a_id),
+	      "a connection whose vPPB the switch unbound is still there");
+	CHECK(fmd_connection_find(ctx, b_id) && task->state == FMD_TASK_RUNNING,
+	      "a connection being bound was not left to its task");
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_task_binding_changed(ctx, sw, 2, 2, true);
+	CHECK(task->state == FMD_TASK_EXCEPTION && !fmd_connection_find(ctx, b_id),
+	      "task %d: %s", task->state, task->message);
+
+	/* an SLD is plugged into port 4, and bound to vPPB 1 of VCS 2 */
+	port_event(ctx, ep, 0x33, 4, 0x04, 0x04, port4);
+	CHECK(fmd_topology_find_sld(&ctx->topology, sld_id), "no SLD on port 4");
+	conn = bound_connection(ctx, host, sld_id, 1);
+	CHECK(conn, "no connection");
+	if (!conn)
+		goto out;
+	snprintf(c_id, sizeof(c_id), "%s", conn->id);
+
+	/*
+	 * Its link goes down with the device still detected, a surprise Link
+	 * Down: "the presence pin ... will remain asserted". It is kept.
+	 */
+	port_event(ctx, ep, 0x34, 4, 0x04, 0x00, port4);
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 4);
+	CHECK(fmd_topology_find_sld(&ctx->topology, sld_id) && port &&
+	      port->link_status == FMD_LINK_DOWN,
+	      "a device whose link went down was removed");
+
+	/*
+	 * Pulled out of the bound port: "the FM can be notified but is not
+	 * involved", and the vPPB stays bound to the port. So does the
+	 * connection, absent.
+	 */
+	port_event(ctx, ep, 0x35, 4, 0x00, 0x00, port4);
+	CHECK(!fmd_topology_find(&ctx->topology, sld_id), "the SLD is still there");
+	CHECK(connection_state(ctx, c_id, &linked, state, sizeof(state)) &&
+	      !strcmp(state, "Absent") && !linked,
+	      "connection to the removed SLD: %s", state);
+
+	/*
+	 * Deleting it unbinds the vPPB, on the switch found through its host:
+	 * the switch takes the Unbind vPPB (5202h) into the background, and
+	 * the connection stands until it is done.
+	 */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, port4, unbound);
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", c_id, &resp);
+	json_decref(resp);
+	/* started: what only the answer to 5202h says */
+	CHECK(rc == FMD_OP_STARTED, "delete: %d", rc);
+	conn = fmd_connection_find(ctx, c_id);
+	CHECK(conn && conn->pending == FMD_CONN_UNBINDING,
+	      "the connection does not stand while it is unbound");
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_task_binding_changed(ctx, sw, 2, 1, false);
+	CHECK(!fmd_connection_find(ctx, c_id), "the connection is still there");
+
+	/* plugged back in: found again */
+	port_event(ctx, ep, 0x36, 4, 0x04, 0x04, unbound);
+	dev = fmd_topology_find(&ctx->topology, sld_id);
+	CHECK(dev && dev->type == FMD_COMPONENT_SLD, "the SLD was not found again");
+	CHECK(root->device_count == devices, "%d devices, %d before the MLD went",
+	      root->device_count, devices);
+out:
+	fmd_ctx_free(ctx);
+	report("devices removed from a switch", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -2013,6 +2272,7 @@ int main(void)
 	test_rescan();
 	test_switch_events();
 	test_mailbox_events_are_the_hosts();
+	test_device_removal();
 	test_device_logs();
 	test_log_ring();
 	test_overcount_switch();

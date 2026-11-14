@@ -197,6 +197,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld);
 static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 		       struct fmd_mld *mld);
 static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw);
+static void settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
  * Link status from the LTSSM State of Get Physical Port State and of Get
@@ -1067,16 +1068,52 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
  */
 /* A port of a switch, from its Get Physical Port State information block */
 /*
+ * The device on a switch port is no longer there: the port reports no
+ * device, or another kind of one (CXL r4.0 Section 7.6.6.7: "the switch
+ * notifies the FM by generating Physical Switch Event Records as the
+ * Presence Detect sideband is deasserted and the associated port links
+ * down", after which the FM reads the port's state).
+ *
+ * It goes, with its LDs, memory domains and chunks, its dynamic capacity
+ * and the event records kept for it.
+ *
+ * The connections to it are the switch's to decide: a connection is a vPPB
+ * bound for a host, and "When a Surprise or Managed Hot-Removal of an SLD
+ * or PCIe device occurs on a bound port, the FM can be notified but is not
+ * involved": the vPPB stays bound to the port, and a device plugged back
+ * into it is the host's again. When an MLD is removed, "the switch will
+ * automatically unbind any existing LD bindings" (Section 7.6.6.8). So the
+ * vPPBs are read again after the ports, and a connection whose device has
+ * gone stands for as long as its vPPB is bound: see settle_connections().
+ */
+static void remove_port_device(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			       struct fmd_port *port, struct fmd_component *dev)
+{
+	fmd_info(ctx, "%s: port %d no longer has %s, which is removed",
+		 sw->base.id, port->port_number, dev->id);
+
+	fmd_topology_remove(&ctx->topology, dev);
+
+	/* no vPPB points at what has gone */
+	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
+}
+
+/* The kind of device a memory device component is, as a port reports it */
+static enum fmd_conn_dev_type memdev_conn_type(struct fmd_component *dev)
+{
+	return dev->type == FMD_COMPONENT_MLD ? FMD_CONN_MLD : FMD_CONN_SLD;
+}
+
+/*
  * A port of a switch, from its Get Physical Port State information block:
  * a port that is not known yet is added, and one that is has its state
- * brought up to date. A device that has appeared on it is discovered. One
- * that is no longer reported is kept: see fmd_rescan().
+ * brought up to date. A device that has appeared on it is discovered, and
+ * one that is no longer there is removed.
  */
 static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			    struct cxlmi_cmd_fmapi_port_state_info_block *pinfo)
 {
 	uint8_t state = pinfo->config_state & 0xf;
-	enum fmd_conn_dev_type old_type = FMD_CONN_NONE;
 	struct fmd_component *child, *dev = NULL;
 	char port_id[128];
 	struct fmd_port *port = NULL;
@@ -1103,7 +1140,6 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		if (!port)
 			return;
 	} else {
-		old_type = port->conn_dev_type;
 		port->conn_dev_cxl_ver = 0;
 		port->conn_dev_type = FMD_CONN_NONE;
 	}
@@ -1178,19 +1214,25 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	}
 
 	/*
-	 * Connected Device Type is reserved unless the port is a DSP. A
-	 * device on a port that had none is discovered. A port that has one
-	 * and no longer reports it keeps it.
+	 * Connected Device Type is reserved unless the port is a DSP: only a
+	 * DSP says what is on it. One that reports no device where there was
+	 * one, or another kind of device ("A bound port will not advertise
+	 * support for MLDs during negotiation, so MLD components will link up
+	 * as an SLD"), no longer has the one that was there. A link that is
+	 * down with the device still detected, a surprise Link Down, is not a
+	 * removal: "the presence pin ... will remain asserted".
 	 */
-	if (port->state == FMD_PORT_DSP && !dev && !port->head) {
-		discover_port_device(ctx, port);
-	} else if (dev && port->conn_dev_type != old_type &&
-		   port->conn_dev_type != FMD_CONN_SLD &&
-		   port->conn_dev_type != FMD_CONN_MLD) {
-		fmd_warn(ctx, "%s: port %d no longer reports %s, which is kept "
-			 "until cxl-fmd is restarted", sw->base.id,
-			 port->port_number, dev->id);
+	if (port->state != FMD_PORT_DSP || port->head)
+		return;
+
+	if (dev && port->conn_dev_type != memdev_conn_type(dev)) {
+		remove_port_device(ctx, sw, port, dev);
+		dev = NULL;
 	}
+
+	/* a device on a port that has none is discovered */
+	if (!dev)
+		discover_port_device(ctx, port);
 }
 
 /*
@@ -1260,6 +1302,49 @@ static int read_switch_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * Read some ports of a switch again, the ones an event said have changed,
  * and its VCSs. Called with fabric_lock held exclusively.
  */
+/*
+ * The connections through a switch whose device has been removed, once its
+ * vPPBs have been read again: one whose vPPB is no longer bound has gone
+ * with its device, and one whose vPPB is still bound stands, without its
+ * device, until it is deleted, which unbinds the vPPB. A connection the
+ * switch is still binding or unbinding is left to its task.
+ *
+ * Not called from fmd_vcs_refresh(): that is also how a deletion of a
+ * connection reads the vPPB it is about to unbind.
+ */
+static void settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw)
+{
+	struct fmd_connection *conn, *next;
+
+	for (conn = ctx->connections; conn; conn = next) {
+		struct fmd_host *host;
+		struct fmd_vcs *vcs;
+		struct fmd_vppb *vppb;
+
+		next = conn->next;
+		if (conn->pending != FMD_CONN_SETTLED ||
+		    fmd_topology_find(&ctx->topology, conn->target_id))
+			continue;
+
+		host = fmd_topology_find_host(&ctx->topology, conn->initiator_id);
+		if (!host || strcmp(host->switch_id, sw->base.id))
+			continue;
+
+		vcs = fmd_switch_find_vcs(sw, conn->vcs_id);
+		vppb = vcs ? fmd_vcs_find_vppb(vcs, conn->vppb_id) : NULL;
+		if (conn->bound && vppb &&
+		    (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
+		     vppb->binding_status == FMD_VPPB_BOUND_LD))
+			continue;
+
+		fmd_info(ctx, "Connection %s of %s to %s, which was removed, is "
+			 "gone: vPPB %d of VCS %d is not bound", conn->id,
+			 conn->initiator_id, conn->target_id, conn->vppb_id,
+			 conn->vcs_id);
+		fmd_connection_remove(ctx, conn);
+	}
+}
+
 int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			     const uint8_t *port_ids, int nports)
 {
@@ -1270,6 +1355,7 @@ int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	rc = read_switch_ports(ctx, sw, port_ids, nports);
 	fmd_vcs_refresh(ctx, sw);
+	settle_connections(ctx, sw);
 	return rc;
 }
 
@@ -1314,6 +1400,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 	/* Step 3: Discover VCS configuration */
 	fmd_vcs_refresh(ctx, sw);
+	settle_connections(ctx, sw);
 
 	/*
 	 * Step 4: Create host entries for each VCS
@@ -1724,11 +1811,9 @@ static int discover_new_endpoints(struct fmd_ctx *ctx)
  * its host. Endpoints that have appeared, or that were not ready, are
  * discovered as at start-up.
  *
- * Nothing is removed. Requests hold pointers into the topology only while
- * they hold fabric_lock, so that is not what prevents it; a device that
- * has gone may have connections, chunks and bindings that removing it
- * would have to undo, and that is not done here. A port says when its
- * device is gone, and its link state shows it.
+ * A device that a port no longer reports is removed, with what it had:
+ * see remove_port_device(). Requests hold pointers into the topology only
+ * while they hold fabric_lock, which this holds exclusively.
  *
  * Returns how many components were added.
  */
@@ -1743,15 +1828,16 @@ int fmd_rescan(struct fmd_ctx *ctx)
 	struct fmd_component *comp;
 	struct fmd_switch **switches;
 	struct fmd_fabric *root;
-	int before, added, n = 0;
+	unsigned int added, removed;
+	int n = 0;
 
 	if (!ctx || !ctx->cxlmi)
 		return -1;
 
 	pthread_rwlock_wrlock(&ctx->fabric_lock);
 	root = ctx->topology.root;
-	before = root->switch_count + root->port_count + root->device_count +
-		 root->ld_count + root->host_count;
+	added = ctx->topology.added;
+	removed = ctx->topology.removed;
 
 	/* the switches there are now: new ones are discovered whole below */
 	switches = calloc(root->switch_count ? root->switch_count : 1,
@@ -1772,13 +1858,13 @@ int fmd_rescan(struct fmd_ctx *ctx)
 	scan_endpoints(ctx);
 	discover_new_endpoints(ctx);
 
-	added = root->switch_count + root->port_count + root->device_count +
-		root->ld_count + root->host_count - before;
-	if (added)
-		fmd_info(ctx, "Re-scan: %d component(s) added: %d switch(es), "
-			 "%d device(s), %d LD(s), %d host(s)", added,
-			 root->switch_count, root->device_count, root->ld_count,
-			 root->host_count);
+	added = ctx->topology.added - added;
+	removed = ctx->topology.removed - removed;
+	if (added || removed)
+		fmd_info(ctx, "Re-scan: %u component(s) added, %u removed: "
+			 "%d switch(es), %d device(s), %d LD(s), %d host(s)",
+			 added, removed, root->switch_count, root->device_count,
+			 root->ld_count, root->host_count);
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 
 	return added;

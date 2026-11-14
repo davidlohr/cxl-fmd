@@ -1014,6 +1014,13 @@ struct fmd_topology {
 
 	/* Generation counter for change tracking */
 	uint32_t generation;
+
+	/*
+	 * Switches, ports, devices, LDs and hosts added and removed since
+	 * the start: what changed, not only how many there are now.
+	 */
+	unsigned int added;
+	unsigned int removed;
 };
 
 

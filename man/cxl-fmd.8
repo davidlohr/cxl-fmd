@@ -157,8 +157,8 @@ starts.
 After that, on hardware:
 .IP \(bu 2
 The event logs of each switch are read and cleared.
-A port whose link or presence has changed is read again, and a device that has
-appeared on it is discovered.
+A port whose link or presence has changed is read again: a device that has
+appeared on it is discovered, and one that is no longer there is removed.
 .IP \(bu 2
 Every
 .B \-\-rescan
@@ -167,6 +167,18 @@ including any that was not ready before.
 .IP \(bu 2
 The Dynamic Capacity event log of each dynamic capacity device is read, and
 the extents of the hosts it names are brought up to date.
+.PP
+A device on a switch port is removed when the port reports no device, or a
+device of another kind, in its place: with its logical devices, memory domains
+and chunks.
+A connection to it goes when its vPPB is no longer bound, as the switch does
+for the logical devices of an MLD; one whose vPPB stays bound, as an SLD's
+port does, stands with its state Absent until it is deleted.
+A port whose link is down and that still reports its device keeps it.
+A device attached directly, on an MCTP endpoint of its own, and a Multi-Headed
+device, are not removed: they stay until
+.B cxl-fmd
+is restarted.
 .SH EVENT LOGS
 The event records read from a component are cleared from it, so that it can
 record more, and kept by
@@ -182,11 +194,6 @@ MCTP interface, and of the FM-owned logical device of an MLD behind a switch.
 A component reached through the kernel's mailbox
 .RB ( \-i )
 shares its event logs with the kernel's driver, and they are left to it.
-.PP
-Components are added and never removed.
-A device that has been unplugged stays, with the link of its port down, until
-.B cxl-fmd
-is restarted.
 .SH BINDING IN THE BACKGROUND
 A switch carries out a bind or an unbind as a background command.
 When it has started one and not finished it,
