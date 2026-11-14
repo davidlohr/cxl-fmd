@@ -28,6 +28,7 @@
 
 /* Event Interrupt Settings bit 4: Dynamic Capacity Event Log */
 #define CCI_EVENT_DC_LOG	(1 << 4)
+#define CCI_EVENT_LOGS		0x000f	/* Informational to Fatal */
 
 static int bind_listener(struct fmd_ctx *ctx, uint8_t type)
 {
@@ -132,13 +133,13 @@ static void handle_notification(struct fmd_ctx *ctx, int sd)
 		fmd_dcd_poll_events(ctx);
 
 	/*
-	 * Any other log: a switch records a port whose link or presence
-	 * has changed as a Physical Switch Event Record, which is when the
-	 * FM reads the port's state again (CXL r4.0 Section 7.6.6.7). Do
-	 * that at the next turn of the loop, not at the next interval.
+	 * One of the other four logs: a switch records there a port whose
+	 * link or presence has changed, and a vPPB whose binding has. Read
+	 * them now. Bit[15], a background operation that has completed, needs
+	 * nothing here: the tasks are looked at on every turn of the loop.
 	 */
-	if ((events & ~CCI_EVENT_DC_LOG) && ctx->config.rescan_sec)
-		ctx->next_rescan_ms = 1;
+	if (events & CCI_EVENT_LOGS)
+		fmd_switch_events_poll(ctx);
 }
 
 static int64_t now_ms(void)
@@ -169,6 +170,8 @@ static void poll_dc_events_if_due(struct fmd_ctx *ctx, int64_t now)
 		return;
 
 	fmd_dcd_poll_events(ctx);
+	/* and the logs of the switches, on the same timer */
+	fmd_switch_events_poll(ctx);
 	ctx->next_dc_poll_ms = now_ms() + interval;
 }
 

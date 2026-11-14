@@ -325,7 +325,7 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cx
 
 The following CXL features are not yet supported:
 - **Port-Based Routing (PBR)**: PBR fabric discovery and Global Fabric-Attached Memory Devices
-- **Removal of devices**: the fabric is looked at again every `--rescan` seconds (default 30) and when a switch sends an MCTP Event Notification. A switch's ports are read again; new ports, devices that have appeared on a port, new VCSs and new endpoints are added. Nothing is removed: a device that has been pulled out stays, with its port's link down, until cxl-fmd is restarted. Where the heads of a Multi-Headed device are plugged in, and an SLD on a switch port, are not discoverable either way
+- **Removal of devices**: a switch records a port whose link or presence has changed in its event logs, which are read every `--event-poll` seconds (default 10) and when the switch sends an MCTP Event Notification; the ports it names are read again, and the records cleared. The whole fabric is looked at again every `--rescan` seconds (default 30), which is also what finds new endpoints. New ports, devices that have appeared on a port, new VCSs and new endpoints are added. Nothing is removed: a device that has been pulled out stays, with its port's link down, until cxl-fmd is restarted. Where the heads of a Multi-Headed device are plugged in, and an SLD on a switch port, are not discoverable either way
 - **Dynamic Capacity events**: the FM-side DC event log is drained every `--event-poll` seconds (default 10) and early on MCTP Event Notification, so an extent's `Pending` state can lag the host's response by up to one interval on devices or transports without notifications
 
 ## References

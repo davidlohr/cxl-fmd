@@ -1193,10 +1193,88 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	}
 }
 
-static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
+/*
+ * Get Physical Port State (5101h) for @nports ports of a switch, as many at
+ * a time as fit a request and its response, and bring each of them up to
+ * date: see add_switch_port().
+ */
+static int read_switch_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			     const uint8_t *port_ids, int nports)
 {
 	struct cxlmi_cmd_fmapi_get_phys_port_state_req *port_req;
 	struct cxlmi_cmd_fmapi_get_phys_port_state_rsp *port_rsp;
+	struct fmd_component *child;
+	int rc = 0;
+
+	port_req = calloc(1, sizeof(*port_req) + FMD_CCI_LIST_MAX);
+	port_rsp = calloc(1, sizeof(*port_rsp) + FMD_CCI_LIST_MAX *
+			  sizeof(struct cxlmi_cmd_fmapi_port_state_info_block));
+	if (!port_req || !port_rsp) {
+		free(port_req);
+		free(port_rsp);
+		return -1;
+	}
+
+	for (int done = 0; done < nports; ) {
+		int want = fmd_cci_list_fit(&sw->base, 4,
+				sizeof(struct cxlmi_cmd_fmapi_port_state_info_block),
+				nports - done);
+
+		port_req->num_ports = want;
+		memcpy(port_req->ports, port_ids + done, want);
+		memset(port_rsp, 0, sizeof(*port_rsp));
+
+		rc = cxlmi_cmd_fmapi_get_phys_port_state(sw->base.ep, CXLMI_NO_TUNNEL,
+							 port_req, port_rsp);
+		if (rc) {
+			fmd_warn(ctx, "%s: get physical port state failed: %d",
+				 sw->base.id, rc);
+			/* the ports read so far are still ports of the switch */
+			if (done)
+				rc = 0;
+			break;
+		}
+		FMD_CCI_LIST_CLAMP(port_rsp->num_ports, want);
+
+		for (int i = 0; i < port_rsp->num_ports; i++)
+			add_switch_port(ctx, sw, &port_rsp->ports[i]);
+		done += want;
+	}
+
+	free(port_req);
+	free(port_rsp);
+
+	/* what the ports are now */
+	sw->num_dsps = sw->num_usps = 0;
+	fmd_for_each_child_type(&sw->base, child, FMD_COMPONENT_PORT) {
+		if (fmd_to_port(child)->state == FMD_PORT_DSP)
+			sw->num_dsps++;
+		else if (fmd_to_port(child)->state == FMD_PORT_USP)
+			sw->num_usps++;
+	}
+
+	return rc;
+}
+
+/*
+ * Read some ports of a switch again, the ones an event said have changed,
+ * and its VCSs. Called with fabric_lock held exclusively.
+ */
+int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			     const uint8_t *port_ids, int nports)
+{
+	int rc;
+
+	if (!sw->base.ep || nports <= 0)
+		return 0;
+
+	rc = read_switch_ports(ctx, sw, port_ids, nports);
+	fmd_vcs_refresh(ctx, sw);
+	return rc;
+}
+
+static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
+{
 	struct cxlmi_endpoint *ep;
 	uint8_t port_ids[256];
 	int rc;
@@ -1222,7 +1300,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 	/*
 	 * Get Physical Port State (5101h) for the ports in the Active Port
-	 * Bitmask, as many at a time as fit a request and its response.
+	 * Bitmask.
 	 */
 	nports = 0;
 	for (int id = 0; id < 256 && nports < num_ports; id++) {
@@ -1230,59 +1308,9 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 			port_ids[nports++] = id;
 	}
 
-	port_req = calloc(1, sizeof(*port_req) + FMD_CCI_LIST_MAX);
-	port_rsp = calloc(1, sizeof(*port_rsp) + FMD_CCI_LIST_MAX *
-			  sizeof(struct cxlmi_cmd_fmapi_port_state_info_block));
-	if (!port_req || !port_rsp) {
-		free(port_req);
-		free(port_rsp);
-		return -1;
-	}
-
-	for (int done = 0; done < nports; ) {
-		int want = fmd_cci_list_fit(&sw->base, 4,
-				sizeof(struct cxlmi_cmd_fmapi_port_state_info_block),
-				nports - done);
-
-		port_req->num_ports = want;
-		memcpy(port_req->ports, port_ids + done, want);
-		memset(port_rsp, 0, sizeof(*port_rsp));
-
-		rc = cxlmi_cmd_fmapi_get_phys_port_state(ep, CXLMI_NO_TUNNEL,
-							 port_req, port_rsp);
-		if (rc) {
-			fmd_warn(ctx, "%s: get physical port state failed: %d",
-				 sw->base.id, rc);
-			/* the ports read so far are still ports of the switch */
-			if (done == 0) {
-				free(port_req);
-				free(port_rsp);
-				return rc;
-			}
-			break;
-		}
-		FMD_CCI_LIST_CLAMP(port_rsp->num_ports, want);
-
-		for (int i = 0; i < port_rsp->num_ports; i++)
-			add_switch_port(ctx, sw, &port_rsp->ports[i]);
-		done += want;
-	}
-
-	free(port_req);
-	free(port_rsp);
-
-	/* what the ports are now */
-	sw->num_dsps = sw->num_usps = 0;
-	{
-		struct fmd_component *child;
-
-		fmd_for_each_child_type(&sw->base, child, FMD_COMPONENT_PORT) {
-			if (fmd_to_port(child)->state == FMD_PORT_DSP)
-				sw->num_dsps++;
-			else if (fmd_to_port(child)->state == FMD_PORT_USP)
-				sw->num_usps++;
-		}
-	}
+	rc = read_switch_ports(ctx, sw, port_ids, nports);
+	if (rc)
+		return rc;
 
 	/* Step 3: Discover VCS configuration */
 	fmd_vcs_refresh(ctx, sw);
@@ -1409,6 +1437,11 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		sw->base.msg_limit = msg_limit;
 		fmd_topology_add(&ctx->topology, &sw->base, NULL);
 
+		/*
+		 * Have it say when something changes before it is read, so
+		 * that nothing changes unseen between the two.
+		 */
+		fmd_switch_events_enable(ctx, sw);
 		rc = discover_switch(ctx, sw);
 		break;
 	}
@@ -1654,6 +1687,12 @@ static int discover_new_endpoints(struct fmd_ctx *ctx)
  *
  * Returns how many components were added.
  */
+/* Everything a switch says of itself, again. fabric_lock held exclusively */
+int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw)
+{
+	return sw->base.ep ? discover_switch(ctx, sw) : 0;
+}
+
 int fmd_rescan(struct fmd_ctx *ctx)
 {
 	struct fmd_component *comp;

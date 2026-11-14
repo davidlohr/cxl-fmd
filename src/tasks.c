@@ -151,6 +151,29 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	task_finish(ctx, task, false, msg);
 }
 
+/*
+ * The switch has recorded a Binding Change of a vPPB. If a task is following
+ * a bind or unbind of it, this is its end, and the switch's own word on how
+ * it went: a failed one is recorded in the Warning log.
+ */
+void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			      uint8_t vcs_id, uint8_t vppb_id, bool failed)
+{
+	struct fmd_task *task;
+
+	for (task = ctx->tasks; task; task = task->next) {
+		if (task->state != FMD_TASK_RUNNING ||
+		    task->vcs_id != vcs_id || task->vppb_id != vppb_id ||
+		    strcmp(task->switch_id, sw->base.id) != 0)
+			continue;
+
+		task->percent = 100;
+		task_complete(ctx, task, sw, failed ? CXLMI_RET_INTERNAL :
+						      CXLMI_RET_SUCCESS);
+		return;
+	}
+}
+
 /* forget the oldest finished tasks beyond the number kept */
 static void tasks_prune(struct fmd_ctx *ctx)
 {

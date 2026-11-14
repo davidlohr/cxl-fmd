@@ -1440,6 +1440,27 @@ int fmd_discover(struct fmd_ctx *ctx);
  */
 int fmd_rescan(struct fmd_ctx *ctx);
 
+/* One switch: some of its ports, or all of it. fabric_lock held exclusively */
+int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			     const uint8_t *port_ids, int nports);
+int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw);
+
+/*
+ * The event logs of the switches (src/switch_events.c): read, acted on and
+ * cleared. Takes fabric_lock.
+ */
+int fmd_switch_events_poll(struct fmd_ctx *ctx);
+
+/* Ask a switch to say when its logs have new records. fabric_lock held */
+void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw);
+
+/*
+ * A Binding Change of a vPPB, from a Virtual CXL Switch Event Record: the
+ * end of the bind or unbind a task is following. fabric_lock held.
+ */
+void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			      uint8_t vcs_id, uint8_t vppb_id, bool failed);
+
 /*
  * VCS Bind/Unbind Operations (CXL r3.2 Section 7.6.7.2)
  *

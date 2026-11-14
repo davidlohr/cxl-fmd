@@ -35,7 +35,7 @@ static void print_usage(const char *prog)
 	       "  -c, --check           Check the topology is a valid CXL fabric and exit\n"
 	       "  -m, --mctp            Enable MCTP device scanning\n"
 	       "  -i, --ioctl           Enable ioctl device scanning\n"
-	       "  -e, --event-poll SECS Drain the DC event log every SECS seconds\n"
+	       "  -e, --event-poll SECS Read the event logs every SECS seconds\n"
 	       "                        (default: %d, 0 disables)\n"
 	       "  -r, --rescan SECS     Look for new devices every SECS seconds\n"
 	       "                        (default: %d, 0 disables)\n"

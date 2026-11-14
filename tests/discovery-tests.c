@@ -1605,6 +1605,162 @@ static void test_rescan(void)
 	report("re-scan", before);
 }
 
+/*
+ * The event logs of a switch (Section 7.6.8). A page of Get Event Records
+ * (Table 8-232) with one record in the Common Event Record Format (Table
+ * 8-221): the identifier at 00h, the handle at 14h, and from 30h on what
+ * the kind of record defines.
+ */
+static const uint8_t physical_switch_event[16] = {	/* 77cf9271-9c02-470b-... */
+	0x77, 0xcf, 0x92, 0x71, 0x9c, 0x02, 0x47, 0x0b,
+	0x9f, 0xe4, 0xbc, 0x7b, 0x75, 0xf2, 0xda, 0x97,
+};
+static const uint8_t virtual_switch_event[16] = {	/* 40d26425-3396-4c4d-... */
+	0x40, 0xd2, 0x64, 0x25, 0x33, 0x96, 0x4c, 0x4d,
+	0xa5, 0xda, 0x3d, 0x47, 0x26, 0x3a, 0xf4, 0x25,
+};
+
+static void answer_event(struct cxlmi_endpoint *ep, const uint8_t *uuid,
+			 uint16_t handle, const uint8_t *data, size_t len)
+{
+	uint8_t page[0x20 + 0x80] = { 0 }, *rec = page + 0x20;
+
+	put16(page + 0x14, 1);			/* Event Record Count */
+	memcpy(rec, uuid, 16);			/* Event Record Identifier */
+	rec[0x10] = 0x80;			/* Event Record Length */
+	put16(rec + 0x14, handle);		/* Event Record Handle */
+	memcpy(rec + 0x30, data, len);
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+}
+
+/* a log with nothing in it, or one that has lost records */
+static void answer_no_events(struct cxlmi_endpoint *ep, bool overflow)
+{
+	uint8_t page[0x20] = { overflow ? 0x01 : 0x00 };
+
+	answer(ep, 0x0100, page, sizeof(page));
+}
+
+static void test_switch_events(void)
+{
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x500c);
+	struct fmd_fabric *root = ctx->topology.root;
+	uint8_t ports[4 + 16] = { 0 }, pl[8] = { 0 }, set = 0, cmd = 0;
+	size_t size = sizeof(pl);
+	int before = failures, nports, rc;
+	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
+	struct fmd_connection *conn;
+	struct fmd_switch *sw;
+	struct fmd_task *task;
+	struct fmd_port *port;
+
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x500c);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw, "no switch %s", sw_id);
+	if (!sw)
+		goto out;
+	nports = root->port_count;
+
+	/*
+	 * Set MCTP Event Interrupt Policy (0105h), Table 8-236: the four logs
+	 * (Bits[3:0]) and a background operation that has completed (Bit[15]).
+	 */
+	answer(ep, 0x0104, (uint8_t[2]){ 0, 0 }, 2);
+	answer_rc(ep, 0x0105, CXLMI_RET_SUCCESS);
+	fmd_switch_events_enable(ctx, sw);
+	cxlmi_mock_get_last_command(ep, &set, &cmd, pl, &size);
+	CHECK(set == 0x01 && cmd == 0x05 && pl[0] == 0x0f && pl[1] == 0x80,
+	      "event notifications asked for with %02x%02xh, %02x%02xh", set,
+	      cmd, pl[1], pl[0]);
+
+	/*
+	 * A Physical Switch Event Record (Table 7-79) for port 4, in the
+	 * Informational log: a device has been plugged in. Only that port is
+	 * read again: Type 3 SLD (04h), LTSSM L0 (04h).
+	 */
+	answer_event(ep, physical_switch_event, 0x11,
+		     (uint8_t[2]){ 4, 0x00 }, 2);	/* port 4, Link State Change */
+	ports[0] = 1;
+	port_block(ports + 4, 4, 0x03, 0x02, 0x04, 0x04, 0x0004);
+	answer(ep, 0x5101, ports, sizeof(ports));
+	fmd_switch_events_poll(ctx);
+
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 4);
+	snprintf(id, sizeof(id), "%.32s_port4_dev", sw_id);
+	CHECK(fmd_topology_find_sld(&ctx->topology, id),
+	      "the device on the port the event named was not discovered");
+	CHECK(port && port->link_status == FMD_LINK_UP, "port 4 link");
+	CHECK(root->port_count == nports, "%d ports", root->port_count);
+
+	/*
+	 * A bind in the background, and the Virtual CXL Switch Event Record
+	 * (Table 7-80) that says it is over: a Binding Change of vPPB 1 of
+	 * VCS 2, in the Informational log, which is where a successful one
+	 * goes.
+	 */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
+	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
+	conn = fmd_connection_create(ctx, "host", "device", "chunk", 0);
+	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 1, conn->id) : NULL;
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	conn->pending = FMD_CONN_BINDING;
+
+	answer_event(ep, virtual_switch_event, 0x12,
+		     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld1, unbound);
+	fmd_switch_events_poll(ctx);
+	CHECK(task->state == FMD_TASK_COMPLETED, "task state %d: %s",
+	      task->state, task->message);
+	CHECK(conn->bound && conn->pending == FMD_CONN_SETTLED,
+	      "the connection is not made by the binding change");
+
+	/*
+	 * An unbind that fails: its Binding Change is in the Warning log. The
+	 * Informational log is read first, and is empty.
+	 */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_unbind(ctx, sw, 2, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
+	CHECK(rc == FMD_OP_STARTED, "unbind: %d", rc);
+	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, 2, 1, conn->id);
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	conn->pending = FMD_CONN_UNBINDING;
+
+	answer_no_events(ep, false);
+	answer_event(ep, virtual_switch_event, 0x13,
+		     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+	fmd_switch_events_poll(ctx);
+	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d: %s",
+	      task->state, task->message);
+	CHECK(fmd_connection_find(ctx, task->connection_id) &&
+	      conn->pending == FMD_CONN_SETTLED,
+	      "the connection does not stand after an unbind that failed");
+
+	/*
+	 * A log that has overflowed has lost records, and what they said is
+	 * only in the switch: all of it is read again. Port 4 has no device
+	 * now.
+	 */
+	answer_no_events(ep, true);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	fmd_switch_events_poll(ctx);
+	CHECK(port && port->link_status == FMD_LINK_DOWN &&
+	      port->conn_dev_type == FMD_CONN_NONE,
+	      "the switch was not read again after an overflow");
+out:
+	fmd_ctx_free(ctx);
+	report("event logs of a switch", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1639,6 +1795,7 @@ int main(void)
 	test_bind_task(false);
 	test_bind_busy();
 	test_rescan();
+	test_switch_events();
 	test_overcount_switch();
 	test_overcount_mld();
 	test_mld_ld_counts();
