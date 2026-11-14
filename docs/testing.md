@@ -130,6 +130,44 @@ Limits, from the libcxlmi mock endpoint:
   responses; one that has none gets "Unsupported".
 - It keeps only the last command it received.
 
+## Mock Topologies
+
+A mock topology is a JSON file in `mock/`. Whatever is tested on one only
+means something if the topology could be a real CXL fabric, so two things
+stand between a file and the daemon:
+
+- **The file is read strictly** (`src/mock.c`). A value that is present and
+  cannot be used as what it is meant to be is an error: a number that does not
+  parse or does not fit its field, a capacity that is not a multiple of
+  256 MB, more entries than a list can hold, a device on a switch or port the
+  file does not have, an extent outside every region. None of these is rounded,
+  truncated, dropped or replaced by a default.
+- **The topology is checked against the CXL specification**
+  (`src/validate.c`). Each check enforces a rule of CXL r4.0 and names it when
+  it fails: a port or an LD bound to more than one vPPB, an MLD port bound as
+  a whole, a VCS whose upstream port is not one, a device on a port whose link
+  is down or whose Connected Device Type is another, capacities that do not
+  add up, an MLD with no LDs or more than 16, a head of a Multi-Headed device
+  with no LD mapped, DC regions and extents that are not aligned or overlap,
+  two devices with one serial number.
+
+A topology that fails either is refused: the daemon exits instead of serving
+it. To check one without serving it:
+
+```bash
+./build/cxl-fmd --mock mock/multi-host-vcs.json --check    # exit status 0: valid
+```
+
+`tests/test_mock_topologies.py` (`meson test -C build mock-topologies`) checks
+that every topology in `mock/` is valid, and that each rule rejects a topology
+that breaks it: every case takes a valid topology, breaks one rule, and
+expects the refusal to name it. **A new check needs a case there**, or nothing
+shows that it can fail.
+
+The same checks run on a discovered topology, where a failure is a warning in
+the log: it says something about the hardware or about discovery, and the
+daemon still serves what it found.
+
 ## DMTF Redfish Service Validator
 
 The [DMTF Redfish Service Validator](https://github.com/DMTF/Redfish-Service-Validator) validates that cxl-fmd's Redfish responses conform to the official DMTF schemas.
@@ -498,37 +536,27 @@ done
 
 ## Continuous Integration
 
-### Recommended CI Pipeline
+`.github/workflows/ci.yml` runs on every push to `main` and on pull requests.
+Nothing in it needs hardware:
 
-```yaml
-test:
-  stages:
-    - build
-    - test-unit
-    - test-validator
-    - test-asan
+| Job | What it runs |
+|-----|--------------|
+| Build and test (gcc, clang) | A warnings-as-errors build, `--check` on every topology in `mock/`, then `meson test`: the discovery harness, the mock topology checks and the pytest suites |
+| ASan and UBSan | The same `meson test` on a build with `-Db_sanitize=address,undefined` |
 
-  build:
-    script:
-      - meson setup build
-      - meson compile -C build
+The pytest fixture that starts the daemon fails the test if the daemon exits
+during it, or does not shut down with status 0 afterwards. A crash, a failed
+assertion or a sanitizer report in the daemon is therefore a test failure,
+even when every request the test made was answered; under the sanitizer job
+that includes memory the daemon still holds at exit.
 
-  test-unit:
-    script:
-      - pytest tests/ -v --junitxml=results.xml
+To run what CI runs:
 
-  test-validator:
-    script:
-      - python scripts/run_redfish_validator.py --output-dir logs
-    artifacts:
-      paths:
-        - logs/
-
-  test-asan:
-    script:
-      - meson setup build-asan -Db_sanitize=address,undefined
-      - meson compile -C build-asan
-      - pytest tests/ -v
+```bash
+meson setup build -Dtests=enabled -Dwerror=true && meson test -C build
+CC=clang meson setup build-asan -Dtests=enabled \
+    -Db_sanitize=address,undefined -Db_lundef=false
+ASAN_OPTIONS=detect_leaks=1 meson test -C build-asan --timeout-multiplier 4
 ```
 
 ## Troubleshooting

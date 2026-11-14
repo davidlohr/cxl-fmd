@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: LGPL-2.1
+#
+# Build cxl-fmd and run everything that needs no hardware: the discovery
+# harness against libcxlmi mock endpoints, the mock topology checks, and
+# the Redfish API suites against the daemon in --mock mode.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config clang \
+            libmicrohttpd-dev libjansson-dev libdbus-1-dev \
+            python3-pytest python3-requests python3-venv
+
+      - name: Build
+        run: |
+          meson setup build -Dtests=enabled -Dwerror=true
+          meson compile -C build
+
+      - name: Check the mock topologies
+        run: |
+          for f in mock/*.json mock/unit/*.json; do
+            ./build/cxl-fmd --mock "$f" --check
+          done
+
+      - name: Test
+        run: meson test -C build --print-errorlogs
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-${{ matrix.cc }}
+          path: build/meson-logs/testlog.txt
+
+  sanitizers:
+    name: ASan and UBSan
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      ASAN_OPTIONS: detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config clang \
+            libmicrohttpd-dev libjansson-dev libdbus-1-dev \
+            python3-pytest python3-requests python3-venv
+
+      - name: Build
+        run: |
+          meson setup build -Dtests=enabled \
+            -Db_sanitize=address,undefined -Db_lundef=false
+          meson compile -C build
+
+      # the code that talks to devices, and the daemon serving every suite
+      - name: Test
+        run: meson test -C build --print-errorlogs --timeout-multiplier 4
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-sanitizers
+          path: build/meson-logs/testlog.txt
