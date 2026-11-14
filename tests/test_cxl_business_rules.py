@@ -165,6 +165,19 @@ class TestMultiVCSRules:
         # Gen1 is 2.5 GT/s, not 2
         assert data["LinkConfiguration"][0]["CapableLinkSpeedGbps"] == [2.5, 5, 8, 16, 32]
 
+    def test_pcie_device_of_an_mld(self, api_client):
+        """The PCIeDevice of mld0, on port 5 of the switch."""
+        status, data = api_client.get("/redfish/v1/Chassis/mld0/PCIeDevices/mld0")
+        assert status == 200
+        # the device's serial number, not the component's ID
+        assert data["SerialNumber"] == "0x4D4C443030303030"
+        # an LD has a firmware revision; the MLD has none to report
+        assert "FirmwareVersion" not in data
+        # the link is the switch port's: its speed and width in use, and
+        # nothing about what the device could do, which no command reports
+        assert data["PCIeInterface"] == {"PCIeType": "Gen5", "LanesInUse": 16}
+        assert data["CXLDevice"]["DeviceClass"] == "MLD"
+
     def test_port_bound_to_another_vcs_is_refused(self, api_client):
         """dev2 is bound to VCS 1: host0, on VCS 0, cannot be given it."""
         before = self._bindings(api_client)

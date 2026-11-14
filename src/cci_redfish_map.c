@@ -15,6 +15,7 @@
 #define CXL_HEALTH_MAINTENANCE_NEEDED      (1 << 0)
 #define CXL_HEALTH_PERFORMANCE_DEGRADED    (1 << 1)
 #define CXL_HEALTH_HW_REPLACEMENT_NEEDED   (1 << 2)
+#define CXL_HEALTH_CAPACITY_DEGRADED       (1 << 3)
 
 /*
  * CXL Media Status values
@@ -39,7 +40,8 @@ enum rf_health fmd_map_health_status(uint8_t cci_health_status)
 		return HEALTH_CRITICAL;
 
 	if (cci_health_status & (CXL_HEALTH_MAINTENANCE_NEEDED |
-				 CXL_HEALTH_PERFORMANCE_DEGRADED))
+				 CXL_HEALTH_PERFORMANCE_DEGRADED |
+				 CXL_HEALTH_CAPACITY_DEGRADED))
 		return HEALTH_WARNING;
 
 	return HEALTH_OK;
@@ -64,10 +66,39 @@ enum rf_state fmd_map_media_status(uint8_t cci_media_status)
 		return STATE_STARTING;
 	case CXL_MEDIA_WRITE_PERSISTENCY_LOST:
 	case CXL_MEDIA_WRITE_PERSISTENCY_LOSS_PRIOR:
+	/*
+	 * 05h to 09h (Table 8-315): write persistency or all data may be
+	 * lost, at shutdown, on power loss, or imminently. The media still
+	 * works and is not in its normal state.
+	 */
+	case 0x05:
+	case 0x06:
+	case 0x07:
+	case 0x08:
+	case 0x09:
 		return STATE_DEGRADED;
 	case CXL_MEDIA_ALL_DATA_LOST:
 		return STATE_UNAVAILABLE_OFFLINE;
 	default:
 		return STATE_ENABLED;
 	}
+}
+
+/*
+ * The worse of two Media Status values. They are an enumeration, not a
+ * scale: "worse" is by the state each maps to, then by which is abnormal.
+ */
+uint8_t fmd_worse_media_status(uint8_t a, uint8_t b)
+{
+	static const int rank[] = {
+		[STATE_ENABLED] = 0, [STATE_STARTING] = 1,
+		[STATE_DEGRADED] = 2, [STATE_UNAVAILABLE_OFFLINE] = 3,
+	};
+	enum rf_state sa = fmd_map_media_status(a), sb = fmd_map_media_status(b);
+	int ra = (unsigned int)sa < sizeof(rank) / sizeof(rank[0]) ? rank[sa] : 0;
+	int rb = (unsigned int)sb < sizeof(rank) / sizeof(rank[0]) ? rank[sb] : 0;
+
+	if (ra != rb)
+		return ra > rb ? a : b;
+	return a ? a : b;
 }

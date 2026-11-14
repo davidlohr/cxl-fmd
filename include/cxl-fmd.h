@@ -1684,5 +1684,6 @@ int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
 
 enum rf_health fmd_map_health_status(uint8_t cci_health_status);
 enum rf_state fmd_map_media_status(uint8_t cci_media_status);
+uint8_t fmd_worse_media_status(uint8_t a, uint8_t b);
 
 #endif /* CXL_FMD_H */

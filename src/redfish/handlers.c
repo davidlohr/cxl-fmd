@@ -2051,10 +2051,10 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		fmd_for_each_child(&mld->base, child) {
 			if (child->type == FMD_COMPONENT_LD) {
 				struct fmd_ld *ld = fmd_to_ld(child);
-				if (ld->health.health_status > worst_health)
-					worst_health = ld->health.health_status;
-				if (ld->health.media_status > worst_media)
-					worst_media = ld->health.media_status;
+				/* Health Status is a bitmask, Media Status is not a scale */
+				worst_health |= ld->health.health_status;
+				worst_media = fmd_worse_media_status(worst_media,
+								     ld->health.media_status);
 			}
 		}
 		fmd_topology_rdunlock(&ctx->topology);
@@ -2076,10 +2076,10 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		fmd_for_each_child(&mhd->base, child) {
 			if (child->type == FMD_COMPONENT_LD) {
 				struct fmd_ld *ld = fmd_to_ld(child);
-				if (ld->health.health_status > worst_health)
-					worst_health = ld->health.health_status;
-				if (ld->health.media_status > worst_media)
-					worst_media = ld->health.media_status;
+				/* Health Status is a bitmask, Media Status is not a scale */
+				worst_health |= ld->health.health_status;
+				worst_media = fmd_worse_media_status(worst_media,
+								     ld->health.media_status);
 			}
 		}
 		fmd_topology_rdunlock(&ctx->topology);
@@ -2194,6 +2194,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 	char fw_str[17];
 	uint8_t worst_health = 0;
 	uint8_t worst_media = 0;
+	uint64_t serial = 0;
 
 	snprintf(uri, sizeof(uri), "/redfish/v1/Chassis/%s/PCIeDevices/%s",
 		 chassis_id, dev_id);
@@ -2210,12 +2211,14 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		snprintf(fw_str, sizeof(fw_str), "%.16s", (char *)sld->memdev.fw_revision);
 		worst_health = sld->health.health_status;
 		worst_media = sld->health.media_status;
+		serial = sld->identify.serial_num;
 		dev_name = "CXL Type 3 SLD";
 	} else if (comp->type == FMD_COMPONENT_MLD) {
 		struct fmd_mld *mld = fmd_to_mld(comp);
 		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mld->identify.vendor_id);
 		snprintf(model_str, sizeof(model_str), "0x%04X", mld->identify.device_id);
-		snprintf(fw_str, sizeof(fw_str), "N/A");
+		fw_str[0] = '\0';	/* an LD has a firmware revision, the MLD none */
+		serial = mld->identify.serial_num;
 		dev_name = "CXL Type 3 MLD";
 
 		/* Aggregate health from all LDs */
@@ -2224,10 +2227,10 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		fmd_for_each_child(&mld->base, child) {
 			if (child->type == FMD_COMPONENT_LD) {
 				struct fmd_ld *ld = fmd_to_ld(child);
-				if (ld->health.health_status > worst_health)
-					worst_health = ld->health.health_status;
-				if (ld->health.media_status > worst_media)
-					worst_media = ld->health.media_status;
+				/* Health Status is a bitmask, Media Status is not a scale */
+				worst_health |= ld->health.health_status;
+				worst_media = fmd_worse_media_status(worst_media,
+								     ld->health.media_status);
 			}
 		}
 		fmd_topology_rdunlock(&ctx->topology);
@@ -2235,7 +2238,8 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		struct fmd_mhd *mhd = fmd_to_mhd(comp);
 		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mhd->identify.vendor_id);
 		snprintf(model_str, sizeof(model_str), "0x%04X", mhd->identify.device_id);
-		snprintf(fw_str, sizeof(fw_str), "N/A");
+		fw_str[0] = '\0';
+		serial = mhd->identify.serial_num;
 		dev_name = "CXL Type 3 MHD";
 
 		/* Aggregate health from all LDs in pool */
@@ -2244,10 +2248,10 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		fmd_for_each_child(&mhd->base, child) {
 			if (child->type == FMD_COMPONENT_LD) {
 				struct fmd_ld *ld = fmd_to_ld(child);
-				if (ld->health.health_status > worst_health)
-					worst_health = ld->health.health_status;
-				if (ld->health.media_status > worst_media)
-					worst_media = ld->health.media_status;
+				/* Health Status is a bitmask, Media Status is not a scale */
+				worst_health |= ld->health.health_status;
+				worst_media = fmd_worse_media_status(worst_media,
+								     ld->health.media_status);
 			}
 		}
 		fmd_topology_rdunlock(&ctx->topology);
@@ -2266,9 +2270,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"  s:s,"   /* Name */
 		"  s:s,"   /* DeviceType */
 		"  s:s,"   /* Model */
-		"  s:s,"   /* FirmwareVersion */
 		"  s:s,"   /* Manufacturer */
-		"  s:s,"   /* SerialNumber */
 		"  s:{s:s, s:s},"  /* Status */
 		"  s:{s:s}"  /* CXLLogicalDevices */
 		"}",
@@ -2278,18 +2280,57 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"Name", dev_name,
 		"DeviceType", "SingleFunction",
 		"Model", model_str,
-		"FirmwareVersion", fw_str,
 		"Manufacturer", vendor_str,
-		"SerialNumber", dev_id,
 		"Status", "State", rf_state_to_str(state),
 		         "Health", rf_health_to_str(health),
 		"CXLLogicalDevices", "@odata.id", ld_uri
 	);
 
-	json_object_set_new(result, "PCIeInterface",
-		json_pack("{s:s, s:i}",
-			  "PCIeType", "Gen5",
-			  "MaxLanes", 16));
+	/* what is not known is not reported: no "N/A", and no component ID */
+	if (fw_str[0])
+		json_object_set_new(result, "FirmwareVersion", json_string(fw_str));
+
+	/*
+	 * SerialNumber is the device's, from Identify (Table 8-216), written
+	 * as it is on the Chassis. 0 is no serial number.
+	 */
+	if (serial) {
+		char serial_str[32];
+
+		snprintf(serial_str, sizeof(serial_str), "0x%016llX",
+			 (unsigned long long)serial);
+		json_object_set_new(result, "SerialNumber", json_string(serial_str));
+	}
+
+	/*
+	 * PCIeInterface: the link of a device on a switch port is the port's
+	 * link, which Get Physical Port State describes: its negotiated
+	 * width and current speed are the lanes and the PCIe generation in
+	 * use. What the device itself is capable of is not reported by any
+	 * command, and neither is the link of a device with no switch.
+	 */
+	if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
+		static const char *const gen[] = {
+			NULL, "Gen1", "Gen2", "Gen3", "Gen4", "Gen5", "Gen6",
+		};
+		struct fmd_port *port = fmd_to_port(comp->parent);
+
+		if (port->link_status == FMD_LINK_UP) {
+			json_t *pcie = json_object();
+
+			if (port->current_link_speed > 0 &&
+			    port->current_link_speed < sizeof(gen) / sizeof(gen[0]))
+				json_object_set_new(pcie, "PCIeType",
+					json_string(gen[port->current_link_speed]));
+			if (port->negotiated_link_width)
+				json_object_set_new(pcie, "LanesInUse",
+					json_integer(port->negotiated_link_width));
+			if (json_object_size(pcie))
+				json_object_set_new(result, "PCIeInterface", pcie);
+			else
+				json_decref(pcie);
+		}
+	}
 
 	/* CXL-specific properties */
 	int max_ld;
@@ -2995,14 +3036,18 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 				    json_integer((json_int_t)volatile_limit_mib));
 
 	/* CXL complex type for staged partition values */
+	/*
+	 * "If both this field and the Next Persistent Capacity field are 0,
+	 * there is no pending change to the partitioning" (Table 8-310).
+	 * When either is not, both say what the partitioning will be, and a
+	 * 0 among them is a capacity of 0.
+	 */
 	if (staged_volatile_mib > 0 || staged_persistent_mib > 0) {
 		json_t *cxl = json_object();
-		if (staged_volatile_mib > 0)
-			json_object_set_new(cxl, "StagedVolatileSizeMiB",
-					    json_integer((json_int_t)staged_volatile_mib));
-		if (staged_persistent_mib > 0)
-			json_object_set_new(cxl, "StagedNonVolatileSizeMiB",
-					    json_integer((json_int_t)staged_persistent_mib));
+		json_object_set_new(cxl, "StagedVolatileSizeMiB",
+				    json_integer((json_int_t)staged_volatile_mib));
+		json_object_set_new(cxl, "StagedNonVolatileSizeMiB",
+				    json_integer((json_int_t)staged_persistent_mib));
 		json_object_set_new(result, "CXL", cxl);
 	}
 

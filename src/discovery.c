@@ -711,6 +711,18 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 		else
 			ld->memory_size = CXL_TO_BYTES(ld->memdev.total_capacity);
 
+		/* and its partitioning and health, as for the LD of an MLD */
+		rc = cxlmi_cmd_memdev_get_partition_info(ep, CXLMI_TUNNEL_MLD(i),
+							 &ld->partition);
+		if (rc)
+			fmd_dbg(ctx, "%s: pool LD %d get partition info failed: %d",
+				mhd->base.id, i, rc);
+		rc = cxlmi_cmd_memdev_get_health_info(ep, CXLMI_TUNNEL_MLD(i),
+						      &ld->health);
+		if (rc)
+			fmd_dbg(ctx, "%s: pool LD %d get health info failed: %d",
+				mhd->base.id, i, rc);
+
 		fmd_dbg(ctx, "%s: pool LD %d bound to head %d",
 			mhd->base.id, i,
 			binding_point == 0xFF ? -1 : binding_point);

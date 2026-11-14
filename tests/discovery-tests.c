@@ -1277,6 +1277,38 @@ static void test_mld_ld_counts(void)
 	report("MLD LD counts and QoS control", before);
 }
 
+/*
+ * Get Health Info to Redfish Status (Table 8-315). Health Status is a
+ * bitmask of four conditions; Media Status is an enumeration of ten values.
+ */
+static void test_health_mapping(void)
+{
+	int before = failures;
+
+	CHECK(fmd_map_health_status(0x00) == HEALTH_OK, "no condition");
+	CHECK(fmd_map_health_status(0x01) == HEALTH_WARNING, "Maintenance Needed");
+	CHECK(fmd_map_health_status(0x02) == HEALTH_WARNING, "Performance Degraded");
+	CHECK(fmd_map_health_status(0x04) == HEALTH_CRITICAL,
+	      "Hardware Replacement Needed");
+	CHECK(fmd_map_health_status(0x08) == HEALTH_WARNING,
+	      "Memory Capacity Degraded is reported as healthy");
+
+	CHECK(fmd_map_media_status(0x00) == STATE_ENABLED, "Normal");
+	CHECK(fmd_map_media_status(0x01) == STATE_STARTING, "Not Ready");
+	CHECK(fmd_map_media_status(0x03) == STATE_UNAVAILABLE_OFFLINE,
+	      "All data lost");
+	for (int media = 0x04; media <= 0x09; media++)
+		CHECK(fmd_map_media_status(media) == STATE_DEGRADED,
+		      "Media Status %02xh is reported as normal", media);
+
+	/* the worse of two is by meaning: 03h (all data lost) over 09h */
+	CHECK(fmd_worse_media_status(0x03, 0x09) == 0x03 &&
+	      fmd_worse_media_status(0x09, 0x03) == 0x03, "worse of 03h and 09h");
+	CHECK(fmd_worse_media_status(0x00, 0x02) == 0x02, "worse of 00h and 02h");
+
+	report("health and media status", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1310,6 +1342,7 @@ int main(void)
 	test_overcount_switch();
 	test_overcount_mld();
 	test_mld_ld_counts();
+	test_health_mapping();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);
