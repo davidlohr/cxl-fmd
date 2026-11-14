@@ -2162,6 +2162,10 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 			"MemoryDomains", "@odata.id", domains_uri
 		);
 
+		/* the switch's CXL event records: see src/event_log.c */
+		json_object_set_new(result, "LogServices", json_pack("{s:s}", "@odata.id",
+			rf_uri(0, "/redfish/v1/Chassis/%s/LogServices", id)));
+
 		/* Add Links.Contains with all device chassis */
 		if (json_array_size(contains) > 0) {
 			json_object_set_new(result, "Links",
@@ -2982,6 +2986,11 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	 * Dynamic capacity (docs/DCD-FM-API.md Table 3): MemoryRegions link,
 	 * extent/tag counters and the DynamicCapacityAdd/Release actions.
 	 */
+	/* its CXL event records: see src/event_log.c */
+	json_object_set_new(result, "Log", json_pack("{s:s}", "@odata.id",
+		rf_uri(0, "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s/DeviceLog",
+		       chassis_id, pcie_id, ld_id)));
+
 	fmd_redfish_dc_logical_device_props(ctx, comp, ld_idx, chassis_id, pcie_id,
 					    ld_id, result);
 

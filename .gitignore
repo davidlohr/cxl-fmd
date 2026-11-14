@@ -30,3 +30,7 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# written by the DMTF Redfish Service Validator into the schema directory
+schema/dmtf/csdl/info.json
+schema/dmtf/csdl/DSP8010.zip

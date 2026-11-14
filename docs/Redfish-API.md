@@ -64,14 +64,14 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 | CXL Command | CXL Field | Redfish Resource | Redfish Property | Implemented |
 |-------------|-----------|------------------|------------------|:-----------:|
 | Get Log Capabilities | Parameter Flags[3]: Persistent across cold reset | `LogService` | `Persistency` | No |
-| Get Event Records | Flags[0]: Overflow | `LogService` | `Overflow` | No |
-| Get Event Records | Overflow Error Count | `LogEntry` | `OverflowErrorCount` | No |
-| Get Event Records | First Overflow Event Timestamp | `LogEntry` | `FirstOverflowTimestamp` | No |
-| Get Event Records | Last Overflow Event Timestamp | `LogEntry` | `LastOverflowTimestamp` | No |
+| Get Event Records | Flags[0]: Overflow | `LogService` | `Overflow` | Yes |
+| Get Event Records | Overflow Error Count | `LogEntry` | `OverflowErrorCount` | Yes |
+| Get Event Records | First Overflow Event Timestamp | `LogEntry` | `FirstOverflowTimestamp` | Yes |
+| Get Event Records | Last Overflow Event Timestamp | `LogEntry` | `LastOverflowTimestamp` | Yes |
 | Get FW Info | FW Slot Info | `PCIeDevice` | `StagedVersion` | No |
 | Get Timestamp | Timestamp | `PCIeDevice` | `CXLDevice/Timestamp` | Yes |
 | Set Timestamp | Timestamp | `PCIeDevice` | `CXLDevice/Timestamp` | Yes |
-| Identify Memory Device | Informational, Warning, Failure, and Fatal Event Log Size | `LogService` | `MaxNumberOfRecords` | No |
+| Identify Memory Device | Informational, Warning, Failure, and Fatal Event Log Size | `LogService` | `MaxNumberOfRecords` | Yes |
 | Identify Memory Device | Poison List Maximum Media Error Records | `Memory` | `PoisonListMaxMediaErrorRecords` | No |
 | Identify Memory Device | Poison Handling Capabilities | `Memory` | `PoisonHandlingCapabilities` | No |
 | Identify Memory Device | QoS Telemetry Capabilities[0]: Egress Port Congestion Supported | `PCIeDevice` | `CXLDevice/EgressPortCongestionSupported` | Yes |
@@ -109,6 +109,37 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 **Comment 3:** Redfish resources contain a `Status` property to show the health and state of a device. The `Conditions` property within the `Status` property is used to show why the `Health` property contains a value other than `OK`.
 
 **Comment 4:** The `Conditions` property within the `Status` property of the `Memory` resource shall contain messages to indicate either the Corrected Volatile Error Count or Corrected Persistent Error Count flags are set.
+
+### Where cxl-fmd puts CXL event records
+
+Comment 2 puts the records of a memory device in the `LogService` of its
+`Memory` resource. The schema (DSP8010 2026.2) allows that `LogService`, at the
+URI segment `DeviceLog`, only under `/redfish/v1/Systems/{id}/Memory/{id}`;
+cxl-fmd's `Memory` resources are under `Chassis`, where it allows none. It
+does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
+
+| Records of | `LogService` |
+|------------|--------------|
+| A memory device | `/redfish/v1/Chassis/{dev}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/DeviceLog`: LD 0 of an SLD; for an MLD, the LD a record names with its LD-ID Valid Flag, or every LD for a record about the whole device. `MaxNumberOfRecords` is the sum of the four log sizes, as Comment 2 says |
+| A switch | `/redfish/v1/Chassis/{switch}/LogServices/EventLog`. The `Switch` resource has `LogServices`, but the schema allows no URI for them; the switch's `Chassis` is where it allows one. `MaxNumberOfRecords` is the 256 records cxl-fmd keeps: no command reports a size |
+
+- Records are read with Get Event Records and then cleared, so what cxl-fmd
+  keeps is the only copy: each record is kept before it is cleared, whatever
+  its kind. `LogService.ClearLog` drops cxl-fmd's copies.
+- Only logs that are the FM's are read: a component's own MCTP CCI, and the
+  FM-owned LD of an MLD behind a switch port. The logs of a component reached
+  through the kernel's mailbox are shared with the kernel's driver (CXL r4.0
+  Section 9.20.1) and are left to it; its `DeviceLog` has `ServiceEnabled`
+  `false`. So does that of a pool LD of a Multi-Headed device, whose records
+  name an LD-ID relative to a head that nothing maps to the pool.
+- `Severity` is cxl-fmd's: `OK` for the Informational log, `Warning` for the
+  Warning log, `Critical` for the Failure and Fatal logs.
+- `EventTimestamp` is the record's Timestamp, left out when it is 0;
+  `Created` is when cxl-fmd read the record. `Message` decodes the Physical
+  Switch, Virtual CXL Switch and MLD Port Event Records, and names the kind of
+  the others.
+- Dynamic Capacity Event Log records are acted on and not kept: nothing places
+  them.
 
 ---
 
@@ -166,7 +197,7 @@ Mapping between CXL Fabric Management API (FM-API) commands and Redfish resource
 | Get PBR Link Partner Info | Device UUID | `Port` | `LinkPartnerReceived/LinkPartnerId` | No |
 | Bind vPPB | All | `Connection` | POST /Connections | Yes |
 | Unbind vPPB | All | `Connection` | DELETE /Connections | Yes |
-| MLD Port Event Record | All | `LogEntry` | | No |
+| MLD Port Event Record | All | `LogEntry` | | Yes |
 
 ### Comments for Table 2
 

@@ -40,7 +40,7 @@ def test_shipped_topology_is_valid(cxl_fmd_executable, path):
 
 
 def test_there_are_topologies():
-    assert len(TOPOLOGIES) >= 18
+    assert len(TOPOLOGIES) >= 20
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +231,31 @@ def head_on_a_port_that_is_down(t):
     port(t, 3)["link_status"] = "down"
 
 
+# event-logs.json
+def records(t, dev):
+    return device(t, dev)["event_records"]
+
+
+def event_in_no_log(t):
+    records(t, "dev0")[0]["log"] = "debug"
+
+
+def event_of_no_kind(t):
+    records(t, "dev0")[0]["kind"] = "thermal"
+
+
+def event_ld_on_an_sld(t):
+    records(t, "dev0")[0]["ld_id"] = 0
+
+
+def event_for_a_missing_ld(t):
+    records(t, "mld0")[0]["ld_id"] = 9
+
+
+def event_data_too_long(t):
+    records(t, "dev0")[0]["data"] = "00" * 0x51
+
+
 # dcd-device.json
 def dcd(t):
     return t["devices"][0]["dcd"]
@@ -297,6 +322,11 @@ BROKEN = [
     ("unit/unit-switch-mhsld.json", mld_head_on_a_switch, "presents an MLD on a switch port"),
     ("unit/unit-switch-mhsld.json", head_port_is_not_an_sld_port, "which presents an SLD"),
     ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down, "and its link is not up"),
+    ("event-logs.json", event_in_no_log, "log is not informational"),
+    ("event-logs.json", event_of_no_kind, "no known kind"),
+    ("event-logs.json", event_ld_on_an_sld, "ld_id is for an MLD"),
+    ("event-logs.json", event_for_a_missing_ld, "no LD 9"),
+    ("event-logs.json", event_data_too_long, "data is not up to"),
     ("dcd-device.json", extent_outside_its_region, "is outside region base"),
     ("dcd-device.json", extent_not_block_aligned, "is not aligned to the block size"),
     ("dcd-device.json", region_base_not_256mb, "is not aligned to 256 MB"),

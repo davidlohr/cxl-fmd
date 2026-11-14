@@ -716,6 +716,75 @@ static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
 		goto not_found;
 	}
 
+	/*
+	 * CXL event records: the log services of a switch's Chassis, and the
+	 * DeviceLog of each CXL logical device (src/event_log.c)
+	 */
+	if (match_route("/redfish/v1/Chassis/{id}/LogServices", norm_url, params, 8)) {
+		response = fmd_redfish_switch_log(ctx, params[0], NULL, "services", 0);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/LogServices/{log}", norm_url, params, 8)) {
+		response = fmd_redfish_switch_log(ctx, params[0], params[1], "service", 0);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/LogServices/{log}/Entries",
+			norm_url, params, 8)) {
+		response = fmd_redfish_switch_log(ctx, params[0], params[1], "entries", 0);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/LogServices/{log}/Entries/{entry}",
+			norm_url, params, 8)) {
+		response = fmd_redfish_switch_log(ctx, params[0], params[1], "entry",
+						  atoi(params[2]));
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/DeviceLog",
+			norm_url, params, 8)) {
+		response = fmd_redfish_ld_log(ctx, params[0], params[1], params[2],
+					      "service", 0);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/DeviceLog/Entries",
+			norm_url, params, 8)) {
+		response = fmd_redfish_ld_log(ctx, params[0], params[1], params[2],
+					      "entries", 0);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/DeviceLog/Entries/{entry}",
+			norm_url, params, 8)) {
+		response = fmd_redfish_ld_log(ctx, params[0], params[1], params[2],
+					      "entry", atoi(params[3]));
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
 	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}", norm_url, params, 8)) {
 		response = fmd_redfish_memory(ctx, params[0], params[1]);
 		free_params(params, 8);
@@ -795,6 +864,30 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 	if (!norm_url)
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Memory allocation failed");
+
+	/*
+	 * LogService.ClearLog: the records cxl-fmd keeps. The component's
+	 * own logs were cleared as they were read.
+	 */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/DeviceLog/Actions/LogService.ClearLog",
+			norm_url, params, 8)) {
+		rc = fmd_redfish_ld_log_clear(ctx, params[0], params[1], params[2]);
+		free_params(params, 8);
+		free(norm_url);
+		if (rc)
+			return send_error(conn, MHD_HTTP_NOT_FOUND, "Log service not found");
+		return send_no_content(conn);
+	}
+
+	if (match_route("/redfish/v1/Chassis/{id}/LogServices/{log}/Actions/LogService.ClearLog",
+			norm_url, params, 8)) {
+		rc = fmd_redfish_switch_log_clear(ctx, params[0], params[1]);
+		free_params(params, 8);
+		free(norm_url);
+		if (rc)
+			return send_error(conn, MHD_HTTP_NOT_FOUND, "Log service not found");
+		return send_no_content(conn);
+	}
 
 	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.ScanMedia */
 	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.ScanMedia",

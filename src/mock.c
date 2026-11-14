@@ -9,6 +9,7 @@
  * fmd_sld, fmd_mld, fmd_ld components.
  */
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,6 +167,150 @@ static const char *json_str_or(json_t *obj, const char *key, const char *def)
 }
 
 /*
+ * The event records of a component, as Get Event Records would have
+ * returned them (Common Event Record Format, Table 8-221):
+ *
+ *   "event_records": [ { "log": "warning", "kind": "physical_switch",
+ *                        "timestamp_ns": 1700000000000000000,
+ *                        "ld_id": 1, "data": "0400" } ],
+ *   "event_log_overflow": { "warning": { "count": 3, "first_ns": ...,
+ *                                        "last_ns": ... } }
+ *
+ * "kind" names a record format, or "uuid" gives its Event Record
+ * Identifier. "data" is the bytes from 30h on, in hex. "ld_id" sets the
+ * LD-ID Valid Flag and the LD-ID, for an MLD. They are kept as records read
+ * from the component are.
+ */
+static const char *const log_names[] = {
+	"informational", "warning", "failure", "fatal",
+};
+
+static int log_from_name(const char *name)
+{
+	for (int i = 0; i < 4; i++) {
+		if (!strcmp(name, log_names[i]))
+			return i;
+	}
+	return -1;
+}
+
+static int parse_uuid(const char *str, uint8_t uuid[16])
+{
+	int n = 0;
+
+	for (const char *p = str; *p && n < 32; p++) {
+		if (*p == '-')
+			continue;
+		if (!isxdigit((unsigned char)p[0]))
+			return -1;
+		uuid[n / 2] = (uint8_t)((uuid[n / 2] << 4) |
+			(isdigit((unsigned char)*p) ? *p - '0' : (tolower(*p) - 'a' + 10)));
+		n++;
+	}
+	return n == 32 ? 0 : -1;
+}
+
+static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
+				struct fmd_component *comp)
+{
+	json_t *arr = json_object_get(jobj, "event_records");
+	json_t *over = json_object_get(jobj, "event_log_overflow");
+	const char *key;
+	json_t *item;
+	size_t idx;
+
+	if (arr && !json_is_array(arr)) {
+		load_error("%s: event_records is not a list", comp->id);
+		return;
+	}
+	json_array_foreach(arr, idx, item) {
+		struct cxlmi_event_record rec = { 0 };
+		const char *log = json_str_or(item, "log", NULL);
+		const char *kind = json_str_or(item, "kind", NULL);
+		const char *uuid = json_str_or(item, "uuid", NULL);
+		const char *data = json_str_or(item, "data", "");
+		int which = log ? log_from_name(log) : -1;
+		size_t len = strlen(data);
+
+		if (which < 0) {
+			load_error("%s: event record %zu: log is not informational, "
+				   "warning, failure or fatal", comp->id, idx);
+			continue;
+		}
+		if (kind ? fmd_event_record_kind_from_name(kind, rec.uuid) < 0 :
+		    !uuid || parse_uuid(uuid, rec.uuid) < 0) {
+			load_error("%s: event record %zu: no known kind, or uuid",
+				   comp->id, idx);
+			continue;
+		}
+		if (len % 2 || len / 2 > sizeof(rec.data)) {
+			load_error("%s: event record %zu: data is not up to %zu bytes "
+				   "of hex", comp->id, idx, sizeof(rec.data));
+			continue;
+		}
+		for (size_t i = 0; i < len / 2; i++) {
+			unsigned int byte;
+
+			if (sscanf(data + 2 * i, "%2x", &byte) != 1 ||
+			    !isxdigit((unsigned char)data[2 * i + 1])) {
+				load_error("%s: event record %zu: data is not hex",
+					   comp->id, idx);
+				break;
+			}
+			rec.data[i] = (uint8_t)byte;
+		}
+
+		rec.length = 0x80;
+		rec.flags[0] = (uint8_t)which;	/* Event Record Severity */
+		rec.handle = (uint16_t)(idx + 1);
+		rec.timestamp = json_uint_or(item, "timestamp_ns", 0);
+		if (json_object_get(item, "ld_id")) {
+			if (comp->type != FMD_COMPONENT_MLD) {
+				load_error("%s: event record %zu: ld_id is for an MLD",
+					   comp->id, idx);
+				continue;
+			}
+			rec.flags[0] |= 1 << 7;	/* LD-ID Valid Flag */
+			rec.ld_id = (uint16_t)json_uint_or(item, "ld_id", 0);
+			if (!fmd_topology_find_ld(&ctx->topology, comp->id, rec.ld_id)) {
+				load_error("%s: event record %zu: no LD %d", comp->id,
+					   idx, rec.ld_id);
+				continue;
+			}
+		}
+
+		if (comp->type == FMD_COMPONENT_SWITCH)
+			fmd_log_add(comp, which, &rec);
+		else
+			fmd_device_record_keep(ctx, comp, which, &rec, NULL);
+	}
+
+	if (over && !json_is_object(over)) {
+		load_error("%s: event_log_overflow is not an object", comp->id);
+		return;
+	}
+	json_object_foreach(over, key, item) {
+		int which = log_from_name(key);
+		struct fmd_component *child;
+
+		if (which < 0) {
+			load_error("%s: event_log_overflow: %s is not a log", comp->id, key);
+			continue;
+		}
+		uint16_t count = (uint16_t)json_uint_or(item, "count", 0);
+		uint64_t first = json_uint_or(item, "first_ns", 0);
+		uint64_t last = json_uint_or(item, "last_ns", 0);
+
+		if (comp->type != FMD_COMPONENT_MLD) {
+			fmd_log_overflowed(comp, which, count, first, last);
+			continue;
+		}
+		fmd_for_each_child_type(comp, child, FMD_COMPONENT_LD)
+			fmd_log_overflowed(child, which, count, first, last);
+	}
+}
+
+/*
  * Parse supported commands from CEL array
  */
 static uint64_t parse_cel_commands(json_t *jcel)
@@ -258,6 +403,15 @@ static struct fmd_sld *parse_sld(struct fmd_ctx *ctx, json_t *jdev,
 			json_capacity_units(obj, "partition_align_mb", 256);
 		sld->memdev.lsa_size =
 			(uint32_t)json_int_or(obj, "lsa_size", 0);
+		/* the sizes of its four event logs (Table 8-309) */
+		sld->memdev.info_event_log_size =
+			(uint16_t)json_uint_or(obj, "info_event_log_size", 0);
+		sld->memdev.warning_event_log_size =
+			(uint16_t)json_uint_or(obj, "warning_event_log_size", 0);
+		sld->memdev.failure_event_log_size =
+			(uint16_t)json_uint_or(obj, "failure_event_log_size", 0);
+		sld->memdev.fatal_event_log_size =
+			(uint16_t)json_uint_or(obj, "fatal_event_log_size", 0);
 	}
 
 	/* Compute memory sizes */
@@ -1022,6 +1176,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 		fmd_topology_add(&ctx->topology, &sld->base, parent);
 		fmd_create_sld_memory_resources(ctx, sld);
 		parse_dcd(ctx, jdev, &sld->base);
+		parse_event_records(ctx, jdev, &sld->base);
 
 		fmd_info(ctx, "Mock SLD %s: %" PRIu64 " MB",
 			 id, (uint64_t)(sld->memory_size / (1024ULL * 1024)));
@@ -1094,6 +1249,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 		fmd_create_mld_memory_resources(ctx, mld);
 		parse_dcd(ctx, jdev, &mld->base);
+		parse_event_records(ctx, jdev, &mld->base);
 
 		fmd_info(ctx, "Mock MLD %s: %d LDs", id, mld->ld_count);
 	}
@@ -1391,6 +1547,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 		fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
 		fmd_info(ctx, "Mock switch %s: %d VCS(s) configured", id, sw->num_vcs);
 	}
+
+	parse_event_records(ctx, jsw, &sw->base);
 
 	/*
 	 * Populate sw_identify (Identify Switch Device response) per DSP0288.

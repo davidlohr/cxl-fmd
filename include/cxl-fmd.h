@@ -209,6 +209,13 @@ struct fmd_component {
 	 */
 	uint16_t msg_limit;
 
+	/*
+	 * The event records read from this component, or for an LD from its
+	 * MLD, kept for the Redfish log service (src/event_log.c). NULL
+	 * until there is one.
+	 */
+	struct fmd_log *log;
+
 	/* Hash table linkage for O(1) lookup, hash by string ID */
 	uint32_t hash;
 	struct fmd_component *hash_next; /* handle collisions */
@@ -1468,6 +1475,70 @@ int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw);
  * cleared. Takes fabric_lock.
  */
 int fmd_switch_events_poll(struct fmd_ctx *ctx);
+
+/*
+ * Event records kept for Redfish (src/event_log.c). All of it runs with
+ * fabric_lock held: exclusively to change, shared to read.
+ */
+struct fmd_log_entry {
+	int id;                              /* LogEntry Id: increasing */
+	int log;                             /* 0 Informational to 3 Fatal */
+	time_t created;                      /* when it was read */
+	struct cxlmi_event_record record;    /* as Get Event Records gave it */
+	bool overflow;                       /* the log overflowed after it */
+	uint16_t overflow_count;
+	uint64_t first_overflow_ns;
+	uint64_t last_overflow_ns;
+};
+
+struct fmd_log {
+	struct fmd_log_entry *entries;       /* a ring of allocated entries */
+	int allocated;                       /* grows up to capacity */
+	int capacity;                        /* MaxNumberOfRecords */
+	int first;
+	int count;
+	int last_id;
+	bool overflow;                       /* a log reported Overflow */
+};
+
+struct fmd_overflow {
+	bool set;
+	int log;
+	uint16_t count;
+	uint64_t first_ns;
+	uint64_t last_ns;
+};
+
+typedef void (*fmd_event_record_fn)(struct fmd_ctx *ctx, struct fmd_component *comp,
+				    int log, const struct cxlmi_event_record *rec,
+				    void *arg);
+
+int fmd_event_log_drain(struct fmd_ctx *ctx, struct fmd_component *comp,
+			struct cxlmi_tunnel_info *ti, int which,
+			fmd_event_record_fn act, void *arg,
+			struct fmd_overflow *overflow);
+int fmd_log_add(struct fmd_component *comp, int which,
+		const struct cxlmi_event_record *rec);
+void fmd_log_overflowed(struct fmd_component *comp, int which, uint16_t count,
+			uint64_t first_ns, uint64_t last_ns);
+void fmd_log_clear(struct fmd_component *comp);
+void fmd_log_free(struct fmd_component *comp);
+bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev);
+void fmd_device_record_keep(struct fmd_ctx *ctx, struct fmd_component *dev,
+			    int which, const struct cxlmi_event_record *rec,
+			    void *arg);
+void fmd_device_logs_poll(struct fmd_ctx *ctx);
+int fmd_event_record_kind_from_name(const char *name, uint8_t uuid[16]);
+
+json_t *fmd_redfish_ld_log(struct fmd_ctx *ctx, const char *chassis_id,
+			   const char *pcie_id, const char *ld_id,
+			   const char *what, int id);
+int fmd_redfish_ld_log_clear(struct fmd_ctx *ctx, const char *chassis_id,
+			     const char *pcie_id, const char *ld_id);
+json_t *fmd_redfish_switch_log(struct fmd_ctx *ctx, const char *chassis_id,
+			       const char *log_id, const char *what, int id);
+int fmd_redfish_switch_log_clear(struct fmd_ctx *ctx, const char *chassis_id,
+				 const char *log_id);
 
 /* Ask a switch to say when its logs have new records. fabric_lock held */
 void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw);

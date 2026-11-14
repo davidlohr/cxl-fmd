@@ -1721,6 +1721,9 @@ static void test_switch_events(void)
 	      task->state, task->message);
 	CHECK(conn->bound && conn->pending == FMD_CONN_SETTLED,
 	      "the connection is not made by the binding change");
+	/* both records are kept: the switch no longer has them */
+	CHECK(sw->base.log && sw->base.log->count == 2,
+	      "%d records kept of the switch", sw->base.log ? sw->base.log->count : 0);
 
 	/*
 	 * An unbind that fails: its Binding Change is in the Warning log. The
@@ -1765,6 +1768,189 @@ out:
  * The event logs of a component reached through the kernel's mailbox are
  * shared with the kernel's driver (Section 9.20.1): they are not drained.
  */
+/*
+ * Records are kept before they are cleared: the component has no other
+ * copy afterwards. Those of a device go to the LD they are about.
+ */
+static const uint8_t general_media_event[16] = {	/* fbcd0a77-c260-... */
+	0xfb, 0xcd, 0x0a, 0x77, 0xc2, 0x60, 0x41, 0x7f,
+	0x85, 0xa9, 0x08, 0x8b, 0x16, 0x21, 0xeb, 0xa6,
+};
+static const uint8_t unknown_event[16] = { 0x12, 0x34 };
+
+/* a page with one record, with Event Record Flags and an LD-ID */
+static void answer_device_event(struct cxlmi_endpoint *ep, const uint8_t *uuid,
+				uint16_t handle, uint8_t flags0, uint16_t ld_id,
+				uint8_t page_flags)
+{
+	uint8_t page[0x20 + 0x80] = { 0 }, *rec = page + 0x20;
+
+	page[0x00] = page_flags;
+	if (page_flags & 0x01) {			/* Overflow */
+		put16(page + 0x02, 7);			/* Overflow Error Count */
+		put64(page + 0x04, 1000000000ULL);	/* First Overflow Event */
+		put64(page + 0x0c, 2000000000ULL);	/* Last Overflow Event */
+	}
+	put16(page + 0x14, 1);
+	memcpy(rec, uuid, 16);
+	rec[0x10] = 0x80;
+	rec[0x11] = flags0;				/* Event Record Flags */
+	put16(rec + 0x14, handle);
+	put16(rec + 0x22, ld_id);			/* LD-ID */
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+}
+
+static int log_count(struct fmd_component *comp)
+{
+	return comp->log ? comp->log->count : 0;
+}
+
+static struct fmd_log_entry *log_newest(struct fmd_component *comp)
+{
+	struct fmd_log *log = comp->log;
+
+	return log && log->count ?
+	       &log->entries[(log->first + log->count - 1) % log->allocated] : NULL;
+}
+
+static void test_device_logs(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *sld_ep = new_device(ctx), *mld_ep;
+	int before = failures;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_sld *sld;
+	struct fmd_mld *mld;
+	struct fmd_log_entry *e;
+
+	answer_identify(sld_ep, 0xe1, 0x03);
+	answer_memdev_identify(sld_ep, 64, 64, 0);
+	mld_ep = new_mld(ctx, 0xe2, 2, 0, 4);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xe1);
+	sld = fmd_topology_find_sld(&ctx->topology, id);
+	device_id(id, sizeof(id), 0xe2);
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	CHECK(sld && mld, "no SLD or MLD");
+	if (!sld || !mld)
+		goto out;
+
+	/*
+	 * The SLD: a General Media record and one of a kind that is not
+	 * decoded in the Informational log; one in the Warning log, which
+	 * has overflowed; the others empty. The MLD's logs are empty.
+	 */
+	answer_device_event(sld_ep, general_media_event, 1, 0x00, 0, 0x02);
+	answer_device_event(sld_ep, unknown_event, 2, 0x00, 0, 0x00);
+	answer_device_event(sld_ep, general_media_event, 3, 0x01, 0, 0x01);
+	answer_no_events(sld_ep, false);
+	answer_no_events(sld_ep, false);
+	for (int log = 0; log < 4; log++)
+		answer_no_events(mld_ep, false);
+
+	fmd_switch_events_poll(ctx);
+	CHECK(last_opcode(sld_ep) == 0x0100, "the SLD's logs were not read");
+	CHECK(log_count(&sld->base) == 3, "%d records kept of the SLD",
+	      log_count(&sld->base));
+	e = log_newest(&sld->base);
+	CHECK(e && e->log == 1 && e->overflow && e->overflow_count == 7 &&
+	      e->first_overflow_ns == 1000000000ULL &&
+	      e->last_overflow_ns == 2000000000ULL,
+	      "the overflow is not on the last record of the Warning log");
+	CHECK(sld->base.log && sld->base.log->overflow, "the log service did not overflow");
+	if (sld->base.log) {
+		struct fmd_log_entry *first = &sld->base.log->entries[sld->base.log->first];
+
+		CHECK(!first->overflow, "an earlier record carries the overflow");
+		CHECK(!memcmp(sld->base.log->entries[(sld->base.log->first + 1) %
+			      sld->base.log->allocated].record.uuid, unknown_event, 16),
+		      "a record of a kind that is not decoded was not kept");
+	}
+
+	/*
+	 * The MLD: a record for LD 1 (LD-ID Valid Flag, Event Record Flags
+	 * Bit[7]), and one about the whole device.
+	 */
+	answer_no_events(sld_ep, false);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(sld_ep, false);
+	answer_device_event(mld_ep, general_media_event, 4, 0x80, 1, 0x02);
+	answer_device_event(mld_ep, general_media_event, 5, 0x00, 0, 0x00);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(mld_ep, false);
+	fmd_switch_events_poll(ctx);
+
+	{
+		struct fmd_ld *ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+		struct fmd_ld *ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+
+		CHECK(ld0 && ld1, "no LDs");
+		if (ld0 && ld1) {
+			CHECK(log_count(&ld1->base) == 2, "LD 1 has %d records",
+			      log_count(&ld1->base));
+			CHECK(log_count(&ld0->base) == 1, "LD 0 has %d records",
+			      log_count(&ld0->base));
+		}
+		CHECK(log_count(&mld->base) == 0, "the MLD itself has records");
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("event logs of memory devices", before);
+}
+
+/*
+ * A log keeps as many records as its capacity, the newest; the memory for
+ * them grows as they come. And a switch-attached SLD's logs, which cannot
+ * be reached, are not said to be read.
+ */
+static void test_log_ring(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x500e);
+	struct cxlmi_event_record rec = { 0 };
+	int before = failures;
+	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
+	struct fmd_component *sld;
+	struct fmd_switch *sw;
+
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x500e);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw, "no switch");
+	if (!sw)
+		goto out;
+
+	for (int i = 1; i <= 300; i++) {
+		rec.handle = (uint16_t)i;
+		fmd_log_add(&sw->base, 0, &rec);
+		if (i == 20)
+			CHECK(sw->base.log->allocated < sw->base.log->capacity,
+			      "%d entries allocated for 20 records",
+			      sw->base.log->allocated);
+	}
+	CHECK(sw->base.log->count == sw->base.log->capacity &&
+	      sw->base.log->allocated == sw->base.log->capacity,
+	      "%d records, %d allocated, capacity %d", sw->base.log->count,
+	      sw->base.log->allocated, sw->base.log->capacity);
+	/* the oldest went: the first kept is 300 - capacity + 1 */
+	CHECK(sw->base.log->entries[sw->base.log->first].record.handle ==
+	      300 - sw->base.log->capacity + 1, "oldest kept is %d",
+	      sw->base.log->entries[sw->base.log->first].record.handle);
+
+	/* an SLD on port 4 */
+	answer_switch_ports(ep, 6, 0x04, 0x04);
+	fmd_rescan(ctx);
+	snprintf(id, sizeof(id), "%.32s_port4_dev", sw_id);
+	sld = fmd_topology_find(&ctx->topology, id);
+	CHECK(sld && !fmd_device_logs_read(ctx, sld),
+	      "a switch-attached SLD's logs are said to be read");
+out:
+	fmd_ctx_free(ctx);
+	report("records kept, and their memory", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1827,6 +2013,8 @@ int main(void)
 	test_rescan();
 	test_switch_events();
 	test_mailbox_events_are_the_hosts();
+	test_device_logs();
+	test_log_ring();
 	test_overcount_switch();
 	test_overcount_mld();
 	test_mld_ld_counts();

@@ -31,9 +31,6 @@
 #define EVENT_LOG_INFO		0
 #define EVENT_LOG_WARNING	1
 #define EVENT_LOG_FATAL		3
-#define EVENT_FLAG_OVERFLOW	(1 << 0)
-#define EVENT_FLAG_MORE		(1 << 1)
-#define EVENT_MAX_PAGES		32
 
 /* MCTP Event Interrupt Policy, Table 8-236 */
 #define EVENT_NOTIFY_LOGS	0x000f	/* Informational to Fatal */
@@ -97,57 +94,31 @@ static void handle_record(struct fmd_ctx *ctx, struct fmd_switch *sw, int log,
 	fmd_dbg(ctx, "%s: event record of a kind that is not acted on", sw->base.id);
 }
 
+/* each record of a switch's log: kept, and acted on */
+static void switch_record(struct fmd_ctx *ctx, struct fmd_component *comp,
+			  int which, const struct cxlmi_event_record *rec,
+			  void *arg)
+{
+	struct fmd_switch *sw = fmd_to_switch(comp);
+
+	/* whatever it is: it is not in the switch any more */
+	fmd_log_add(comp, which, rec);
+	handle_record(ctx, sw, which, (struct cxlmi_event_record *)rec, arg);
+}
+
 /* Read one log of a switch to its end, clearing what is read */
 static int drain_log(struct fmd_ctx *ctx, struct fmd_switch *sw, int log,
 		     struct switch_events *ev)
 {
-	struct cxlmi_cmd_get_event_records_req req = { .event_log = log };
-	struct cxlmi_cmd_get_event_records_rsp *rsp;
-	struct cxlmi_cmd_clear_event_records_req *clr;
-	int rc = 0;
+	struct fmd_overflow o;
+	int rc;
 
-	rsp = calloc(1, sizeof(*rsp) +
-		     CXLMI_MAX_SUPPORTED_EVENT_RECORDS * sizeof(rsp->records[0]));
-	clr = calloc(1, sizeof(*clr) +
-		     CXLMI_MAX_SUPPORTED_EVENT_RECORDS * sizeof(clr->handles[0]));
-	if (!rsp || !clr) {
-		free(rsp);
-		free(clr);
-		return -1;
+	rc = fmd_event_log_drain(ctx, &sw->base, CXLMI_NO_TUNNEL, log,
+				 switch_record, ev, &o);
+	if (o.set) {
+		ev->everything = true;
+		fmd_log_overflowed(&sw->base, log, o.count, o.first_ns, o.last_ns);
 	}
-
-	for (int page = 0; page < EVENT_MAX_PAGES; page++) {
-		rc = cxlmi_cmd_get_event_records(sw->base.ep, CXLMI_NO_TUNNEL,
-						 &req, rsp);
-		if (rc)
-			break;
-		if (rsp->flags & EVENT_FLAG_OVERFLOW)
-			ev->everything = true;
-		if (!rsp->record_count)
-			break;
-		FMD_CCI_LIST_CLAMP(rsp->record_count,
-				   CXLMI_MAX_SUPPORTED_EVENT_RECORDS);
-
-		for (int i = 0; i < rsp->record_count; i++) {
-			clr->handles[i] = rsp->records[i].handle;
-			handle_record(ctx, sw, log, &rsp->records[i], ev);
-		}
-
-		clr->event_log = log;
-		clr->clear_flags = 0;
-		clr->nr_recs = rsp->record_count;
-		rc = cxlmi_cmd_clear_event_records(sw->base.ep, CXLMI_NO_TUNNEL, clr);
-		if (rc) {
-			fmd_warn(ctx, "%s: clear event records of log %d failed: %d",
-				 sw->base.id, log, rc);
-			break;
-		}
-		if (!(rsp->flags & EVENT_FLAG_MORE))
-			break;
-	}
-
-	free(rsp);
-	free(clr);
 	return rc;
 }
 
@@ -211,6 +182,9 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx)
 	for (int i = 0; i < n; i++)
 		switch_events(ctx, switches[i]);
 	free(switches);
+
+	/* and the logs of the memory devices, which are kept the same way */
+	fmd_device_logs_poll(ctx);
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 	return 0;

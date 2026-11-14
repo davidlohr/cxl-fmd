@@ -703,6 +703,36 @@ that is up. Only a head that presents an SLD can be on a switch port; see
 [mock/README.md](../mock/README.md) for why. `unit/unit-switch-mhsld.json` is
 the example.
 
+## Event Records
+
+A switch, an SLD or an MLD can have records in its event logs, as Get Event
+Records (0100h) would have returned them. They are served as the records
+read from hardware are: see *Where cxl-fmd puts CXL event records* in
+[Redfish-API.md](Redfish-API.md).
+
+```json
+"event_records": [
+    { "log": "warning", "kind": "physical_switch",
+      "timestamp_ns": 1763000000000000000, "data": "0400" },
+    { "log": "failure", "kind": "general_media", "ld_id": 2 }
+],
+"event_log_overflow": {
+    "failure": { "count": 3, "first_ns": 1763000003000000000,
+                 "last_ns": 1763000004000000000 }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `log` | `informational`, `warning`, `failure` or `fatal` |
+| `kind` | `general_media`, `dram`, `memory_module`, `memory_sparing`, `physical_switch`, `virtual_switch` or `mld_port`; or give `uuid`, the Event Record Identifier |
+| `data` | The bytes of the record from offset 30h, in hex, up to 80 bytes |
+| `timestamp_ns` | Nanoseconds since 1970; 0 or absent is no timestamp |
+| `ld_id` | For an MLD: the record is about this LD (LD-ID Valid Flag). Without it, a record is about every LD |
+
+The identify block of an SLD can give `info_event_log_size`,
+`warning_event_log_size`, `failure_event_log_size` and `fatal_event_log_size`.
+
 ## Complete Examples
 
 ### Single Direct-Attached SLD

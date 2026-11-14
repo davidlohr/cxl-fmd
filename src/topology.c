@@ -1021,6 +1021,8 @@ void fmd_component_free(struct fmd_component *comp)
 		break;
 	}
 
+	fmd_log_free(comp);
+
 	/* All component types are allocated with calloc, so free works */
 	free(comp);
 }

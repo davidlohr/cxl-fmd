@@ -92,8 +92,10 @@ The exit status is 0 if the topology is valid.
 .BI \-e\  secs \fR,\ \fB\-\-event\-poll\  secs
 Read the event logs every
 .I secs
-seconds: the event logs of each switch, and the Dynamic Capacity event log of
+seconds: the Informational, Warning, Failure and Fatal logs of each switch and
+memory device whose logs are the FM's, and the Dynamic Capacity event log of
 each dynamic capacity device.
+Records are cleared as they are read, and served as Redfish log entries.
 The default is 10; 0 disables it.
 The logs are also read when a component sends an MCTP Event Notification.
 .TP
@@ -165,6 +167,21 @@ including any that was not ready before.
 .IP \(bu 2
 The Dynamic Capacity event log of each dynamic capacity device is read, and
 the extents of the hosts it names are brought up to date.
+.SH EVENT LOGS
+The event records read from a component are cleared from it, so that it can
+record more, and kept by
+.BR cxl-fmd ,
+which serves them as Redfish LogEntry resources: those of a switch in
+.IR /redfish/v1/Chassis/ switch /LogServices/EventLog ,
+those of a memory device in the
+.I DeviceLog
+of the CXL logical device they are about.
+.PP
+Only logs that are the Fabric Manager's are read: those of a component's own
+MCTP interface, and of the FM-owned logical device of an MLD behind a switch.
+A component reached through the kernel's mailbox
+.RB ( \-i )
+shares its event logs with the kernel's driver, and they are left to it.
 .PP
 Components are added and never removed.
 A device that has been unplugged stays, with the link of its port down, until
