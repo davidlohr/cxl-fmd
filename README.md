@@ -76,6 +76,7 @@ See [docs/mock-topology.md](docs/mock-topology.md) for available topologies and 
 | `--mock FILE` | `-M` | Use mock topology from JSON file |
 | `--mctp` | `-m` | Enable MCTP device scanning |
 | `--ioctl` | `-i` | Enable ioctl device scanning |
+| `--rescan SECS` | `-r` | Look for new devices every SECS seconds (default: 30, 0 disables) |
 | `--threads N` | `-N` | Serve requests on N threads, 1 to 256 (default: 8). Requests that only read run together; a change runs alone |
 | `--verbose` | `-v` | Increase verbosity (repeatable) |
 | `--help` | `-h` | Show help message |
@@ -324,6 +325,7 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cx
 
 The following CXL features are not yet supported:
 - **Port-Based Routing (PBR)**: PBR fabric discovery and Global Fabric-Attached Memory Devices
+- **Removal of devices**: the fabric is looked at again every `--rescan` seconds (default 30) and when a switch sends an MCTP Event Notification. A switch's ports are read again; new ports, devices that have appeared on a port, new VCSs and new endpoints are added. Nothing is removed: a device that has been pulled out stays, with its port's link down, until cxl-fmd is restarted. Where the heads of a Multi-Headed device are plugged in, and an SLD on a switch port, are not discoverable either way
 - **Dynamic Capacity events**: the FM-side DC event log is drained every `--event-poll` seconds (default 10) and early on MCTP Event Notification, so an extent's `Pending` state can lag the host's response by up to one interval on devices or transports without notifications
 
 ## References

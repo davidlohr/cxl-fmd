@@ -37,6 +37,8 @@ static void print_usage(const char *prog)
 	       "  -i, --ioctl           Enable ioctl device scanning\n"
 	       "  -e, --event-poll SECS Drain the DC event log every SECS seconds\n"
 	       "                        (default: %d, 0 disables)\n"
+	       "  -r, --rescan SECS     Look for new devices every SECS seconds\n"
+	       "                        (default: %d, 0 disables)\n"
 	       "  -N, --threads N       Serve requests on N threads, 1 to %d\n"
 	       "                        (default: %d). Requests that only read\n"
 	       "                        run together; a change runs alone.\n"
@@ -50,6 +52,7 @@ static void print_usage(const char *prog)
 	       "  This is useful for testing and development.\n"
 	       "\n",
 	       prog, FMD_DEFAULT_PORT, FMD_DEFAULT_EVENT_POLL_SEC,
+	       FMD_DEFAULT_RESCAN_SEC,
 	       FMD_MAX_HTTP_THREADS, FMD_DEFAULT_HTTP_THREADS);
 }
 
@@ -110,6 +113,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 	fmd_events_cleanup(ctx);
 
 	fmd_tasks_free(ctx);
+	free(ctx->known_eps);
 
 	/* connections are kept on the context, not in the topology */
 	while (ctx->connections)
@@ -142,6 +146,7 @@ int main(int argc, char *argv[])
 		{"mock",    required_argument, NULL, 'M'},
 		{"check",   no_argument,       NULL, 'c'},
 		{"threads", required_argument, NULL, 'N'},
+		{"rescan",  required_argument, NULL, 'r'},
 		{"mctp",    no_argument,       NULL, 'm'},
 		{"ioctl",   no_argument,       NULL, 'i'},
 		{"event-poll", required_argument, NULL, 'e'},
@@ -158,10 +163,11 @@ int main(int argc, char *argv[])
 	bool transport_specified = false;
 	unsigned int event_poll_sec = FMD_DEFAULT_EVENT_POLL_SEC;
 	unsigned int http_threads = FMD_DEFAULT_HTTP_THREADS;
+	unsigned int rescan_sec = FMD_DEFAULT_RESCAN_SEC;
 	const char *mock_path = NULL;
 	bool check_only = false;
 
-	while ((opt = getopt_long(argc, argv, "p:M:cN:mie:vhV", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:M:cN:r:mie:vhV", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p': {
 			char *endptr;
@@ -180,6 +186,17 @@ int main(int argc, char *argv[])
 		case 'c':
 			check_only = true;
 			break;
+		case 'r': {
+			char *endptr;
+			long val = strtol(optarg, &endptr, 10);
+			if (endptr == optarg || *endptr != '\0' || val < 0 ||
+			    val > 86400) {
+				fprintf(stderr, "Invalid re-scan interval: %s\n", optarg);
+				return EXIT_FAILURE;
+			}
+			rescan_sec = (unsigned int)val;
+			break;
+		}
 		case 'N': {
 			char *endptr;
 			long val = strtol(optarg, &endptr, 10);
@@ -241,6 +258,7 @@ int main(int argc, char *argv[])
 	ctx->config.scan_ioctl = use_ioctl;
 	ctx->config.event_poll_sec = event_poll_sec;
 	ctx->config.http_threads = http_threads;
+	ctx->config.rescan_sec = rescan_sec;
 	ctx->config.mock_topology_path = mock_path ? strdup(mock_path) : NULL;
 
 	if (verbosity >= 1)

@@ -443,14 +443,14 @@ static void answer_vcs(struct cxlmi_endpoint *ep, uint8_t vcs_id, uint8_t usp,
  */
 static const uint8_t port2[3] = { 0x02, 2, 0xff };
 
-static struct cxlmi_endpoint *new_switch_claiming(struct fmd_ctx *ctx,
-						  uint64_t serial,
-						  uint8_t claimed_ports)
+/*
+ * Identify Switch Device and Get Physical Port State of that switch, with
+ * port 4 as given: its Connected Device Type and LTSSM State.
+ */
+static void answer_switch_ports(struct cxlmi_endpoint *ep, uint8_t claimed_ports,
+				uint8_t port4_type, uint8_t port4_ltssm)
 {
-	struct cxlmi_endpoint *ep = new_device(ctx);
 	uint8_t id[0x49] = { 0 }, ports[4 + 6 * 16] = { 0 };
-
-	answer_identify(ep, serial, 0x00);
 
 	/* Identify Switch Device (5100h), Table 7-18 */
 	id[0x02] = 6;				/* Number of Physical Ports */
@@ -468,10 +468,21 @@ static struct cxlmi_endpoint *new_switch_claiming(struct fmd_ctx *ctx,
 	port_block(ports + 4 + 1 * 16, 1, 0x14, 0, 0x00, 0x04, 0x0000);
 	port_block(ports + 4 + 2 * 16, 2, 0x03, 0x02, 0x01, 0x04, 0x0004);
 	port_block(ports + 4 + 3 * 16, 3, 0x00, 0, 0x00, 0x00, 0x0004);
-	port_block(ports + 4 + 4 * 16, 4, 0x03, 0, 0x00, 0x00, 0x0000);
+	port_block(ports + 4 + 4 * 16, 4, 0x03, port4_type ? 0x02 : 0,
+		   port4_type, port4_ltssm, port4_type ? 0x0004 : 0x0000);
 	port_block(ports + 4 + 5 * 16, 5, 0x03, 0x02, 0x05, 0x04, 0x0004);
 	ports[4 + 5 * 16 + 0xf] = 1;		/* Supported LD Count: 1 more */
 	answer(ep, 0x5101, ports, sizeof(ports));
+}
+
+static struct cxlmi_endpoint *new_switch_claiming(struct fmd_ctx *ctx,
+						  uint64_t serial,
+						  uint8_t claimed_ports)
+{
+	struct cxlmi_endpoint *ep = new_device(ctx);
+
+	answer_identify(ep, serial, 0x00);
+	answer_switch_ports(ep, claimed_ports, 0x00, 0x00);
 
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, unbound, unbound);
@@ -1478,6 +1489,99 @@ static void test_bind_busy(void)
 	report("bind on a busy switch", before);
 }
 
+/*
+ * Re-scan: what has appeared since start-up is added, and nothing is
+ * removed. "When a device is Hot-Added to an unbound port on a switch ...
+ * FM issues the Get Physical Port State command for the physical port that
+ * has linked up to discover the connected device type" (Section 7.6.6.7).
+ */
+static void test_rescan(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *sw_ep = new_switch(ctx, 0x500a), *late, *slow;
+	struct fmd_fabric *root = ctx->topology.root;
+	int before = failures, rc, ports, devices;
+	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
+	struct fmd_port *port;
+
+	/* an endpoint that is not ready when cxl-fmd starts */
+	slow = new_device(ctx);
+	answer_rc(slow, 0x0001, CXLMI_RET_RETRY);
+
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x500a);
+	ports = root->port_count;
+	devices = root->device_count;
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 4);
+	CHECK(port && port->link_status == FMD_LINK_DOWN && !port->base.first_child,
+	      "port 4 is not empty to begin with");
+
+	/* nothing has changed: nothing is added, and nothing twice */
+	answer_rc(slow, 0x0001, CXLMI_RET_RETRY);
+	answer_switch_ports(sw_ep, 6, 0x00, 0x00);
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 0, "%d components added by a re-scan of an unchanged fabric", rc);
+	CHECK(root->port_count == ports && root->switch_count == 1 &&
+	      root->host_count == 2, "%d ports, %d switches, %d hosts",
+	      root->port_count, root->switch_count, root->host_count);
+
+	/* an SLD is plugged into port 4: Type 3 SLD (04h), LTSSM L0 (04h) */
+	answer_rc(slow, 0x0001, CXLMI_RET_RETRY);
+	answer_switch_ports(sw_ep, 6, 0x04, 0x04);
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 1, "%d components added when an SLD appears on a port", rc);
+	snprintf(id, sizeof(id), "%.32s_port4_dev", sw_id);
+	CHECK(fmd_topology_find_sld(&ctx->topology, id), "no SLD %s", id);
+	if (port) {
+		CHECK(port->link_status == FMD_LINK_UP &&
+		      port->conn_dev_type == FMD_CONN_SLD,
+		      "port 4: link %d, device type %d", port->link_status,
+		      port->conn_dev_type);
+		CHECK(port->base.first_child && !port->base.first_child->next_sibling,
+		      "port 4 does not have exactly one device");
+	}
+	CHECK(root->port_count == ports, "%d ports after a re-scan", root->port_count);
+
+	/* and is pulled out: the port says so, and the device is kept */
+	answer_rc(slow, 0x0001, CXLMI_RET_RETRY);
+	answer_switch_ports(sw_ep, 6, 0x00, 0x00);
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 0, "%d components added when a device is removed", rc);
+	CHECK(fmd_topology_find_sld(&ctx->topology, id),
+	      "a device that is gone was removed");
+	if (port)
+		CHECK(port->link_status == FMD_LINK_DOWN &&
+		      port->conn_dev_type == FMD_CONN_NONE,
+		      "port 4 after removal: link %d, device type %d",
+		      port->link_status, port->conn_dev_type);
+
+	/* an endpoint appears, and the one that was not ready now is */
+	late = new_device(ctx);
+	answer_identify(late, 0x1003, 0x03);
+	answer_memdev_identify(late, 64, 64, 0);
+	answer_identify(slow, 0x1004, 0x03);
+	answer_memdev_identify(slow, 32, 32, 0);
+	answer_switch_ports(sw_ep, 6, 0x00, 0x00);
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 2, "%d components added for two new endpoints", rc);
+	device_id(id, sizeof(id), 0x1003);
+	CHECK(fmd_topology_find_sld(&ctx->topology, id), "no SLD %s", id);
+	device_id(id, sizeof(id), 0x1004);
+	CHECK(fmd_topology_find_sld(&ctx->topology, id),
+	      "an endpoint that was not ready was not asked again");
+	CHECK(root->device_count == devices + 3, "%d devices, %d to begin with",
+	      root->device_count, devices);
+
+	/* and once known, an endpoint is not discovered again */
+	answer_switch_ports(sw_ep, 6, 0x00, 0x00);
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 0 && root->device_count == devices + 3,
+	      "%d components added by a second look at the same endpoints", rc);
+
+	fmd_ctx_free(ctx);
+	report("re-scan", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1511,6 +1615,7 @@ int main(void)
 	test_bind_task(true);
 	test_bind_task(false);
 	test_bind_busy();
+	test_rescan();
 	test_overcount_switch();
 	test_overcount_mld();
 	test_mld_ld_counts();

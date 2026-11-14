@@ -262,3 +262,22 @@ class TestThreadsOption:
             output, _ = proc.communicate(timeout=10)
         assert proc.returncode == 0, output
         assert ("Serving requests on %d thread" % threads) in output
+
+
+class TestRescanOption:
+    """-r, --rescan: how often to look for new devices."""
+
+    @pytest.mark.parametrize("value", ["-1", "soon", "", "86401"])
+    def test_seconds(self, cxl_fmd_executable, value):
+        proc = subprocess.run(
+            [str(cxl_fmd_executable), "--mock", str(ROOT / "mock/single-sld.json"),
+             "--check", "-r", value], capture_output=True, text=True, timeout=30)
+        assert proc.returncode != 0
+        assert "Invalid re-scan interval" in proc.stderr
+
+    @pytest.mark.parametrize("value", ["0", "5"])
+    def test_accepted(self, cxl_fmd_executable, value):
+        proc = subprocess.run(
+            [str(cxl_fmd_executable), "--mock", str(ROOT / "mock/single-sld.json"),
+             "--check", "--rescan", value], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0

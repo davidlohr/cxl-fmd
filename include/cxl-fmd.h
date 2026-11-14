@@ -1034,6 +1034,11 @@ struct fmd_ctx {
 	/* AF_MCTP listeners for Event Notification: CXL CCI, FM-API (-1 if unbound) */
 	int notify_sd[2];
 	int64_t next_dc_poll_ms;	/* CLOCK_MONOTONIC, 0 = not armed */
+	int64_t next_rescan_ms;		/* likewise, for fmd_rescan() */
+
+	/* Endpoints that have been discovered (src/discovery.c) */
+	struct cxlmi_endpoint **known_eps;
+	int nknown_eps;
 	/*
 	 * Serializes DCD state changes (refresh, event drain, add/release)
 	 * across the event loop and the Redfish threads. The topology rwlock
@@ -1073,6 +1078,7 @@ struct fmd_ctx {
 		bool scan_mctp;
 		bool scan_ioctl;
 		unsigned int event_poll_sec;	/* 0 disables */
+		unsigned int rescan_sec;	/* 0 disables */
 		unsigned int http_threads;	/* threads serving requests */
 		char *mock_topology_path;
 	} config;
@@ -1084,6 +1090,7 @@ static inline bool fmd_is_mock(struct fmd_ctx *ctx)
 }
 
 #define FMD_DEFAULT_EVENT_POLL_SEC 10
+#define FMD_DEFAULT_RESCAN_SEC     30
 
 struct fmd_ctx *fmd_ctx_new(void);
 void fmd_ctx_free(struct fmd_ctx *ctx);
@@ -1425,6 +1432,13 @@ fmd_mld_ld_tunnel(const struct fmd_mld *mld, int ld_id,
 
 
 int fmd_discover(struct fmd_ctx *ctx);
+
+/*
+ * Bring the topology up to date with what is there now: new endpoints, new
+ * ports, devices that have appeared on ports, new VCSs. Adds and never
+ * removes. Takes fabric_lock. Returns how many components were added.
+ */
+int fmd_rescan(struct fmd_ctx *ctx);
 
 /*
  * VCS Bind/Unbind Operations (CXL r3.2 Section 7.6.7.2)

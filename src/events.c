@@ -130,6 +130,15 @@ static void handle_notification(struct fmd_ctx *ctx, int sd)
 
 	if (events & CCI_EVENT_DC_LOG)
 		fmd_dcd_poll_events(ctx);
+
+	/*
+	 * Any other log: a switch records a port whose link or presence
+	 * has changed as a Physical Switch Event Record, which is when the
+	 * FM reads the port's state again (CXL r4.0 Section 7.6.6.7). Do
+	 * that at the next turn of the loop, not at the next interval.
+	 */
+	if ((events & ~CCI_EVENT_DC_LOG) && ctx->config.rescan_sec)
+		ctx->next_rescan_ms = 1;
 }
 
 static int64_t now_ms(void)
@@ -163,6 +172,29 @@ static void poll_dc_events_if_due(struct fmd_ctx *ctx, int64_t now)
 	ctx->next_dc_poll_ms = now_ms() + interval;
 }
 
+/*
+ * Look for new devices when the re-scan interval has elapsed, or when a
+ * notification asked for it sooner.
+ */
+static void rescan_if_due(struct fmd_ctx *ctx, int64_t now)
+{
+	int64_t interval = (int64_t)ctx->config.rescan_sec * 1000;
+
+	if (!interval || fmd_is_mock(ctx))
+		return;
+
+	if (!ctx->next_rescan_ms) {
+		ctx->next_rescan_ms = now + interval;
+		return;
+	}
+
+	if (now < ctx->next_rescan_ms)
+		return;
+
+	fmd_rescan(ctx);
+	ctx->next_rescan_ms = now_ms() + interval;
+}
+
 int fmd_events_poll(struct fmd_ctx *ctx, int timeout_ms)
 {
 	struct pollfd fds[2];
@@ -170,8 +202,14 @@ int fmd_events_poll(struct fmd_ctx *ctx, int timeout_ms)
 	int n = 0, rc;
 
 	poll_dc_events_if_due(ctx, now);
+	rescan_if_due(ctx, now);
+	now = now_ms();
 	if (ctx->next_dc_poll_ms && ctx->next_dc_poll_ms - now < timeout_ms)
 		timeout_ms = (int)(ctx->next_dc_poll_ms - now);
+	if (ctx->next_rescan_ms && ctx->next_rescan_ms - now < timeout_ms)
+		timeout_ms = (int)(ctx->next_rescan_ms - now);
+	if (timeout_ms < 0)
+		timeout_ms = 0;
 
 	for (int i = 0; i < 2; i++) {
 		if (ctx->notify_sd[i] < 0)

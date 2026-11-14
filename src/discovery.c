@@ -1066,24 +1066,47 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
  * 3. Get Virtual CXL Switch Info (5200h) - for each enabled VCS
  */
 /* A port of a switch, from its Get Physical Port State information block */
+/*
+ * A port of a switch, from its Get Physical Port State information block:
+ * a port that is not known yet is added, and one that is has its state
+ * brought up to date. A device that has appeared on it is discovered. One
+ * that is no longer reported is kept: see fmd_rescan().
+ */
 static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			    struct cxlmi_cmd_fmapi_port_state_info_block *pinfo)
 {
 	uint8_t state = pinfo->config_state & 0xf;
+	enum fmd_conn_dev_type old_type = FMD_CONN_NONE;
+	struct fmd_component *child, *dev = NULL;
 	char port_id[128];
-	struct fmd_port *port;
+	struct fmd_port *port = NULL;
+	bool known;
 
 	/* Fh: Invalid Port_ID. There is no such port */
 	if (state == 0xf)
 		return;
 
-	/* a USP is named as one, as the mock topologies name theirs */
-	(void)snprintf(port_id, sizeof(port_id), "%.50s_%s%d", sw->base.id,
-		       state == 0x4 ? "usp" : "dsp", pinfo->port_id);
+	fmd_for_each_child_type(&sw->base, child, FMD_COMPONENT_PORT) {
+		if (fmd_to_port(child)->port_number == pinfo->port_id) {
+			port = fmd_to_port(child);
+			break;
+		}
+	}
+	known = port != NULL;
 
-	port = fmd_port_create(port_id, pinfo->port_id);
-	if (!port)
-		return;
+	if (!known) {
+		/* a USP is named as one, as the mock topologies name theirs */
+		(void)snprintf(port_id, sizeof(port_id), "%.50s_%s%d", sw->base.id,
+			       state == 0x4 ? "usp" : "dsp", pinfo->port_id);
+
+		port = fmd_port_create(port_id, pinfo->port_id);
+		if (!port)
+			return;
+	} else {
+		old_type = port->conn_dev_type;
+		port->conn_dev_cxl_ver = 0;
+		port->conn_dev_type = FMD_CONN_NONE;
+	}
 
 	/*
 	 * The port information block of Table 7-21. The widths and speeds
@@ -1122,11 +1145,9 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		break;
 	case 0x3: /* DSP */
 		port->state = FMD_PORT_DSP;
-		sw->num_dsps++;
 		break;
 	case 0x4: /* USP */
 		port->state = FMD_PORT_USP;
-		sw->num_usps++;
 		break;
 	case 0x0: /* Disabled */
 		port->state = FMD_PORT_DISABLED;
@@ -1140,7 +1161,8 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	}
 
 	/* Add to topology */
-	fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+	if (!known)
+		fmd_topology_add(&ctx->topology, &port->base, &sw->base);
 
 	fmd_dbg(ctx, "%s: port %d conn_type=%d link=%s width=%d",
 		sw->base.id, port->port_number,
@@ -1148,9 +1170,27 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		port->link_status == FMD_LINK_UP ? "up" : "down",
 		port->negotiated_link_width);
 
-	/* Connected Device Type is reserved unless the port is a DSP */
-	if (port->state == FMD_PORT_DSP)
+	fmd_for_each_child(&port->base, child) {
+		if (fmd_is_memdev(child)) {
+			dev = child;
+			break;
+		}
+	}
+
+	/*
+	 * Connected Device Type is reserved unless the port is a DSP. A
+	 * device on a port that had none is discovered. A port that has one
+	 * and no longer reports it keeps it.
+	 */
+	if (port->state == FMD_PORT_DSP && !dev && !port->head) {
 		discover_port_device(ctx, port);
+	} else if (dev && port->conn_dev_type != old_type &&
+		   port->conn_dev_type != FMD_CONN_SLD &&
+		   port->conn_dev_type != FMD_CONN_MLD) {
+		fmd_warn(ctx, "%s: port %d no longer reports %s, which is kept "
+			 "until cxl-fmd is restarted", sw->base.id,
+			 port->port_number, dev->id);
+	}
 }
 
 static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
@@ -1231,6 +1271,19 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	free(port_req);
 	free(port_rsp);
 
+	/* what the ports are now */
+	sw->num_dsps = sw->num_usps = 0;
+	{
+		struct fmd_component *child;
+
+		fmd_for_each_child_type(&sw->base, child, FMD_COMPONENT_PORT) {
+			if (fmd_to_port(child)->state == FMD_PORT_DSP)
+				sw->num_dsps++;
+			else if (fmd_to_port(child)->state == FMD_PORT_USP)
+				sw->num_usps++;
+		}
+	}
+
 	/* Step 3: Discover VCS configuration */
 	fmd_vcs_refresh(ctx, sw);
 
@@ -1246,6 +1299,10 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		struct fmd_host *host;
 
 		snprintf(host_id, sizeof(host_id), "%.50s_host%d", sw->base.id, vcs->vcs_id);
+
+		/* the host of a VCS that was there already */
+		if (fmd_topology_find_host(&ctx->topology, host_id))
+			continue;
 
 		host = fmd_host_create(host_id);
 		if (host) {
@@ -1466,20 +1523,31 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	return rc;
 }
 
-int fmd_discover(struct fmd_ctx *ctx)
+/* The endpoints that have been discovered, or found to be a known device */
+static bool endpoint_known(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 {
-	struct {
-		struct cxlmi_endpoint *ep;
-		struct cxlmi_cmd_identify_rsp identify;
-		int rc;
-	} *found;
-	struct cxlmi_endpoint *ep;
-	int nfound = 0;
-	int count = 0;
-	int rc;
+	for (int i = 0; i < ctx->nknown_eps; i++) {
+		if (ctx->known_eps[i] == ep)
+			return true;
+	}
+	return false;
+}
 
-	if (!ctx || !ctx->cxlmi)
-		return -1;
+static void endpoint_mark_known(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
+	struct cxlmi_endpoint **tmp = realloc(ctx->known_eps,
+			(ctx->nknown_eps + 1) * sizeof(*tmp));
+
+	if (!tmp)
+		return;
+	ctx->known_eps = tmp;
+	ctx->known_eps[ctx->nknown_eps++] = ep;
+}
+
+/* Look for endpoints. libcxlmi does not open one that is open already */
+static void scan_endpoints(struct fmd_ctx *ctx)
+{
+	int rc;
 
 	/* Scan for MCTP endpoints */
 	if (ctx->config.scan_mctp) {
@@ -1502,6 +1570,24 @@ int fmd_discover(struct fmd_ctx *ctx)
 			fmd_dbg(ctx, "ioctl scan found %d endpoint(s)", rc);
 		}
 	}
+}
+
+/*
+ * Discover the endpoints that have not been. An endpoint whose Identify
+ * fails stays unknown and is asked again the next time: "Retry Required"
+ * is how a component says it is not ready yet.
+ */
+static int discover_new_endpoints(struct fmd_ctx *ctx)
+{
+	struct {
+		struct cxlmi_endpoint *ep;
+		struct cxlmi_cmd_identify_rsp identify;
+		int rc;
+	} *found;
+	struct cxlmi_endpoint *ep;
+	int nfound = 0;
+	int count = 0;
+	int rc;
 
 	/*
 	 * Identify (0001h) every endpoint, then discover the switches before
@@ -1517,6 +1603,8 @@ int fmd_discover(struct fmd_ctx *ctx)
 
 	nfound = 0;
 	cxlmi_for_each_endpoint(ctx->cxlmi, ep) {
+		if (endpoint_known(ctx, ep))
+			continue;
 		found[nfound].ep = ep;
 		found[nfound].rc = cxlmi_cmd_identify(ep, NULL, &found[nfound].identify);
 		if (found[nfound].rc)
@@ -1531,13 +1619,101 @@ int fmd_discover(struct fmd_ctx *ctx)
 
 			if (found[i].rc || is_switch != (pass == 0))
 				continue;
+			/* numbered in the order they are discovered */
 			rc = discover_endpoint(ctx, found[i].ep,
-					       &found[i].identify, i);
+					       &found[i].identify, ctx->nknown_eps);
+			endpoint_mark_known(ctx, found[i].ep);
 			if (rc == 0)
 				count++;
 		}
 	}
 	free(found);
+
+	return count;
+}
+
+/*
+ * Bring the topology up to date with what is there now, adding and never
+ * removing.
+ *
+ * "When a device is Hot-Added to an unbound port on a switch, the FM
+ * receives a notification ... FM issues the Get Physical Port State
+ * command for the physical port that has linked up to discover the
+ * connected device type" (CXL r4.0 Section 7.6.6.7). So, for every switch:
+ * its ports are read again, a port it did not have is added, the state of
+ * the others is brought up to date, and a device that has appeared on one
+ * is discovered. Its VCSs are read again, and a VCS it did not have gets
+ * its host. Endpoints that have appeared, or that were not ready, are
+ * discovered as at start-up.
+ *
+ * Nothing is removed. Requests hold pointers into the topology only while
+ * they hold fabric_lock, so that is not what prevents it; a device that
+ * has gone may have connections, chunks and bindings that removing it
+ * would have to undo, and that is not done here. A port says when its
+ * device is gone, and its link state shows it.
+ *
+ * Returns how many components were added.
+ */
+int fmd_rescan(struct fmd_ctx *ctx)
+{
+	struct fmd_component *comp;
+	struct fmd_switch **switches;
+	struct fmd_fabric *root;
+	int before, added, n = 0;
+
+	if (!ctx || !ctx->cxlmi)
+		return -1;
+
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+	root = ctx->topology.root;
+	before = root->switch_count + root->port_count + root->device_count +
+		 root->ld_count + root->host_count;
+
+	/* the switches there are now: new ones are discovered whole below */
+	switches = calloc(root->switch_count ? root->switch_count : 1,
+			  sizeof(*switches));
+	if (!switches) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		return -1;
+	}
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SWITCH) {
+		if (comp->ep && n < root->switch_count)
+			switches[n++] = fmd_to_switch(comp);
+	}
+
+	for (int i = 0; i < n; i++)
+		discover_switch(ctx, switches[i]);
+	free(switches);
+
+	scan_endpoints(ctx);
+	discover_new_endpoints(ctx);
+
+	added = root->switch_count + root->port_count + root->device_count +
+		root->ld_count + root->host_count - before;
+	if (added)
+		fmd_info(ctx, "Re-scan: %d component(s) added: %d switch(es), "
+			 "%d device(s), %d LD(s), %d host(s)", added,
+			 root->switch_count, root->device_count, root->ld_count,
+			 root->host_count);
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+
+	return added;
+}
+
+/*
+ * Main discovery entry point
+ */
+int fmd_discover(struct fmd_ctx *ctx)
+{
+	int count;
+
+	if (!ctx || !ctx->cxlmi)
+		return -1;
+
+	scan_endpoints(ctx);
+	count = discover_new_endpoints(ctx);
+	if (count < 0)
+		return -1;
 
 	/*
 	 * If no hosts were discovered (no switches with VCS), create a default
