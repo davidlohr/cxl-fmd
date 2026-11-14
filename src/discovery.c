@@ -1304,8 +1304,9 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		 sw->base.id, vppb_id, vcs_id, port_id,
 		 ld_id != 0xFFFF ? " (MLD LD)" : "");
 
+	/* the switch may bind in the background: that is not a failure */
 	rc = cxlmi_cmd_fmapi_bind_vppb(ep, CXLMI_NO_TUNNEL, &req);
-	if (rc) {
+	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: bind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
 		return -EIO;
@@ -1413,8 +1414,9 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	fmd_info(ctx, "%s: unbinding vPPB %d in VCS %d (%s hot-remove)",
 		 sw->base.id, vppb_id, vcs_id, option_str);
 
+	/* as for bind, the switch may do this in the background */
 	rc = cxlmi_cmd_fmapi_unbind_vppb(ep, CXLMI_NO_TUNNEL, &req);
-	if (rc) {
+	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: unbind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
 		return -EIO;

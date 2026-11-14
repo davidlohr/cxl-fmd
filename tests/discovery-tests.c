@@ -544,10 +544,43 @@ static void test_switch(void)
 	rc = fmd_vppb_bind(ctx, sw, 1, 1, 2, 0xffff);
 	CHECK(last_opcode(ep) == 0x5201 || last_opcode(ep) == 0x5200,
 	      "bind not sent: last command %04xh", last_opcode(ep));
-	XFAIL(rc == 0, "bind returns %d for Background Command Started", rc);
+	CHECK(rc == 0, "bind returns %d for Background Command Started", rc);
 out:
 	fmd_ctx_free(ctx);
 	report("switch with two VCSs", before);
+}
+
+/* Unbind vPPB (5202h) runs in the background too (Section 7.6.7.2.3) */
+static void test_switch_unbind(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5001);
+	int before = failures, rc;
+	struct fmd_switch *sw;
+	char id[FMD_MAX_ID_LEN];
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x5001);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (!sw)
+		goto out;
+
+	/* a refusal by the switch is an error */
+	answer_rc(ep, 0x5202, CXLMI_RET_INPUT);
+	rc = fmd_vppb_unbind(ctx, sw, 0, 1, FMD_UNBIND_WAIT_FOR_CLEAN);
+	CHECK(last_opcode(ep) == 0x5202, "unbind not sent: last command %04xh",
+	      last_opcode(ep));
+	CHECK(rc != 0, "unbind returns %d for Invalid Input", rc);
+
+	/* its starting the unbind is not */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_unbind(ctx, sw, 0, 1, FMD_UNBIND_WAIT_FOR_CLEAN);
+	CHECK(rc == 0, "unbind returns %d for Background Command Started",
+	      rc);
+out:
+	fmd_ctx_free(ctx);
+	report("unbind on a switch", before);
 }
 
 /*
@@ -581,6 +614,7 @@ int main(void)
 	test_two_mlds();
 	test_mld_granularity();
 	test_switch();
+	test_switch_unbind();
 	test_not_ready();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,

@@ -4463,7 +4463,9 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 		return -1;
 	}
 
-	if (cxlmi_cmd_memdev_scan_media(ep, ti, &req) != 0)
+	/* Scan Media runs in the background: "started" is success */
+	int rc = cxlmi_cmd_memdev_scan_media(ep, ti, &req);
+	if (rc != 0 && rc != CXLMI_RET_BACKGROUND)
 		return -1;
 
 	return 0;
