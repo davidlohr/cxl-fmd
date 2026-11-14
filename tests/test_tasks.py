@@ -9,7 +9,8 @@ started it is answered with 202 Accepted and a task (DSP0266, asynchronous
 operations); the task monitor answers 202 while it runs and then with what
 the request would have been answered with.
 
-mock/background-bind.json has a switch that takes 400 ms over each.
+mock/background-bind.json has a switch that takes 1.5 s over each: long enough that a request sent
+while one runs is not late on a loaded machine, as under a sanitizer.
 """
 
 import time

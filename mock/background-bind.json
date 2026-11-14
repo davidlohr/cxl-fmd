@@ -1,7 +1,7 @@
 {
     "version": 1,
     "id": "background_bind",
-    "description": "fm-boots-first.json with a switch that takes 400 ms over a bind or unbind, in the background",
+    "description": "fm-boots-first.json with a switch that takes 1.5 s over a bind or unbind, in the background",
     "_comment": [
         "\"All binding operations are executed as background commands\" (CXL r4.0 Section 7.6.7.2.2): a",
         "switch answers Bind vPPB with Background Command Started and finishes later, one such command",
@@ -15,7 +15,7 @@
             "device_id": "0x0e00",
             "serial_number": "0x5357495443480001",
             "max_vcs": 8,
-            "bind_time_ms": 400,
+            "bind_time_ms": 1500,
             "ports": [
                 {
                     "port_number": 0,
