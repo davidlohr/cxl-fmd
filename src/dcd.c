@@ -789,7 +789,14 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 			      int host_id)
 {
 	struct cxlmi_cmd_fmapi_get_host_dc_region_config_req req = {0};
-	struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp rsp = {0};
+	/* room for as many region entries as the device can claim to return */
+	union {
+		struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp rsp;
+		uint8_t room[sizeof(struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp) +
+			     FMD_CCI_LIST_MAX *
+			     sizeof(((struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp *)0)->region_configs[0])];
+	} u = { 0 };
+	struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp *rsp = &u.rsp;
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
 	int rc;
@@ -801,44 +808,50 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 	req.region_cnt = FMD_MAX_DC_REGIONS;
 	req.start_region_id = 0;
 
-	rc = cxlmi_cmd_fmapi_get_dc_reg_config(ep, ti, &req, &rsp);
+	rc = cxlmi_cmd_fmapi_get_dc_reg_config(ep, ti, &req, rsp);
 	if (rc) {
 		fmd_warn(ctx, "%s: get host %d DC region config failed: %d",
 			 dev->id, host_id, rc);
 		return -EIO;
 	}
+	/* past the regions asked for, the counts after them are overwritten */
+	if (rsp->regions_returned > FMD_MAX_DC_REGIONS) {
+		fmd_warn(ctx, "%s: host %d: %d DC regions returned, %d requested",
+			 dev->id, host_id, rsp->regions_returned, FMD_MAX_DC_REGIONS);
+		return -EIO;
+	}
 
 	clear_host_regions(ctx, dev, host_id);
 
-	for (int i = 0; i < rsp.regions_returned && i < FMD_MAX_DC_REGIONS; i++) {
+	for (int i = 0; i < rsp->regions_returned && i < FMD_MAX_DC_REGIONS; i++) {
 		struct fmd_dc_region *r;
 
-		if (rsp.region_configs[i].region_len == 0)
+		if (rsp->region_configs[i].region_len == 0)
 			continue;
 
 		r = fmd_dc_region_add(ctx, owner, i, host_id);
 		if (!r)
 			return -ENOMEM;
 
-		r->base_dpa = rsp.region_configs[i].base;
-		r->decode_len = rsp.region_configs[i].decode_len;
-		r->region_len = rsp.region_configs[i].region_len;
-		r->block_size = rsp.region_configs[i].block_size;
-		r->flags = rsp.region_configs[i].flags;
-		r->sanitize_on_release = rsp.region_configs[i].sanitize_on_release & 0x01;
+		r->base_dpa = rsp->region_configs[i].base;
+		r->decode_len = rsp->region_configs[i].decode_len;
+		r->region_len = rsp->region_configs[i].region_len;
+		r->block_size = rsp->region_configs[i].block_size;
+		r->flags = rsp->region_configs[i].flags;
+		r->sanitize_on_release = rsp->region_configs[i].sanitize_on_release & 0x01;
 	}
 
 	if (owner->type == FMD_COMPONENT_LD) {
 		struct fmd_ld *ld = fmd_to_ld(owner);
-		ld->dc_extents_supported = rsp.num_extents_supported;
-		ld->dc_extents_available = rsp.num_extents_available;
-		ld->dc_tags_supported = rsp.num_tags_supported;
-		ld->dc_tags_available = rsp.num_tags_available;
+		ld->dc_extents_supported = rsp->num_extents_supported;
+		ld->dc_extents_available = rsp->num_extents_available;
+		ld->dc_tags_supported = rsp->num_tags_supported;
+		ld->dc_tags_available = rsp->num_tags_available;
 	} else if (dcd) {
-		dcd->extents_supported = rsp.num_extents_supported;
-		dcd->extents_available = rsp.num_extents_available;
-		dcd->tags_supported = rsp.num_tags_supported;
-		dcd->tags_available = rsp.num_tags_available;
+		dcd->extents_supported = rsp->num_extents_supported;
+		dcd->extents_available = rsp->num_extents_available;
+		dcd->tags_supported = rsp->num_tags_supported;
+		dcd->tags_available = rsp->num_tags_available;
 	}
 
 	return 0;
@@ -881,6 +894,7 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 			rc = -EIO;
 			goto out;
 		}
+		FMD_CCI_LIST_CLAMP(rsp->extents_returned, DC_EXT_LIST_PAGE);
 
 		if (start == 0) {
 			generation = rsp->list_generation_num;
@@ -990,6 +1004,8 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 			rc = 0;
 			break;
 		}
+
+		FMD_CCI_LIST_CLAMP(rsp->num_tags_returned, DC_TAG_LIST_PAGE);
 
 		for (uint32_t i = 0; i < rsp->num_tags_returned; i++) {
 			uint64_t pending = 0;
@@ -1169,6 +1185,9 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			overflow = true;
 		if (!rsp->record_count)
 			break;
+		/* clr has room for no more handles than this */
+		FMD_CCI_LIST_CLAMP(rsp->record_count,
+				   CXLMI_MAX_SUPPORTED_EVENT_RECORDS);
 
 		for (int i = 0; i < rsp->record_count; i++) {
 			struct cxlmi_event_record *rec = &rsp->records[i];

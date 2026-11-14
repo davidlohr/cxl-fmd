@@ -398,7 +398,9 @@ static void port_block(uint8_t *b, uint8_t port, uint8_t state, uint8_t mode,
  *   port 2  DSP, link up, PCIe device, bound to vPPB 1 of VCS 0
  *   port 3  disabled
  */
-static struct cxlmi_endpoint *new_switch(struct fmd_ctx *ctx, uint64_t serial)
+static struct cxlmi_endpoint *new_switch_claiming(struct fmd_ctx *ctx,
+						  uint64_t serial,
+						  uint8_t claimed_ports)
 {
 	struct cxlmi_endpoint *ep = new_device(ctx);
 	uint8_t id[0x49] = { 0 }, ports[4 + 4 * 16] = { 0 };
@@ -417,7 +419,7 @@ static struct cxlmi_endpoint *new_switch(struct fmd_ctx *ctx, uint64_t serial)
 	answer(ep, 0x5100, id, sizeof(id));
 
 	/* Get Physical Port State (5101h), Table 7-20 */
-	ports[0] = 4;				/* Number of Ports */
+	ports[0] = claimed_ports;		/* Number of Ports */
 	port_block(ports + 4 + 0 * 16, 0, 0x04, 0, 0x00, 0x04, 0x0004);
 	port_block(ports + 4 + 1 * 16, 1, 0x14, 0, 0x00, 0x04, 0x0000);
 	port_block(ports + 4 + 2 * 16, 2, 0x03, 0x02, 0x01, 0x04, 0x0004);
@@ -445,6 +447,11 @@ static struct cxlmi_endpoint *new_switch(struct fmd_ctx *ctx, uint64_t serial)
 	}
 
 	return ep;
+}
+
+static struct cxlmi_endpoint *new_switch(struct fmd_ctx *ctx, uint64_t serial)
+{
+	return new_switch_claiming(ctx, serial, 4);
 }
 
 static void test_switch(void)
@@ -587,6 +594,162 @@ out:
  * A device that is not ready answers Identify with Retry Required
  * (Section 7.6.6.1). It is not discovered, and nothing else is sent to it.
  */
+/*
+ * Devices that say they returned more list entries than were asked for.
+ * The count is the device's to choose; what was asked for is all there is
+ * room for. Run under ASan, these are overflows unless the count is bounded.
+ *
+ * A libcxlmi that bounds the count itself fails the command, so what is
+ * checked is that nothing past what was asked for is used, not that the
+ * rest of the response is.
+ */
+static void test_overcount_switch(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	int before = failures, ports = 0;
+	char id[FMD_MAX_ID_LEN];
+
+	new_switch_claiming(ctx, 0x5002, 255);	/* 4 ports asked for */
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x5002);
+	CHECK(fmd_topology_find_switch(&ctx->topology, id), "no switch %s", id);
+	for (int i = 0; i < 256; i++)
+		if (fmd_topology_find_port(&ctx->topology, id, i))
+			ports++;
+	CHECK(ports <= 4, "%d ports from a response to a request for 4", ports);
+
+	fmd_ctx_free(ctx);
+	report("switch returning more ports than asked", before);
+}
+
+static void test_overcount_mld(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t alloc[4 + 2 * 16] = { 0 }, bw[4 + 2] = { 0 };
+	int before = failures;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mld *mld;
+	struct fmd_ld *ld;
+
+	answer_identify(ep, 0xd, 0x03);
+	answer_ld_info(ep, 2ULL << 30, 2);
+	answer_ld_info(ep, 2ULL << 30, 2);
+
+	/* Get LD Allocations (5401h): 2 LDs asked for, 200 "returned" */
+	alloc[0] = 2;
+	alloc[3] = 200;				/* LD Allocation List Length */
+	put64(alloc + 4, 4);
+	put64(alloc + 4 + 16, 4);
+	answer(ep, 0x5401, alloc, sizeof(alloc));
+
+	/* Get QoS Allocated BW (5406h) and BW Limit (5408h), likewise */
+	bw[0] = 255;				/* Number of LDs */
+	bw[2] = 50;
+	bw[3] = 50;
+	answer(ep, 0x5406, bw, sizeof(bw));
+	answer(ep, 0x5408, bw, sizeof(bw));
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xd);
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	CHECK(mld, "no MLD %s", id);
+	ld = fmd_topology_find_ld(&ctx->topology, id, 1);
+	CHECK(ld, "no LD 1");
+	if (ld) {
+		CHECK(ld->memory_size == 4ULL << 28 || ld->memory_size == 0,
+		      "LD 1: %" PRIu64 " bytes", ld->memory_size);
+		CHECK(ld->qos_allocated_bw == 50 || ld->qos_allocated_bw == 0,
+		      "LD 1 allocated BW %d", ld->qos_allocated_bw);
+	}
+	CHECK(!fmd_topology_find_ld(&ctx->topology, id, 2),
+	      "an LD past the 2 the MLD has");
+
+	fmd_ctx_free(ctx);
+	report("MLD returning more LDs than asked", before);
+}
+
+/*
+ * A Multi-Headed device: Get Multi-Headed Info (5500h) on the LD Pool CCI,
+ * Tables 7-60 and 7-61, asked once to tell what the device is and once to
+ * discover it, then Get Head Info (5501h).
+ */
+static void test_mhd(bool overcount)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 4] = { 0 };
+	uint8_t heads[4 + 2 * 9] = { 0 };
+	int before = failures;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mhd *mhd;
+
+	answer_identify(ep, 0xe, 0x03);
+
+	probe[0] = 4;				/* Number of LDs */
+	probe[1] = 2;				/* Number of Heads */
+	probe[5] = 1;				/* LD Map Length */
+	answer(ep, 0x5500, probe, sizeof(probe));
+
+	info[0] = 4;
+	info[1] = 2;
+	info[5] = overcount ? 200 : 4;		/* LD Map Length: 64 asked for */
+	info[8] = 0;				/* LD 0: head 0 */
+	info[9] = 0;				/* LD 1: head 0 */
+	info[10] = 1;				/* LD 2: head 1 */
+	info[11] = 0xff;			/* LD 3: unassigned */
+	answer(ep, 0x5500, info, sizeof(info));
+
+	heads[0] = overcount ? 255 : 2;		/* Number of Heads: 2 asked for */
+	heads[4 + 0] = 1;			/* head 0: port 1 */
+	heads[4 + 6] = 0x04;			/*   LTSSM State: L0 */
+	heads[4 + 9 + 0] = 2;			/* head 1: port 2 */
+	heads[4 + 9 + 6] = 0x00;		/*   LTSSM State: Detect */
+	answer(ep, 0x5501, heads, sizeof(heads));
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xe);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	CHECK(mhd, "no MHD %s: the probe did not find a multi-headed device",
+	      id);
+	if (mhd) {
+		struct fmd_component *child;
+		int nheads = 0, nlds = 0;
+
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD)
+			nheads++;
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD)
+			nlds++;
+		CHECK(nheads <= 2 && nlds <= 4, "%d heads, %d LDs", nheads,
+		      nlds);
+	}
+	if (mhd && !overcount) {
+		struct fmd_component *child;
+		int nheads = 0, nlds = 0, up = 0;
+
+		CHECK(mhd->num_heads == 2 && mhd->total_lds == 4,
+		      "%d heads, %d LDs", mhd->num_heads, mhd->total_lds);
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+			nheads++;
+			if (fmd_to_head(child)->state == FMD_HEAD_ENABLED)
+				up++;
+		}
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD)
+			nlds++;
+		CHECK(nheads == 2, "%d head components", nheads);
+		CHECK(nlds == 4, "%d LD components", nlds);
+		/* head 0 is in L0 (04h), head 1 is not */
+		CHECK(up == 1, "%d heads enabled", up);
+	}
+
+	fmd_ctx_free(ctx);
+	report(overcount ? "multi-headed device returning more than asked" :
+			   "multi-headed device", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -615,6 +778,10 @@ int main(void)
 	test_mld_granularity();
 	test_switch();
 	test_switch_unbind();
+	test_overcount_switch();
+	test_overcount_mld();
+	test_mhd(false);
+	test_mhd(true);
 	test_not_ready();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,

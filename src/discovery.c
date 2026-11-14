@@ -71,6 +71,9 @@ static uint64_t opcode_to_cmd_bit(uint16_t opcode)
 	}
 }
 
+/* A CEL entry is 4 bytes and there are 2^16 opcodes */
+#define CEL_MAX_SIZE (4 * 65536)
+
 /*
  * Get supported commands from Command Effects Log (CEL)
  *
@@ -93,8 +96,9 @@ static int get_supported_commands(struct fmd_ctx *ctx,
 	*supported_cmds = FMD_CMD_DEFAULT_MEMDEV;
 
 	/* Allocate buffer for supported logs response */
+	/* the entry count is 16 bits and the device's to choose */
 	logs_rsp = calloc(1, sizeof(*logs_rsp) +
-			  CXLMI_MAX_SUPPORTED_LOGS * sizeof(logs_rsp->entries[0]));
+			  UINT16_MAX * sizeof(logs_rsp->entries[0]));
 	if (!logs_rsp)
 		return -1;
 
@@ -112,6 +116,11 @@ static int get_supported_commands(struct fmd_ctx *ctx,
 			break;
 		}
 	}
+
+	/* whole entries only, and no more than there are opcodes */
+	if (cel_size > CEL_MAX_SIZE)
+		cel_size = CEL_MAX_SIZE;
+	cel_size -= cel_size % sizeof(*cel_rsp);
 
 	if (cel_size == 0) {
 		fmd_dbg(ctx, "CEL not found in supported logs");
@@ -327,6 +336,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	size_t rsp_size;
 	size_t bw_rsp_size;
 	uint64_t granularity = CXL_CAPACITY_UNIT; /* until 5401h says otherwise */
+	uint8_t nld;
 	int rc;
 	int i;
 
@@ -357,11 +367,12 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	fmd_info(ctx, "%s: MLD with %d logical devices", mld->base.id, mld->ld_count);
 
 	/* Get LD Allocations (5401h) */
+	nld = mld->ld_count < FMD_MAX_LD_COUNT ? mld->ld_count : FMD_MAX_LD_COUNT;
 	alloc_req.start_ld_id = 0;
-	alloc_req.ld_allocation_list_limit = mld->ld_count;
+	alloc_req.ld_allocation_list_limit = nld;
 
 	rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_ld_allocations_rsp) +
-		   mld->ld_count * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
+		   FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
 	alloc_rsp = calloc(1, rsp_size);
 	if (!alloc_rsp) {
 		fmd_warn(ctx, "%s: failed to allocate LD allocations buffer", mld->base.id);
@@ -387,6 +398,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		 */
 		mld->memory_granularity = 1 << alloc_rsp->memory_granularity;
 		granularity = mld->memory_granularity * CXL_CAPACITY_UNIT;
+		FMD_CCI_LIST_CLAMP(alloc_rsp->ld_allocation_list_len, nld);
 	}
 
 	/* Get QoS Control (5403h) */
@@ -406,11 +418,11 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	}
 
 	/* Get QoS Allocated BW (5406h) and BW Limit (5408h) */
-	bw_req.number_ld = mld->ld_count;
+	bw_req.number_ld = nld;
 	bw_req.start_ld_id = 0;
 
 	bw_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_qos_allocated_bw_rsp) +
-		      mld->ld_count * sizeof(uint8_t);
+		      FMD_CCI_LIST_MAX * sizeof(uint8_t);
 	alloc_bw = calloc(1, bw_rsp_size);
 	limit_bw = calloc(1, bw_rsp_size);
 
@@ -418,16 +430,18 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		rc = cxlmi_cmd_fmapi_get_qos_allocated_bw(ep, ti, &bw_req, alloc_bw);
 		if (rc)
 			fmd_dbg(ctx, "%s: get qos allocated bw failed: %d", mld->base.id, rc);
+		FMD_CCI_LIST_CLAMP(alloc_bw->number_ld, nld);
 	}
 
 	if (limit_bw) {
 		struct cxlmi_cmd_fmapi_get_qos_bw_limit_req limit_req = {
-			.number_ld = mld->ld_count,
+			.number_ld = nld,
 			.start_ld_id = 0
 		};
 		rc = cxlmi_cmd_fmapi_get_qos_bw_limit(ep, ti, &limit_req, limit_bw);
 		if (rc)
 			fmd_dbg(ctx, "%s: get qos bw limit failed: %d", mld->base.id, rc);
+		FMD_CCI_LIST_CLAMP(limit_bw->number_ld, nld);
 	}
 
 	/* Create LD children */
@@ -497,7 +511,7 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	mh_req.ld_map_list_limit = FMD_MAX_LD_POOL;
 
 	mh_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp) +
-		      FMD_MAX_LD_POOL;
+		      FMD_CCI_LIST_MAX;
 	mh_rsp = calloc(1, mh_rsp_size);
 	if (!mh_rsp)
 		return -1;
@@ -508,6 +522,8 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 		free(mh_rsp);
 		return rc;
 	}
+
+	FMD_CCI_LIST_CLAMP(mh_rsp->ld_map_len, FMD_MAX_LD_POOL);
 
 	mhd->num_heads = mh_rsp->num_heads;
 	mhd->max_heads = mh_rsp->num_heads;  /* Assume current = max */
@@ -522,7 +538,7 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	head_req.num_heads = mhd->num_heads;
 
 	head_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_head_info_rsp) +
-			mhd->num_heads * sizeof(struct cxlmi_cmd_fmapi_get_head_info_blkfmt);
+			FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_get_head_info_blkfmt);
 	head_rsp = calloc(1, head_rsp_size);
 	if (!head_rsp) {
 		free(mh_rsp);
@@ -533,7 +549,9 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	if (rc) {
 		fmd_warn(ctx, "%s: get head info failed: %d", mhd->base.id, rc);
 		/* Continue without head details */
+		head_rsp->num_heads = 0;
 	}
+	FMD_CCI_LIST_CLAMP(head_rsp->num_heads, head_req.num_heads);
 
 	/* Create head children */
 	for (i = 0; i < mhd->num_heads && i < FMD_MAX_HEADS; i++) {
@@ -856,7 +874,8 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	}
 	port_req->num_ports = port_index;
 
-	rsp_size = sizeof(*port_rsp) + port_index * sizeof(struct cxlmi_cmd_fmapi_port_state_info_block);
+	rsp_size = sizeof(*port_rsp) +
+		   FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_port_state_info_block);
 	port_rsp = calloc(1, rsp_size);
 	if (!port_rsp) {
 		free(port_req);
@@ -870,6 +889,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		free(port_rsp);
 		return rc;
 	}
+	FMD_CCI_LIST_CLAMP(port_rsp->num_ports, port_index);
 
 	/* Create port children */
 	for (int i = 0; i < port_rsp->num_ports; i++) {
@@ -1018,16 +1038,25 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 		 * 3. Otherwise it's an SLD
 		 */
 		struct cxlmi_cmd_fmapi_get_multiheaded_info_req mh_req = {0};
-		struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp mh_rsp = {0};
+		union {
+			struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp rsp;
+			uint8_t room[sizeof(struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp) +
+				     FMD_CCI_LIST_MAX];
+		} mh = { 0 };
 		struct cxlmi_cmd_fmapi_get_ld_info_rsp ld_info = {0};
 
-		/* Try MHD detection first */
+		/*
+		 * Try MHD detection first. Only the number of heads is wanted,
+		 * but an LD Map List Limit of 0 is not a request for no
+		 * entries: the field shall be at least 1 (CXL r4.0 Table
+		 * 7-60), and libcxlmi expects one entry back.
+		 */
 		mh_req.start_ld_id = 0;
-		mh_req.ld_map_list_limit = 0;  /* Just need num_heads */
+		mh_req.ld_map_list_limit = 1;
 		rc = cxlmi_cmd_fmapi_get_multiheaded_info(ep, CXLMI_NO_TUNNEL,
-							  &mh_req, &mh_rsp);
+							  &mh_req, &mh.rsp);
 
-		if (rc == 0 && mh_rsp.num_heads > 1) {
+		if (rc == 0 && mh.rsp.num_heads > 1) {
 			/* Multi-Headed Device */
 			struct fmd_mhd *mhd = fmd_mhd_create(dev_id);
 			if (!mhd)
@@ -1612,7 +1641,7 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 
 	/* Build response buffer */
 	size_t rsp_size = sizeof(struct cxlmi_cmd_fmapi_set_ld_allocations_rsp) +
-			  sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
+			  FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
 	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp = calloc(1, rsp_size);
 	if (!rsp) {
 		free(req);
@@ -1762,7 +1791,7 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 
 	/* Build response buffer */
 	size_t rsp_size = sizeof(struct cxlmi_cmd_fmapi_set_ld_allocations_rsp) +
-			  sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
+			  FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
 	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp = calloc(1, rsp_size);
 	if (!rsp) {
 		free(req);

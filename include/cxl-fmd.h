@@ -80,6 +80,16 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  * CXL capacity unit conversion (CCI uses 256MB granularity)
  */
 #define CXL_CAPACITY_UNIT  (256ULL * 1024 * 1024)
+
+/*
+ * libcxlmi copies as many list entries into a response as the device says
+ * it returned, which need not be as many as were asked for. Every response
+ * whose entry count is a single byte gets room for the most that byte can
+ * hold, and no more entries are read from it than were requested.
+ */
+#define FMD_CCI_LIST_MAX   UINT8_MAX
+#define FMD_CCI_LIST_CLAMP(count, asked) \
+	do { if ((count) > (asked)) (count) = (asked); } while (0)
 #define CXL_TO_BYTES(x)    ((x) * CXL_CAPACITY_UNIT)
 #define FMD_MIB            (1024ULL * 1024)
 
