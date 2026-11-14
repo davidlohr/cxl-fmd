@@ -121,6 +121,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Binds and unbinds the switch carries out in the background
+    test(
+        'tasks',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_tasks.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Several clients at once
     test(
         'concurrency',

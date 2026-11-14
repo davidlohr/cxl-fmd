@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <pthread.h>
+#include <time.h>
 
 #include <libcxlmi.h>
 #include <microhttpd.h>
@@ -377,6 +378,15 @@ struct fmd_vppb {
 	/* Resolved references to physical components */
 	struct fmd_port *port;       /* Resolved port pointer */
 	struct fmd_ld *ld;           /* Resolved LD pointer (MLD only) */
+
+	/*
+	 * Mock only: a bind or unbind that the mock switch is carrying out
+	 * in the background, and what the vPPB becomes when it is done.
+	 */
+	int64_t mock_done_ms;        /* CLOCK_MONOTONIC; 0 = nothing under way */
+	enum fmd_vppb_binding_status mock_next_status;
+	uint8_t mock_next_port_id;
+	uint8_t mock_next_ld_id;
 };
 
 /*
@@ -427,6 +437,12 @@ struct fmd_switch {
 	uint8_t num_vcs;
 	uint8_t max_vcs;
 	struct fmd_vcs vcs[FMD_MAX_VCS];
+
+	/*
+	 * Mock only: how long the mock switch takes over a bind or unbind,
+	 * which it then does in the background as a switch does. 0: at once.
+	 */
+	unsigned int mock_bind_time_ms;
 };
 
 /*
@@ -946,6 +962,17 @@ struct fmd_connection {
 	uint8_t vppb_id;
 	bool bound;                          /* vPPB bind succeeded */
 
+	/*
+	 * The switch is still binding or unbinding for this connection: see
+	 * struct fmd_task. A connection being made is not one yet, and one
+	 * being removed still is.
+	 */
+	enum {
+		FMD_CONN_SETTLED = 0,
+		FMD_CONN_BINDING,
+		FMD_CONN_UNBINDING,
+	} pending;
+
 	/* Linked list */
 	struct fmd_connection *next;
 };
@@ -1013,6 +1040,10 @@ struct fmd_ctx {
 	 * only covers single add/remove calls, not a whole refresh.
 	 */
 	pthread_mutex_t dcd_lock;
+
+	/* Operations in the background (src/tasks.c), newest first */
+	struct fmd_task *tasks;
+	int task_next_id;
 
 	/*
 	 * The state of the fabric: the topology, the VCS tables of the
@@ -1238,6 +1269,52 @@ void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_swit
  * how many there are.
  */
 int fmd_topology_validate(struct fmd_ctx *ctx);
+
+/*
+ * A bind or unbind that the switch carries out in the background
+ * (src/tasks.c). All of these are called with fabric_lock held exclusively,
+ * except fmd_tasks_running() and fmd_tasks_poll(), which take it.
+ */
+enum fmd_task_kind { FMD_TASK_BIND, FMD_TASK_UNBIND };
+enum fmd_task_state { FMD_TASK_RUNNING, FMD_TASK_COMPLETED, FMD_TASK_EXCEPTION };
+
+struct fmd_task {
+	int id;
+	enum fmd_task_kind kind;
+	enum fmd_task_state state;
+	int percent;                         /* Percentage Complete of 0002h */
+	int failed_polls;
+	char switch_id[FMD_MAX_ID_LEN];
+	uint8_t vcs_id;
+	uint8_t vppb_id;
+	char connection_id[FMD_MAX_ID_LEN];
+	time_t start;
+	time_t end;                          /* 0 while running */
+	char message[128];                   /* how it ended */
+	struct fmd_task *next;
+};
+
+struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
+				struct fmd_switch *sw, uint8_t vcs_id,
+				uint8_t vppb_id, const char *connection_id);
+struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id);
+bool fmd_tasks_running(struct fmd_ctx *ctx);
+void fmd_tasks_poll(struct fmd_ctx *ctx);
+void fmd_tasks_free(struct fmd_ctx *ctx);
+
+/*
+ * fmd_vppb_bind() and fmd_vppb_unbind() return this when the switch has
+ * started the operation and has not finished it.
+ */
+#define FMD_OP_STARTED 1
+
+/*
+ * Background Operation Status (0002h) of a switch, for an operation with
+ * @opcode. Returns 1 while it is in progress, with @percent; 0 when it is
+ * over, with its return code in @rc; negative if the switch cannot be asked.
+ */
+int fmd_switch_bg_status(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			 uint16_t opcode, int *percent, uint16_t *rc);
 
 /*
  * Around a command that a request sends while it holds fabric_lock shared:
@@ -1668,7 +1745,14 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
 				json_t **response);
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
-				  const char *connection_id);
+				  const char *connection_id, json_t **response);
+
+/* Tasks: a bind or unbind in the background (src/tasks.c) */
+json_t *fmd_redfish_task_service(struct fmd_ctx *ctx);
+json_t *fmd_redfish_tasks(struct fmd_ctx *ctx);
+json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id);
+int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
+			     char *location, size_t len);
 
 /* PATCH handlers */
 int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx, const char *chassis_id,

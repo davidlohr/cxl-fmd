@@ -100,6 +100,7 @@ json_t *fmd_redfish_service_root(struct fmd_ctx *ctx)
 		"  s:{s:s},"  /* Chassis */
 		"  s:{s:s},"  /* Systems */
 		"  s:{s:s},"  /* Managers */
+		"  s:{s:s},"  /* Tasks */
 		"  s:{s:{s:s}}"  /* Links.Sessions (mandatory) */
 		"}",
 		"@odata.id", "/redfish/v1",
@@ -111,6 +112,7 @@ json_t *fmd_redfish_service_root(struct fmd_ctx *ctx)
 		"Chassis", "@odata.id", "/redfish/v1/Chassis",
 		"Systems", "@odata.id", "/redfish/v1/Systems",
 		"Managers", "@odata.id", "/redfish/v1/Managers",
+		"Tasks", "@odata.id", "/redfish/v1/TaskService",
 		"Links", "Sessions", "@odata.id", "/redfish/v1/SessionService/Sessions"
 	);
 }
@@ -408,6 +410,155 @@ json_t *fmd_redfish_managers_collection(struct fmd_ctx *ctx)
 		"Members@odata.count", 0,
 		"Members"
 	);
+}
+
+/*
+ * ============================================================================
+ * Tasks
+ * ============================================================================
+ *
+ * A bind or unbind that a switch carries out in the background is a Redfish
+ * task (DSP0266, asynchronous operations): the request is answered with 202
+ * Accepted and the Location of a task monitor. A GET of the monitor answers
+ * 202 while the operation runs, and with what the request would have been
+ * answered with once it is over.
+ */
+
+static void task_time(time_t t, char *buf, size_t len)
+{
+	struct tm tm;
+
+	gmtime_r(&t, &tm);
+	strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+/* TaskService - /redfish/v1/TaskService */
+json_t *fmd_redfish_task_service(struct fmd_ctx *ctx)
+{
+	char now[32];
+
+	(void)ctx;
+	task_time(time(NULL), now, sizeof(now));
+
+	return json_pack("{s:s, s:s, s:s, s:s, s:b, s:s, s:o, s:{s:s}}",
+		"@odata.id", "/redfish/v1/TaskService",
+		"@odata.type", "#TaskService.v1_3_0.TaskService",
+		"Id", "TaskService",
+		"Name", "Task Service",
+		"ServiceEnabled", 1,
+		"DateTime", now,
+		"Status", rf_status("Enabled", "OK"),
+		"Tasks", "@odata.id", "/redfish/v1/TaskService/Tasks");
+}
+
+/* Tasks - /redfish/v1/TaskService/Tasks */
+json_t *fmd_redfish_tasks(struct fmd_ctx *ctx)
+{
+	struct rf_collection coll;
+	struct fmd_task *task;
+
+	rf_collection_init(&coll, "/redfish/v1/TaskService/Tasks",
+			   "#TaskCollection.TaskCollection", "Task Collection");
+	for (task = ctx->tasks; task; task = task->next)
+		rf_collection_add(&coll, "/redfish/v1/TaskService/Tasks/%d", task->id);
+
+	return rf_collection_finish(&coll);
+}
+
+static void task_connection_uri(struct fmd_task *task, char *buf, size_t len)
+{
+	snprintf(buf, len, "/redfish/v1/Fabrics/CXL/Connections/%s",
+		 task->connection_id);
+}
+
+/* Task - /redfish/v1/TaskService/Tasks/{id} */
+json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
+{
+	struct fmd_task *task = fmd_task_find(ctx, id);
+	char uri[64], monitor[64], start[32], conn_uri[256];
+	json_t *result;
+
+	if (!task)
+		return NULL;
+
+	snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
+	snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
+	task_time(task->start, start, sizeof(start));
+	task_connection_uri(task, conn_uri, sizeof(conn_uri));
+
+	result = json_pack("{s:s, s:s, s:s, s:s, s:s, s:i, s:s, s:s, s:{s:s, s:s}}",
+		"@odata.id", uri,
+		"@odata.type", "#Task.v1_7_4.Task",
+		"Id", uri + strlen("/redfish/v1/TaskService/Tasks/"),
+		"Name", task->kind == FMD_TASK_BIND ? "Bind vPPB" : "Unbind vPPB",
+		"TaskState", task->state == FMD_TASK_RUNNING ? "Running" :
+			     task->state == FMD_TASK_COMPLETED ? "Completed" : "Exception",
+		/* Percentage Complete of Background Operation Status */
+		"PercentComplete", task->percent,
+		"StartTime", start,
+		"TaskMonitor", monitor,
+		"Payload",
+			"TargetUri", task->kind == FMD_TASK_BIND ?
+				"/redfish/v1/Fabrics/CXL/Connections" : conn_uri,
+			"HttpOperation", task->kind == FMD_TASK_BIND ? "POST" : "DELETE");
+
+	/* TaskStatus and EndTime "shall not be set until the task completes" */
+	if (task->state != FMD_TASK_RUNNING) {
+		bool ok = task->state == FMD_TASK_COMPLETED;
+		char end[32];
+
+		task_time(task->end, end, sizeof(end));
+		json_object_set_new(result, "EndTime", json_string(end));
+		json_object_set_new(result, "TaskStatus", json_string(ok ? "OK" : "Critical"));
+		json_object_set_new(result, "Messages",
+			json_pack("[{s:s, s:s}]",
+				  "MessageId", ok ? "Base.1.0.Success" : "Base.1.0.GeneralError",
+				  "Message", task->message));
+		if (ok && task->kind == FMD_TASK_BIND)
+			json_object_set_new(result, "Links",
+				json_pack("{s:[{s:s}]}", "CreatedResources",
+					  "@odata.id", conn_uri));
+	}
+
+	return result;
+}
+
+/*
+ * Task monitor - /redfish/v1/TaskService/TaskMonitors/{id}
+ *
+ * Returns the HTTP status to answer with, and for all but 204 a body in
+ * @response. @location is the monitor while the task runs, and the
+ * connection once a bind has made it.
+ */
+int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
+			     char *location, size_t len)
+{
+	struct fmd_task *task = fmd_task_find(ctx, id);
+
+	*response = NULL;
+	location[0] = '\0';
+	if (!task)
+		return 404;
+
+	if (task->state == FMD_TASK_RUNNING) {
+		snprintf(location, len, "/redfish/v1/TaskService/TaskMonitors/%d", id);
+		*response = fmd_redfish_task(ctx, id);
+		return 202;
+	}
+
+	if (task->state == FMD_TASK_EXCEPTION) {
+		*response = json_pack("{s:{s:s, s:s}}", "error",
+				      "code", "Base.1.0.GeneralError",
+				      "message", task->message);
+		return 500;
+	}
+
+	if (task->kind == FMD_TASK_UNBIND)
+		return 204;
+
+	task_connection_uri(task, location, len);
+	*response = fmd_redfish_connection(ctx, "CXL", task->connection_id);
+	return *response ? 201 : 404;
 }
 
 /*
@@ -829,7 +980,9 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			"Id", conn->id,
 			"Name", "CXL Memory Connection",
 			"ConnectionType", "Memory",
-			"Status", rf_status("Enabled", "OK"),
+			"Status", rf_status(conn->pending == FMD_CONN_BINDING ? "Starting" :
+				    conn->pending == FMD_CONN_UNBINDING ? "Updating" :
+				    "Enabled", "OK"),
 			"Links",
 				"InitiatorEndpoints", "@odata.id", init_uri,
 				"TargetEndpoints", "@odata.id", target_uri,
@@ -893,7 +1046,9 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		"Id", connection_id,
 		"Name", name,
 		"ConnectionType", "Memory",
-		"Status", rf_status("Enabled", "OK"),
+		"Status", rf_status(conn->pending == FMD_CONN_BINDING ? "Starting" :
+				    conn->pending == FMD_CONN_UNBINDING ? "Updating" :
+				    "Enabled", "OK"),
 		"Links",
 			"TargetEndpoints", "@odata.id", endpoint_uri
 	);
@@ -5443,17 +5598,41 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		/* Perform the vPPB bind */
 		rc = fmd_vppb_bind(ctx, sw, host->vcs_id, (uint8_t)vppb_id,
 				   port_id, ld_id);
-		if (rc != 0) {
+		if (rc < 0) {
 			fmd_err(ctx, "Connection %s: vPPB bind failed: %d",
 				conn->id, rc);
 			fmd_connection_remove(ctx, conn);
 			/* the port or LD belongs to another host's VCS */
-			return rc == -EBUSY ? -9 : -7;
+			if (rc == -EBUSY)
+				return -9;
+			/* the switch has another operation under way */
+			return rc == -EAGAIN ? -11 : -7;
 		}
 
 		/* Record binding info in connection */
 		conn->vcs_id = host->vcs_id;
 		conn->vppb_id = (uint8_t)vppb_id;
+
+		/*
+		 * The switch has started and not finished: the connection is
+		 * not made until it has. The request is answered with the
+		 * task that follows the bind.
+		 */
+		if (rc == FMD_OP_STARTED) {
+			struct fmd_task *task;
+
+			conn->bound = false;
+			conn->pending = FMD_CONN_BINDING;
+			task = fmd_task_start(ctx, FMD_TASK_BIND, sw, conn->vcs_id,
+					      conn->vppb_id, conn->id);
+			if (!task) {
+				fmd_connection_remove(ctx, conn);
+				return -6;
+			}
+			*response = fmd_redfish_task(ctx, task->id);
+			return FMD_OP_STARTED;
+		}
+
 		conn->bound = true;
 
 		fmd_info(ctx, "Connection %s: bound vPPB %d in VCS %d to port %d%s",
@@ -5523,14 +5702,20 @@ done:
  *  -2 vPPB unbind failed
  */
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
-				  const char *connection_id)
+				  const char *connection_id, json_t **response)
 {
+	*response = NULL;
+
 	if (strcmp(fabric_id, "CXL") != 0)
 		return -1;
 
 	struct fmd_connection *conn = fmd_connection_find(ctx, connection_id);
 	if (!conn)
 		return -1;
+
+	/* the switch is still working on it: wait for that to end */
+	if (conn->pending != FMD_CONN_SETTLED)
+		return -3;
 
 	fmd_info(ctx, "Deleting connection %s: %s -> %s",
 		 conn->id, conn->initiator_id, conn->target_id);
@@ -5561,10 +5746,29 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				rc = fmd_vppb_unbind(ctx, sw, conn->vcs_id,
 						     conn->vppb_id,
 						     FMD_UNBIND_MANAGED_HOT_REMOVE);
-				if (rc != 0 && rc != -ENOENT) {
+				if (rc == -EAGAIN)
+					return -3;
+				if (rc < 0 && rc != -ENOENT) {
 					fmd_err(ctx, "Connection %s: vPPB unbind failed: %d",
 						conn->id, rc);
 					return -2;
+				}
+
+				/*
+				 * Started and not finished: the connection
+				 * stands until the vPPB is unbound.
+				 */
+				if (rc == FMD_OP_STARTED) {
+					struct fmd_task *task;
+
+					conn->pending = FMD_CONN_UNBINDING;
+					task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw,
+							      conn->vcs_id, conn->vppb_id,
+							      conn->id);
+					if (!task)
+						return -2;
+					*response = fmd_redfish_task(ctx, task->id);
+					return FMD_OP_STARTED;
 				}
 			}
 		}

@@ -545,6 +545,51 @@ static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
 		goto not_found;
 	}
 
+	/* Tasks: binds and unbinds a switch carries out in the background */
+	if (strcmp(norm_url, "/redfish/v1/TaskService") == 0) {
+		response = fmd_redfish_task_service(ctx);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (strcmp(norm_url, "/redfish/v1/TaskService/Tasks") == 0) {
+		response = fmd_redfish_tasks(ctx);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	if (match_route("/redfish/v1/TaskService/Tasks/{task}", norm_url, params, 8)) {
+		response = fmd_redfish_task(ctx, atoi(params[0]));
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
+	}
+
+	/*
+	 * The task monitor: 202 and the task while the operation runs, then
+	 * what the request that started it would have been answered with.
+	 */
+	if (match_route("/redfish/v1/TaskService/TaskMonitors/{task}", norm_url,
+			params, 8)) {
+		char location[256];
+		int status = fmd_redfish_task_monitor(ctx, atoi(params[0]), &response,
+						      location, sizeof(location));
+
+		free_params(params, 8);
+		free(norm_url);
+		if (status == 404)
+			return send_error(conn, MHD_HTTP_NOT_FOUND, "Task not found");
+		if (status == 204)
+			return send_no_content(conn);
+		if (location[0])
+			return send_json_response_with_location(conn, status,
+								response, location);
+		return send_json_response(conn, status, response);
+	}
+
 	if (match_route("/redfish/v1/Fabrics/{id}/Connections", norm_url, params, 8)) {
 		response = fmd_redfish_connections_collection(ctx, params[0]);
 		free_params(params, 8);
@@ -957,6 +1002,19 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		rc = fmd_redfish_post_connection(ctx, params[0], body, body_size, &response);
 
+		/*
+		 * The switch is binding in the background: 202 Accepted, the
+		 * task, and where to ask how it went.
+		 */
+		if (rc == FMD_OP_STARTED && response) {
+			snprintf(location, sizeof(location), "%s",
+				 json_string_value(json_object_get(response, "TaskMonitor")));
+			free_params(params, 8);
+			free(norm_url);
+			return send_json_response_with_location(conn, MHD_HTTP_ACCEPTED,
+								response, location);
+		}
+
 		if (rc == 0 && response) {
 			/* Extract @odata.id for Location header */
 			json_t *odata_id = json_object_get(response, "@odata.id");
@@ -994,6 +1052,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -8)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Cross-head access denied: host cannot access this memory");
+		if (rc == -11)
+			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
+					  "The switch is carrying out another operation; try again");
 		if (rc == -10)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The host and the device are not on the same switch");
@@ -1138,9 +1199,24 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 	/* DELETE /redfish/v1/Fabrics/{id}/Connections/{conn} */
 	if (match_route("/redfish/v1/Fabrics/{id}/Connections/{conn}",
 			norm_url, params, 8)) {
-		rc = fmd_redfish_delete_connection(ctx, params[0], params[1]);
+		json_t *task = NULL;
+
+		rc = fmd_redfish_delete_connection(ctx, params[0], params[1], &task);
 		free_params(params, 8);
 		free(norm_url);
+
+		/* the switch is unbinding in the background */
+		if (rc == FMD_OP_STARTED && task) {
+			char location[256];
+
+			snprintf(location, sizeof(location), "%s",
+				 json_string_value(json_object_get(task, "TaskMonitor")));
+			return send_json_response_with_location(conn, MHD_HTTP_ACCEPTED,
+								task, location);
+		}
+		if (rc == -3)
+			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
+					  "The switch is carrying out another operation; try again");
 
 		if (rc == 0)
 			return send_no_content(conn);

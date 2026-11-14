@@ -22,6 +22,7 @@ From the simplest to the largest. "Bound" is what the hosts already have;
 | `switch-attached.json` | One switch, one host: five SLDs and an MLD, two ports empty | A single VCS |
 | `multi-host-vcs.json` | One switch, two hosts: three SLDs and an MLD, everything bound | Two VCSs sharing an MLD by LD |
 | `fm-boots-first.json` | One switch, two hosts: two SLDs, an MLD, an empty port, a PCIe device; **nothing bound** | Where an orchestrator starts (Section 7.2.1.2) |
+| `background-bind.json` | `fm-boots-first.json` with a switch that takes 400 ms over a bind or unbind | Binds and unbinds in the background: 202 Accepted, tasks, a switch that is busy |
 | `switch-dcd.json` | One switch, two hosts: an MLD and an SLD with dynamic capacity | Dynamic capacity through a switch, an extent shared by two hosts |
 | `large-fabric.json` | Two switches, six hosts: six SLDs, MLDs of 4, 8 and 16 LDs; bound and unbound capacity; links down and training | Scale, more than one switch, partly provisioned pools |
 | `unit/unit-direct-*.json`, `unit/unit-switch-{sld,mld}.json` | One device each | One device type at a time |
@@ -66,5 +67,6 @@ topology. Section and table numbers are CXL r4.0.
   hardware a head is not placed on a port.
 - **PBR switches, Fabric Ports and G-FAM devices.**
 - **Cascaded switches.**
-- **A bind or unbind in progress**, although a vPPB can be given the `busy`
-  binding status.
+- **A bind or unbind that fails in the background.** `background-bind.json`
+  has a switch that takes its time and then succeeds. One that fails is tested
+  against Background Operation Status answers in `tests/discovery-tests.c`.

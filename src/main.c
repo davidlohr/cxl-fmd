@@ -109,6 +109,8 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 	fmd_redfish_stop(ctx);
 	fmd_events_cleanup(ctx);
 
+	fmd_tasks_free(ctx);
+
 	/* connections are kept on the context, not in the topology */
 	while (ctx->connections)
 		fmd_connection_remove(ctx, ctx->connections);
@@ -309,9 +311,15 @@ int main(int argc, char *argv[])
 	fmd_info(ctx, "Redfish API available at http://localhost:%d/redfish/v1",
 		 ctx->config.port);
 
-	/* Main loop: drain the DC event log on a timer and on notification */
-	while (g_running && ctx->running)
-		fmd_events_poll(ctx, 1000);
+	/*
+	 * Main loop: drain the DC event log on a timer and on notification,
+	 * and follow the binds and unbinds the switches have under way, more
+	 * often while there are any.
+	 */
+	while (g_running && ctx->running) {
+		fmd_events_poll(ctx, fmd_tasks_running(ctx) ? 100 : 1000);
+		fmd_tasks_poll(ctx);
+	}
 
 	fmd_info(ctx, "Shutting down...");
 	ret = EXIT_SUCCESS;

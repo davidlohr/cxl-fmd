@@ -1208,6 +1208,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 	/* VCS configuration - default to 0 if no vcs array provided */
 	sw->num_vcs = 0;
 	sw->max_vcs = (uint8_t)json_int_or(jsw, "max_vcs", 8);
+	/* binds and unbinds in the background, as a switch does them */
+	sw->mock_bind_time_ms = (unsigned int)json_uint_or(jsw, "bind_time_ms", 0);
 
 	fmd_topology_add(&ctx->topology, &sw->base, NULL);
 

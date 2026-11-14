@@ -735,7 +735,7 @@ static void test_switch_bind(void)
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, ld1, unbound);
 	rc = try_bind(ctx, ep, sw, 2, 1, 5, 1, &sent);
-	CHECK(rc == 0, "bind of LD 1 of port 5: %d", rc);
+	CHECK(rc == FMD_OP_STARTED, "bind of LD 1 of port 5: %d", rc);
 
 	vcs = fmd_switch_find_vcs(sw, 2);
 	CHECK(vcs, "VCS 2 is gone after a bind");
@@ -773,7 +773,7 @@ static void test_switch_bind(void)
 	/* Unbind vPPB (5202h) takes the VCS ID as well (Table 7-36) */
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_unbind(ctx, sw, 2, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
-	CHECK(rc == 0, "unbind in VCS 2: %d", rc);
+	CHECK(rc == FMD_OP_STARTED, "unbind in VCS 2: %d", rc);
 	/* all other encodings of the Unbind Option are reserved */
 	rc = fmd_vppb_unbind(ctx, sw, 2, 1, (enum fmd_unbind_option)3);
 	CHECK(rc == -EINVAL, "unbind with a reserved option: %d", rc);
@@ -808,8 +808,8 @@ static void test_switch_unbind(void)
 	/* its starting the unbind is not */
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_unbind(ctx, sw, 0, 1, FMD_UNBIND_WAIT_FOR_CLEAN);
-	CHECK(rc == 0, "unbind returns %d for Background Command Started",
-	      rc);
+	CHECK(rc == FMD_OP_STARTED,
+	      "unbind returns %d for Background Command Started", rc);
 out:
 	fmd_ctx_free(ctx);
 	report("unbind on a switch", before);
@@ -1359,6 +1359,125 @@ static void test_dcd_info(void)
 	report("Get DCD Info", before);
 }
 
+/*
+ * A bind in the background, to its end. The switch answers Bind vPPB with
+ * Background Command Started; Background Operation Status (0002h, Table
+ * 8-217) then says whether it is in progress (Bit[0]), how far it is
+ * (Bits[7:1]) and, when it is complete, its return code.
+ */
+static void answer_bg_status(struct cxlmi_endpoint *ep, bool running,
+			     uint8_t percent, uint16_t opcode, uint16_t rc)
+{
+	uint8_t pl[8] = { 0 };
+
+	pl[0] = (percent << 1) | (running ? 1 : 0);
+	put16(pl + 2, opcode);			/* Command Opcode */
+	put16(pl + 4, rc);			/* Return Code */
+	answer(ep, 0x0002, pl, sizeof(pl));
+}
+
+static void test_bind_task(bool succeeds)
+{
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, succeeds ? 0x5007 : 0x5008);
+	int before = failures, rc;
+	struct fmd_connection *conn;
+	struct fmd_switch *sw;
+	struct fmd_task *task;
+	char id[FMD_MAX_ID_LEN];
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), succeeds ? 0x5007 : 0x5008);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (!sw)
+		goto out;
+
+	/* LD 1 of port 5 to vPPB 1 of VCS 2: started, not done */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
+	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
+
+	conn = fmd_connection_create(ctx, "host", "device", "chunk", 0);
+	CHECK(conn, "no connection");
+	if (!conn)
+		goto out;
+	conn->pending = FMD_CONN_BINDING;
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 1, conn->id);
+	CHECK(task && task->state == FMD_TASK_RUNNING, "no running task");
+	if (!task)
+		goto out;
+
+	/* in progress, 40% */
+	answer_bg_status(ep, true, 40, 0x5201, 0);
+	fmd_tasks_poll(ctx);
+	CHECK(last_opcode(ep) == 0x0002, "the switch was not asked: %04xh",
+	      last_opcode(ep));
+	CHECK(task->state == FMD_TASK_RUNNING && task->percent == 40,
+	      "state %d at %d%%", task->state, task->percent);
+	CHECK(fmd_connection_find(ctx, conn->id) && !conn->bound,
+	      "the connection is made before the bind is over");
+
+	/* a switch that does not answer once is asked again */
+	fmd_tasks_poll(ctx);
+	CHECK(task->state == FMD_TASK_RUNNING, "one failed poll ended the task");
+
+	if (succeeds) {
+		/* complete, Success; the VCSs are read to see the binding */
+		answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_SUCCESS);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, ld1, unbound);
+		fmd_tasks_poll(ctx);
+		CHECK(task->state == FMD_TASK_COMPLETED && task->percent == 100,
+		      "state %d at %d%%: %s", task->state, task->percent,
+		      task->message);
+		conn = fmd_connection_find(ctx, task->connection_id);
+		CHECK(conn && conn->bound && conn->pending == FMD_CONN_SETTLED,
+		      "the connection is not made after the bind");
+	} else {
+		/* complete, with the return code of a failure */
+		answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_INTERNAL);
+		fmd_tasks_poll(ctx);
+		CHECK(task->state == FMD_TASK_EXCEPTION, "state %d: %s",
+		      task->state, task->message);
+		CHECK(!fmd_connection_find(ctx, task->connection_id),
+		      "a connection is left by a bind that failed");
+	}
+
+	/* over: the switch is not asked again */
+	rc = commands_sent(ep);
+	fmd_tasks_poll(ctx);
+	CHECK((int)commands_sent(ep) == rc, "a finished task is still polled");
+out:
+	fmd_ctx_free(ctx);
+	report(succeeds ? "bind in the background, to success" :
+			  "bind in the background, to failure", before);
+}
+
+/* a switch that is busy with a background command says so */
+static void test_bind_busy(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5009);
+	int before = failures, rc;
+	struct fmd_switch *sw;
+	char id[FMD_MAX_ID_LEN];
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x5009);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (sw) {
+		answer_rc(ep, 0x5201, CXLMI_RET_BUSY);
+		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
+		CHECK(rc == -EAGAIN, "bind on a busy switch: %d", rc);
+	}
+
+	fmd_ctx_free(ctx);
+	report("bind on a busy switch", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1389,6 +1508,9 @@ int main(void)
 	test_port_resource();
 	test_switch_bind();
 	test_switch_unbind();
+	test_bind_task(true);
+	test_bind_task(false);
+	test_bind_busy();
 	test_overcount_switch();
 	test_overcount_mld();
 	test_mld_ld_counts();

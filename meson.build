@@ -50,6 +50,7 @@ src = files(
     'src/topology.c',
     'src/mock.c',
     'src/validate.c',
+    'src/tasks.c',
     'src/cci_redfish_map.c',
     'src/dcd.c',
     'src/events.c',

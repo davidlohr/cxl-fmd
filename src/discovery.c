@@ -1566,6 +1566,29 @@ int fmd_discover(struct fmd_ctx *ctx)
 }
 
 
+static int64_t mono_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/*
+ * Mock: whether the switch has a bind or unbind under way. A component runs
+ * one background command at a time, and answers another with Busy.
+ */
+static bool mock_bg_busy(struct fmd_switch *sw)
+{
+	for (int v = 0; v < sw->num_vcs; v++) {
+		for (int i = 0; i < sw->vcs[v].num_vppbs; i++) {
+			if (sw->vcs[v].vppbs[i].mock_done_ms)
+				return true;
+		}
+	}
+	return false;
+}
+
 /*
  * The vPPB that a bind target is already bound to, NULL if it is unused.
  *
@@ -1704,6 +1727,19 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			 sw->base.id, vppb_id, vcs_id, port_id,
 			 ld_id != 0xFFFF ? " (MLD)" : "");
 
+		/* in the background, as a switch does it */
+		if (sw->mock_bind_time_ms) {
+			if (mock_bg_busy(sw))
+				return -EAGAIN;
+			vppb->binding_status = FMD_VPPB_BUSY;
+			vppb->mock_next_status = (ld_id != 0xFFFF) ?
+				FMD_VPPB_BOUND_LD : FMD_VPPB_BOUND_PHYSICAL_PORT;
+			vppb->mock_next_port_id = port_id;
+			vppb->mock_next_ld_id = (ld_id != 0xFFFF) ? ld_id : 0;
+			vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
+			return FMD_OP_STARTED;
+		}
+
 		vppb->bound_port_id = port_id;
 		vppb->bound_ld_id = (ld_id != 0xFFFF) ? ld_id : 0;
 
@@ -1729,6 +1765,11 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	/* the switch may bind in the background: that is not a failure */
 	rc = cxlmi_cmd_fmapi_bind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
+	if (rc == CXLMI_RET_BUSY) {
+		/* it runs one background command at a time */
+		fmd_warn(ctx, "%s: bind vPPB: the switch is busy", sw->base.id);
+		return -EAGAIN;
+	}
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: bind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
@@ -1738,10 +1779,11 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	/* Refresh VCS state to reflect the binding */
 	fmd_vcs_refresh(ctx, sw);
 
-	fmd_info(ctx, "%s: bind of vPPB %d in VCS %d accepted",
-		 sw->base.id, vppb_id, vcs_id);
+	fmd_info(ctx, "%s: bind of vPPB %d in VCS %d %s",
+		 sw->base.id, vppb_id, vcs_id,
+		 rc == CXLMI_RET_BACKGROUND ? "started" : "done");
 
-	return 0;
+	return rc == CXLMI_RET_BACKGROUND ? FMD_OP_STARTED : 0;
 }
 
 /*
@@ -1815,6 +1857,17 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		fmd_info(ctx, "%s: mock unbind vPPB %d in VCS %d (%s hot-remove)",
 			 sw->base.id, vppb_id, vcs_id, option_str);
 
+		if (sw->mock_bind_time_ms) {
+			if (mock_bg_busy(sw))
+				return -EAGAIN;
+			vppb->binding_status = FMD_VPPB_BUSY;
+			vppb->mock_next_status = FMD_VPPB_UNBOUND;
+			vppb->mock_next_port_id = 0;
+			vppb->mock_next_ld_id = 0;
+			vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
+			return FMD_OP_STARTED;
+		}
+
 		vppb->binding_status = FMD_VPPB_UNBOUND;
 		vppb->bound_port_id = 0;
 		vppb->bound_ld_id = 0;
@@ -1836,6 +1889,10 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	/* as for bind, the switch may do this in the background */
 	rc = cxlmi_cmd_fmapi_unbind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
+	if (rc == CXLMI_RET_BUSY) {
+		fmd_warn(ctx, "%s: unbind vPPB: the switch is busy", sw->base.id);
+		return -EAGAIN;
+	}
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: unbind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
@@ -1845,9 +1902,79 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	/* Refresh VCS state to reflect the unbinding */
 	fmd_vcs_refresh(ctx, sw);
 
-	fmd_info(ctx, "%s: unbind of vPPB %d in VCS %d accepted",
-		 sw->base.id, vppb_id, vcs_id);
+	fmd_info(ctx, "%s: unbind of vPPB %d in VCS %d %s",
+		 sw->base.id, vppb_id, vcs_id,
+		 rc == CXLMI_RET_BACKGROUND ? "started" : "done");
 
+	return rc == CXLMI_RET_BACKGROUND ? FMD_OP_STARTED : 0;
+}
+
+/*
+ * How a background bind or unbind on a switch is doing: Background
+ * Operation Status (0002h), CXL r4.0 Table 8-217.
+ */
+int fmd_switch_bg_status(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			 uint16_t opcode, int *percent, uint16_t *rc)
+{
+	struct cxlmi_cmd_bg_op_status_rsp rsp = { 0 };
+	int ret;
+
+	*percent = 0;
+	*rc = CXLMI_RET_SUCCESS;
+
+	if (!sw->base.ep) {
+		/* Mock: the operation is over when its time is up */
+		int64_t now = mono_ms();
+		bool running = false;
+
+		for (int v = 0; v < sw->num_vcs; v++) {
+			for (int i = 0; i < sw->vcs[v].num_vppbs; i++) {
+				struct fmd_vppb *vppb = &sw->vcs[v].vppbs[i];
+
+				if (!vppb->mock_done_ms)
+					continue;
+				if (now < vppb->mock_done_ms) {
+					running = true;
+					continue;
+				}
+				vppb->binding_status = vppb->mock_next_status;
+				vppb->bound_port_id = vppb->mock_next_port_id;
+				vppb->bound_ld_id = vppb->mock_next_ld_id;
+				vppb->bound_pbr_id = 0;
+				vppb->mock_done_ms = 0;
+			}
+		}
+		if (running) {
+			*percent = 50;
+			return 1;
+		}
+		fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
+		*percent = 100;
+		return 0;
+	}
+
+	ret = cxlmi_cmd_bg_op_status(sw->base.ep, CXLMI_NO_TUNNEL, &rsp);
+	if (ret) {
+		fmd_warn(ctx, "%s: background operation status failed: %d",
+			 sw->base.id, ret);
+		return -EIO;
+	}
+
+	/* Bit[0]: in progress; Bits[7:1]: Percentage Complete */
+	*percent = rsp.status >> 1;
+	if (rsp.status & 0x01)
+		return 1;
+
+	/*
+	 * Return Code is that of "the last command executed in the
+	 * background", and is valid when Percentage Complete is 100. If
+	 * that command is not ours, the switch has run another since: how
+	 * ours ended is then only in what the vPPB is now, which the caller
+	 * looks at in any case.
+	 */
+	if (rsp.opcode == opcode && *percent == 100)
+		*rc = rsp.returncode;
+	*percent = 100;
 	return 0;
 }
 

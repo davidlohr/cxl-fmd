@@ -607,6 +607,7 @@ Switches define the fabric topology for switch-attached devices.
 | `serial_number` | string/int | 0 | Switch serial number |
 | `upstream_port` | integer | 0 | Upstream port number |
 | `max_vcs` | integer | 8 | Maximum VCS supported |
+| `bind_time_ms` | integer | 0 | How long the switch takes over a bind or unbind, which it then does in the background, one at a time, as a switch does. 0: done at once |
 | `ports` | array | [] | Port configuration array |
 | `vcs` | array | [] | VCS configuration array |
 

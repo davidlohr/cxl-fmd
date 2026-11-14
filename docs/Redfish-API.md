@@ -621,6 +621,24 @@ Content-Type: application/json
 **Hardware Behavior (Switch-Attached Hosts):**
 - Automatically finds an available vPPB in the host's VCS
 - Issues `Bind vPPB (0x5201h)` to bind the device port (and LD for MLD/MHD) to the vPPB
+
+**Binds and unbinds in the background:**
+"All binding operations are executed as background commands" (CXL r4.0 Section
+7.6.7.2.2). A switch answers Bind vPPB or Unbind vPPB with Background Command
+Started and finishes later, one such command at a time. cxl-fmd does not wait:
+
+| Request | Answer | Then |
+|---------|--------|------|
+| `POST .../Connections` | `202 Accepted`, a `Task`, `Location:` the task monitor | The connection exists with `Status.State` `Starting`; it is made, or removed, when the bind is over |
+| `DELETE .../Connections/{id}` | `202 Accepted`, a `Task`, `Location:` the task monitor | The connection stands, with `Status.State` `Updating`, until the vPPB is unbound |
+| Either, while the switch has an operation under way | `503 Service Unavailable` | Try again |
+| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs; then `201` and the connection for a bind, `204` for an unbind, or the error | |
+
+The task is at `/redfish/v1/TaskService/Tasks/{id}`. Its `PercentComplete` is
+the Percentage Complete of Background Operation Status (0002h), which the event
+loop reads until the operation is over; the return code there, and what the
+vPPB is afterwards, decide between `Completed` and `Exception`. A switch that
+finishes a bind before it answers is answered for with `201`, and no task.
 - Records binding info (`vcs_id`, `vppb_id`) in the connection
 
 **MHD Direct-Attached Validation:**
