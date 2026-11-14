@@ -121,6 +121,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Several clients at once
+    test(
+        'concurrency',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_concurrency.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Memory lifecycle tests
     test(
         'memory-lifecycle',

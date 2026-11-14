@@ -1014,12 +1014,35 @@ struct fmd_ctx {
 	 */
 	pthread_mutex_t dcd_lock;
 
+	/*
+	 * The state of the fabric: the topology, the VCS tables of the
+	 * switches, the connections, and everything hanging off them. None of
+	 * it has a lock of its own, and a change spans several of them and
+	 * commands to the hardware: a bind reads the VCSs, picks a vPPB, sends
+	 * the command and reads them again.
+	 *
+	 *  - A request that only reads (GET) holds it shared. Any number run
+	 *    at once, on the threads of the HTTP server.
+	 *  - A request that changes anything holds it exclusively, and so
+	 *    does the event loop while it brings dynamic capacity up to date.
+	 *
+	 * libcxlmi takes no locks: commands on an endpoint are the caller's
+	 * to keep apart. Whoever holds this exclusively is the only one
+	 * sending any. The few commands a reader sends are kept apart by
+	 * fmd_cci_read_lock().
+	 *
+	 * Taken before dcd_lock. Writers are preferred, so that a stream of
+	 * readers does not keep a change waiting.
+	 */
+	pthread_rwlock_t fabric_lock;
+
 	/* Configuration */
 	struct {
 		uint16_t port;
 		bool scan_mctp;
 		bool scan_ioctl;
 		unsigned int event_poll_sec;	/* 0 disables */
+		unsigned int http_threads;	/* threads serving requests */
 		char *mock_topology_path;
 	} config;
 };
@@ -1215,6 +1238,20 @@ void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_swit
  * how many there are.
  */
 int fmd_topology_validate(struct fmd_ctx *ctx);
+
+/*
+ * Around a command that a request sends while it holds fabric_lock shared:
+ * two such requests must not have commands on one endpoint at once.
+ */
+void fmd_cci_read_lock(void);
+void fmd_cci_read_unlock(void);
+
+/*
+ * Threads of the HTTP server: how many requests can be in hand at once.
+ * Requests that only read run together on them; -N sets the number.
+ */
+#define FMD_DEFAULT_HTTP_THREADS 8
+#define FMD_MAX_HTTP_THREADS     256
 
 /*
  * A VCS of a switch by its Virtual CXL Switch ID, and a vPPB of a VCS by its

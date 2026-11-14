@@ -1859,6 +1859,24 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
  *
  * Returns timestamp in nanoseconds since Unix epoch, or 0 on error.
  */
+/*
+ * Commands sent by requests that hold fabric_lock shared. libcxlmi does not
+ * keep two commands on one endpoint apart, and two readers may be on the
+ * same one. One lock for all endpoints: there are two such commands, both
+ * short, and a reader that sends one is the exception.
+ */
+static pthread_mutex_t cci_read_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void fmd_cci_read_lock(void)
+{
+	pthread_mutex_lock(&cci_read_lock);
+}
+
+void fmd_cci_read_unlock(void)
+{
+	pthread_mutex_unlock(&cci_read_lock);
+}
+
 uint64_t fmd_get_device_timestamp(struct fmd_component *comp)
 {
 	struct timespec ts;
@@ -1869,20 +1887,22 @@ uint64_t fmd_get_device_timestamp(struct fmd_component *comp)
 	/* Real hardware: call CCI command */
 	if (comp->ep) {
 		struct cxlmi_cmd_get_timestamp_rsp rsp = {0};
+		int rc;
 
+		/* sent by a reader: see fmd_cci_read_lock() */
+		fmd_cci_read_lock();
 		/* Use switch tunneling if device is behind a switch port */
 		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
 			struct fmd_port *port = fmd_to_port(comp->parent);
 			DEFINE_CXLMI_TUNNEL_SWITCH(ti, port->port_number);
-			if (cxlmi_cmd_get_timestamp(comp->ep, &ti, &rsp) == 0)
-				return rsp.timestamp;
-			return 0;
+
+			rc = cxlmi_cmd_get_timestamp(comp->ep, &ti, &rsp);
+		} else {
+			rc = cxlmi_cmd_get_timestamp(comp->ep, CXLMI_NO_TUNNEL, &rsp);
 		}
+		fmd_cci_read_unlock();
 
-		if (cxlmi_cmd_get_timestamp(comp->ep, CXLMI_NO_TUNNEL, &rsp) == 0)
-			return rsp.timestamp;
-
-		return 0;
+		return rc == 0 ? rsp.timestamp : 0;
 	}
 
 	/* Mock mode: return current system time */
@@ -1951,7 +1971,13 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 	if (comp->type == FMD_COMPONENT_MLD)
 		ti = fmd_mld_ld_tunnel(fmd_to_mld(comp), ld_id, &ti_buf);
 
-	if (cxlmi_cmd_memdev_get_security_state(comp->ep, ti, &rsp) != 0)
+	int rc;
+
+	/* sent by a reader: see fmd_cci_read_lock() */
+	fmd_cci_read_lock();
+	rc = cxlmi_cmd_memdev_get_security_state(comp->ep, ti, &rsp);
+	fmd_cci_read_unlock();
+	if (rc != 0)
 		return 0;
 
 	return rsp.security_state;

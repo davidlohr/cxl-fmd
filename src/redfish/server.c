@@ -1243,23 +1243,39 @@ static enum MHD_Result handle_request(void *cls,
 		}
 	}
 
-	/* Dispatch to method-specific handler */
-	if (strcmp(method, "GET") == 0)
-		return handle_request_get(ctx, conn, url);
-	else if (strcmp(method, "POST") == 0)
-		return handle_request_post(ctx, conn, url,
-					   rctx->body, rctx->body_size);
-	else if (strcmp(method, "PUT") == 0)
-		return handle_request_put(ctx, conn, url,
-					  rctx->body, rctx->body_size);
-	else if (strcmp(method, "PATCH") == 0)
-		return handle_request_patch(ctx, conn, url,
-					    rctx->body, rctx->body_size);
-	else if (strcmp(method, "DELETE") == 0)
-		return handle_request_delete(ctx, conn, url);
+	/*
+	 * Dispatch to method-specific handler under fabric_lock: shared for
+	 * a GET, which only reads, and exclusive for anything else. The body
+	 * of a request has arrived by now, so the lock is not held while a
+	 * client is slow to send one.
+	 */
+	enum MHD_Result result;
 
-	return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
-			  "Method not allowed");
+	if (strcmp(method, "GET") == 0) {
+		pthread_rwlock_rdlock(&ctx->fabric_lock);
+		result = handle_request_get(ctx, conn, url);
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		return result;
+	}
+
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+	if (strcmp(method, "POST") == 0)
+		result = handle_request_post(ctx, conn, url,
+					     rctx->body, rctx->body_size);
+	else if (strcmp(method, "PUT") == 0)
+		result = handle_request_put(ctx, conn, url,
+					    rctx->body, rctx->body_size);
+	else if (strcmp(method, "PATCH") == 0)
+		result = handle_request_patch(ctx, conn, url,
+					      rctx->body, rctx->body_size);
+	else if (strcmp(method, "DELETE") == 0)
+		result = handle_request_delete(ctx, conn, url);
+	else
+		result = send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+				    "Method not allowed");
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+
+	return result;
 }
 
 static void request_completed(void *cls,
@@ -1279,24 +1295,47 @@ static void request_completed(void *cls,
 
 int fmd_redfish_start(struct fmd_ctx *ctx)
 {
+	unsigned int threads;
+
 	if (!ctx)
 		return -1;
 
 	ctx->redfish.port = ctx->config.port;
 
-	ctx->redfish.daemon = MHD_start_daemon(
-		MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG,
-		ctx->redfish.port,
-		NULL, NULL,                    /* accept policy */
-		handle_request, ctx,           /* request handler */
-		MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
-		MHD_OPTION_END);
+	/*
+	 * A pool of threads, each serving connections of its own. What may
+	 * run at once is decided by fabric_lock, not here. libmicrohttpd
+	 * makes a pool only of two threads or more: one is the single
+	 * internal thread it has without the option.
+	 */
+	threads = ctx->config.http_threads ? ctx->config.http_threads :
+					     FMD_DEFAULT_HTTP_THREADS;
+	if (threads > 1)
+		ctx->redfish.daemon = MHD_start_daemon(
+			MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG,
+			ctx->redfish.port,
+			NULL, NULL,                    /* accept policy */
+			handle_request, ctx,           /* request handler */
+			MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
+			MHD_OPTION_THREAD_POOL_SIZE, threads,
+			MHD_OPTION_END);
+	else
+		ctx->redfish.daemon = MHD_start_daemon(
+			MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG,
+			ctx->redfish.port,
+			NULL, NULL,                    /* accept policy */
+			handle_request, ctx,           /* request handler */
+			MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
+			MHD_OPTION_END);
 
 	if (!ctx->redfish.daemon) {
 		fmd_err(ctx, "Failed to start HTTP daemon on port %d",
 			ctx->redfish.port);
 		return -1;
 	}
+
+	fmd_info(ctx, "Serving requests on %u thread%s", threads,
+		 threads == 1 ? "" : "s");
 
 	ctx->redfish.running = true;
 	return 0;

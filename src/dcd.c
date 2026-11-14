@@ -1257,6 +1257,12 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 	struct fmd_component *devs[DC_EVENT_MAX_DEVS], *comp;
 	int n = 0, rc = 0;
 
+	/*
+	 * A drain sends commands and replaces a device's regions and extents:
+	 * it has the fabric to itself, as a request that changes it does.
+	 */
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+
 	/* Collect under the read lock; each drain then runs under dcd_lock */
 	fmd_topology_rdlock(&ctx->topology);
 	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
@@ -1274,6 +1280,7 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 		if (r && !rc)
 			rc = r;
 	}
+	pthread_rwlock_unlock(&ctx->fabric_lock);
 	return rc;
 }
 

@@ -31,6 +31,8 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
 	localtime_r(&now, &tm);
 	strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm);
 
+	/* one line at a time, from whichever thread */
+	flockfile(stderr);
 	fprintf(stderr, "[%s] [%s] ", timebuf, level_str[level]);
 
 	va_start(ap, fmt);
@@ -38,4 +40,5 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
 	va_end(ap);
 
 	fprintf(stderr, "\n");
+	funlockfile(stderr);
 }

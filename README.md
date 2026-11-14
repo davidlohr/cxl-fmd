@@ -76,6 +76,7 @@ See [docs/mock-topology.md](docs/mock-topology.md) for available topologies and 
 | `--mock FILE` | `-M` | Use mock topology from JSON file |
 | `--mctp` | `-m` | Enable MCTP device scanning |
 | `--ioctl` | `-i` | Enable ioctl device scanning |
+| `--threads N` | `-N` | Serve requests on N threads, 1 to 256 (default: 8). Requests that only read run together; a change runs alone |
 | `--verbose` | `-v` | Increase verbosity (repeatable) |
 | `--help` | `-h` | Show help message |
 | `--version` | `-V` | Show version |

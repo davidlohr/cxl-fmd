@@ -37,6 +37,9 @@ static void print_usage(const char *prog)
 	       "  -i, --ioctl           Enable ioctl device scanning\n"
 	       "  -e, --event-poll SECS Drain the DC event log every SECS seconds\n"
 	       "                        (default: %d, 0 disables)\n"
+	       "  -N, --threads N       Serve requests on N threads, 1 to %d\n"
+	       "                        (default: %d). Requests that only read\n"
+	       "                        run together; a change runs alone.\n"
 	       "  -v, --verbose         Increase verbosity (can repeat)\n"
 	       "  -h, --help            Show this help\n"
 	       "  -V, --version         Show version\n"
@@ -46,7 +49,8 @@ static void print_usage(const char *prog)
 	       "  the JSON topology file instead of scanning for real hardware.\n"
 	       "  This is useful for testing and development.\n"
 	       "\n",
-	       prog, FMD_DEFAULT_PORT, FMD_DEFAULT_EVENT_POLL_SEC);
+	       prog, FMD_DEFAULT_PORT, FMD_DEFAULT_EVENT_POLL_SEC,
+	       FMD_MAX_HTTP_THREADS, FMD_DEFAULT_HTTP_THREADS);
 }
 
 static void print_version(void)
@@ -70,6 +74,15 @@ struct fmd_ctx *fmd_ctx_new(void)
 	ctx->running = true;
 	ctx->notify_sd[0] = ctx->notify_sd[1] = -1;
 	pthread_mutex_init(&ctx->dcd_lock, NULL);
+	{
+		pthread_rwlockattr_t attr;
+
+		pthread_rwlockattr_init(&attr);
+		pthread_rwlockattr_setkind_np(&attr,
+			PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+		pthread_rwlock_init(&ctx->fabric_lock, &attr);
+		pthread_rwlockattr_destroy(&attr);
+	}
 
 	/* Initialize topology */
 	if (fmd_topology_init(&ctx->topology) < 0) {
@@ -102,6 +115,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 
 	fmd_topology_cleanup(&ctx->topology);
 	pthread_mutex_destroy(&ctx->dcd_lock);
+	pthread_rwlock_destroy(&ctx->fabric_lock);
 
 	if (ctx->mock_fabric)
 		fmd_mock_free(ctx->mock_fabric);
@@ -125,6 +139,7 @@ int main(int argc, char *argv[])
 		{"port",    required_argument, NULL, 'p'},
 		{"mock",    required_argument, NULL, 'M'},
 		{"check",   no_argument,       NULL, 'c'},
+		{"threads", required_argument, NULL, 'N'},
 		{"mctp",    no_argument,       NULL, 'm'},
 		{"ioctl",   no_argument,       NULL, 'i'},
 		{"event-poll", required_argument, NULL, 'e'},
@@ -140,10 +155,11 @@ int main(int argc, char *argv[])
 	bool use_ioctl = false;
 	bool transport_specified = false;
 	unsigned int event_poll_sec = FMD_DEFAULT_EVENT_POLL_SEC;
+	unsigned int http_threads = FMD_DEFAULT_HTTP_THREADS;
 	const char *mock_path = NULL;
 	bool check_only = false;
 
-	while ((opt = getopt_long(argc, argv, "p:M:cmie:vhV", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:M:cN:mie:vhV", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p': {
 			char *endptr;
@@ -162,6 +178,18 @@ int main(int argc, char *argv[])
 		case 'c':
 			check_only = true;
 			break;
+		case 'N': {
+			char *endptr;
+			long val = strtol(optarg, &endptr, 10);
+			if (endptr == optarg || *endptr != '\0' ||
+			    val < 1 || val > FMD_MAX_HTTP_THREADS) {
+				fprintf(stderr, "Invalid number of threads: %s "
+					"(1 to %d)\n", optarg, FMD_MAX_HTTP_THREADS);
+				return EXIT_FAILURE;
+			}
+			http_threads = (unsigned int)val;
+			break;
+		}
 		case 'm':
 			use_mctp = true;
 			transport_specified = true;
@@ -210,6 +238,7 @@ int main(int argc, char *argv[])
 	ctx->config.scan_mctp = use_mctp;
 	ctx->config.scan_ioctl = use_ioctl;
 	ctx->config.event_poll_sec = event_poll_sec;
+	ctx->config.http_threads = http_threads;
 	ctx->config.mock_topology_path = mock_path ? strdup(mock_path) : NULL;
 
 	if (verbosity >= 1)

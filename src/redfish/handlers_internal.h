@@ -271,13 +271,13 @@ static inline json_t *rf_collection_finish(struct rf_collection *coll)
 
 /*
  * Helper for building dynamic URI strings.
- * Returns a statically allocated buffer - use immediately or copy.
- * Not thread-safe for the same index.
+ * Returns a statically allocated buffer - use immediately or copy. The
+ * buffers are the calling thread's: requests run on several.
  */
 #define RF_URI_BUFS 4
 static inline char *rf_uri(int idx, const char *fmt, ...)
 {
-	static char bufs[RF_URI_BUFS][256];
+	static _Thread_local char bufs[RF_URI_BUFS][256];
 	va_list ap;
 
 	idx = idx % RF_URI_BUFS;

@@ -543,12 +543,21 @@ Nothing in it needs hardware:
 |-----|--------------|
 | Build and test (gcc, clang) | A warnings-as-errors build, `--check` on every topology in `mock/`, then `meson test`: the discovery harness, the mock topology checks and the pytest suites |
 | ASan and UBSan | The same `meson test` on a build with `-Db_sanitize=address,undefined` |
+| TSan | The same `meson test` on a build with `-Db_sanitize=thread` |
 
 The pytest fixture that starts the daemon fails the test if the daemon exits
 during it, or does not shut down with status 0 afterwards. A crash, a failed
 assertion or a sanitizer report in the daemon is therefore a test failure,
 even when every request the test made was answered; under the sanitizer job
 that includes memory the daemon still holds at exit.
+
+The HTTP server serves requests on a pool of threads (`-N`, `--threads`,
+8 by default). Requests that only read
+(GET) run together; a request that changes the fabric, and the event loop when
+it brings dynamic capacity up to date, has it exclusively (`fabric_lock` in
+`struct fmd_ctx`). `tests/test_concurrency.py` sends requests at once, and
+under the TSan job a data race anywhere in the daemon fails the test that was
+running.
 
 To run what CI runs:
 

@@ -88,3 +88,37 @@ jobs:
         with:
           name: testlog-sanitizers
           path: build/meson-logs/testlog.txt
+
+  thread-sanitizer:
+    name: TSan
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config clang \
+            libmicrohttpd-dev libjansson-dev libdbus-1-dev \
+            python3-pytest python3-requests python3-venv
+
+      - name: Build
+        run: |
+          meson setup build -Dtests=enabled \
+            -Db_sanitize=thread -Db_lundef=false
+          meson compile -C build
+
+      # requests run on a pool of threads: a data race in the daemon
+      # makes it exit with a failure, which fails the test it served
+      - name: Test
+        run: meson test -C build --print-errorlogs --timeout-multiplier 6
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-tsan
+          path: build/meson-logs/testlog.txt
