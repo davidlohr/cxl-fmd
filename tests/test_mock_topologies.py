@@ -40,7 +40,7 @@ def test_shipped_topology_is_valid(cxl_fmd_executable, path):
 
 
 def test_there_are_topologies():
-    assert len(TOPOLOGIES) >= 19
+    assert len(TOPOLOGIES) >= 18
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +199,38 @@ def head_presents_wrongly(t):
     mhd(t)["heads"][0]["presentation"] = "MLD"
 
 
+# unit/unit-switch-mhsld.json: an MH-SLD with head 0 on port 2 and head 1 on
+# port 3 of a switch. A head is a port of the device.
+def whole_mhd_on_one_port(t):
+    dev = t["devices"][0]
+    dev["parent_switch"], dev["parent_port"] = "switch_0", 2
+    for head in dev["heads"]:
+        del head["parent_switch"], head["parent_port"]
+
+
+def two_heads_on_one_port(t):
+    t["devices"][0]["heads"][1]["parent_port"] = 2
+
+
+def head_on_a_missing_port(t):
+    t["devices"][0]["heads"][1]["parent_port"] = 9
+
+
+def mld_head_on_a_switch(t):
+    dev = t["devices"][0]
+    dev["heads"][0]["presentation"] = "MLD"
+    dev["heads"][0]["lds"] = [0, 1]
+    dev["heads"][1]["lds"] = []
+
+
+def head_port_is_not_an_sld_port(t):
+    port(t, 3)["conn_dev_type"] = "mld"
+
+
+def head_on_a_port_that_is_down(t):
+    port(t, 3)["link_status"] = "down"
+
+
 # dcd-device.json
 def dcd(t):
     return t["devices"][0]["dcd"]
@@ -253,6 +285,12 @@ BROKEN = [
     ("mhd-device.json", head_without_lds, "a head has 1 to 16"),
     ("mhd-device.json", mhd_with_one_head, "has more than one"),
     ("mhd-device.json", head_presents_wrongly, "does not present as an SLD"),
+    ("unit/unit-switch-mhsld.json", whole_mhd_on_one_port, "is not on one switch port"),
+    ("unit/unit-switch-mhsld.json", two_heads_on_one_port, "which already has a device"),
+    ("unit/unit-switch-mhsld.json", head_on_a_missing_port, "which the topology does not have"),
+    ("unit/unit-switch-mhsld.json", mld_head_on_a_switch, "presents an MLD on a switch port"),
+    ("unit/unit-switch-mhsld.json", head_port_is_not_an_sld_port, "which presents an SLD"),
+    ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down, "and its link is not up"),
     ("dcd-device.json", extent_outside_its_region, "is outside region base"),
     ("dcd-device.json", extent_not_block_aligned, "is not aligned to the block size"),
     ("dcd-device.json", region_base_not_256mb, "is not aligned to 256 MB"),

@@ -1018,9 +1018,14 @@ json_t *fmd_redfish_zone(struct fmd_ctx *ctx, const char *fabric_id,
 		    vppb->binding_status != FMD_VPPB_BOUND_LD)
 			continue;
 
-		/* Get the device connected to this port */
+		/*
+		 * Get the device connected to this port: the device on it,
+		 * or the Multi-Headed device one of whose heads is.
+		 */
 		if (vppb->port && vppb->port->base.first_child)
 			dev = vppb->port->base.first_child;
+		else if (vppb->port && vppb->port->head)
+			dev = vppb->port->head->base.parent;
 
 		if (dev && fmd_is_memdev(dev))
 			json_array_append_new(endpoints,
@@ -1392,6 +1397,13 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 		json_object_set_new(cxl_obj, "SupportedCXLModes", supported_modes);
 	else
 		json_decref(supported_modes);
+
+	/* A head of a Multi-Headed device: the endpoint is the device's */
+	if (port->head && port->head->base.parent)
+		json_object_set_new(result, "Links",
+			rf_links_array_single("AssociatedEndpoints",
+				"/redfish/v1/Fabrics/CXL/Endpoints/%s",
+				port->head->base.parent->id));
 
 	/* Add link to connected device's Endpoint resource */
 	struct fmd_component *dev_child;
@@ -2472,6 +2484,29 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 					"/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
 					sw->id, port->base.id));
 		}
+	}
+
+	/* A Multi-Headed device is on a port per head */
+	if (comp->type == FMD_COMPONENT_MHD) {
+		struct fmd_component *child;
+		json_t *ports = json_array();
+
+		fmd_topology_rdlock(&ctx->topology);
+		fmd_for_each_child_type(comp, child, FMD_COMPONENT_HEAD) {
+			struct fmd_port *port = fmd_to_head(child)->port;
+
+			if (port && port->base.parent)
+				json_array_append_new(ports,
+					rf_link("/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
+						port->base.parent->id, port->base.id));
+		}
+		fmd_topology_rdunlock(&ctx->topology);
+
+		if (json_array_size(ports))
+			json_object_set_new(result, "Links",
+				json_pack("{s:o}", "ConnectedPCIePorts", ports));
+		else
+			json_decref(ports);
 	}
 
 	return result;
@@ -5065,6 +5100,41 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 	return 0;
 }
 
+static uint16_t extract_ld_id_from_chunk(struct fmd_mem_chunk *chunk);
+
+/*
+ * The switch port that the target of a connection is reached through, NULL
+ * if it is not on a switch. An SLD or an MLD is on a port. A Multi-Headed
+ * device has a port per head (CXL r4.0 Section 2.5): the one that matters
+ * is that of the head the chunk's LD is mapped to.
+ */
+static struct fmd_port *connection_port(struct fmd_ctx *ctx,
+					struct fmd_component *target,
+					struct fmd_mem_chunk *chunk)
+{
+	struct fmd_component *child;
+	struct fmd_ld *ld = NULL;
+	uint16_t ld_id;
+
+	if (target->type != FMD_COMPONENT_MHD)
+		return (target->parent && target->parent->type == FMD_COMPONENT_PORT) ?
+		       fmd_to_port(target->parent) : NULL;
+
+	if (!chunk)
+		return NULL;
+	ld_id = extract_ld_id_from_chunk(chunk);
+	if (ld_id != 0xFFFF)
+		ld = fmd_topology_find_ld(&ctx->topology, target->id, ld_id);
+	if (!ld || ld->binding_point_id == 0xFF)
+		return NULL;	/* mapped to no head */
+
+	fmd_for_each_child_type(target, child, FMD_COMPONENT_HEAD) {
+		if (fmd_to_head(child)->head_id == ld->binding_point_id)
+			return fmd_to_head(child)->port;
+	}
+	return NULL;
+}
+
 /*
  * Helper: Find an unbound vPPB in a VCS
  * Returns vPPB ID (1+, skipping USP at 0) or -1 if none available
@@ -5225,9 +5295,12 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 
 	/*
 	 * For MHD (multi-headed devices), validate cross-head access:
-	 * Host can only access pool LDs assigned to its head.
+	 * Host can only access pool LDs assigned to its head. When that
+	 * head is on a switch port, the host is whichever VCS the port is
+	 * bound to, which is decided below.
 	 */
-	if (target->type == FMD_COMPONENT_MHD) {
+	if (target->type == FMD_COMPONENT_MHD &&
+	    !connection_port(ctx, target, chunk)) {
 		struct fmd_mhd *mhd = fmd_to_mhd(target);
 		struct fmd_head *head = fmd_mhd_find_host_head(mhd, initiator_id);
 
@@ -5271,11 +5344,12 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		int rc;
 
 		/*
-		 * Find the switch and port for the target device.
-		 * Device parent chain: device -> port -> switch (for switch-attached)
+		 * Find the switch and port for the target device: the port
+		 * the device is on, or for a Multi-Headed device the port of
+		 * the head that the chunk's LD is mapped to.
 		 */
-		if (target->parent && target->parent->type == FMD_COMPONENT_PORT) {
-			port = fmd_to_port(target->parent);
+		port = connection_port(ctx, target, chunk);
+		if (port) {
 			port_id = port->port_number;
 
 			if (port->base.parent &&
@@ -5321,9 +5395,12 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			return -7;
 		}
 
-		/* For MLD/MHD, extract LD ID from chunk's interleave set */
-		if (target->type == FMD_COMPONENT_MLD ||
-		    target->type == FMD_COMPONENT_MHD)
+		/*
+		 * For an MLD, the LD-ID from the chunk's interleave set. The
+		 * head of a Multi-Headed device on a switch port presents an
+		 * SLD: the port is bound as a whole.
+		 */
+		if (target->type == FMD_COMPONENT_MLD)
 			ld_id = extract_ld_id_from_chunk(chunk);
 
 		/*
@@ -5468,10 +5545,11 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		struct fmd_component *target = fmd_topology_find(&ctx->topology,
 								 conn->target_id);
 
-		if (host && target && target->parent &&
-		    target->parent->type == FMD_COMPONENT_PORT) {
-			struct fmd_port *port = fmd_to_port(target->parent);
+		struct fmd_port *port = (host && target) ?
+			connection_port(ctx, target,
+				fmd_topology_find_chunk(&ctx->topology, conn->chunk_id)) : NULL;
 
+		if (port) {
 			if (port->base.parent &&
 			    port->base.parent->type == FMD_COMPONENT_SWITCH) {
 				struct fmd_switch *sw = fmd_to_switch(port->base.parent);

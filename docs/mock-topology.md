@@ -48,8 +48,7 @@ Minimal topologies covering all 8 CXL device type combinations:
 | `unit-direct-mhmld.json` | Direct-attached MH-MLD (2 heads, 2 LDs each) |
 | `unit-switch-sld.json` | Switch-attached SLD |
 | `unit-switch-mld.json` | Switch-attached MLD |
-| `unit-switch-mhsld.json` | Switch-attached MH-SLD (2 VCS) |
-| `unit-switch-mhmld.json` | Switch-attached MH-MLD (2 VCS) |
+| `unit-switch-mhsld.json` | MH-SLD with each head on a port of a switch (2 VCS) |
 
 ## File Structure
 
@@ -686,6 +685,22 @@ Virtual PCI-to-PCI Bridges (vPPBs) bind physical ports/LDs to a VCS.
 | `"busy"` | vPPB binding/unbinding operation in progress |
 
 Any other value is an error.
+
+## Multi-Headed Devices and Switches
+
+A head is a CXL port of a Multi-Headed device, so the device is never on one
+switch port (`parent_switch`/`parent_port` on an `"MHD"` device is an error).
+Each head is on a host, or on a switch port of its own:
+
+| Head field | Type | Description |
+|------------|------|-------------|
+| `attached_host` | string | The host a head is connected to directly |
+| `parent_switch`, `parent_port` | string, integer | The switch port a head is on; both or neither |
+
+The port a head is on has the `conn_dev_type` the head presents and a link
+that is up. Only a head that presents an SLD can be on a switch port; see
+[mock/README.md](../mock/README.md) for why. `unit/unit-switch-mhsld.json` is
+the example.
 
 ## Complete Examples
 

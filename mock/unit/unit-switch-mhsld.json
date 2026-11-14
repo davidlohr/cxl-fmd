@@ -1,16 +1,20 @@
 {
     "version": 1,
     "id": "unit_switch_mhsld",
-    "description": "Unit test: Switch-attached MH-SLD (2 heads behind switch, 2 VCS)",
-
+    "description": "Unit test: MH-SLD with each of its two heads on a port of a switch (2 VCS)",
+    "_comment": [
+        "A head is a CXL port of a Multi-Headed device (CXL r4.0 Section 2.5): two heads are two links,",
+        "on two ports of the switch. Each head of an MH-SLD presents an SLD, so each port holds an SLD",
+        "and is bound as a whole to one VCS. Head 0 (pool LD 0) is on port 2, bound to VCS 0; head 1",
+        "(pool LD 1) is on port 3 and is not bound to any host yet."
+    ],
     "switches": [
         {
             "id": "switch_0",
             "vendor_id": "0x8086",
             "device_id": "0x0e00",
-            "serial_number": "0x5357303030303032",
-            "max_vcs": 4,
-
+            "serial_number": "0x5357495443483130",
+            "max_vcs": 2,
             "ports": [
                 {
                     "port_number": 0,
@@ -27,16 +31,26 @@
                     "negotiated_link_width": 16
                 },
                 {
+                    "_comment": "head 0 of mhsld_0",
                     "port_number": 2,
                     "type": "downstream",
                     "link_status": "up",
-                    "conn_dev_type": "mld",
+                    "conn_dev_type": "sld",
                     "max_link_width": 16,
                     "negotiated_link_width": 16,
-                    "supported_ld_count": 16
+                    "supported_ld_count": 0
+                },
+                {
+                    "_comment": "head 1 of mhsld_0",
+                    "port_number": 3,
+                    "type": "downstream",
+                    "link_status": "up",
+                    "conn_dev_type": "sld",
+                    "max_link_width": 16,
+                    "negotiated_link_width": 16,
+                    "supported_ld_count": 0
                 }
             ],
-
             "vcs": [
                 {
                     "vcs_id": 0,
@@ -51,9 +65,8 @@
                         },
                         {
                             "vppb_id": 1,
-                            "binding_status": "bound_ld",
-                            "bound_port_id": 2,
-                            "bound_ld_id": 0
+                            "binding_status": "bound_physical_port",
+                            "bound_port_id": 2
                         },
                         {
                             "vppb_id": 2,
@@ -74,9 +87,7 @@
                         },
                         {
                             "vppb_id": 1,
-                            "binding_status": "bound_ld",
-                            "bound_port_id": 2,
-                            "bound_ld_id": 1
+                            "binding_status": "unbound"
                         },
                         {
                             "vppb_id": 2,
@@ -87,7 +98,6 @@
             ]
         }
     ],
-
     "devices": [
         {
             "id": "mhsld_0",
@@ -95,31 +105,32 @@
             "vendor_id": "0x8086",
             "device_id": "0x0d95",
             "serial_number": "0x4d48534c44303031",
-            "parent_switch": "switch_0",
-            "parent_port": 2,
-
             "num_heads": 2,
             "max_heads": 4,
-
             "heads": [
                 {
                     "head_id": 0,
                     "presentation": "SLD",
-                    "lds": [0],
+                    "lds": [
+                        0
+                    ],
                     "max_link_width": 16,
                     "negotiated_link_width": 16,
-                    "attached_host": "switch_0_host0"
+                    "parent_switch": "switch_0",
+                    "parent_port": 2
                 },
                 {
                     "head_id": 1,
                     "presentation": "SLD",
-                    "lds": [1],
+                    "lds": [
+                        1
+                    ],
                     "max_link_width": 16,
                     "negotiated_link_width": 16,
-                    "attached_host": "switch_0_host1"
+                    "parent_switch": "switch_0",
+                    "parent_port": 3
                 }
             ],
-
             "ld_pool": [
                 {
                     "pool_index": 0,
@@ -134,7 +145,6 @@
                     "qos_limit_bw": 100
                 }
             ],
-
             "health_info": {
                 "health_status": 0,
                 "media_status": 0,

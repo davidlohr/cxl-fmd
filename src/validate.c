@@ -352,6 +352,44 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 		if (ndev > 1)
 			invalid(v, port_rule, "%s: port %d has %d devices",
 				sw->base.id, port->port_number, ndev);
+
+		/*
+		 * The head of a Multi-Headed device on this port. It presents
+		 * an SLD or an MLD (Section 2.5), and that is what the port
+		 * sees: Connected Device Type 04h or 05h, on a DSP whose link
+		 * is up.
+		 */
+		if (port->head) {
+			struct fmd_head *head = port->head;
+			const char *mhd_id = head->base.parent ?
+					     head->base.parent->id : "?";
+
+			if (dev)
+				invalid(v, port_rule, "%s: port %d has device %s "
+					"and head %d of %s", sw->base.id,
+					port->port_number, dev->id, head->head_id, mhd_id);
+			if (head->port != port)
+				invalid(v, "Multi-Headed Devices, Section 2.5",
+					"%s: port %d has head %d of %s, which is "
+					"on another port", sw->base.id,
+					port->port_number, head->head_id, mhd_id);
+			if (port->state != FMD_PORT_DSP)
+				invalid(v, port_rule, "%s: port %d has head %d of "
+					"%s and is not a DSP", sw->base.id,
+					port->port_number, head->head_id, mhd_id);
+			if (port->link_status != FMD_LINK_UP)
+				invalid(v, port_rule, "%s: port %d has head %d of "
+					"%s and its link is not up", sw->base.id,
+					port->port_number, head->head_id, mhd_id);
+			if (port->conn_dev_type != (head->presentation == FMD_HEAD_MLD ?
+						    FMD_CONN_MLD : FMD_CONN_SLD))
+				invalid(v, port_rule, "%s: port %d has head %d of "
+					"%s, which presents an %s, and Connected "
+					"Device Type %d", sw->base.id,
+					port->port_number, head->head_id, mhd_id,
+					head->presentation == FMD_HEAD_MLD ? "MLD" : "SLD",
+					port->conn_dev_type);
+		}
 		if (!dev)
 			continue;
 
@@ -365,6 +403,12 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 			invalid(v, port_rule, "%s: port %d has SLD %s and Connected "
 				"Device Type %d, not 04h", sw->base.id, port->port_number,
 				dev->id, port->conn_dev_type);
+		/* a head is a port of the device: it has one per head */
+		if (dev->type == FMD_COMPONENT_MHD)
+			invalid(v, "Multi-Headed Devices, Section 2.5", "%s: port "
+				"%d has the whole of Multi-Headed device %s: each "
+				"of its heads is on a port of its own",
+				sw->base.id, port->port_number, dev->id);
 		if (dev->type == FMD_COMPONENT_MLD && port->conn_dev_type != FMD_CONN_MLD)
 			invalid(v, port_rule, "%s: port %d has MLD %s and Connected "
 				"Device Type %d, not 05h", sw->base.id, port->port_number,

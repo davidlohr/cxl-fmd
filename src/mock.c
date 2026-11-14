@@ -475,8 +475,11 @@ static struct fmd_head *parse_head(struct fmd_ctx *ctx, json_t *jhead,
 	pres = json_str_or(jhead, "presentation", "SLD");
 	if (strcmp(pres, "MLD") == 0)
 		head->presentation = FMD_HEAD_MLD;
-	else
+	else if (strcmp(pres, "SLD") == 0)
 		head->presentation = FMD_HEAD_SLD;
+	else
+		load_error("%s: presentation \"%s\" is not SLD or MLD",
+			   head_id_str, pres);
 
 	/* Head state - default to enabled */
 	head->state = FMD_HEAD_ENABLED;
@@ -1323,6 +1326,19 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			if (parent_port < 0)
 				continue;
 
+			/*
+			 * A head is a port of a Multi-Headed device, so the
+			 * device is not on one switch port: each head is on
+			 * a port of its own.
+			 */
+			if (!strcmp(json_str_or(jdev, "type", ""), "MHD")) {
+				load_error("%s: a Multi-Headed device is not on one "
+					   "switch port; give each head its "
+					   "parent_switch and parent_port",
+					   json_str_or(jdev, "id", "?"));
+				continue;
+			}
+
 			/* Find the port */
 			struct fmd_port *port = fmd_topology_find_port(&ctx->topology, id, parent_port);
 			if (!port) {
@@ -1427,6 +1443,73 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 /*
  * Parse a host system from JSON
  */
+/*
+ * The heads of a Multi-Headed device that are on switch ports: each head
+ * that gives a parent_switch and parent_port is put on that port.
+ *
+ * Only a head that presents an SLD can be. A head that presents an MLD is
+ * bound by LD, with LD-IDs "relative to that head" (CXL r4.0 Section 2.5.1),
+ * and no command reports which LD of the pool each of them is; such a head
+ * on a switch cannot be managed, and is refused rather than guessed at.
+ */
+static void place_heads(struct fmd_ctx *ctx, json_t *jdev)
+{
+	const char *dev_id = json_str_or(jdev, "id", NULL);
+	json_t *heads = json_object_get(jdev, "heads");
+	size_t idx;
+	json_t *jhead;
+
+	if (!dev_id || strcmp(json_str_or(jdev, "type", ""), "MHD") != 0 ||
+	    !heads || !json_is_array(heads))
+		return;
+
+	json_array_foreach(heads, idx, jhead) {
+		const char *sw_id = json_str_or(jhead, "parent_switch", NULL);
+		int port_num = (int)json_int_or(jhead, "parent_port", -1);
+		char head_id[FMD_MAX_ID_LEN];
+		struct fmd_component *comp;
+		struct fmd_port *port;
+		struct fmd_head *head;
+
+		if (!sw_id && port_num < 0)
+			continue;	/* on a host directly */
+		if (!sw_id || port_num < 0) {
+			load_error("%s: head %zu needs both parent_switch and "
+				   "parent_port", dev_id, idx);
+			continue;
+		}
+
+		(void)snprintf(head_id, sizeof(head_id), "%.50s_head%d", dev_id, (int)idx);
+		comp = fmd_topology_find(&ctx->topology, head_id);
+		port = fmd_topology_find_port(&ctx->topology, sw_id, port_num);
+		if (!comp || comp->type != FMD_COMPONENT_HEAD)
+			continue;	/* the head itself did not load */
+		head = fmd_to_head(comp);
+
+		if (!port) {
+			load_error("%s: head %zu is on switch %s port %d, which "
+				   "the topology does not have", dev_id, idx,
+				   sw_id, port_num);
+			continue;
+		}
+		if (port->head || port->base.first_child) {
+			load_error("%s: head %zu is on switch %s port %d, which "
+				   "already has a device", dev_id, idx, sw_id, port_num);
+			continue;
+		}
+		if (head->presentation != FMD_HEAD_SLD) {
+			load_error("%s: head %zu presents an MLD on a switch "
+				   "port: not supported, as nothing reports which "
+				   "LD of the pool each of its LD-IDs is",
+				   dev_id, idx);
+			continue;
+		}
+
+		head->port = port;
+		port->head = head;
+	}
+}
+
 static int parse_host(struct fmd_ctx *ctx, json_t *jhost)
 {
 	const char *id;
@@ -1543,6 +1626,15 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 			if (parse_device(ctx, jdev, NULL) < 0)
 				load_error("device %zu could not be loaded", idx);
 		}
+	}
+
+	/* Put the heads that are on switch ports on them */
+	if (devices && json_is_array(devices)) {
+		size_t idx;
+		json_t *jdev;
+
+		json_array_foreach(devices, idx, jdev)
+			place_heads(ctx, jdev);
 	}
 
 	/* Parse hosts */

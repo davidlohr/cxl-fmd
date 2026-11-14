@@ -25,6 +25,7 @@ From the simplest to the largest. "Bound" is what the hosts already have;
 | `switch-dcd.json` | One switch, two hosts: an MLD and an SLD with dynamic capacity | Dynamic capacity through a switch, an extent shared by two hosts |
 | `large-fabric.json` | Two switches, six hosts: six SLDs, MLDs of 4, 8 and 16 LDs; bound and unbound capacity; links down and training | Scale, more than one switch, partly provisioned pools |
 | `unit/unit-direct-*.json`, `unit/unit-switch-{sld,mld}.json` | One device each | One device type at a time |
+| `unit/unit-switch-mhsld.json` | One switch, two hosts: an MH-SLD with each head on a port of its own | A Multi-Headed device through a switch |
 
 ## What the specification says a fabric is
 
@@ -40,9 +41,10 @@ topology. Section and table numbers are CXL r4.0.
   (Section 2.4). Its port is bound by LD: each LD to one host, or to none, in
   which case it is FM-owned (Section 7.3.4). The LDs of one MLD can be on
   different VCSs.
-- **Multi-Headed devices.** A head is a CXL port of the device. Each LD is
-  mapped to at most one head and each head has 1 to 16 LDs; a head with one LD
-  presents an SLD, with more an MLD (Section 2.5).
+- **Multi-Headed devices.** A head is a CXL port of the device, on a host or
+  on a switch port of its own. Each LD is mapped to at most one head and each
+  head has 1 to 16 LDs; a head with one LD presents an SLD, with more an MLD
+  (Section 2.5). The port a head is on sees what the head presents.
 - **Dynamic capacity.** The Host ID of an LD-FAM device is the LD-ID of the
   host interface (Table 7-66). An extent lies in a region, aligned to its block
   size; one extent can be held by several hosts only in a Sharable region
@@ -50,13 +52,18 @@ topology. Section and table numbers are CXL r4.0.
 
 ## Not represented
 
-- **A Multi-Headed device with heads on switch ports.** `unit/unit-switch-mhsld.json`
-  and `unit/unit-switch-mhmld.json` put a two-headed device on a single switch
-  port and bind the LDs of both heads through it. A head is a port of the
-  device, so two heads are two links: one switch port carries one head. Those
-  two files model an MLD with the bookkeeping of a Multi-Headed device, and
-  not a fabric that can be built. A topology cannot say yet which port each
-  head is on.
+- **A head that presents an MLD, on a switch port.** A head is a CXL port of
+  the device, so each head of a Multi-Headed device is on a port of its own:
+  a head gives its `parent_switch` and `parent_port`, and the device itself is
+  on no port. A head that presents an SLD is bound as a whole port, like any
+  SLD. A head that presents an MLD is bound by LD, with LD-IDs "relative to
+  that head" (Section 2.5.1), and no command reports which LD of the pool each
+  of them is: such a head on a switch is refused when the file is loaded.
+  MH-MLDs are represented with their heads on hosts, in `mhd-device.json`.
+- **Where the heads of a discovered Multi-Headed device are.** This is a
+  property of mock topologies only. Get Head Info gives the port number of a
+  head as the device sees it, not the switch port it is plugged into, so on
+  hardware a head is not placed on a port.
 - **PBR switches, Fabric Ports and G-FAM devices.**
 - **Cascaded switches.**
 - **A bind or unbind in progress**, although a vPPB can be given the `busy`

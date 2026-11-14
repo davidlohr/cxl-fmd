@@ -460,6 +460,9 @@ struct fmd_port {
 
 	/* MLD binding support */
 	uint8_t supported_ld_count;
+
+	/* The head of a Multi-Headed device on this port, if that is what is */
+	struct fmd_head *head;
 };
 
 /*
@@ -669,6 +672,14 @@ struct fmd_head {
 
 	/* Per-head MCTP endpoint for FM access (NULL if using the MHD's ep) */
 	struct cxlmi_endpoint *ep;
+
+	/*
+	 * The switch port this head is on, NULL if it is on a host directly.
+	 * A head is a CXL port of the device (CXL r4.0 Section 2.5), so each
+	 * head has a link of its own: the heads of one device are on
+	 * different ports, of one switch or of several.
+	 */
+	struct fmd_port *port;
 };
 
 /*

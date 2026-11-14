@@ -941,197 +941,70 @@ class TestSwitchMHSLDMemoryLifecycle:
 
 @pytest.mark.mock_topology("mock/unit/unit-switch-mhsld.json")
 class TestSwitchMHSLDConnections:
-    """Connection tests for switch-attached MH-SLD."""
+    """Connection tests for an MH-SLD whose heads are on switch ports.
 
-    def test_host0_connects_via_vcs0(self, api_client):
-        """Host via VCS 0 connects to pool LD 0."""
-        # Get chunk for LD 0
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhsld_0/MemoryDomains/mhsld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = None
-        for member in data["Members"]:
-            if "_ld0_" in member["@odata.id"]:
-                chunk_uri = member["@odata.id"]
-                break
+    A head is a CXL port of the device: head 0 (pool LD 0) is on port 2,
+    which is bound to VCS 0, and head 1 (pool LD 1) is on port 3, which is
+    bound to no host. Each head presents an SLD, so its port is bound as a
+    whole.
+    """
 
+    CHUNKS = "/redfish/v1/Chassis/mhsld_0/MemoryDomains/mhsld_0_domain0/MemoryChunks"
+    VCSS = "/redfish/v1/Fabrics/CXL/Switches/switch_0/VCSs"
+
+    def _connect(self, api_client, host, ld):
+        status, data = api_client.get(self.CHUNKS)
+        assert status == 200
+        chunk_uri = next(m["@odata.id"] for m in data["Members"]
+                         if "_ld%d_" % ld in m["@odata.id"])
         status, data, _ = api_client.post(
             "/redfish/v1/Fabrics/CXL/Connections",
             {
                 "ConnectionType": "Memory",
                 "Links": {
-                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
+                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host%d" % host}],
                     "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0"}]
                 },
                 "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
             }
         )
-        assert status == 201
+        return status, data
 
-    def test_host1_connects_via_vcs1(self, api_client):
-        """Host via VCS 1 connects to pool LD 1."""
-        # Get chunk for LD 1
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhsld_0/MemoryDomains/mhsld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = None
-        for member in data["Members"]:
-            if "_ld1_" in member["@odata.id"]:
-                chunk_uri = member["@odata.id"]
-                break
-
-        status, data, _ = api_client.post(
-            "/redfish/v1/Fabrics/CXL/Connections",
-            {
-                "ConnectionType": "Memory",
-                "Links": {
-                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host1"}],
-                    "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0"}]
-                },
-                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
-            }
-        )
-        assert status == 201
-
-
-# =============================================================================
-# 8. SWITCH-ATTACHED MH-MLD
-# =============================================================================
-
-@pytest.mark.mock_topology("mock/unit/unit-switch-mhmld.json")
-class TestSwitchMHMLDDiscovery:
-    """Discovery tests for switch-attached MH-MLD."""
-
-    def test_four_pool_lds(self, api_client):
-        """MH-MLD has 4 pool LDs."""
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhmld_0/PCIeDevices/mhmld_0/CXLLogicalDevices"
-        )
+    def _vppb(self, api_client, vcs, vppb):
+        status, data = api_client.get("%s/%d/VPPBs/%d" % (self.VCSS, vcs, vppb))
         assert status == 200
-        assert data["Members@odata.count"] == 4
+        return data["BindingStatus"], data.get("BoundPortId")
 
-    def test_two_vcs(self, api_client):
-        """Switch has 2 VCS."""
-        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Switches/switch_0/VCSs")
+    def test_each_head_is_on_its_own_port(self, api_client):
+        status, data = api_client.get("/redfish/v1/Chassis/mhsld_0/PCIeDevices/mhsld_0")
         assert status == 200
-        assert data["Members@odata.count"] == 2
+        ports = sorted(p["@odata.id"].rsplit("/", 1)[1]
+                       for p in data["Links"]["ConnectedPCIePorts"])
+        assert ports == ["switch_0_dsp2", "switch_0_dsp3"]
+        for port in ports:
+            status, data = api_client.get(
+                "/redfish/v1/Fabrics/CXL/Switches/switch_0/Ports/" + port)
+            assert status == 200
+            # each head presents an SLD to the port it is on
+            assert data["CXL"]["ConnectedDeviceType"] == "Type3SLD"
+            assert data["Links"]["AssociatedEndpoints"] == [
+                {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0"}]
 
-    def test_two_hosts(self, api_client):
-        """2 hosts auto-created."""
-        status, data = api_client.get("/redfish/v1/Systems")
-        assert status == 200
-        assert data["Members@odata.count"] >= 2
+    def test_host0_has_head0(self, api_client):
+        """Port 2 is already bound to VCS 0: nothing more is bound."""
+        assert self._connect(api_client, 0, 0)[0] == 201
+        assert self._vppb(api_client, 0, 1) == ("BoundPhysicalPort", 2)
+        assert self._vppb(api_client, 0, 2) == ("Unbound", None)
+
+    def test_host1_is_given_head1(self, api_client):
+        """Head 1 is on port 3: the whole port is bound to VCS 1."""
+        assert self._vppb(api_client, 1, 1) == ("Unbound", None)
+        assert self._connect(api_client, 1, 1)[0] == 201
+        assert self._vppb(api_client, 1, 1) == ("BoundPhysicalPort", 3)
+
+    def test_host1_cannot_have_head0(self, api_client):
+        """Pool LD 0 is on head 0, whose port is bound to VCS 0."""
+        assert self._connect(api_client, 1, 0)[0] == 409
+        assert self._vppb(api_client, 1, 1) == ("Unbound", None)
 
 
-@pytest.mark.mock_topology("mock/unit/unit-switch-mhmld.json")
-class TestSwitchMHMLDMemoryLifecycle:
-    """Memory lifecycle tests for switch-attached MH-MLD."""
-
-    def test_four_chunks(self, api_client):
-        """4 chunks exist (one per pool LD)."""
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhmld_0/MemoryDomains/mhmld_0_domain0/MemoryChunks"
-        )
-        assert status == 200
-        assert data["Members@odata.count"] == 4
-
-
-@pytest.mark.mock_topology("mock/unit/unit-switch-mhmld.json")
-class TestSwitchMHMLDConnections:
-    """Connection tests for switch-attached MH-MLD."""
-
-    def test_host0_to_ld0_via_vcs0(self, api_client):
-        """Host0 (VCS 0) connects to pool LD 0."""
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhmld_0/MemoryDomains/mhmld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = None
-        for member in data["Members"]:
-            if "_ld0_" in member["@odata.id"]:
-                chunk_uri = member["@odata.id"]
-                break
-
-        status, data, _ = api_client.post(
-            "/redfish/v1/Fabrics/CXL/Connections",
-            {
-                "ConnectionType": "Memory",
-                "Links": {
-                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
-                    "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhmld_0"}]
-                },
-                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
-            }
-        )
-        assert status == 201
-
-    def test_host0_to_ld1_via_vcs0(self, api_client):
-        """Host0 (VCS 0) connects to pool LD 1."""
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhmld_0/MemoryDomains/mhmld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = None
-        for member in data["Members"]:
-            if "_ld1_" in member["@odata.id"]:
-                chunk_uri = member["@odata.id"]
-                break
-
-        status, data, _ = api_client.post(
-            "/redfish/v1/Fabrics/CXL/Connections",
-            {
-                "ConnectionType": "Memory",
-                "Links": {
-                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
-                    "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhmld_0"}]
-                },
-                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
-            }
-        )
-        assert status == 201
-
-    def test_host1_to_ld2_via_vcs1(self, api_client):
-        """Host1 (VCS 1) connects to pool LD 2."""
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhmld_0/MemoryDomains/mhmld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = None
-        for member in data["Members"]:
-            if "_ld2_" in member["@odata.id"]:
-                chunk_uri = member["@odata.id"]
-                break
-
-        status, data, _ = api_client.post(
-            "/redfish/v1/Fabrics/CXL/Connections",
-            {
-                "ConnectionType": "Memory",
-                "Links": {
-                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host1"}],
-                    "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhmld_0"}]
-                },
-                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
-            }
-        )
-        assert status == 201
-
-    def test_host0_to_ld2_cross_vcs_rejected(self, api_client):
-        """Host0 (VCS 0) cannot access pool LD 2 (VCS 1's LD) - expect 400."""
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/mhmld_0/MemoryDomains/mhmld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = None
-        for member in data["Members"]:
-            if "_ld2_" in member["@odata.id"]:
-                chunk_uri = member["@odata.id"]
-                break
-
-        status, data, _ = api_client.post(
-            "/redfish/v1/Fabrics/CXL/Connections",
-            {
-                "ConnectionType": "Memory",
-                "Links": {
-                    "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
-                    "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhmld_0"}]
-                },
-                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
-            }
-        )
-        assert status == 400
