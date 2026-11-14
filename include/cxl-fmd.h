@@ -315,6 +315,8 @@ enum fmd_port_state {
 	FMD_PORT_UNBIND_IN_PROGRESS,
 	FMD_PORT_DSP,
 	FMD_PORT_USP,
+	FMD_PORT_FABRIC,		/* 5h, Fabric Port of a PBR switch */
+	FMD_PORT_RESERVED,		/* any other encoding */
 };
 
 /*
@@ -448,6 +450,13 @@ struct fmd_port {
 	uint8_t max_link_width;
 	uint8_t negotiated_link_width;
 	uint8_t supported_link_speeds;    /* Supported Link Speeds Vector */
+	/*
+	 * Max Link Speed and Current Link Speed, encoded as in the PCIe Link
+	 * Capabilities and Link Status registers: 1 = 2.5 GT/s up to
+	 * 6 = 64 GT/s, 0 = not known.
+	 */
+	uint8_t max_link_speed;
+	uint8_t current_link_speed;
 
 	/* MLD binding support */
 	uint8_t supported_ld_count;

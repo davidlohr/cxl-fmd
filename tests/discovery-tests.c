@@ -569,6 +569,83 @@ out:
 	report("switch with two VCSs", before);
 }
 
+/*
+ * The Port resource of a discovered switch. DSP0288 maps Get Physical Port
+ * State to it: Max Link Speed to MaxSpeedGbps, Current Link Speed to
+ * CurrentSpeedGbps, the Supported Link Speeds Vector to
+ * LinkConfiguration/CapableLinkSpeedGbps, and the widths.
+ */
+static void test_port_resource(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	int before = failures;
+	char sw_id[FMD_MAX_ID_LEN], port_id[FMD_MAX_ID_LEN + 8];
+	json_t *port, *cxl, *speeds;
+
+	new_switch(ctx, 0x5006);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5006);
+
+	/* port 1 is a USP: named as one, and an UpstreamPort */
+	snprintf(port_id, sizeof(port_id), "%s_usp1", sw_id);
+	port = fmd_redfish_port(ctx, "CXL", sw_id, port_id);
+	CHECK(port, "no Port resource %s", port_id);
+	if (port) {
+		const char *type = json_string_value(json_object_get(port, "PortType"));
+
+		cxl = json_object_get(port, "CXL");
+		CHECK(type && !strcmp(type, "UpstreamPort"), "USP PortType %s",
+		      type ? type : "(none)");
+		/* reserved unless the port is a DSP */
+		CHECK(!json_object_get(cxl, "ConnectedDeviceMode"),
+		      "a USP reports a Connected Device Mode");
+		json_decref(port);
+	}
+
+	/* port 2: a DSP in L0, x16 trained to x8, 32 GT/s of 2.5 to 32 */
+	snprintf(port_id, sizeof(port_id), "%s_dsp2", sw_id);
+	port = fmd_redfish_port(ctx, "CXL", sw_id, port_id);
+	CHECK(port, "no Port resource %s", port_id);
+	if (port) {
+		const char *type = json_string_value(json_object_get(port, "PortType"));
+
+		CHECK(type && !strcmp(type, "DownstreamPort"), "DSP PortType %s",
+		      type ? type : "(none)");
+		CHECK(json_number_value(json_object_get(port, "MaxSpeedGbps")) == 32 &&
+		      json_number_value(json_object_get(port, "CurrentSpeedGbps")) == 32,
+		      "speeds %g/%g",
+		      json_number_value(json_object_get(port, "MaxSpeedGbps")),
+		      json_number_value(json_object_get(port, "CurrentSpeedGbps")));
+		CHECK(json_integer_value(json_object_get(port, "Width")) == 16 &&
+		      json_integer_value(json_object_get(port, "ActiveWidth")) == 8,
+		      "widths");
+		speeds = json_object_get(json_array_get(
+				json_object_get(port, "LinkConfiguration"), 0),
+				"CapableLinkSpeedGbps");
+		CHECK(json_array_size(speeds) == 5 &&
+		      json_number_value(json_array_get(speeds, 0)) == 2.5 &&
+		      json_number_value(json_array_get(speeds, 4)) == 32,
+		      "%d capable speeds from %g", (int)json_array_size(speeds),
+		      json_number_value(json_array_get(speeds, 0)));
+		json_decref(port);
+	}
+
+	/* port 3 is disabled: it has no direction, and its link is down */
+	snprintf(port_id, sizeof(port_id), "%s_dsp3", sw_id);
+	port = fmd_redfish_port(ctx, "CXL", sw_id, port_id);
+	CHECK(port, "no Port resource %s", port_id);
+	if (port) {
+		CHECK(!json_object_get(port, "PortType"),
+		      "a disabled port has a PortType");
+		CHECK(json_number_value(json_object_get(port, "CurrentSpeedGbps")) == 0,
+		      "a port that is down has a current speed");
+		json_decref(port);
+	}
+
+	fmd_ctx_free(ctx);
+	report("Port resource of a discovered switch", before);
+}
+
 /* bind, and say whether Bind vPPB (5201h) went to the switch */
 static int try_bind(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		    struct fmd_switch *sw, uint8_t vcs_id, uint8_t vppb_id,
@@ -1140,6 +1217,7 @@ int main(void)
 	test_two_mlds();
 	test_mld_granularity();
 	test_switch();
+	test_port_resource();
 	test_switch_bind();
 	test_switch_unbind();
 	test_overcount_switch();

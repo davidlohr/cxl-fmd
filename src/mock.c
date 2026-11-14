@@ -1117,6 +1117,10 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 
 			const char *link = json_str_or(jport, "link_status", is_upstream ? "up" : "down");
 			port->link_status = (strcmp(link, "up") == 0) ? FMD_LINK_UP : FMD_LINK_DOWN;
+			/* PCIe encoding: 5 is 32.0 GT/s */
+			port->max_link_speed = (uint8_t)json_int_or(jport, "max_link_speed", 5);
+			port->current_link_speed = (port->link_status == FMD_LINK_UP) ?
+				(uint8_t)json_int_or(jport, "current_link_speed", 5) : 0;
 
 			if (is_upstream) {
 				/* USP - mark as upstream and add to tree */

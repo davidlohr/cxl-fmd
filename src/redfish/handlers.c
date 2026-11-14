@@ -1251,9 +1251,6 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 	char port_id_str[16];
 	snprintf(port_id_str, sizeof(port_id_str), "%d", port->port_number);
 
-	/* Calculate current speed - PCIe 5.0 is 32 GT/s = 32 Gbps per lane */
-	int current_speed = (port->link_status == FMD_LINK_UP) ? 32 : 0;
-
 	json_t *result = json_pack(
 		"{"
 		"  s:s,"   /* @odata.id */
@@ -1262,11 +1259,8 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 		"  s:s,"   /* Name */
 		"  s:s,"   /* PortId */
 		"  s:s,"   /* PortProtocol */
-		"  s:s,"   /* PortType */
 		"  s:o,"   /* Status */
 		"  s:s,"   /* LinkStatus */
-		"  s:i,"   /* MaxSpeedGbps */
-		"  s:i,"   /* CurrentSpeedGbps */
 		"  s:i,"   /* Width */
 		"  s:i"    /* ActiveWidth */
 		"}",
@@ -1277,29 +1271,52 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 		"Name", "CXL Switch Port",
 		"PortId", port_id_str,
 		"PortProtocol", "CXL",
-		"PortType", "DownstreamPort",
 		"Status", rf_status(link_state, "OK"),
 		"LinkStatus", link_status,
-		"MaxSpeedGbps", 32,
-		"CurrentSpeedGbps", current_speed,
 		"Width", port->max_link_width,
 		"ActiveWidth", port->negotiated_link_width
 	);
 
-	/* Build LinkConfiguration/CapableLinkSpeedGbps from supported_link_speeds */
+	/*
+	 * PortType: a USP "connects to a host device", a DSP "to a target
+	 * device", a Fabric Port "to another switch". A port in any other
+	 * state has no direction to report.
+	 */
+	const char *port_type = NULL;
+	switch (port->state) {
+	case FMD_PORT_USP:    port_type = "UpstreamPort"; break;
+	case FMD_PORT_DSP:    port_type = "DownstreamPort"; break;
+	case FMD_PORT_FABRIC: port_type = "InterswitchPort"; break;
+	default: break;
+	}
+	if (port_type)
+		json_object_set_new(result, "PortType", json_string(port_type));
+
+	/*
+	 * Speeds, as DSP0288 maps them from Get Physical Port State: Max
+	 * Link Speed to MaxSpeedGbps, Current Link Speed to CurrentSpeedGbps
+	 * and the Supported Link Speeds Vector to CapableLinkSpeedGbps. The
+	 * PCIe encoding is 1 for 2.5 GT/s up to 6 for 64 GT/s; bit n of the
+	 * vector is encoding n + 1. A speed that is not known is left out.
+	 */
+	static const double pcie_gts[] = { 0, 2.5, 5, 8, 16, 32, 64 };
+	const int nspeeds = sizeof(pcie_gts) / sizeof(pcie_gts[0]);
+
+	if (port->max_link_speed > 0 && port->max_link_speed < nspeeds)
+		json_object_set_new(result, "MaxSpeedGbps",
+			json_real(pcie_gts[port->max_link_speed]));
+	if (port->link_status != FMD_LINK_UP)
+		json_object_set_new(result, "CurrentSpeedGbps", json_integer(0));
+	else if (port->current_link_speed > 0 && port->current_link_speed < nspeeds)
+		json_object_set_new(result, "CurrentSpeedGbps",
+			json_real(pcie_gts[port->current_link_speed]));
+
 	json_t *capable_speeds = json_array();
-	if (port->supported_link_speeds & 0x01)
-		json_array_append_new(capable_speeds, json_integer(2));   /* Gen1: 2.5 GT/s */
-	if (port->supported_link_speeds & 0x02)
-		json_array_append_new(capable_speeds, json_integer(5));   /* Gen2: 5 GT/s */
-	if (port->supported_link_speeds & 0x04)
-		json_array_append_new(capable_speeds, json_integer(8));   /* Gen3: 8 GT/s */
-	if (port->supported_link_speeds & 0x08)
-		json_array_append_new(capable_speeds, json_integer(16));  /* Gen4: 16 GT/s */
-	if (port->supported_link_speeds & 0x10)
-		json_array_append_new(capable_speeds, json_integer(32));  /* Gen5: 32 GT/s */
-	if (port->supported_link_speeds & 0x20)
-		json_array_append_new(capable_speeds, json_integer(64));  /* Gen6: 64 GT/s */
+	for (int bit = 0; bit < nspeeds - 1; bit++) {
+		if (port->supported_link_speeds & (1 << bit))
+			json_array_append_new(capable_speeds,
+					      json_real(pcie_gts[bit + 1]));
+	}
 
 	json_object_set_new(result, "LinkConfiguration",
 		json_pack("[{s:o}]", "CapableLinkSpeedGbps", capable_speeds));
@@ -1312,6 +1329,8 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 	case FMD_PORT_UNBIND_IN_PROGRESS: port_config_state = "UnbindInProgress"; break;
 	case FMD_PORT_DSP:                port_config_state = "DSP"; break;
 	case FMD_PORT_USP:                port_config_state = "USP"; break;
+	case FMD_PORT_FABRIC:             port_config_state = "FabricLink"; break;
+	case FMD_PORT_RESERVED:           port_config_state = "Reserved"; break;
 	}
 
 	/* Map conn_dev_cxl_ver to ConnectedDeviceMode enum */
@@ -1339,12 +1358,27 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 		json_array_append_new(supported_modes, json_string("PBR"));
 
 	/* Build CXL extension */
-	json_t *cxl_obj = json_pack("{s:s, s:s, s:o, s:i, s:s}",
-		"ConnectedDeviceType", conn_dev_type_str,
-		"ConnectedDeviceMode", conn_dev_mode,
-		"SupportedCXLModes", supported_modes,
+	json_t *cxl_obj = json_pack("{s:i, s:s}",
 		"MaxLogicalDeviceCount", port->supported_ld_count,
 		"CurrentPortConfigurationState", port_config_state);
+
+	/*
+	 * Get Physical Port State reserves Connected Device Mode unless the
+	 * port is a DSP, and Connected Device Type unless it is a DSP or a
+	 * Fabric Port; Supported CXL Modes is undefined when it is 00h, and
+	 * the property "shall not contain the value Disconnected". What the
+	 * switch does not define is not reported.
+	 */
+	if (port->state == FMD_PORT_DSP || port->state == FMD_PORT_FABRIC)
+		json_object_set_new(cxl_obj, "ConnectedDeviceType",
+				    json_string(conn_dev_type_str));
+	if (port->state == FMD_PORT_DSP)
+		json_object_set_new(cxl_obj, "ConnectedDeviceMode",
+				    json_string(conn_dev_mode));
+	if (json_array_size(supported_modes) > 0)
+		json_object_set_new(cxl_obj, "SupportedCXLModes", supported_modes);
+	else
+		json_decref(supported_modes);
 
 	/* Add link to connected device's Endpoint resource */
 	struct fmd_component *dev_child;
@@ -1707,7 +1741,9 @@ json_t *fmd_redfish_vppb(struct fmd_ctx *ctx, const char *fabric_id,
 		/*
 		 * GCXLID - globally unique CXL logical device identifier
 		 * Format: XX-XX-XX-XX-XX-XX-XX-XX:XXXX
-		 * (PCIe Device Serial Number : Bound LD ID)
+		 * (PCIe Device Serial Number : Bound LD ID), "where the
+		 * most significant octet is first" (Resource schema,
+		 * DurableNameFormat GCXLID).
 		 */
 		if (vppb->ld && vppb->ld->base.parent) {
 			struct fmd_component *parent = vppb->ld->base.parent;
@@ -1720,14 +1756,14 @@ json_t *fmd_redfish_vppb(struct fmd_ctx *ctx, const char *fabric_id,
 				char gcxlid[32];
 				snprintf(gcxlid, sizeof(gcxlid),
 					 "%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X:%04X",
-					 (unsigned)(serial & 0xFF),
-					 (unsigned)((serial >> 8) & 0xFF),
-					 (unsigned)((serial >> 16) & 0xFF),
-					 (unsigned)((serial >> 24) & 0xFF),
-					 (unsigned)((serial >> 32) & 0xFF),
-					 (unsigned)((serial >> 40) & 0xFF),
-					 (unsigned)((serial >> 48) & 0xFF),
 					 (unsigned)((serial >> 56) & 0xFF),
+					 (unsigned)((serial >> 48) & 0xFF),
+					 (unsigned)((serial >> 40) & 0xFF),
+					 (unsigned)((serial >> 32) & 0xFF),
+					 (unsigned)((serial >> 24) & 0xFF),
+					 (unsigned)((serial >> 16) & 0xFF),
+					 (unsigned)((serial >> 8) & 0xFF),
+					 (unsigned)(serial & 0xFF),
 					 vppb->bound_ld_id);
 				json_object_set_new(result, "GCXLID",
 						    json_string(gcxlid));

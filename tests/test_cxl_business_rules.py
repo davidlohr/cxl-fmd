@@ -141,6 +141,30 @@ class TestMultiVCSRules:
                 out[vppb["@odata.id"]] = data.get("BindingStatus")
         return out
 
+    def test_gcxlid_is_serial_number_most_significant_octet_first(self, api_client):
+        """vPPB 3 of VCS 0 is bound to LD 0 of mld0, whose serial number is
+        0x4d4c443030303030. The GCXLID is the PCIe serial number, "where the
+        most significant octet is first", then the LD-ID."""
+        status, data = api_client.get(self.SWITCH + "/VCSs/0/VPPBs/3")
+        assert status == 200
+        assert data["GCXLID"] == "4D-4C-44-30-30-30-30-30:0000"
+
+    def test_usp_is_an_upstream_port(self, api_client):
+        status, data = api_client.get(self.SWITCH + "/Ports/cxl_switch_0_usp0")
+        assert status == 200
+        assert data["PortType"] == "UpstreamPort"
+        assert data["CXL"]["CurrentPortConfigurationState"] == "USP"
+        # Connected Device Mode is reserved unless the port is a DSP
+        assert "ConnectedDeviceMode" not in data["CXL"]
+
+    def test_port_speeds_are_pcie_link_speeds(self, api_client):
+        status, data = api_client.get(self.SWITCH + "/Ports/cxl_switch_0_dsp2")
+        assert status == 200
+        assert data["PortType"] == "DownstreamPort"
+        assert data["MaxSpeedGbps"] == 32
+        # Gen1 is 2.5 GT/s, not 2
+        assert data["LinkConfiguration"][0]["CapableLinkSpeedGbps"] == [2.5, 5, 8, 16, 32]
+
     def test_port_bound_to_another_vcs_is_refused(self, api_client):
         """dev2 is bound to VCS 1: host0, on VCS 0, cannot be given it."""
         before = self._bindings(api_client)

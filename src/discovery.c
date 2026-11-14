@@ -1012,28 +1012,51 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			    struct cxlmi_cmd_fmapi_port_state_info_block *pinfo)
 {
+	uint8_t state = pinfo->config_state & 0xf;
 	char port_id[128];
 	struct fmd_port *port;
 
-	(void)snprintf(port_id, sizeof(port_id), "%.50s_dsp%d", sw->base.id, pinfo->port_id);
+	/* Fh: Invalid Port_ID. There is no such port */
+	if (state == 0xf)
+		return;
+
+	/* a USP is named as one, as the mock topologies name theirs */
+	(void)snprintf(port_id, sizeof(port_id), "%.50s_%s%d", sw->base.id,
+		       state == 0x4 ? "usp" : "dsp", pinfo->port_id);
 
 	port = fmd_port_create(port_id, pinfo->port_id);
 	if (!port)
 		return;
 
-	/* Map port state info to our structures */
-	port->conn_dev_type = pinfo->conn_dev_type;
+	/*
+	 * The port information block of Table 7-21. The widths and speeds
+	 * are Bits[5:0] of their bytes, encoded as in the PCIe Link
+	 * Capabilities, Link Capabilities 2 and Link Status registers.
+	 */
 	port->link_status = ltssm_to_link_status(pinfo->ltssm_state);
-	port->max_link_width = pinfo->max_link_width;
-	port->negotiated_link_width = pinfo->negotiated_link_width;
+	port->port_cxl_ver_bitmask = pinfo->port_cxl_ver_bitmask;
+	port->max_link_width = pinfo->max_link_width & 0x3f;
+	port->negotiated_link_width = pinfo->negotiated_link_width & 0x3f;
+	port->supported_link_speeds = pinfo->supported_link_speeds_vector & 0x3f;
+	port->max_link_speed = pinfo->max_link_speed & 0x3f;
+	port->current_link_speed = pinfo->current_link_speed & 0x3f;
 	port->supported_ld_count = pinfo->supported_ld_count;
+
+	/*
+	 * Connected Device Mode is reserved unless the port is a DSP, and
+	 * Connected Device Type unless it is a DSP or a Fabric Port.
+	 */
+	if (state == 0x3)
+		port->conn_dev_cxl_ver = pinfo->conn_dev_cxl_ver & 0xf;
+	if (state == 0x3 || state == 0x5)
+		port->conn_dev_type = pinfo->conn_dev_type;
 
 	/*
 	 * Current Port Configuration State is Bits[3:0]; Bit[4] is GAE
 	 * Support. A port that is not a DSP or a USP must not be left
 	 * in the state fmd_port_create() starts it in, which is DSP.
 	 */
-	switch (pinfo->config_state & 0xf) {
+	switch (state) {
 	case 0x1: /* Bind in progress */
 		port->state = FMD_PORT_BIND_IN_PROGRESS;
 		break;
@@ -1049,8 +1072,13 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		sw->num_usps++;
 		break;
 	case 0x0: /* Disabled */
-	default:  /* Fabric Port (PBR), Invalid Port_ID, reserved */
 		port->state = FMD_PORT_DISABLED;
+		break;
+	case 0x5: /* Fabric Port of a PBR switch */
+		port->state = FMD_PORT_FABRIC;
+		break;
+	default:  /* reserved */
+		port->state = FMD_PORT_RESERVED;
 		break;
 	}
 
