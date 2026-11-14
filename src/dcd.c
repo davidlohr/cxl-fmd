@@ -1065,7 +1065,7 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 	int hosts[FMD_MAX_DC_HOSTS];
 	int n, rc = 0;
 
-	if (!dev_is_hw(dev) || !fmd_memdev_dcd(dev))
+	if (unlikely(!dev_is_hw(dev)) || !fmd_memdev_dcd(dev))
 		return 0;
 
 	ep = dev->ep;
@@ -1109,7 +1109,7 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct fmd_dcd_info *dcd;
 	int rc;
 
-	if (!dev_is_hw(dev) || !fmd_is_memdev(dev))
+	if (unlikely(!dev_is_hw(dev)) || !fmd_is_memdev(dev))
 		return 0;
 
 	ti = dcd_tunnel(dev, &tbuf);
@@ -1269,7 +1269,7 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
 		fmd_for_each_type(&ctx->topology, comp, types[t]) {
 			/* a log that is the host's is not drained */
-			if (dev_is_hw(comp) && fmd_memdev_dcd(comp) &&
+			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) &&
 			    fmd_endpoint_owns_events(ctx, comp->ep) &&
 			    n < DC_EVENT_MAX_DEVS)
 				devs[n++] = comp;
@@ -1320,7 +1320,7 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 			return -EBUSY;
 	}
 
-	if (dev_is_hw(dev)) {
+	if (likely(dev_is_hw(dev))) {
 		struct cxlmi_cmd_fmapi_set_dc_region_config_req req = {0};
 		struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
 		int rc;
@@ -1372,7 +1372,7 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	if (!fmd_dc_host_component(dev, host_id))
 		return -ENOENT;
 
-	if (!dev_is_hw(dev))
+	if (unlikely(!dev_is_hw(dev)))
 		return mock_dc_add(ctx, dev, host_id, policy, region_id, length,
 				   tag, extents, ext_count);
 
@@ -1446,7 +1446,7 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		}
 	}
 
-	if (!dev_is_hw(dev))
+	if (unlikely(!dev_is_hw(dev)))
 		return mock_dc_release(ctx, dev, host_id, policy, length, tag,
 				       extents, ext_count);
 
@@ -1499,7 +1499,7 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 	if (!fmd_memdev_dcd(dev))
 		return -ENOENT;
 
-	if (!dev_is_hw(dev))
+	if (unlikely(!dev_is_hw(dev)))
 		return mock_dc_reference(ctx, dev, tag, add);
 
 	{

@@ -414,7 +414,7 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 
 bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
-	if (!dev->ep || !fmd_endpoint_owns_events(ctx, dev->ep))
+	if (unlikely(!dev->ep) || !fmd_endpoint_owns_events(ctx, dev->ep))
 		return false;
 	/*
 	 * An SLD on a switch port: the endpoint is the switch's, and an SLD
@@ -624,7 +624,7 @@ static struct fmd_component *ld_component(struct fmd_ctx *ctx, const char *chass
 		return NULL;
 
 	/* in a mock topology records are given; on hardware they are read */
-	*enabled = !dev->ep || fmd_device_logs_read(ctx, dev);
+	*enabled = unlikely(!dev->ep) || fmd_device_logs_read(ctx, dev);
 
 	/* an SLD is its own LD 0 */
 	if (dev->type == FMD_COMPONENT_SLD)
@@ -757,7 +757,8 @@ json_t *fmd_redfish_switch_log(struct fmd_ctx *ctx, const char *chassis_id,
 
 	if (!sw)
 		return NULL;
-	enabled = !sw->base.ep || fmd_endpoint_owns_events(ctx, sw->base.ep);
+	enabled = unlikely(!sw->base.ep) ||
+		  fmd_endpoint_owns_events(ctx, sw->base.ep);
 
 	if (!strcmp(what, "services")) {
 		rf_collection_init(&coll,

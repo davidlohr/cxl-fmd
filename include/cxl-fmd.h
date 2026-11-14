@@ -24,6 +24,13 @@
 #include "generated/enums/pcie_device.h"
 
 /*
+ * Branch hints. A mock topology (--mock) is for development and tests: the
+ * branches that only it takes are the unlikely ones.
+ */
+#define likely(x)	__builtin_expect(!!(x), 1)
+#define unlikely(x)	__builtin_expect(!!(x), 0)
+
+/*
  * Forward declarations
  */
 struct fmd_ctx;

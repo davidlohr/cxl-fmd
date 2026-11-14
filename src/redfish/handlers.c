@@ -4101,7 +4101,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * For MLD: resize LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
 	 */
-	if (!fmd_is_mock(ctx)) {
+	if (likely(!fmd_is_mock(ctx))) {
 		int rc = 0;
 
 		if (chassis->type == FMD_COMPONENT_MLD) {
@@ -4282,7 +4282,7 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 	 * For MLD: decrease LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
 	 */
-	if (!fmd_is_mock(ctx)) {
+	if (likely(!fmd_is_mock(ctx))) {
 		int rc = 0;
 
 		if (domain_parent->type == FMD_COMPONENT_MLD) {
@@ -4662,7 +4662,7 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx)) {
+	if (unlikely(fmd_is_mock(ctx))) {
 		/* Update in-memory partition values for mock mode */
 		partition->next_vmem = volatile_capacity;
 		partition->next_pmem = (total_capacity_mib / 256) - volatile_capacity;
@@ -4751,7 +4751,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	/* For real hardware, issue the CXL Scan Media command (4304h) */
@@ -4832,7 +4832,7 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
 		if (strcmp(mem_id, chassis_id) != 0)
 			return -1;
 
-		if (!comp->ep)
+		if (unlikely(!comp->ep))
 			return -1;
 		*ep_out = comp->ep;
 
@@ -4913,7 +4913,7 @@ int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	struct cxlmi_endpoint *ep;
@@ -4981,7 +4981,7 @@ int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	struct cxlmi_endpoint *ep;
@@ -5037,7 +5037,7 @@ int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	struct cxlmi_endpoint *ep;
@@ -5093,7 +5093,7 @@ int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	struct cxlmi_endpoint *ep;
@@ -5121,7 +5121,7 @@ int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx,
 					     const char *chassis_id,
 					     const char *mem_id)
 {
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	struct cxlmi_endpoint *ep;
@@ -5198,7 +5198,7 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
 
 	json_decref(root);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	struct cxlmi_endpoint *ep;
@@ -5244,7 +5244,7 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 
 	struct fmd_port *port = fmd_to_port(port_comp);
 
-	if (fmd_is_mock(ctx))
+	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
 	/* Need switch endpoint to send FM-API command */

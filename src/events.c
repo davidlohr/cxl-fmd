@@ -158,7 +158,7 @@ static void poll_dc_events_if_due(struct fmd_ctx *ctx, int64_t now)
 {
 	int64_t interval = (int64_t)ctx->config.event_poll_sec * 1000;
 
-	if (!interval || fmd_is_mock(ctx))
+	if (!interval || unlikely(fmd_is_mock(ctx)))
 		return;
 
 	if (!ctx->next_dc_poll_ms) {
@@ -183,7 +183,7 @@ static void rescan_if_due(struct fmd_ctx *ctx, int64_t now)
 {
 	int64_t interval = (int64_t)ctx->config.rescan_sec * 1000;
 
-	if (!interval || fmd_is_mock(ctx))
+	if (!interval || unlikely(fmd_is_mock(ctx)))
 		return;
 
 	if (!ctx->next_rescan_ms) {

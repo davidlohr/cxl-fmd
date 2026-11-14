@@ -2272,7 +2272,7 @@ uint64_t fmd_get_device_timestamp(struct fmd_component *comp)
 		return 0;
 
 	/* Real hardware: call CCI command */
-	if (comp->ep) {
+	if (likely(comp->ep)) {
 		struct cxlmi_cmd_get_timestamp_rsp rsp = {0};
 		int rc;
 
@@ -2313,7 +2313,7 @@ int fmd_set_device_timestamp(struct fmd_component *comp, uint64_t timestamp_ns)
 		return -1;
 
 	/* Real hardware: call CCI command */
-	if (comp->ep) {
+	if (likely(comp->ep)) {
 		struct cxlmi_cmd_set_timestamp_req req = {
 			.timestamp = timestamp_ns
 		};
@@ -2352,7 +2352,7 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 	struct cxlmi_cmd_memdev_get_security_state_rsp rsp = {0};
 	struct cxlmi_tunnel_info ti_buf, *ti = CXLMI_NO_TUNNEL;
 
-	if (!comp || !comp->ep)
+	if (!comp || unlikely(!comp->ep))
 		return 0;
 
 	if (comp->type == FMD_COMPONENT_MLD)
@@ -2519,7 +2519,7 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 	allocation_mult = size_bytes / granularity_bytes;
 
 	/* Mock mode: update local state only */
-	if (fmd_is_mock(ctx)) {
+	if (unlikely(fmd_is_mock(ctx))) {
 		fmd_info(ctx, "%s: mock set pool LD %d allocation to %lu MB",
 			 mhd->base.id, pool_ld_id,
 			 (unsigned long)(size_bytes / (1024 * 1024)));

@@ -174,7 +174,7 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx)
 	}
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SWITCH) {
 		/* a log that is the host's is not drained */
-		if (comp->ep && fmd_endpoint_owns_events(ctx, comp->ep) &&
+		if (likely(comp->ep) && fmd_endpoint_owns_events(ctx, comp->ep) &&
 		    n < ctx->topology.root->switch_count)
 			switches[n++] = fmd_to_switch(comp);
 	}
@@ -203,7 +203,7 @@ void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	uint16_t want = EVENT_NOTIFY_LOGS | EVENT_NOTIFY_BG_DONE;
 	int rc;
 
-	if (!sw->base.ep)
+	if (unlikely(!sw->base.ep))
 		return;
 
 	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(sw->base.ep,
