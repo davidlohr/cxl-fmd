@@ -17,6 +17,7 @@ def pytest_configure(config):
 
 import os
 import subprocess
+import tempfile
 import sys
 import time
 import urllib.request
@@ -150,28 +151,35 @@ def cxl_fmd_daemon(cxl_fmd_executable, request):
     port_marker = request.node.get_closest_marker("port")
     port = port_marker.args[0] if port_marker else _find_free_port()
 
-    # Start daemon
+    # Start daemon. Its output goes to a file: a pipe nobody reads fills up
+    # and then blocks the daemon in the middle of a test.
+    log = tempfile.TemporaryFile()
     process = subprocess.Popen(
         [
             str(cxl_fmd_executable),
             "--mock", str(mock_path),
             "--port", str(port),
         ],
-        stdout=subprocess.PIPE,
+        stdout=log,
         stderr=subprocess.STDOUT,
     )
+
+    def output():
+        log.seek(0)
+        return log.read().decode(errors="replace")
 
     # Wait for ready
     url = f"http://localhost:{port}/redfish/v1"
     if not _wait_for_service(url):
-        # Capture output for debugging
         process.terminate()
         try:
-            stdout, _ = process.communicate(timeout=5)
-            output = stdout.decode() if stdout else ""
-        except Exception:
-            output = ""
-        pytest.fail(f"Daemon did not become ready. Output:\n{output}")
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        text = output()
+        log.close()
+        pytest.fail(f"Daemon did not become ready. Output:\n{text}")
 
     yield {
         "process": process,
@@ -180,13 +188,24 @@ def cxl_fmd_daemon(cxl_fmd_executable, request):
         "mock_topology": str(mock_path),
     }
 
-    # Cleanup
+    # Cleanup. A daemon that died during the test, or that does not shut
+    # down cleanly when asked to, fails the test: a crash, an assertion or
+    # a sanitizer report is a failure even if every request was answered.
+    died = process.poll()
     process.terminate()
     try:
-        process.wait(timeout=5)
+        rc = process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
+        rc = "killed: it did not exit within 10 seconds of SIGTERM"
+    text = output()
+    log.close()
+
+    if died is not None:
+        pytest.fail(f"cxl-fmd exited during the test (status {died}). Output:\n{text[-4000:]}")
+    if rc != 0:
+        pytest.fail(f"cxl-fmd did not shut down cleanly (status {rc}). Output:\n{text[-4000:]}")
 
 
 class RedfishClient:
