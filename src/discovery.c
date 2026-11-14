@@ -733,29 +733,52 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 			return -1;
 
 		/*
-		 * TODO:
-		 *  Identify, get CEL, memdev discovery etc. would need to be
-		 *  done from its own mctp cxlmi ep; the FM cannot submit directly
-		 *  to the switch SLD.
+		 * All the switch says of an SLD is that one is there. An SLD
+		 * port is not a target of the Tunnel Management Command, which
+		 * reaches "switch MLD Ports, valid LDs within an MLD, and the
+		 * LD Pool CCI in a Multi-Headed device" (Section 7.6.7.3.1),
+		 * so nothing can be asked of the device through the switch.
+		 * If it has a CCI of its own it is discovered there, as a
+		 * separate component: nothing either CCI reports ties the two
+		 * together.
 		 */
-
-		/* SLDs don't need tunneling - switch is transparent */
 		fmd_topology_add(&ctx->topology, &sld->base, &port->base);
 
-		/* rc = discover_sld(ctx, sld); */
-		/* if (rc == 0) */
-		/*	fmd_create_sld_memory_resources(ctx, sld); */
-
-		fmd_info(ctx, "%s: discovered SLD %s on port %d (%" PRIu64 " MB)",
-			 port->base.parent->id, dev_id, port->port_number,
-			 (uint64_t)(sld->memory_size / (1024ULL * 1024)));
+		fmd_info(ctx, "%s: SLD %s on port %d: not manageable through "
+			 "the switch, capacity unknown",
+			 port->base.parent->id, dev_id, port->port_number);
 		break;
 	}
 
 	case FMD_CONN_MLD: {
-		struct fmd_mld *mld = fmd_mld_create(dev_id);
+		struct cxlmi_cmd_identify_rsp identify = { 0 };
+		struct fmd_mld *mld;
+
+		/*
+		 * A command tunnelled to an MLD port is processed by the
+		 * FM-owned LD of the MLD (Section 7.6.7.3.1). Its Identify
+		 * gives the serial number that names the device, the same
+		 * however it is reached. Without one it is named by its port.
+		 */
+		rc = cxlmi_cmd_identify(port->base.ep,
+					CXLMI_TUNNEL_SWITCH(port->port_number),
+					&identify);
+		if (rc == 0 && identify.serial_num) {
+			(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64,
+				       identify.serial_num);
+			if (fmd_topology_find(&ctx->topology, dev_id)) {
+				fmd_info(ctx, "%s: MLD %s on port %d is already known",
+					 port->base.parent->id, dev_id,
+					 port->port_number);
+				break;
+			}
+		}
+
+		mld = fmd_mld_create(dev_id);
 		if (!mld)
 			return -1;
+		if (rc == 0)
+			mld->identify = identify;
 
 		/* MLD behind switch - store port for tunneling */
 		mld->switch_port = port->port_number;
@@ -1156,24 +1179,42 @@ static uint16_t endpoint_msg_limit(struct cxlmi_endpoint *ep,
 	return 1 << (req_n < rsp_n ? req_n : rsp_n);
 }
 
-static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+/*
+ * Discover the component on an endpoint that has answered Identify.
+ * Returns 0 if it was added, 1 if it is one that is already known, and a
+ * negative value or a CCI return code if it could not be discovered.
+ */
+static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+			     const struct cxlmi_cmd_identify_rsp *id, int index)
 {
-	struct cxlmi_cmd_identify_rsp identify = {0};
+	struct cxlmi_cmd_identify_rsp identify = *id;
 	char dev_id[FMD_MAX_ID_LEN];
 	uint16_t msg_limit;
 	int rc;
 
-	/* Identify (0001h) */
-	rc = cxlmi_cmd_identify(ep, NULL, &identify);
-	if (rc) {
-		fmd_err(ctx, "Identify command failed: %d", rc);
-		return rc;
+	/*
+	 * The Device Serial Number of Identify is the "unique identifier for
+	 * this device" (Table 8-216), and names the component. A device can
+	 * be reached more than one way: on two interconnects, by MCTP and by
+	 * its mailbox, or as the MLD on a switch port and on its own. It is
+	 * one component however it is reached, and the first way stands.
+	 *
+	 * A serial number of 0 identifies nothing. Such a device is named
+	 * after its endpoint, and is never taken for another.
+	 */
+	if (identify.serial_num) {
+		(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64,
+			       identify.serial_num);
+		if (fmd_topology_find(&ctx->topology, dev_id)) {
+			fmd_info(ctx, "%s: reached on another endpoint as well, "
+				 "discovered once", dev_id);
+			return 1;
+		}
+	} else {
+		(void)snprintf(dev_id, sizeof(dev_id), "cxl_ep%d", index);
 	}
 
 	msg_limit = endpoint_msg_limit(ep, &identify);
-
-	/* Generate device ID from serial number */
-	(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64, identify.serial_num);
 
 	fmd_info(ctx, "Discovered endpoint %s: vendor=%04x device=%04x type=%d",
 		 dev_id, identify.vendor_id, identify.device_id,
@@ -1302,7 +1343,13 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 
 int fmd_discover(struct fmd_ctx *ctx)
 {
+	struct {
+		struct cxlmi_endpoint *ep;
+		struct cxlmi_cmd_identify_rsp identify;
+		int rc;
+	} *found;
 	struct cxlmi_endpoint *ep;
+	int nfound = 0;
 	int count = 0;
 	int rc;
 
@@ -1331,12 +1378,41 @@ int fmd_discover(struct fmd_ctx *ctx)
 		}
 	}
 
-	/* Process each discovered endpoint */
+	/*
+	 * Identify (0001h) every endpoint, then discover the switches before
+	 * anything else: a switch says what is on its ports, and a device
+	 * found there is placed in the fabric, which the same device seen on
+	 * an endpoint of its own is not.
+	 */
+	cxlmi_for_each_endpoint(ctx->cxlmi, ep)
+		nfound++;
+	found = calloc(nfound ? nfound : 1, sizeof(*found));
+	if (!found)
+		return -1;
+
+	nfound = 0;
 	cxlmi_for_each_endpoint(ctx->cxlmi, ep) {
-		rc = discover_endpoint(ctx, ep);
-		if (rc == 0)
-			count++;
+		found[nfound].ep = ep;
+		found[nfound].rc = cxlmi_cmd_identify(ep, NULL, &found[nfound].identify);
+		if (found[nfound].rc)
+			fmd_err(ctx, "Identify command failed: %d", found[nfound].rc);
+		nfound++;
 	}
+
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < nfound; i++) {
+			bool is_switch = found[i].identify.component_type ==
+					 CXL_COMPONENT_SWITCH;
+
+			if (found[i].rc || is_switch != (pass == 0))
+				continue;
+			rc = discover_endpoint(ctx, found[i].ep,
+					       &found[i].identify, i);
+			if (rc == 0)
+				count++;
+		}
+	}
+	free(found);
 
 	/*
 	 * If no hosts were discovered (no switches with VCS), create a default

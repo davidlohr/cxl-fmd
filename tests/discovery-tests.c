@@ -992,6 +992,100 @@ static void test_paging_lds(bool large)
 		       "more LDs than fit a response", before);
 }
 
+/*
+ * One device, reached two ways. The Device Serial Number of Identify is
+ * the "unique identifier for this device" (Table 8-216): the same serial
+ * number is the same device.
+ */
+static void test_same_device_twice(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep[2] = { new_device(ctx), new_device(ctx) };
+	int before = failures, rc;
+	char id[FMD_MAX_ID_LEN];
+
+	for (int i = 0; i < 2; i++) {
+		answer_identify(ep[i], 0x1002, 0x03);
+		answer_memdev_identify(ep[i], 64, 64, 0);
+	}
+
+	rc = fmd_discover(ctx);
+	CHECK(rc == 1, "fmd_discover: %d components from one device", rc);
+
+	device_id(id, sizeof(id), 0x1002);
+	CHECK(fmd_topology_find_sld(&ctx->topology, id), "no SLD %s", id);
+	CHECK(ctx->topology.root->device_count == 1, "%d devices",
+	      ctx->topology.root->device_count);
+
+	fmd_ctx_free(ctx);
+	report("one device on two endpoints", before);
+}
+
+/* a serial number of 0 identifies nothing: two such devices are two */
+static void test_no_serial(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep[2] = { new_device(ctx), new_device(ctx) };
+	int before = failures, rc;
+
+	for (int i = 0; i < 2; i++) {
+		answer_identify(ep[i], 0, 0x03);
+		answer_memdev_identify(ep[i], 64, 64, 0);
+	}
+
+	rc = fmd_discover(ctx);
+	CHECK(rc == 2, "fmd_discover: %d", rc);
+	CHECK(ctx->topology.root->device_count == 2, "%d devices",
+	      ctx->topology.root->device_count);
+	CHECK(fmd_topology_find_sld(&ctx->topology, "cxl_ep0") &&
+	      fmd_topology_find_sld(&ctx->topology, "cxl_ep1"),
+	      "devices without a serial number are not named by endpoint");
+
+	fmd_ctx_free(ctx);
+	report("two devices without a serial number", before);
+}
+
+/*
+ * An MLD on a switch port that also has an MCTP interconnect of its own. A
+ * command tunnelled to the port is processed by the FM-owned LD of the MLD
+ * (Section 7.6.7.3.1), whose Identify has the same serial number as the
+ * device's own endpoint. The device is found first here, and is still
+ * placed where the switch has it.
+ */
+static void test_mld_on_switch_and_alone(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *dev = new_device(ctx), *sw;
+	struct fmd_component *comp;
+	int before = failures;
+	char id[FMD_MAX_ID_LEN], sw_id[FMD_MAX_ID_LEN];
+
+	answer_identify(dev, 0x3001, 0x03);
+
+	sw = new_switch(ctx, 0x5005);
+	answer_identify(sw, 0x3001, 0x03);	/* tunnelled to port 5 */
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x3001);
+	device_id(sw_id, sizeof(sw_id), 0x5005);
+	comp = fmd_topology_find(&ctx->topology, id);
+	CHECK(comp && comp->type == FMD_COMPONENT_MLD, "no MLD %s", id);
+	if (comp) {
+		CHECK(comp->parent == (struct fmd_component *)
+		      fmd_topology_find_port(&ctx->topology, sw_id, 5),
+		      "the MLD is not on port 5 of the switch");
+		CHECK(comp->ep == sw, "the MLD is not reached through the switch");
+		CHECK(fmd_to_mld(comp)->switch_port == 5, "tunnel port %d",
+		      fmd_to_mld(comp)->switch_port);
+	}
+	CHECK(ctx->topology.root->device_count == 1, "%d devices",
+	      ctx->topology.root->device_count);
+
+	fmd_ctx_free(ctx);
+	report("MLD on a switch port and on its own endpoint", before);
+}
+
 static void test_not_ready(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -1026,6 +1120,9 @@ int main(void)
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);
+	test_same_device_twice();
+	test_no_serial();
+	test_mld_on_switch_and_alone();
 	test_mhd(false);
 	test_mhd(true);
 	test_not_ready();
