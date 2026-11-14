@@ -41,6 +41,27 @@ if not requests_available
     warning('requests not found - API tests will be skipped. Install with "pip install requests"')
 endif
 
+# Mock topologies: the shipped ones are valid CXL fabrics, and one that
+# breaks a rule of the specification is refused (needs only pytest)
+if pytest_available
+    test(
+        'mock-topologies',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            meson.current_source_dir() / 'test_mock_topologies.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 120,
+        suite: 'unit',
+    )
+endif
+
 # Quick endpoint tests (always run if pytest available)
 if pytest_available
     test(

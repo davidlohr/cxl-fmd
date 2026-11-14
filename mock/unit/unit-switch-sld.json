@@ -62,7 +62,7 @@
             "id": "sld_0",
             "vendor_id": "0x144d",
             "device_id": "0xa80a",
-            "serial_number": "0x534c44303030303031",
+            "serial_number": "0x534c443030303030",
             "component_type": 3,
             "parent_switch": "switch_0",
             "parent_port": 1,

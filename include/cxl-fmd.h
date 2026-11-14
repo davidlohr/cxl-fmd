@@ -1194,6 +1194,13 @@ void fmd_component_free(struct fmd_component *comp);
 void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_switch *sw);
 
 /*
+ * Check the topology against what the CXL specification lets a fabric be
+ * (src/validate.c). Logs each violation with the rule it breaks and returns
+ * how many there are.
+ */
+int fmd_topology_validate(struct fmd_ctx *ctx);
+
+/*
  * A VCS of a switch by its Virtual CXL Switch ID, and a vPPB of a VCS by its
  * vPPB ID. sw->vcs holds the VCSs that are active, in the order they were
  * read: a VCS ID is not an index into it.

@@ -48,7 +48,7 @@
             "id": "cxl_performance_degraded",
             "vendor_id": "0x8086",
             "device_id": "0x0d93",
-            "serial_number": "0x504552464445475244",
+            "serial_number": "0x5045524644454752",
             "component_type": 3,
 
             "identify_memory_device": {
@@ -88,7 +88,7 @@
             "id": "cxl_media_not_ready",
             "vendor_id": "0x8086",
             "device_id": "0x0d93",
-            "serial_number": "0x4e4f54524541445930",
+            "serial_number": "0x4e4f545245414459",
             "component_type": 3,
 
             "identify_memory_device": {

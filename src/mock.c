@@ -9,6 +9,7 @@
  * fmd_sld, fmd_mld, fmd_ld components.
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,50 +20,148 @@
 #include "mock.h"
 
 
-/* Helper: parse hex string like "0x8086" to uint16_t */
+/*
+ * A topology file is read strictly. A value that is there and cannot be
+ * used as what it is meant to be is an error, not a reason to fall back on
+ * a default: a serial number one digit too long used to load as all ones.
+ * Errors are counted while the file is read, and the load fails if there
+ * were any. The file is read by one thread, at start-up.
+ */
+static struct fmd_ctx *load_ctx;
+static int load_errors;
+
+static void load_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+static void load_error(const char *fmt, ...)
+{
+	char msg[256];
+	va_list ap;
+
+	va_start(ap, fmt);
+	(void)vsnprintf(msg, sizeof(msg), fmt, ap);
+	va_end(ap);
+
+	fmd_err(load_ctx, "mock topology: %s", msg);
+	load_errors++;
+}
+
+/* a number, given as one or as a string in any base strtoull() takes */
+static bool json_number(json_t *val, const char *what, bool is_signed,
+			uint64_t max, uint64_t *out)
+{
+	*out = 0;
+
+	if (json_is_integer(val)) {
+		json_int_t n = json_integer_value(val);
+
+		if (n < 0 && !is_signed) {
+			load_error("%s: %lld is negative", what, (long long)n);
+			return false;
+		}
+		*out = (uint64_t)n;
+	} else if (json_is_string(val)) {
+		const char *str = json_string_value(val);
+		char *end;
+
+		errno = 0;
+		if (is_signed)
+			*out = (uint64_t)strtoll(str, &end, 0);
+		else
+			*out = strtoull(str, &end, 0);
+		if (errno || end == str || *end != '\0' ||
+		    (!is_signed && strchr(str, '-'))) {
+			load_error("%s: \"%s\" is not a number that fits", what, str);
+			*out = 0;
+			return false;
+		}
+	} else {
+		load_error("%s: not a number", what);
+		return false;
+	}
+
+	if (!is_signed && *out > max) {
+		load_error("%s: %#llx is more than %#llx", what,
+			   (unsigned long long)*out, (unsigned long long)max);
+		*out = 0;
+		return false;
+	}
+	return true;
+}
+
+/* Helper: parse hex string to uint16_t */
 static uint16_t parse_hex16(json_t *val)
 {
-	if (json_is_string(val)) {
-		const char *s = json_string_value(val);
-		return (uint16_t)strtoul(s, NULL, 0);
-	}
-	return (uint16_t)json_integer_value(val);
+	uint64_t n;
+
+	if (!val)
+		return 0;	/* not given */
+	json_number(val, "16-bit value", false, UINT16_MAX, &n);
+	return (uint16_t)n;
 }
 
 /* Helper: parse hex string to uint64_t */
 static uint64_t parse_hex64(json_t *val)
 {
-	if (json_is_string(val)) {
-		const char *s = json_string_value(val);
-		return strtoull(s, NULL, 0);
-	}
-	return (uint64_t)json_integer_value(val);
+	uint64_t n;
+
+	if (!val)
+		return 0;	/* not given */
+	json_number(val, "64-bit value", false, UINT64_MAX, &n);
+	return n;
 }
 
 /* Helper: get integer with default */
 static int64_t json_int_or(json_t *obj, const char *key, int64_t def)
 {
 	json_t *val = json_object_get(obj, key);
+	uint64_t n;
+
 	if (!val)
 		return def;
-	if (json_is_string(val))
-		return strtoll(json_string_value(val), NULL, 0);
-	return json_integer_value(val);
+	if (!json_number(val, key, true, 0, &n))
+		return def;
+	return (int64_t)n;
 }
 
-/* Helper: get unsigned integer with default (negative values become 0) */
+/* Helper: get unsigned integer with default */
 static uint64_t json_uint_or(json_t *obj, const char *key, uint64_t def)
 {
-	int64_t val = json_int_or(obj, key, (int64_t)def);
-	return (val < 0) ? 0 : (uint64_t)val;
+	json_t *val = json_object_get(obj, key);
+	uint64_t n;
+
+	if (!val)
+		return def;
+	if (!json_number(val, key, false, UINT64_MAX, &n))
+		return def;
+	return n;
+}
+
+/*
+ * A capacity given in MB, in the 256 MB units Identify Memory Device reports
+ * capacities in (Table 8-309). One that is not a whole number of them cannot
+ * be reported, and is not rounded.
+ */
+static uint64_t json_capacity_units(json_t *obj, const char *key, uint64_t def_mb)
+{
+	uint64_t mb = json_uint_or(obj, key, def_mb);
+
+	if (mb % 256)
+		load_error("%s: %llu MB is not a multiple of 256 MB", key,
+			   (unsigned long long)mb);
+	return mb / 256;
 }
 
 /* Helper: get string with default */
 static const char *json_str_or(json_t *obj, const char *key, const char *def)
 {
 	json_t *val = json_object_get(obj, key);
-	if (!val || !json_is_string(val))
+
+	if (!val)
 		return def;
+	if (!json_is_string(val)) {
+		load_error("%s: not a string", key);
+		return def;
+	}
 	return json_string_value(val);
 }
 
@@ -150,13 +249,13 @@ static struct fmd_sld *parse_sld(struct fmd_ctx *ctx, json_t *jdev,
 
 		/* Capacities in MB from JSON, stored in 256MB units (CCI format) */
 		sld->memdev.total_capacity =
-			json_uint_or(obj, "total_capacity_mb", 0) / 256;
+			json_capacity_units(obj, "total_capacity_mb", 0);
 		sld->memdev.volatile_capacity =
-			json_uint_or(obj, "volatile_capacity_mb", 0) / 256;
+			json_capacity_units(obj, "volatile_capacity_mb", 0);
 		sld->memdev.persistent_capacity =
-			json_uint_or(obj, "persistent_capacity_mb", 0) / 256;
+			json_capacity_units(obj, "persistent_capacity_mb", 0);
 		sld->memdev.partition_align =
-			json_uint_or(obj, "partition_align_mb", 256) / 256;
+			json_capacity_units(obj, "partition_align_mb", 256);
 		sld->memdev.lsa_size =
 			(uint32_t)json_int_or(obj, "lsa_size", 0);
 	}
@@ -170,13 +269,13 @@ static struct fmd_sld *parse_sld(struct fmd_ctx *ctx, json_t *jdev,
 	obj = json_object_get(jdev, "partition_info");
 	if (obj) {
 		sld->partition.active_vmem =
-			json_uint_or(obj, "active_volatile_mb", 0) / 256;
+			json_capacity_units(obj, "active_volatile_mb", 0);
 		sld->partition.active_pmem =
-			json_uint_or(obj, "active_persistent_mb", 0) / 256;
+			json_capacity_units(obj, "active_persistent_mb", 0);
 		sld->partition.next_vmem =
-			json_uint_or(obj, "next_volatile_mb", 0) / 256;
+			json_capacity_units(obj, "next_volatile_mb", 0);
 		sld->partition.next_pmem =
-			json_uint_or(obj, "next_persistent_mb", 0) / 256;
+			json_capacity_units(obj, "next_persistent_mb", 0);
 	} else {
 		/* Default: all capacity is active */
 		sld->partition.active_pmem = sld->memdev.persistent_capacity;
@@ -651,8 +750,10 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 
 	/* Get DCD Info (5600h) */
 	dcd->num_hosts = (uint8_t)json_int_or(jdcd, "num_hosts", default_hosts);
-	if (dcd->num_hosts > FMD_MAX_DC_HOSTS)
+	if (dcd->num_hosts > FMD_MAX_DC_HOSTS) {
+		load_error("%s: dcd: more than %d hosts", dev->id, FMD_MAX_DC_HOSTS);
 		dcd->num_hosts = FMD_MAX_DC_HOSTS;
+	}
 	dcd->add_policies = parse_policies(json_object_get(jdcd, "add_policies"), false,
 					   FMD_DC_ADD_FREE | FMD_DC_ADD_CONTIGUOUS |
 					   FMD_DC_ADD_PRESCRIPTIVE);
@@ -686,8 +787,9 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			uint8_t flags = 0;
 
 			if (rid < 0 || rid >= FMD_MAX_DC_REGIONS || len_mb == 0 || bs_mb == 0) {
-				fmd_warn(ctx, "%s: dcd region %d: invalid or empty, skipping",
-					 dev->id, rid);
+				load_error("%s: dcd region %d: no length or block size, "
+					   "or not one of regions 0 to %d", dev->id, rid,
+					   FMD_MAX_DC_REGIONS - 1);
 				continue;
 			}
 
@@ -729,8 +831,8 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 					continue;
 				owner = fmd_dc_host_component(dev, h);
 				if (!owner) {
-					fmd_warn(ctx, "%s: dcd region %d: host %d has no logical device, skipping",
-						 dev->id, rid, h);
+					load_error("%s: dcd region %d: host %d has no logical device",
+						   dev->id, rid, h);
 					continue;
 				}
 
@@ -788,14 +890,14 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 				}
 			}
 			if (len == 0 || rid < 0) {
-				fmd_warn(ctx, "%s: dcd extent at %" PRIu64 " MB is empty or outside every region, skipping",
-					 dev->id, (uint64_t)(dpa / FMD_MIB));
+				load_error("%s: dcd extent at %" PRIu64 " MB is empty or is outside region base to base + length of every region",
+					   dev->id, (uint64_t)(dpa / FMD_MIB));
 				continue;
 			}
 
 			if (fmd_dc_tag_from_str(tag_str, tag) < 0)
-				fmd_warn(ctx, "%s: dcd extent at %" PRIu64 " MB: invalid tag '%s'",
-					 dev->id, (uint64_t)(dpa / FMD_MIB), tag_str);
+				load_error("%s: dcd extent at %" PRIu64 " MB: invalid tag '%s'",
+					   dev->id, (uint64_t)(dpa / FMD_MIB), tag_str);
 			ext = fmd_dc_extent_add(ctx, dev, dpa, len, tag,
 						(uint16_t)json_int_or(item, "shared_seq", 0),
 						(uint8_t)rid);
@@ -859,8 +961,10 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 			json_t *jld;
 
 			json_array_foreach(ld_pool, ld_idx, jld) {
-				if (ld_idx >= FMD_MAX_LD_POOL)
+				if (ld_idx >= FMD_MAX_LD_POOL) {
+					load_error("more than %d LDs in a pool", FMD_MAX_LD_POOL);
 					break;
+				}
 
 				struct fmd_ld *ld = parse_ld_pool_entry(ctx, jld, id, ld_idx,
 									def_health, def_media);
@@ -879,8 +983,10 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 			json_t *jhead;
 
 			json_array_foreach(heads, head_idx, jhead) {
-				if (head_idx >= FMD_MAX_HEADS)
+				if (head_idx >= FMD_MAX_HEADS) {
+					load_error("more than %d heads", FMD_MAX_HEADS);
 					break;
+				}
 
 				struct fmd_head *head = parse_head(ctx, jhead, id, head_idx);
 				if (head) {
@@ -944,8 +1050,10 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 			json_t *jld;
 
 			json_array_foreach(lds, ld_idx, jld) {
-				if (ld_idx >= FMD_MAX_LD_COUNT)
+				if (ld_idx >= FMD_MAX_LD_COUNT) {
+					load_error("more than %d LDs in an MLD", FMD_MAX_LD_COUNT);
 					break;
+				}
 
 				struct fmd_ld *ld = parse_ld(ctx, jld, id, ld_idx,
 							    def_health, def_media);
@@ -1023,8 +1131,10 @@ static int parse_vcs_config(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		return 0;
 
 	json_array_foreach(jvcs_array, vcs_idx, jvcs) {
-		if (vcs_idx >= FMD_MAX_VCS)
+		if (vcs_idx >= FMD_MAX_VCS) {
+			load_error("more than %d VCSs in a switch", FMD_MAX_VCS);
 			break;
+		}
 
 		struct fmd_vcs *vcs = &sw->vcs[vcs_idx];
 
@@ -1040,8 +1150,10 @@ static int parse_vcs_config(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			json_t *jvppb;
 
 			json_array_foreach(jvppbs, vppb_idx, jvppb) {
-				if (vppb_idx >= FMD_MAX_VPPB)
+				if (vppb_idx >= FMD_MAX_VPPB) {
+					load_error("more than %d vPPBs in a VCS", FMD_MAX_VPPB);
 					break;
+				}
 
 				struct fmd_vppb *vppb = &vcs->vppbs[vppb_idx];
 
@@ -1210,8 +1322,11 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			}
 
 			if (port) {
-				/* Update port connection info */
-				port->link_status = FMD_LINK_UP;
+				/*
+				 * A port the file describes is as the file
+				 * describes it: whether that agrees with the
+				 * device on it is for the validator to say.
+				 */
 
 				/*
 				 * Only update conn_dev_type if not already set from explicit
@@ -1223,7 +1338,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 				}
 
 				/* Parse device under this port */
-				parse_device(ctx, jdev, &port->base);
+				if (parse_device(ctx, jdev, &port->base) < 0)
+					load_error("device %zu could not be loaded", idx);
 			}
 		}
 	}
@@ -1341,6 +1457,8 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 	int ret = -1;
 
 	fmd_info(ctx, "Loading mock topology from %s", path);
+	load_ctx = ctx;
+	load_errors = 0;
 
 	/* Parse JSON file */
 	root = json_load_file(path, 0, &error);
@@ -1377,7 +1495,8 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 		json_t *jsw;
 
 		json_array_foreach(switches, idx, jsw) {
-			parse_switch(ctx, jsw, devices);
+			if (parse_switch(ctx, jsw, devices) < 0)
+				load_error("switch %zu could not be loaded", idx);
 		}
 	}
 
@@ -1391,7 +1510,8 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 			if (parent_sw)
 				continue; /* Already handled by switch parsing */
 
-			parse_device(ctx, jdev, NULL);
+			if (parse_device(ctx, jdev, NULL) < 0)
+				load_error("device %zu could not be loaded", idx);
 		}
 	}
 
@@ -1402,7 +1522,8 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 		json_t *jhost;
 
 		json_array_foreach(hosts, idx, jhost) {
-			parse_host(ctx, jhost);
+			if (parse_host(ctx, jhost) < 0)
+				load_error("host %zu could not be loaded", idx);
 		}
 	}
 
@@ -1419,6 +1540,29 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 			fmd_topology_add(&ctx->topology, &local_host->base, NULL);
 			fmd_info(ctx, "Created default local host for direct-attached devices");
 		}
+	}
+
+	/* a device on a switch or port that is not there was never added */
+	if (devices && json_is_array(devices)) {
+		size_t idx;
+		json_t *jdev;
+
+		json_array_foreach(devices, idx, jdev) {
+			const char *dev_id = json_str_or(jdev, "id", NULL);
+			const char *parent_sw = json_str_or(jdev, "parent_switch", NULL);
+
+			if (dev_id && parent_sw &&
+			    !fmd_topology_find(&ctx->topology, dev_id))
+				load_error("device %s is on switch %s port %lld, "
+					   "which the topology does not have", dev_id,
+					   parent_sw,
+					   (long long)json_int_or(jdev, "parent_port", -1));
+		}
+	}
+
+	if (load_errors) {
+		fmd_err(ctx, "%s: %d error(s)", path, load_errors);
+		goto out;
 	}
 
 	fmd_info(ctx, "Loaded: %d switch(es), %d device(s), %d LD(s), %d host(s)",

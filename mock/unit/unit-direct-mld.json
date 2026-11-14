@@ -16,7 +16,7 @@
             "id": "mld_0",
             "vendor_id": "0x8086",
             "device_id": "0x0d94",
-            "serial_number": "0x4d4c44303030303030",
+            "serial_number": "0x4d4c443030303030",
             "component_type": 3,
             "ld_count": 2,
             "max_ld_count": 4,

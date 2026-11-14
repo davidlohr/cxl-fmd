@@ -154,7 +154,7 @@
         },
 
         {
-            "_comment": "MHD with unmapped LDs in pool",
+            "_comment": "MHD with unmapped LDs in pool: one LD on each head, two on none",
             "id": "cxl_mhd_partial",
             "type": "MHD",
             "vendor_id": "0x8086",
@@ -166,15 +166,21 @@
             "heads": [
                 {
                     "head_id": 0,
-                    "presentation": "MLD",
-                    "lds": [0, 1],
+                    "presentation": "SLD",
+                    "lds": [0],
                     "attached_host": "host0"
+                },
+                {
+                    "head_id": 1,
+                    "presentation": "SLD",
+                    "lds": [1],
+                    "attached_host": "host1"
                 }
             ],
 
             "ld_pool": [
                 {"pool_index": 0, "memory_size_mb": 8192, "_comment": "Mapped to head 0"},
-                {"pool_index": 1, "memory_size_mb": 8192, "_comment": "Mapped to head 0"},
+                {"pool_index": 1, "memory_size_mb": 8192, "_comment": "Mapped to head 1"},
                 {"pool_index": 2, "memory_size_mb": 8192, "_comment": "Unmapped - available"},
                 {"pool_index": 3, "memory_size_mb": 8192, "_comment": "Unmapped - available"}
             ],

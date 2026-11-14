@@ -32,6 +32,7 @@ static void print_usage(const char *prog)
 	       "Options:\n"
 	       "  -p, --port PORT       HTTP port (default: %d)\n"
 	       "  -M, --mock FILE       Use mock topology from JSON file\n"
+	       "  -c, --check           Check the topology is a valid CXL fabric and exit\n"
 	       "  -m, --mctp            Enable MCTP device scanning\n"
 	       "  -i, --ioctl           Enable ioctl device scanning\n"
 	       "  -e, --event-poll SECS Drain the DC event log every SECS seconds\n"
@@ -94,6 +95,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 
 	fmd_redfish_stop(ctx);
 	fmd_events_cleanup(ctx);
+
 	fmd_topology_cleanup(&ctx->topology);
 	pthread_mutex_destroy(&ctx->dcd_lock);
 
@@ -118,6 +120,7 @@ int main(int argc, char *argv[])
 	static const struct option long_opts[] = {
 		{"port",    required_argument, NULL, 'p'},
 		{"mock",    required_argument, NULL, 'M'},
+		{"check",   no_argument,       NULL, 'c'},
 		{"mctp",    no_argument,       NULL, 'm'},
 		{"ioctl",   no_argument,       NULL, 'i'},
 		{"event-poll", required_argument, NULL, 'e'},
@@ -134,8 +137,9 @@ int main(int argc, char *argv[])
 	bool transport_specified = false;
 	unsigned int event_poll_sec = FMD_DEFAULT_EVENT_POLL_SEC;
 	const char *mock_path = NULL;
+	bool check_only = false;
 
-	while ((opt = getopt_long(argc, argv, "p:M:mie:vhV", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "p:M:cmie:vhV", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p': {
 			char *endptr;
@@ -150,6 +154,9 @@ int main(int argc, char *argv[])
 		}
 		case 'M':
 			mock_path = optarg;
+			break;
+		case 'c':
+			check_only = true;
 			break;
 		case 'm':
 			use_mctp = true;
@@ -232,6 +239,30 @@ int main(int argc, char *argv[])
 
 	fmd_info(ctx, "Discovered %d CXL device(s)",
 		 ctx->topology.root ? ctx->topology.root->device_count : 0);
+
+	/*
+	 * A mock topology that could not be a CXL fabric is refused: nothing
+	 * learnt from it would hold on a real one. A discovered topology is
+	 * what the hardware said, so there it is only reported.
+	 */
+	{
+		int invalid = fmd_topology_validate(ctx);
+
+		if (invalid && mock_path) {
+			fmd_err(ctx, "%s is not a valid CXL topology: %d error(s)",
+				mock_path, invalid);
+			goto out;
+		}
+		if (invalid)
+			fmd_warn(ctx, "the discovered topology breaks %d rule(s) "
+				 "of the CXL specification", invalid);
+		if (check_only) {
+			if (!invalid)
+				printf("%s: valid\n", mock_path ? mock_path : "topology");
+			ret = invalid ? EXIT_FAILURE : EXIT_SUCCESS;
+			goto out;
+		}
+	}
 
 	if (!mock_path && use_mctp)
 		fmd_events_init(ctx);
