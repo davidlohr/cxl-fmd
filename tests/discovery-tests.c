@@ -443,6 +443,8 @@ static void test_switch(void)
 	CHECK(ctx->topology.root->port_count == 4, "%d ports",
 	      ctx->topology.root->port_count);
 	CHECK(sw->num_vcs == 2, "%d VCSs", sw->num_vcs);
+	CHECK(sw->num_usps == 2 && sw->num_dsps == 1, "%d USPs, %d DSPs",
+	      sw->num_usps, sw->num_dsps);
 	CHECK(sw->vcs[0].vcs_id == 0 && sw->vcs[0].upstream_port_id == 0 &&
 	      sw->vcs[0].num_vppbs == 2, "VCS 0: id %d, USP %d, %d vPPBs",
 	      sw->vcs[0].vcs_id, sw->vcs[0].upstream_port_id,
@@ -484,9 +486,8 @@ static void test_switch(void)
 	port = fmd_topology_find_port(&ctx->topology, id, 1);
 	CHECK(port, "no port 1");
 	if (port) {
-		XFAIL(port->state == FMD_PORT_USP,
-		      "port 1 state %d: byte 1h is not masked to Bits[3:0], "
-		      "want USP", port->state);
+		CHECK(port->state == FMD_PORT_USP, "port 1 state %d",
+		      port->state);
 		/*
 		 * The link state is the LTSSM State, 04h for L0. Link State
 		 * Flags are lane reversal, PERST#, PRSNT# and power, and are
@@ -501,8 +502,7 @@ static void test_switch(void)
 	port = fmd_topology_find_port(&ctx->topology, id, 3);
 	CHECK(port, "no port 3");
 	if (port)
-		XFAIL(port->state == FMD_PORT_DISABLED,
-		      "port 3 state %d: Disabled (0h) is published as a DSP",
+		CHECK(port->state == FMD_PORT_DISABLED, "port 3 state %d",
 		      port->state);
 
 	/*

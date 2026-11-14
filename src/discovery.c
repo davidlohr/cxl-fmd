@@ -854,23 +854,29 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		port->negotiated_link_width = pinfo->negotiated_link_width;
 		port->supported_ld_count = pinfo->supported_ld_count;
 
-		/* Determine port type (USP vs DSP) based on config_state */
-		switch (pinfo->config_state) {
-		case 0: /* disabled */
-			break;
+		/*
+		 * Current Port Configuration State is Bits[3:0]; Bit[4] is GAE
+		 * Support. A port that is not a DSP or a USP must not be left
+		 * in the state fmd_port_create() starts it in, which is DSP.
+		 */
+		switch (pinfo->config_state & 0xf) {
 		case 0x1: /* Bind in progress */
+			port->state = FMD_PORT_BIND_IN_PROGRESS;
 			break;
 		case 0x2: /* Unbind in progress */
+			port->state = FMD_PORT_UNBIND_IN_PROGRESS;
 			break;
 		case 0x3: /* DSP */
 			port->state = FMD_PORT_DSP;
 			sw->num_dsps++;
 			break;
-		case 0x4:
+		case 0x4: /* USP */
 			port->state = FMD_PORT_USP;
 			sw->num_usps++;
 			break;
-		default:
+		case 0x0: /* Disabled */
+		default:  /* Fabric Port (PBR), Invalid Port_ID, reserved */
+			port->state = FMD_PORT_DISABLED;
 			break;
 		}
 
@@ -883,7 +889,9 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 			port->link_status == FMD_LINK_UP ? "up" : "down",
 			port->negotiated_link_width);
 
-		discover_port_device(ctx, port);
+		/* Connected Device Type is reserved unless the port is a DSP */
+		if (port->state == FMD_PORT_DSP)
+			discover_port_device(ctx, port);
 	}
 
 	free(port_rsp);
