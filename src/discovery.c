@@ -538,6 +538,8 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	struct cxlmi_endpoint *ep;
 	size_t mh_rsp_size;
 	size_t head_rsp_size;
+	uint8_t head_port[FMD_MAX_HEADS];	/* Port Number of each head */
+	int nhead_ports = 0;
 	int rc;
 	int i;
 
@@ -613,6 +615,10 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 			struct cxlmi_cmd_fmapi_get_head_info_blkfmt *hi =
 				&head_rsp->head_info_list[i];
 
+			head->port_number = hi->port_num;
+			head->port_number_valid = true;
+			head_port[i] = hi->port_num;
+			nhead_ports = i + 1;
 			head->max_link_width = hi->field_1;
 			head->negotiated_link_width = hi->field_2;
 
@@ -644,14 +650,42 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 		if (!ld)
 			continue;
 
-		/* Get binding from ld_map if available */
-		if (mh_rsp->ld_map_len > 0 && i < mh_rsp->ld_map_len)
-			binding_point = mh_rsp->ld_map[i];
+		/*
+		 * The LD Map gives the port number of the head an LD is
+		 * assigned to, FFh for none. The head with that Port Number
+		 * in Get Head Info is the one: without the port numbers the
+		 * LD cannot be placed, and is left unassigned.
+		 */
+		if (i < mh_rsp->ld_map_len && mh_rsp->ld_map[i] != 0xFF) {
+			for (int h = 0; h < nhead_ports; h++) {
+				if (head_port[h] == mh_rsp->ld_map[i]) {
+					binding_point = h;
+					break;
+				}
+			}
+			if (binding_point == 0xFF)
+				fmd_warn(ctx, "%s: pool LD %d is on port %d, "
+					 "which is no head of the device",
+					 mhd->base.id, i, mh_rsp->ld_map[i]);
+		}
 
 		ld->binding_point_id = binding_point;
 		ld->visible_ld_id = i;  /* Pool index */
+		ld->base.msg_limit = tunnelled_msg_limit(&mhd->base);
 
 		fmd_topology_add(&ctx->topology, &ld->base, &mhd->base);
+
+		/*
+		 * The LD Pool CCI tunnels "management commands to all LDs
+		 * within the device" (Section 2.5). Each LD is a Type 3
+		 * device: Identify Memory Device gives its capacity.
+		 */
+		rc = cxlmi_cmd_memdev_identify(ep, CXLMI_TUNNEL_MLD(i), &ld->memdev);
+		if (rc)
+			fmd_dbg(ctx, "%s: pool LD %d memdev identify failed: %d",
+				mhd->base.id, i, rc);
+		else
+			ld->memory_size = CXL_TO_BYTES(ld->memdev.total_capacity);
 
 		fmd_dbg(ctx, "%s: pool LD %d bound to head %d",
 			mhd->base.id, i,

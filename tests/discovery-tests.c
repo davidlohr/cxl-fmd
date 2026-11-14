@@ -835,11 +835,16 @@ static void test_mhd(bool overcount)
 	info[0] = 4;
 	info[1] = 2;
 	info[5] = overcount ? 200 : 4;		/* LD Map Length: 64 asked for */
-	info[8] = 0;				/* LD 0: head 0 */
-	info[9] = 0;				/* LD 1: head 0 */
-	info[10] = 1;				/* LD 2: head 1 */
+	/* the LD Map names a head by its port number, not by its index */
+	info[8] = 1;				/* LD 0: port 1, head 0 */
+	info[9] = 1;				/* LD 1: port 1, head 0 */
+	info[10] = 2;				/* LD 2: port 2, head 1 */
 	info[11] = 0xff;			/* LD 3: unassigned */
 	answer(ep, 0x5500, info, sizeof(info));
+
+	/* Identify Memory Device (4000h), tunnelled to each LD of the pool */
+	for (int i = 0; i < 4; i++)
+		answer_memdev_identify(ep, 4 * (i + 1), 4 * (i + 1), 0);
 
 	heads[0] = overcount ? 255 : 2;		/* Number of Heads: 2 asked for */
 	heads[4 + 0] = 1;			/* head 0: port 1 */
@@ -882,6 +887,28 @@ static void test_mhd(bool overcount)
 		CHECK(nlds == 4, "%d LD components", nlds);
 		/* head 0 is in L0 (04h), head 1 is not */
 		CHECK(up == 1, "%d heads enabled", up);
+
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD) {
+			struct fmd_ld *ld = fmd_to_ld(child);
+			/* LDs 0 and 1 on head 0, LD 2 on head 1, LD 3 on none */
+			int want = ld->ld_id < 2 ? 0 : ld->ld_id == 2 ? 1 : 0xff;
+
+			CHECK(ld->binding_point_id == want,
+			      "pool LD %d on head %d", ld->ld_id,
+			      ld->binding_point_id);
+			/* 4, 8, 12 and 16 units of 256 MB */
+			CHECK(ld->memory_size ==
+			      (uint64_t)4 * (ld->ld_id + 1) << 28,
+			      "pool LD %d: %" PRIu64 " bytes", ld->ld_id,
+			      ld->memory_size);
+		}
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+			struct fmd_head *head = fmd_to_head(child);
+
+			CHECK(head->ld_count == (head->head_id == 0 ? 2 : 1),
+			      "head %d has %d LDs", head->head_id,
+			      head->ld_count);
+		}
 	}
 
 	fmd_ctx_free(ctx);

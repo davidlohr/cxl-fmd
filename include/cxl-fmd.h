@@ -638,6 +638,13 @@ struct fmd_head {
 	struct fmd_component base;
 
 	uint8_t head_id;                     /* 0 to num_heads-1 */
+	/*
+	 * Port Number of Get Head Info (Table 7-64). It is what the LD Map
+	 * of Get Multi-Headed Info names a head by: "Port number of the head
+	 * to which each LD is assigned" (Table 7-61). Not the head's index.
+	 */
+	uint8_t port_number;
+	bool port_number_valid;
 	enum fmd_head_type presentation;     /* How this head appears to host */
 	enum fmd_head_state state;
 
