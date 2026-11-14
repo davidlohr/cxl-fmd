@@ -224,6 +224,16 @@ class TestMultiVCSRules:
         mld = self._chunks(api_client, "mld0")
         assert mld and all("AddressRangeOffsetMiB" not in c for c in mld)
 
+    def test_every_connection_listed_can_be_read(self, api_client):
+        """The collection lists one connection per device on a switch, as
+        well as those asked for: each of them can be read."""
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Connections")
+        assert status == 200 and data["Members"]
+        for member in data["Members"]:
+            status, connection = api_client.get(member["@odata.id"])
+            assert status == 200, member["@odata.id"]
+            assert connection["Status"]["State"] == "Enabled"
+
     def test_port_bound_to_another_vcs_is_refused(self, api_client):
         """dev2 is bound to VCS 1: host0, on VCS 0, cannot be given it."""
         before = self._bindings(api_client)

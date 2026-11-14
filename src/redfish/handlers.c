@@ -1046,9 +1046,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		"Id", connection_id,
 		"Name", name,
 		"ConnectionType", "Memory",
-		"Status", rf_status(conn->pending == FMD_CONN_BINDING ? "Starting" :
-				    conn->pending == FMD_CONN_UNBINDING ? "Updating" :
-				    "Enabled", "OK"),
+		"Status", rf_status("Enabled", "OK"),
 		"Links",
 			"TargetEndpoints", "@odata.id", endpoint_uri
 	);
