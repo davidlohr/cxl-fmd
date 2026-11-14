@@ -326,7 +326,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	struct cxlmi_tunnel_info *ti;
 	size_t rsp_size;
 	size_t bw_rsp_size;
-	uint64_t granularity = 256ULL * 1024 * 1024; /* 256 MiB */
+	uint64_t granularity = CXL_CAPACITY_UNIT; /* until 5401h says otherwise */
 	int rc;
 	int i;
 
@@ -351,7 +351,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 
 	mld->ld_count = ld_info.ld_count;
 	mld->max_ld_count = FMD_MAX_LD_COUNT;  /* Spec max for MLD */
-	mld->memory_granularity = 1; /* Default to 256MB granularity */
+	mld->memory_granularity = 1; /* 256 MB, until 5401h says otherwise */
 	mld->total_memory_ranges = 0; /* Not available in this response */
 
 	fmd_info(ctx, "%s: MLD with %d logical devices", mld->base.id, mld->ld_count);
@@ -373,6 +373,20 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		fmd_warn(ctx, "%s: get ld allocations failed: %d", mld->base.id, rc);
 		free(alloc_rsp);
 		alloc_rsp = NULL;
+	} else if (alloc_rsp->memory_granularity > 2) {
+		/* without the unit, the multipliers mean nothing */
+		fmd_warn(ctx, "%s: reserved memory granularity %d, LD sizes unknown",
+			 mld->base.id, alloc_rsp->memory_granularity);
+		free(alloc_rsp);
+		alloc_rsp = NULL;
+	} else {
+		/*
+		 * Memory Granularity: 0h = 256 MB, 1h = 512 MB, 2h = 1 GB
+		 * (CXL r4.0 Table 7-48). Kept as a count of 256 MB units,
+		 * which is what Set LD Allocations converts with.
+		 */
+		mld->memory_granularity = 1 << alloc_rsp->memory_granularity;
+		granularity = mld->memory_granularity * CXL_CAPACITY_UNIT;
 	}
 
 	/* Get QoS Control (5403h) */

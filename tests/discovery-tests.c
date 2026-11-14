@@ -301,7 +301,7 @@ static void test_two_mlds(void)
 	sent[1] = commands_sent(ep[1]);
 	answer_ld_allocations(ep[1], 2, 0, 8);
 	cxlmi_mock_set_response(ep[1], 0x54, 0x02, CXLMI_RET_SUCCESS,
-				(uint8_t[4 + 16]){ 1, 0, 0, 1 }, 4 + 16);
+				(uint8_t[4 + 16]){ 1, 0, 0, 0, 8 }, 4 + 16);
 
 	fmd_mld_set_ld_allocation(ctx, mld[1], 0, 8ULL << 28);
 
@@ -323,21 +323,47 @@ out:
 static void test_mld_granularity(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
 	int before = failures;
 	char id[FMD_MAX_ID_LEN];
+	struct fmd_mld *mld;
 	struct fmd_ld *ld;
 
-	new_mld(ctx, 0xc, 2, 1, 4);		/* 4 units of 512 MB */
+	ep = new_mld(ctx, 0xc, 2, 1, 4);	/* 4 units of 512 MB */
 	fmd_discover(ctx);
 
 	device_id(id, sizeof(id), 0xc);
 	ld = fmd_topology_find_ld(&ctx->topology, id, 0);
 	CHECK(ld, "no LD 0");
 	if (ld)
-		XFAIL(ld->memory_size == 4ULL << 29,
-		      "LD size %" PRIu64 " ignores Memory Granularity 1h "
-		      "(512 MB), want %" PRIu64, ld->memory_size,
-		      (uint64_t)4 << 29);
+		CHECK(ld->memory_size == 4ULL << 29, "LD size %" PRIu64,
+		      ld->memory_size);
+
+	/* and back: 4 GiB in units of 512 MB is a multiplier of 8 */
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	CHECK(mld, "no MLD");
+	if (mld) {
+		uint8_t set = 0, cmd = 0, pl[64] = { 0 };
+		size_t size = sizeof(pl);
+
+		CHECK(mld->memory_granularity == 2,
+		      "granularity %d units of 256 MB",
+		      mld->memory_granularity);
+
+		cxlmi_mock_set_response(ep, 0x54, 0x02, CXLMI_RET_SUCCESS,
+					(uint8_t[4 + 16]){ 1, 0, 0, 0, 8 },
+					4 + 16);
+		fmd_mld_set_ld_allocation(ctx, mld, 0, 4ULL << 30);
+		cxlmi_mock_get_last_command(ep, &set, &cmd, pl, &size);
+		CHECK(set == 0x54 && cmd == 0x02,
+		      "last command %02x%02xh", set, cmd);
+		/* Table 7-50: multiplier of the first LD at offset 4h */
+		CHECK(pl[4] == 8 && pl[5] == 0,
+		      "Range 1 Allocation Multiplier %d", pl[4]);
+		if (ld)
+			CHECK(ld->memory_size == 4ULL << 30,
+			      "LD size after set %" PRIu64, ld->memory_size);
+	}
 
 	fmd_ctx_free(ctx);
 	report("MLD with 512 MB granularity", before);
