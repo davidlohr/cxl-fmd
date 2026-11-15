@@ -2556,19 +2556,30 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 	}
 
 	/*
-	 * DSP0288 Table 2, Comment 1:
-	 * - SLD: EgressPortCongestionSupported in PCIeDevice.CXLDevice
-	 * - MLD/MHD: EgressPortBackpressureSupported in Port.CXL.QoSTelemetryCapabilities
+	 * DSP0288 Table 2, Comment 1: "For an MLD, implementations shall
+	 * represent Egress Port Congestion Supported in the Port resource. For
+	 * an SLD, implementations shall represent Egress Port Congestion
+	 * Supported in the PCIeDevice resource." Table 1 names the PCIeDevice
+	 * property CXLDevice/EgressPortCongestionSupported, which DSP8010 does
+	 * not have; the schema's is CXLDevice/EgressPortCongestionSupport. For
+	 * an MLD it is Port CXL/QoSTelemetryCapabilities/
+	 * EgressPortBackpressureSupported.
+	 *
+	 * An MLD that is not on a switch port has no Port resource. Serving it
+	 * on the PCIeDevice then, as for an SLD, is cxl-fmd's choice: it would
+	 * otherwise be served nowhere.
 	 *
 	 * TemporaryThroughputReductionSupported is always in PCIeDevice.CXLDevice
+	 * (DSP0288 Tables 1 and 2).
 	 */
 	json_t *cxl_device = json_pack("{s:s, s:i, s:b}",
 		"DeviceType", rf_cxl_device_type_to_str(CXL_DEVICE_TYPE_TYPE3),
 		"MaxNumberLogicalDevices", max_ld,
 		"TemporaryThroughputReductionSupported", (qos_telemetry_caps & 0x02) ? 1 : 0);
 
-	/* Only add EgressPortCongestionSupport for SLDs (not MLDs/MHDs per DSP0288) */
-	if (comp->type == FMD_COMPONENT_SLD) {
+	if (comp->type == FMD_COMPONENT_SLD ||
+	    (comp->type == FMD_COMPONENT_MLD &&
+	     !(comp->parent && comp->parent->type == FMD_COMPONENT_PORT))) {
 		json_object_set_new(cxl_device, "EgressPortCongestionSupport",
 			json_boolean((qos_telemetry_caps & 0x01) ? 1 : 0));
 	}

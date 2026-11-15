@@ -95,6 +95,15 @@ class TestSLDInventory:
 class TestMLDInventory:
     """Tests for Multi-Logical Device discovery and representation."""
 
+    def test_mld_without_port_has_egress_congestion_support(self, api_client):
+        """DSP0288 Table 2 Comment 1 puts an MLD's Egress Port Congestion
+        Supported on its Port. A directly attached MLD has none: cxl-fmd
+        serves it on the PCIeDevice, as for an SLD."""
+        status, data = api_client.get(
+            "/redfish/v1/Chassis/cxl_mld_0/PCIeDevices/cxl_mld_0")
+        assert status == 200
+        assert "EgressPortCongestionSupport" in data["CXLDevice"]
+
     def test_mld_has_multiple_logical_devices(self, api_client):
         """Verify MLD exposes multiple CXLLogicalDevices."""
         status, data = api_client.get(
@@ -475,6 +484,17 @@ class TestMultiHostVCS:
             links = [ep["@odata.id"] for ep in zone["Links"]["Endpoints"]]
             assert len(links) == len(set(links)), links
             assert "/redfish/v1/Fabrics/CXL/Endpoints/mld0" in links
+
+    def test_mld_on_a_port_has_egress_congestion_on_the_port(self, api_client):
+        """mld0 is on dsp5: Egress Port Congestion Supported is on the Port
+        (DSP0288 Table 2 Comment 1), not on the PCIeDevice."""
+        status, data = api_client.get("/redfish/v1/Chassis/mld0/PCIeDevices/mld0")
+        assert status == 200
+        assert "EgressPortCongestionSupport" not in data["CXLDevice"]
+        status, port = api_client.get(
+            "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/Ports/cxl_switch_0_dsp5")
+        assert status == 200
+        assert "EgressPortBackpressureSupported" in port["CXL"]["QoSTelemetryCapabilities"]
 
     def test_no_pci_ids_as_names(self, api_client):
         """Manufacturer and Model are names, and only the PCI Vendor and
