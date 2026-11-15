@@ -1065,10 +1065,11 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			uint8_t flags = 0;
 
 			if (rid < 0 || rid >= FMD_MAX_DC_REGIONS ||
+			    !json_object_get(item, "region_len_mb") ||
 			    (len_mb != 0 && bs_mb == 0)) {
-				load_error("%s: dcd region %d: no block size, or not "
-					   "one of regions 0 to %d", dev->id, rid,
-					   FMD_MAX_DC_REGIONS - 1);
+				load_error("%s: dcd region %d: no region_len_mb, no "
+					   "block size, or not one of regions 0 to %d",
+					   dev->id, rid, FMD_MAX_DC_REGIONS - 1);
 				continue;
 			}
 

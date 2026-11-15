@@ -292,6 +292,10 @@ def extent_in_a_region_with_no_length(t):
     dcd(t)["extents"].append({"start_mb": 65536, "len_mb": 256})
 
 
+def region_without_a_length(t):
+    del dcd(t)["regions"][1]["region_len_mb"]
+
+
 # switch-dcd.json: region 0 of the MLD is Sharable, region 1 is not
 def shared_extent_in_a_region_that_is_not_sharable(t):
     extent = t["devices"][0]["dcd"]["extents"][1]      # in region 1, host 1's
@@ -346,6 +350,7 @@ BROKEN = [
     ("dcd-device.json", extents_overlap, "overlap"),
     ("dcd-device.json", extent_in_a_region_with_no_length,
      "is empty or is outside region base"),
+    ("dcd-device.json", region_without_a_length, "no region_len_mb"),
     ("switch-dcd.json", shared_extent_in_a_region_that_is_not_sharable,
      "is not Sharable"),
 ]
