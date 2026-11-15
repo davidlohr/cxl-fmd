@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: LGPL-2.1
 """
-Unit tests for all 8 CXL topology combinations.
+Unit tests for 7 CXL topology combinations: every attachment and device type
+of the matrix below but a Multi-Headed MLD on a switch, which has no topology
+here (a head that presents an MLD cannot be bound per LD, a known gap).
 
 Each topology has three test categories:
 1. Discovery - Verify correct resource hierarchy
@@ -17,7 +19,7 @@ Topology Matrix:
     | Switch     | SLD      | -     | 1 implicit |
     | Switch     | MLD      | -     | 2 explicit |
     | Switch     | MH-SLD   | 2     | 1 per head |
-    | Switch     | MH-MLD   | 2     | 2 per head |
+    | Switch     | MH-MLD   | 2     | not tested |
 """
 
 import pytest

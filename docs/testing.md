@@ -84,10 +84,10 @@ meson test -C build --list
 | Suite | Tests | Description | Dependencies |
 |-------|-------|-------------|--------------|
 | `redfish` | redfish-endpoints | Basic endpoint accessibility | pytest |
-| `api` | topology-inventory, memory-lifecycle, connections, cxl-business-rules, error-handling | Full API tests | pytest, requests |
+| `api` | topology-inventory, orchestration, tasks, hot-removal, event-logs, concurrency, memory-lifecycle, connections, cxl-business-rules, error-handling, dcd | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
-| `unit` | unit-topologies | All 8 CXL topology combinations | pytest, requests |
-| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services) and `hot-removal.json` after a device with a connection has been pulled out | pytest, `.venv-validator` |
+| `unit` | discovery, mock-topologies, manpage, unit-topologies | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, and 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch) | pytest, requests (the pytest ones) |
+| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, and `dcd-device.json` | pytest, `.venv-validator` |
 
 ### Test Timeouts
 
@@ -95,6 +95,8 @@ meson test -C build --list
 |-------|---------|
 | redfish | 120s |
 | api | 180s |
+| security | 180s (fuzzing), 300s (adversarial) |
+| unit | 60s (manpage), 120s (mock-topologies), 300s (unit-topologies) |
 | validator | 600s |
 
 Override timeouts:
@@ -244,16 +246,24 @@ The pytest test suite provides comprehensive API testing against mock topologies
 
 | File | Description | Tests |
 |------|-------------|-------|
-| `test_redfish_validator.py` | Basic endpoint accessibility | 7 |
-| `test_topology_inventory.py` | Device/switch/host/MHD discovery | 49 |
-| `test_memory_lifecycle.py` | Memory chunk CRUD operations | 21 |
+| `test_redfish_validator.py` | Basic endpoint accessibility, and the DMTF validator runs | 10 |
+| `test_topology_inventory.py` | Device/switch/host/MHD discovery | 67 |
+| `test_orchestration.py` | Provisioning on the larger mock topologies | 14 |
+| `test_tasks.py` | Binds and unbinds in the background | 6 |
+| `test_hot_removal.py` | Devices pulled out of a switch port | 3 |
+| `test_event_logs.py` | Event records as log entries | 8 |
+| `test_concurrency.py` | Requests served on several threads | 19 |
+| `test_memory_lifecycle.py` | Memory chunk CRUD operations | 20 |
 | `test_connections.py` | Connection management | 16 |
-| `test_cxl_business_rules.py` | CXL-specific rules (VCS, LD limits, health) | 20 |
+| `test_cxl_business_rules.py` | CXL-specific rules (VCS, LD limits, health) | 33 |
 | `test_error_handling.py` | Error responses (404, 400, 409) | 31 |
-| `test_fuzzing.py` | Input fuzzing and boundary tests | 29 |
+| `test_fuzzing.py` | Input fuzzing and boundary tests | 28 |
 | `test_adversarial.py` | Security and adversarial tests | 59 |
-| `test_unit_topologies.py` | All 8 CXL topology combinations | 74 |
-| **Total** | | **316** |
+| `test_dcd.py` | Dynamic capacity | 61 |
+| `test_mock_topologies.py` | The mock topologies, and the checker refusing invalid ones | 74 |
+| `test_manpage.py` | The man page against `--help` | 5 |
+| `test_unit_topologies.py` | 7 combinations of attachment and device type | 68 |
+| **Total** | | **522** |
 
 ### Running Tests
 
