@@ -158,9 +158,13 @@ json_t *fmd_redfish_system(struct fmd_ctx *ctx, const char *system_id)
 	snprintf(mem_domains_id, sizeof(mem_domains_id),
 		 "/redfish/v1/Systems/%s/MemoryDomains", system_id);
 
+	/*
+	 * No PowerState: nothing the FM reads (Identify Switch Device, Get
+	 * Virtual CXL Switch Info, Get Physical Port State) says whether a
+	 * host is powered on.
+	 */
 	return json_pack(
 		"{"
-		"  s:s,"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
@@ -173,7 +177,6 @@ json_t *fmd_redfish_system(struct fmd_ctx *ctx, const char *system_id)
 		"Id", system_id,
 		"Name", host->name,
 		"SystemType", "Physical",
-		"PowerState", "On",
 		"MemoryDomains", "@odata.id", mem_domains_id
 	);
 }

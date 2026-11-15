@@ -359,6 +359,12 @@ class TestHostDiscovery:
         assert status == 200
         assert "MemoryDomains" in data
 
+    def test_host_power_state_is_not_claimed(self, api_client):
+        """Nothing the FM reads says whether a host is powered on."""
+        status, data = api_client.get("/redfish/v1/Systems/cxl_switch_0_host0")
+        assert status == 200
+        assert "PowerState" not in data
+
     def test_host_appears_as_initiator_endpoint(self, api_client):
         """Verify host appears as Fabric Endpoint with EntityRole=Initiator."""
         status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host0")
