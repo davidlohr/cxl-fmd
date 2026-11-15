@@ -2362,6 +2362,24 @@ void fmd_cci_read_unlock(void)
 	pthread_mutex_unlock(&cci_read_lock);
 }
 
+/*
+ * Where Get and Set Timestamp go. A device on an endpoint of its own takes
+ * them directly. Behind a switch, only an MLD can be reached: its port is
+ * one of the "switch MLD Ports" that are valid targets of the Tunnel
+ * Management Command (Section 7.6.7.3.1), as in discover_port_device(). An
+ * SLD on a switch port is not one, and is not asked at all
+ * (fmd_sld_behind_switch()).
+ */
+static struct cxlmi_tunnel_info *timestamp_tunnel(struct fmd_component *comp,
+						  struct cxlmi_tunnel_info *ti)
+{
+	if (comp->type == FMD_COMPONENT_MLD && fmd_to_mld(comp)->switch_port >= 0) {
+		*ti = *CXLMI_TUNNEL_SWITCH(fmd_to_mld(comp)->switch_port);
+		return ti;
+	}
+	return CXLMI_NO_TUNNEL;
+}
+
 uint64_t fmd_get_device_timestamp(struct fmd_component *comp)
 {
 	struct timespec ts;
@@ -2372,19 +2390,16 @@ uint64_t fmd_get_device_timestamp(struct fmd_component *comp)
 	/* Real hardware: call CCI command */
 	if (likely(comp->ep)) {
 		struct cxlmi_cmd_get_timestamp_rsp rsp = {0};
+		struct cxlmi_tunnel_info ti;
 		int rc;
+
+		if (fmd_sld_behind_switch(comp))
+			return 0;
 
 		/* sent by a reader: see fmd_cci_read_lock() */
 		fmd_cci_read_lock();
-		/* Use switch tunneling if device is behind a switch port */
-		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
-			struct fmd_port *port = fmd_to_port(comp->parent);
-			DEFINE_CXLMI_TUNNEL_SWITCH(ti, port->port_number);
-
-			rc = cxlmi_cmd_get_timestamp(comp->ep, &ti, &rsp);
-		} else {
-			rc = cxlmi_cmd_get_timestamp(comp->ep, CXLMI_NO_TUNNEL, &rsp);
-		}
+		rc = cxlmi_cmd_get_timestamp(comp->ep, timestamp_tunnel(comp, &ti),
+					     &rsp);
 		fmd_cci_read_unlock();
 
 		return rc == 0 ? rsp.timestamp : 0;
@@ -2416,14 +2431,13 @@ int fmd_set_device_timestamp(struct fmd_component *comp, uint64_t timestamp_ns)
 			.timestamp = timestamp_ns
 		};
 
-		/* Use switch tunneling if device is behind a switch port */
-		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
-			struct fmd_port *port = fmd_to_port(comp->parent);
-			DEFINE_CXLMI_TUNNEL_SWITCH(ti, port->port_number);
-			return cxlmi_cmd_set_timestamp(comp->ep, &ti, &req);
-		}
+		struct cxlmi_tunnel_info ti;
 
-		return cxlmi_cmd_set_timestamp(comp->ep, CXLMI_NO_TUNNEL, &req);
+		if (fmd_sld_behind_switch(comp))
+			return -EOPNOTSUPP;
+
+		return cxlmi_cmd_set_timestamp(comp->ep,
+					       timestamp_tunnel(comp, &ti), &req);
 	}
 
 	/* Mock mode: accept silently (no persistence needed) */
@@ -2450,7 +2464,7 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 	struct cxlmi_cmd_memdev_get_security_state_rsp rsp = {0};
 	struct cxlmi_tunnel_info ti_buf, *ti = CXLMI_NO_TUNNEL;
 
-	if (!comp || unlikely(!comp->ep))
+	if (!comp || unlikely(!comp->ep) || fmd_sld_behind_switch(comp))
 		return 0;
 
 	if (comp->type == FMD_COMPONENT_MLD)
@@ -2782,6 +2796,9 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 
 	/* Convert bytes to 256MB CXL capacity units */
 	volatile_capacity = volatile_bytes / CXL_CAPACITY_UNIT;
+
+	if (fmd_sld_behind_switch(&sld->base))
+		return -EOPNOTSUPP;
 
 	/* Mock mode: update local state only */
 	ep = sld->base.ep;

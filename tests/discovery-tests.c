@@ -1499,6 +1499,74 @@ out:
 }
 
 /*
+ * An SLD on a switch port has the switch's endpoint and cannot be reached
+ * through it: "Valid targets for the tunneled commands include switch MLD
+ * Ports, valid LDs within an MLD, and the LD Pool CCI in a Multi-Headed
+ * device" (Section 7.6.7.3.1), and "It is prohibited for switches to
+ * support any commands from the Memory Device Command Set" (Table 8-308, note 1).
+ * Nothing is sent for it. An MLD on a switch port is reached through the
+ * port.
+ */
+static void test_switch_sld_placeholder(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
+	struct cxlmi_tunnel_info ti = { 0 };
+	struct fmd_component *sld, *mld;
+	int before = failures, rc;
+	unsigned int sent;
+	const char *scan = "{\"PhysicalAddress\": \"0x0\", \"Length\": 64}";
+	const char *ts = "{\"CXLDevice\": {\"Timestamp\": \"2025-11-13T02:13:20Z\"}}";
+	const char *part = "{\"CXL\": {\"StagedVolatileSizeMiB\": 0}}";
+
+	/* port 4 has an SLD: Type 3 SLD (04h), LTSSM L0 (04h) */
+	answer_identify(ep, 0x5013, 0x00);
+	answer_switch_ports(ep, 6, 0x04, 0x04);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_discover(ctx);
+
+	device_id(sw_id, sizeof(sw_id), 0x5013);
+	snprintf(id, sizeof(id), "%.32s_port4_dev", sw_id);
+	sld = fmd_topology_find(&ctx->topology, id);
+	CHECK(sld && sld->type == FMD_COMPONENT_SLD, "no SLD %s", id);
+	if (!sld)
+		goto out;
+
+	sent = commands_sent(ep);
+	CHECK(fmd_get_device_timestamp(sld) == 0, "a timestamp for the SLD");
+	rc = fmd_redfish_patch_pcie_device(ctx, id, id, ts, strlen(ts));
+	CHECK(rc == -4, "Set Timestamp of the SLD: %d", rc);
+	CHECK(fmd_get_security_state(sld, 0) == 0, "a security state");
+	rc = fmd_redfish_action_scan_media(ctx, id, id, scan, strlen(scan));
+	CHECK(rc != 0, "Scan Media of the SLD: %d", rc);
+	rc = fmd_redfish_patch_memory(ctx, id, id, part, strlen(part));
+	CHECK(rc != 0, "Set Partition Info of the SLD: %d", rc);
+	rc = fmd_sld_set_partition(ctx, fmd_to_sld(sld), 0, false);
+	CHECK(rc != 0, "fmd_sld_set_partition of the SLD: %d", rc);
+	CHECK(commands_sent(ep) == sent,
+	      "%u commands for the SLD went to the switch",
+	      commands_sent(ep) - sent);
+
+	/* the MLD on port 5: through the port */
+	snprintf(id, sizeof(id), "%.32s_port5_dev", sw_id);
+	mld = fmd_topology_find(&ctx->topology, id);
+	CHECK(mld && mld->type == FMD_COMPONENT_MLD, "no MLD %s", id);
+	if (mld) {
+		answer(ep, 0x0300, (uint8_t[8]){ 1 }, 8);
+		CHECK(fmd_get_device_timestamp(mld) == 1, "no MLD timestamp");
+		cxlmi_mock_get_last_tunnel(ep, &ti);
+		CHECK(last_opcode(ep) == 0x0300 && ti.level == 1 &&
+		      ti.port == 5, "Get Timestamp: %04xh, level %d, port %d",
+		      last_opcode(ep), ti.level, ti.port);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("an SLD on a switch port is not sent commands", before);
+}
+
+/*
  * Get DCD Info (5600h), Table 7-65. Total Dynamic Capacity is "in multiples
  * of 256 MB"; libcxlmi returns it in bytes.
  */
@@ -3218,6 +3286,7 @@ int main(void)
 	test_mld_ld_counts();
 	test_health_mapping();
 	test_scan_media();
+	test_switch_sld_placeholder();
 	test_dcd_info();
 	test_paging_ports();
 	test_paging_lds(false);

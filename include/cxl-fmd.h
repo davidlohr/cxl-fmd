@@ -296,6 +296,21 @@ static inline bool fmd_is_memdev(struct fmd_component *c)
 		     c->type == FMD_COMPONENT_MHD);
 }
 
+/*
+ * An SLD on a switch port, as the switch reports it. It has the switch's
+ * endpoint, inherited from the port, and cannot be reached through it:
+ * "Valid targets for the tunneled commands include switch MLD Ports, valid
+ * LDs within an MLD, and the LD Pool CCI in a Multi-Headed device"
+ * (Section 7.6.7.3.1), and "It is prohibited for switches to support any
+ * commands from the Memory Device Command Set" (Table 8-308, note 1).
+ * Nothing is sent for it.
+ */
+static inline bool fmd_sld_behind_switch(const struct fmd_component *c)
+{
+	return c && c->type == FMD_COMPONENT_SLD && c->parent &&
+	       c->parent->type == FMD_COMPONENT_PORT;
+}
+
 /* Check if component is a Multi-Headed Device */
 static inline bool fmd_is_mhd(struct fmd_component *c)
 {
@@ -1687,14 +1702,16 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw);
 /*
  * Get device timestamp via CCI Get Timestamp (0300h)
  * For mock mode, returns current system time.
- * Returns nanoseconds since Unix epoch, or 0 on error.
+ * Returns nanoseconds since Unix epoch, or 0 on error and for an SLD on a
+ * switch port, which cannot be asked.
  */
 uint64_t fmd_get_device_timestamp(struct fmd_component *comp);
 
 /*
  * Set device timestamp via CCI Set Timestamp (0301h)
  * For mock mode, accepts silently (no persistence).
- * Returns 0 on success, negative on error.
+ * Returns 0 on success, -EOPNOTSUPP for an SLD on a switch port, which
+ * cannot be reached, other negative values on error.
  */
 int fmd_set_device_timestamp(struct fmd_component *comp, uint64_t timestamp_ns);
 

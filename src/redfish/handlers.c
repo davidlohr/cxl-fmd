@@ -4518,6 +4518,7 @@ static json_t *build_mhd_semantics_array(struct fmd_mhd *mhd)
  *  -1 on resource not found
  *  -2 on invalid request body
  *  -3 on CCI command failure
+ *  -4 if the device cannot be reached: an SLD on a switch port
  */
 int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -4553,6 +4554,10 @@ int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx,
 			}
 
 			int rc = fmd_set_device_timestamp(comp, ts_ns);
+			if (rc == -EOPNOTSUPP) {
+				json_decref(root);
+				return -4;  /* nothing to send it to */
+			}
 			if (rc != 0) {
 				json_decref(root);
 				return -3;  /* CCI command failed */
@@ -4798,7 +4803,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 			return -1;
 
 		ep = sld->base.ep;
-		if (!ep)
+		if (!ep || fmd_sld_behind_switch(&sld->base))
 			return -1;
 
 		/* SLDs don't need tunneling */
@@ -4859,7 +4864,7 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
 		if (strcmp(mem_id, chassis_id) != 0)
 			return -1;
 
-		if (unlikely(!comp->ep))
+		if (unlikely(!comp->ep) || fmd_sld_behind_switch(comp))
 			return -1;
 		*ep_out = comp->ep;
 

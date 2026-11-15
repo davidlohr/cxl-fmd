@@ -1213,6 +1213,9 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource not found");
 		if (rc == -2)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST, "Invalid request body");
+		if (rc == -4)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The device cannot be reached: an SLD on a switch port");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "CCI command failed");
 	}
 
