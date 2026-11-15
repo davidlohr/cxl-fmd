@@ -458,6 +458,18 @@ class TestMultiHostVCS:
         assert status == 200
         assert data["Members@odata.count"] >= 2
 
+    def test_zone_lists_each_endpoint_once(self, api_client):
+        """Two LDs of mld0 are bound to each VCS: mld0 is one Endpoint, and
+        each Zone links to it once."""
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Zones")
+        assert status == 200
+        for member in data["Members"]:
+            status, zone = api_client.get(member["@odata.id"])
+            assert status == 200
+            links = [ep["@odata.id"] for ep in zone["Links"]["Endpoints"]]
+            assert len(links) == len(set(links)), links
+            assert "/redfish/v1/Fabrics/CXL/Endpoints/mld0" in links
+
 
 # =============================================================================
 # Direct-Attached Topology Tests

@@ -1108,6 +1108,22 @@ json_t *fmd_redfish_zones_collection(struct fmd_ctx *ctx, const char *fabric_id)
  * A Zone represents a VCS and contains links to all endpoints (devices)
  * bound to that VCS via vPPBs.
  */
+/*
+ * The device a bound vPPB reaches: the device on its port, or the
+ * Multi-Headed device one of whose heads is. NULL if it is not bound.
+ */
+static struct fmd_component *zone_vppb_device(const struct fmd_vppb *vppb)
+{
+	if (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
+	    vppb->binding_status != FMD_VPPB_BOUND_LD)
+		return NULL;
+	if (vppb->port && vppb->port->base.first_child)
+		return vppb->port->base.first_child;
+	if (vppb->port && vppb->port->head)
+		return vppb->port->head->base.parent;
+	return NULL;
+}
+
 json_t *fmd_redfish_zone(struct fmd_ctx *ctx, const char *fabric_id,
 			 const char *zone_id)
 {
@@ -1176,24 +1192,19 @@ json_t *fmd_redfish_zone(struct fmd_ctx *ctx, const char *fabric_id,
 
 	/* Add device endpoints from bound vPPBs */
 	for (int i = 0; i < vcs->num_vppbs; i++) {
-		struct fmd_vppb *vppb = &vcs->vppbs[i];
-		struct fmd_component *dev = NULL;
+		struct fmd_component *dev = zone_vppb_device(&vcs->vppbs[i]);
+		bool listed = false;
 
-		/* Only include bound vPPBs */
-		if (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
-		    vppb->binding_status != FMD_VPPB_BOUND_LD)
+		if (!dev || !fmd_is_memdev(dev))
 			continue;
 
 		/*
-		 * Get the device connected to this port: the device on it,
-		 * or the Multi-Headed device one of whose heads is.
+		 * Once: an MLD with two LDs bound to this VCS is one Endpoint,
+		 * reached through two vPPBs.
 		 */
-		if (vppb->port && vppb->port->base.first_child)
-			dev = vppb->port->base.first_child;
-		else if (vppb->port && vppb->port->head)
-			dev = vppb->port->head->base.parent;
-
-		if (dev && fmd_is_memdev(dev))
+		for (int j = 0; j < i && !listed; j++)
+			listed = (zone_vppb_device(&vcs->vppbs[j]) == dev);
+		if (!listed)
 			json_array_append_new(endpoints,
 				rf_link("/redfish/v1/Fabrics/CXL/Endpoints/%s", dev->id));
 	}
