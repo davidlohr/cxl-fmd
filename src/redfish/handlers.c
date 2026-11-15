@@ -1285,9 +1285,11 @@ json_t *fmd_redfish_switch(struct fmd_ctx *ctx, const char *fabric_id, const cha
 	snprintf(ports_uri, sizeof(ports_uri), "/redfish/v1/Fabrics/CXL/Switches/%s/Ports",
 		 switch_id);
 
-	char vendor_str[16];
-	snprintf(vendor_str, sizeof(vendor_str), "0x%04X", sw->identify.vendor_id);
-
+	/*
+	 * No Manufacturer: it "shall contain the name of the organization
+	 * responsible for producing the switch" (Switch_v1), and only the PCI
+	 * Vendor ID is known.
+	 */
 	json_t *result = json_pack(
 		"{"
 		"  s:s,"   /* @odata.id */
@@ -1295,7 +1297,6 @@ json_t *fmd_redfish_switch(struct fmd_ctx *ctx, const char *fabric_id, const cha
 		"  s:s,"   /* Id */
 		"  s:s,"   /* Name */
 		"  s:s,"   /* SwitchType */
-		"  s:s,"   /* Manufacturer */
 		"  s:{s:s},"  /* Ports */
 		"  s:o"    /* Status */
 		"}",
@@ -1304,7 +1305,6 @@ json_t *fmd_redfish_switch(struct fmd_ctx *ctx, const char *fabric_id, const cha
 		"Id", switch_id,
 		"Name", "CXL Switch",
 		"SwitchType", "CXL",
-		"Manufacturer", vendor_str,
 		"Ports", "@odata.id", ports_uri,
 		"Status", rf_status("Enabled", "OK")
 	);
@@ -2073,8 +2073,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 
 	char chassis_uri[256];
 	char domains_uri[256];
-	char vendor_str[16];
-	char model_str[16];
 	char serial_str[32];
 	char description[256];
 	const char *name;
@@ -2095,8 +2093,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		struct fmd_switch *sw = fmd_to_switch(comp);
 		name = "CXL Switch";
 		chassis_type = "Module";
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", sw->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", sw->identify.device_id);
 		snprintf(serial_str, sizeof(serial_str), "0x%016llX",
 			 (unsigned long long)sw->identify.serial_num);
 
@@ -2169,8 +2165,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 			"  s:s,"   /* Name */
 			"  s:s,"   /* Description */
 			"  s:s,"   /* ChassisType */
-			"  s:s,"   /* Manufacturer */
-			"  s:s,"   /* Model */
 			"  s:s,"   /* SerialNumber */
 			"  s:{s:s, s:s},"  /* Status */
 			"  s:{s:s}"   /* MemoryDomains */
@@ -2181,8 +2175,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 			"Name", name,
 			"Description", description,
 			"ChassisType", chassis_type,
-			"Manufacturer", vendor_str,
-			"Model", model_str,
 			"SerialNumber", serial_str,
 			"Status", "State", state_str, "Health", health_str,
 			"MemoryDomains", "@odata.id", domains_uri
@@ -2213,8 +2205,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		struct fmd_sld *sld = fmd_to_sld(comp);
 		name = "CXL SLD Memory Device";
 		chassis_type = "Component";
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", sld->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", sld->identify.device_id);
 		snprintf(serial_str, sizeof(serial_str), "0x%016llX",
 			 (unsigned long long)sld->identify.serial_num);
 		snprintf(description, sizeof(description),
@@ -2226,8 +2216,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		struct fmd_mld *mld = fmd_to_mld(comp);
 		name = "CXL MLD Memory Device";
 		chassis_type = "Component";
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mld->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", mld->identify.device_id);
 		snprintf(serial_str, sizeof(serial_str), "0x%016llX",
 			 (unsigned long long)mld->identify.serial_num);
 		snprintf(description, sizeof(description),
@@ -2251,8 +2239,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		struct fmd_mhd *mhd = fmd_to_mhd(comp);
 		name = "CXL MHD Memory Device";
 		chassis_type = "Component";
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mhd->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", mhd->identify.device_id);
 		snprintf(serial_str, sizeof(serial_str), "0x%016llX",
 			 (unsigned long long)mhd->identify.serial_num);
 		snprintf(description, sizeof(description),
@@ -2287,6 +2273,13 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		health_str = "Warning";
 	}
 
+	/*
+	 * No Manufacturer or Model: they are names ("the name of the
+	 * organization responsible for producing the chassis", "the name by
+	 * which the manufacturer generally refers to the chassis", Chassis_v1),
+	 * and only the PCI Vendor and Device IDs are known. Those are on the
+	 * device's Endpoint, as EntityPciId.
+	 */
 	result = json_pack(
 		"{"
 		"  s:s,"   /* @odata.id */
@@ -2295,8 +2288,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		"  s:s,"   /* Name */
 		"  s:s,"   /* Description */
 		"  s:s,"   /* ChassisType */
-		"  s:s,"   /* Manufacturer */
-		"  s:s,"   /* Model */
 		"  s:s,"   /* SerialNumber */
 		"  s:{s:s, s:s},"  /* Status */
 		"  s:{s:s},"  /* PCIeDevices */
@@ -2309,8 +2300,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		"Name", name,
 		"Description", description,
 		"ChassisType", chassis_type,
-		"Manufacturer", vendor_str,
-		"Model", model_str,
 		"SerialNumber", serial_str,
 		"Status", "State", state_str, "Health", health_str,
 		"PCIeDevices", "@odata.id", pcie_uri,
@@ -2378,8 +2367,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 
 	char uri[256];
 	char ld_uri[256];
-	char vendor_str[16];
-	char model_str[16];
 	char fw_str[17];
 	uint8_t worst_health = 0;
 	uint8_t worst_media = 0;
@@ -2395,8 +2382,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 	const char *dev_name;
 	if (comp->type == FMD_COMPONENT_SLD) {
 		struct fmd_sld *sld = fmd_to_sld(comp);
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", sld->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", sld->identify.device_id);
 		snprintf(fw_str, sizeof(fw_str), "%.16s", (char *)sld->memdev.fw_revision);
 		worst_health = sld->health.health_status;
 		worst_media = sld->health.media_status;
@@ -2404,8 +2389,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		dev_name = "CXL Type 3 SLD";
 	} else if (comp->type == FMD_COMPONENT_MLD) {
 		struct fmd_mld *mld = fmd_to_mld(comp);
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mld->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", mld->identify.device_id);
 		fw_str[0] = '\0';	/* an LD has a firmware revision, the MLD none */
 		serial = mld->identify.serial_num;
 		dev_name = "CXL Type 3 MLD";
@@ -2425,8 +2408,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		fmd_topology_rdunlock(&ctx->topology);
 	} else if (comp->type == FMD_COMPONENT_MHD) {
 		struct fmd_mhd *mhd = fmd_to_mhd(comp);
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mhd->identify.vendor_id);
-		snprintf(model_str, sizeof(model_str), "0x%04X", mhd->identify.device_id);
 		fw_str[0] = '\0';
 		serial = mhd->identify.serial_num;
 		dev_name = "CXL Type 3 MHD";
@@ -2458,8 +2439,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"  s:s,"   /* Id */
 		"  s:s,"   /* Name */
 		"  s:s,"   /* DeviceType */
-		"  s:s,"   /* Model */
-		"  s:s,"   /* Manufacturer */
 		"  s:{s:s, s:s},"  /* Status */
 		"  s:{s:s}"  /* CXLLogicalDevices */
 		"}",
@@ -2468,8 +2447,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"Id", dev_id,
 		"Name", dev_name,
 		"DeviceType", "SingleFunction",
-		"Model", model_str,
-		"Manufacturer", vendor_str,
 		"Status", "State", rf_state_to_str(state),
 		         "Health", rf_health_to_str(health),
 		"CXLLogicalDevices", "@odata.id", ld_uri

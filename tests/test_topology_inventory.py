@@ -470,6 +470,24 @@ class TestMultiHostVCS:
             assert len(links) == len(set(links)), links
             assert "/redfish/v1/Fabrics/CXL/Endpoints/mld0" in links
 
+    def test_no_pci_ids_as_names(self, api_client):
+        """Manufacturer and Model are names, and only the PCI Vendor and
+        Device IDs are known: they are left out, and the IDs are on the
+        device's Endpoint, as EntityPciId."""
+        for uri in ("/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0",
+                    "/redfish/v1/Chassis/cxl_switch_0",
+                    "/redfish/v1/Chassis/dev0",
+                    "/redfish/v1/Chassis/dev0/PCIeDevices/dev0",
+                    "/redfish/v1/Chassis/mld0",
+                    "/redfish/v1/Chassis/mld0/PCIeDevices/mld0"):
+            status, data = api_client.get(uri)
+            assert status == 200, uri
+            assert "Manufacturer" not in data and "Model" not in data, uri
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints/dev0")
+        assert status == 200
+        ids = data["ConnectedEntities"][0]["EntityPciId"]
+        assert ids["VendorId"].startswith("0x") and ids["DeviceId"].startswith("0x")
+
 
 # =============================================================================
 # Direct-Attached Topology Tests
