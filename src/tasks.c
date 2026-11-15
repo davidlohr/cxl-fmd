@@ -89,9 +89,13 @@ static void task_finish(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 		fmd_err(ctx, "Task %d: %s", task->id, message);
 }
 
-/* The outcome of one task whose operation is over, with return code @rc */
+/*
+ * The outcome of one task whose operation is over, with return code @rc.
+ * @logged_failed: the switch recorded it as failed, with no return code
+ * known.
+ */
 static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
-			  struct fmd_switch *sw, uint16_t rc)
+			  struct fmd_switch *sw, uint16_t rc, bool logged_failed)
 {
 	struct fmd_connection *conn = fmd_connection_find(ctx, task->connection_id);
 	struct fmd_vcs *vcs;
@@ -108,7 +112,7 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 			(vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
 			 vppb->binding_status == FMD_VPPB_BOUND_LD);
 
-		if (rc == CXLMI_RET_SUCCESS && bound) {
+		if (rc == CXLMI_RET_SUCCESS && bound && !logged_failed) {
 			if (conn) {
 				conn->bound = true;
 				conn->pending = FMD_CONN_SETTLED;
@@ -123,6 +127,9 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 		if (rc != CXLMI_RET_SUCCESS)
 			snprintf(msg, sizeof(msg), "Bind vPPB failed: %s",
 				 cxlmi_cmd_retcode_tostr(rc));
+		else if (logged_failed)
+			snprintf(msg, sizeof(msg), "Bind vPPB failed: the switch "
+				 "logged it as failed");
 		else
 			snprintf(msg, sizeof(msg), "Bind vPPB completed and the "
 				 "vPPB is not bound");
@@ -131,7 +138,7 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	}
 
 	/* unbind */
-	if (rc == CXLMI_RET_SUCCESS &&
+	if (rc == CXLMI_RET_SUCCESS && !logged_failed &&
 	    (!vppb || vppb->binding_status == FMD_VPPB_UNBOUND)) {
 		if (conn)
 			fmd_connection_remove(ctx, conn);
@@ -145,6 +152,9 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	if (rc != CXLMI_RET_SUCCESS)
 		snprintf(msg, sizeof(msg), "Unbind vPPB failed: %s",
 			 cxlmi_cmd_retcode_tostr(rc));
+	else if (logged_failed)
+		snprintf(msg, sizeof(msg), "Unbind vPPB failed: the switch "
+			 "logged it as failed");
 	else
 		snprintf(msg, sizeof(msg), "Unbind vPPB completed and the vPPB "
 			 "is still bound");
@@ -154,12 +164,15 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 /*
  * The switch has recorded a Binding Change of a vPPB. If a task is following
  * a bind or unbind of it, this is its end, and the switch's own word on how
- * it went: a failed one is recorded in the Warning log.
+ * it went: "Failed bind and unbind operations generate events to the
+ * Warning Event Log" (Table 7-80). The record has no return code: that is
+ * in Background Operation Status, if the switch has run nothing since.
  */
 void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			      uint8_t vcs_id, uint8_t vppb_id, bool failed)
 {
 	struct fmd_task *task;
+	uint16_t rc = CXLMI_RET_SUCCESS;
 
 	for (task = ctx->tasks; task; task = task->next) {
 		if (task->state != FMD_TASK_RUNNING ||
@@ -168,8 +181,14 @@ void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			continue;
 
 		task->percent = 100;
-		task_complete(ctx, task, sw, failed ? CXLMI_RET_INTERNAL :
-						      CXLMI_RET_SUCCESS);
+		if (failed) {
+			int percent;
+
+			if (fmd_switch_bg_status(ctx, sw, task->kind == FMD_TASK_BIND ?
+						 0x5201 : 0x5202, &percent, &rc) != 0)
+				rc = CXLMI_RET_SUCCESS;
+		}
+		task_complete(ctx, task, sw, rc, failed);
 		return;
 	}
 }
@@ -233,7 +252,7 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 		task->failed_polls = 0;
 		task->percent = percent;
 		if (status == 0)
-			task_complete(ctx, task, sw, rc);
+			task_complete(ctx, task, sw, rc, false);
 	}
 	tasks_prune(ctx);
 	pthread_rwlock_unlock(&ctx->fabric_lock);

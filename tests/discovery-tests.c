@@ -1786,9 +1786,37 @@ static void test_switch_events(void)
 	fmd_switch_events_poll(ctx);
 	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d: %s",
 	      task->state, task->message);
+	/* the record has no return code, and Background Operation Status none */
+	CHECK(!strcmp(task->message, "Unbind vPPB failed: the switch logged it "
+		      "as failed"), "task message: %s", task->message);
 	CHECK(fmd_connection_find(ctx, task->connection_id) &&
 	      conn->pending == FMD_CONN_SETTLED,
 	      "the connection does not stand after an unbind that failed");
+
+	/*
+	 * Another that fails, and Background Operation Status (Table 8-217)
+	 * has its return code: 100% complete, Unbind vPPB, Invalid Input.
+	 */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_unbind(ctx, sw, 2, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
+	CHECK(rc == FMD_OP_STARTED, "unbind: %d", rc);
+	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, 2, 1, conn->id);
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	conn->pending = FMD_CONN_UNBINDING;
+
+	answer_no_events(ep, false);
+	answer_event(ep, virtual_switch_event, 0x14,
+		     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+	answer(ep, 0x0002, (uint8_t[8]){ 100 << 1, 0, 0x02, 0x52,
+					 CXLMI_RET_INPUT, 0 }, 8);
+	fmd_switch_events_poll(ctx);
+	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d: %s",
+	      task->state, task->message);
+	CHECK(strstr(task->message, cxlmi_cmd_retcode_tostr(CXLMI_RET_INPUT)) &&
+	      !strstr(task->message, cxlmi_cmd_retcode_tostr(CXLMI_RET_INTERNAL)),
+	      "task message: %s", task->message);
 
 	/*
 	 * A log that has overflowed has lost records, and what they said is
