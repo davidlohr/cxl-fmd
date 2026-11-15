@@ -51,7 +51,7 @@ curl -s http://localhost:8080/redfish/v1/Fabrics/CXL/Connections | jq
 
 ## Authentication
 
-cxl-fmd does not currently implement authentication. All endpoints are accessible without credentials. The `SessionService` endpoint exists for schema compliance but sessions are not enforced.
+cxl-fmd does not currently implement authentication. All endpoints are accessible without credentials. Only the `Sessions` collection, `/redfish/v1/SessionService/Sessions`, is served, linked from the service root's `Links/Sessions`; there is no `/redfish/v1/SessionService` resource, and no session is created or required.
 
 For production deployments, place cxl-fmd behind a reverse proxy (e.g., nginx) that handles authentication.
 
@@ -59,46 +59,49 @@ For production deployments, place cxl-fmd behind a reverse proxy (e.g., nginx) t
 
 ## Table 1 - CXL CCI to Redfish Mapping
 
-Mapping between CXL Component Command Interface (CCI) commands and Redfish resources.
+DSP0288 1.4.0 Section 3, Table 1 — CXL CCI to Redfish mapping. The first
+five columns are DSP0288's rows as it gives them, with its property names
+even where DSP8010 has none by that name. The last column is cxl-fmd's:
+whether it serves the mapping, and where it serves it under another name.
 
-| CXL Command | CXL Field | Redfish Resource | Redfish Property | Implemented |
-|-------------|-----------|------------------|------------------|:-----------:|
-| Get Log Capabilities | Parameter Flags[3]: Persistent across cold reset | `LogService` | `Persistency` | No |
-| Get Event Records | Flags[0]: Overflow | `LogService` | `Overflow` | Yes |
-| Get Event Records | Overflow Error Count | `LogEntry` | `OverflowErrorCount` | Yes |
-| Get Event Records | First Overflow Event Timestamp | `LogEntry` | `FirstOverflowTimestamp` | Yes |
-| Get Event Records | Last Overflow Event Timestamp | `LogEntry` | `LastOverflowTimestamp` | Yes |
-| Get FW Info | FW Slot Info | `PCIeDevice` | `StagedVersion` | No |
-| Get Timestamp | Timestamp | `PCIeDevice` | `CXLDevice/Timestamp` | Yes |
-| Set Timestamp | Timestamp | `PCIeDevice` | `CXLDevice/Timestamp` | Yes |
-| Identify Memory Device | Informational, Warning, Failure, and Fatal Event Log Size | `LogService` | `MaxNumberOfRecords` | Yes |
-| Identify Memory Device | Poison List Maximum Media Error Records | `Memory` | `PoisonListMaxMediaErrorRecords` | No |
-| Identify Memory Device | Poison Handling Capabilities | `Memory` | `PoisonHandlingCapabilities` | No |
-| Identify Memory Device | QoS Telemetry Capabilities[0]: Egress Port Congestion Supported | `PCIeDevice` | `CXLDevice/EgressPortCongestionSupported` | Yes |
-| Identify Memory Device | QoS Telemetry Capabilities[1]: Temporary Throughput Reduction Supported | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionSupported` | Yes |
-| Identify Memory Device | LSA Size | `Memory` | `LabelStorageSizeBytes` | No |
-| Get SLD QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | No |
-| Set SLD QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | No |
-| Get Partition Info | Active Volatile Capacity | `Memory` | `VolatileSizeLimitMiB` | Yes |
-| Get Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | Yes |
-| Get Partition Info | Next Persistent Capacity | `Memory` | `StagedNonVolatileSizeMiB` | Yes |
-| Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | Yes (see "Set Partition Info" below) |
-| Set Partition Info | Next Persistent Capacity | `Memory` | `StagedNonVolatileSizeMiB` | Yes (see "Set Partition Info" below) |
-| Get Health Info | Health Status | Many | `Status` | Yes |
-| Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | No (deviation, see "Life Used" below) |
-| Get Health Info | Corrected Volatile Error Count | `MemoryMetrics` | `CorrectedVolatileErrorCount` | Yes |
-| Get Health Info | Corrected Persistent Error Count | `MemoryMetrics` | `CorrectedPersistentErrorCount` | Yes |
-| Get Health Info | Additional Status[4]: Corrected Volatile Error Count | `Memory` | `Status/Conditions` | No |
-| Get Health Info | Additional Status[5]: Corrected Persistent Error Count | `Memory` | `Status/Conditions` | No |
-| Get Health Info | Dirty Shutdown Count | `MemoryMetrics` | `DirtyShutdownCount` | Yes |
-| Get Alert Configuration | Valid Alerts and Programmable Alerts | `MemoryMetrics` | `CXL/AlertCapabilities` | No |
-| Scan Media | N/A | `Memory` | `ScanMedia` action | Yes |
-| Get Security State | Security State | `Memory` | `SecurityStates` | Yes |
-| Set Passphrase | All | `Memory` | `SetPassphrase`, `SetMasterPassphrase` actions | Yes |
-| Disable Passphrase | All | `Memory` | `DisablePassphrase`, `DisableMasterPassphrase` actions | Yes |
-| Freeze Security State | N/A | `Memory` | `FreezeSecurityState` action | Yes |
-| Passphrase Secure Erase | All | `Memory` | `SecureEraseUnit` action | Yes |
-| Unlock | All | `CXLLogicalDevice` | `Unlock` action | No |
+| CXL Command | CXL Field | Redfish Resource | Redfish Property | Comment | Implemented (cxl-fmd) |
+|-------------|-----------|------------------|------------------|---------|-----------------------|
+| Get Log Capabilities | Parameter Flags[3]: Persistent across cold reset | `LogService` | `Persistency` | See Comment 1. | No |
+| Get Event Records | Flags[0]: Overflow | `LogService` | `Overflow` | See Comment 1. | Yes |
+| Get Event Records | Overflow Error Count | `LogEntry` | `OverflowErrorCount` | See Comment 1. | Yes |
+| Get Event Records | First Overflow Event Timestamp | `LogEntry` | `FirstOverflowTimestamp` | See Comment 1. | Yes |
+| Get Event Records | Last Overflow Event Timestamp | `LogEntry` | `LastOverflowTimestamp` | See Comment 1. | Yes |
+| Get FW Info | FW Slot Info | `PCIeDevice` | `StagedVersion` | | No |
+| Get Timestamp | Timestamp | `PCIeDevice` | `CXLDevice/Timestamp` | | Yes |
+| Set Timestamp | Timestamp | `PCIeDevice` | `CXLDevice/Timestamp` | | Yes |
+| Identify Memory Device | Informational, Warning, Failure, and Fatal Event Log Size | `LogService` | `MaxNumberOfRecords` | See Comment 2. | Yes, on the `LogService` of a `CXLLogicalDevice` (see "Where cxl-fmd puts CXL event records") |
+| Identify Memory Device | Poison List Maximum Media Error Records | `Memory` | `PoisonListMaxMediaErrorRecords` | | No |
+| Identify Memory Device | Poison Handling Capabilities | `Memory` | `PoisonHandlingCapabilities` | | No. DSP8010 has no property of this name |
+| Identify Memory Device | QoS Telemetry Capabilities[0]: Egress Port Congestion Supported | `PCIeDevice` | `CXLDevice/EgressPortCongestionSupported` | | Yes, as `CXLDevice/EgressPortCongestionSupport`: DSP8010 has no property named as DSP0288 names it |
+| Identify Memory Device | QoS Telemetry Capabilities[1]: Temporary Throughput Reduction Supported | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionSupported` | | Yes |
+| Identify Memory Device | LSA Size | `Memory` | `LabelStorageSizeBytes` | | No. DSP8010 has it as `CXL/LabelStorageSizeBytes` |
+| Get SLD QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | | No |
+| Set SLD QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | | No |
+| Get Partition Info | Active Volatile Capacity | `Memory` | `VolatileSizeLimitMiB` | | Yes |
+| Get Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | | Yes, as `CXL/StagedVolatileSizeMiB`, where DSP8010 has it |
+| Get Partition Info | Next Persistent Capacity | `Memory` | `StagedPersistentSizeMiB` | | Yes, as `CXL/StagedNonVolatileSizeMiB`: DSP8010 has no `StagedPersistentSizeMiB` (see "Set Partition Info" below) |
+| Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | | Yes, as `CXL/StagedVolatileSizeMiB` (see "Set Partition Info" below) |
+| Set Partition Info | Next Persistent Capacity | `Memory` | `StagedPersistentSizeMiB` | | Yes, as `CXL/StagedNonVolatileSizeMiB` (see "Set Partition Info" below) |
+| Get Health Info | Health Status | Many | `Status` | See Comment 3. | Partial: `Status/Health` and `Status/State` are served; `Status/Conditions`, which Comment 3 describes, is not |
+| Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | | No (deviation, see "Life Used" below) |
+| Get Health Info | Corrected Volatile Error Count | `MemoryMetrics` | `CorrectedVolatileErrorCount` | | Yes |
+| Get Health Info | Corrected Persistent Error Count | `MemoryMetrics` | `CorrectedPersistentErrorCount` | | Yes |
+| Get Health Info | Additional Status[4]: Corrected Volatile Error Count | `Memory` | `Status/Conditions` | See Comment 4. | No |
+| Get Health Info | Additional Status[5]: Corrected Persistent Error Count | `Memory` | `Status/Conditions` | See Comment 4. | No |
+| Get Health Info | Dirty Shutdown Count | `MemoryMetrics` | `DirtyShutdownCount` | | Yes |
+| Get Alert Configuration | Valid Alerts and Programmable Alerts | `MemoryMetrics` | `CXL/AlertCapabilities` | | No |
+| Scan Media | N/A | `Memory` | `ScanMedia` action | | Yes |
+| Get Security State | Security State | `Memory` | `SecurityStates` | | Yes |
+| Set Passphrase | All | `CXLLogicalDevice` | `SetPassphrase` action | | No. Served on `Memory`, as DSP0288 1.2.0 mapped it (see "Security actions" below) |
+| Disable Passphrase | All | `CXLLogicalDevice` | `DisablePassphrase` action | | No. Served on `Memory`, as DSP0288 1.2.0 mapped it |
+| Freeze Security State | N/A | `CXLLogicalDevice` | `FreezeSecurityState` action | | No. Served on `Memory`, as DSP0288 1.2.0 mapped it |
+| Passphrase Secure Erase | All | `CXLLogicalDevice` | `PassphraseSecureErase` action | | No. Served on `Memory` as `SecureEraseUnit`, as DSP0288 1.2.0 mapped it |
+| Unlock | All | `CXLLogicalDevice` | `Unlock` action | | No |
 
 ### Comments for Table 1
 
@@ -109,6 +112,20 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 **Comment 3:** Redfish resources contain a `Status` property to show the health and state of a device. The `Conditions` property within the `Status` property is used to show why the `Health` property contains a value other than `OK`.
 
 **Comment 4:** The `Conditions` property within the `Status` property of the `Memory` resource shall contain messages to indicate either the Corrected Volatile Error Count or Corrected Persistent Error Count flags are set.
+
+### Security actions
+
+DSP0288 1.2.0 mapped the security commands to actions of `Memory`: Set
+Passphrase to `SetMasterPassphrase` (Passphrase Type 00h) and
+`SetPassphrase` (01h), Disable Passphrase to `DisableMasterPassphrase`
+(00h) and `DisablePassphrase` (01h), Freeze Security State to
+`FreezeSecurityState`, and Passphrase Secure Erase to `SecureEraseUnit`.
+DSP0288 1.3.0 changed Set Passphrase, Disable Passphrase, Freeze Security
+State and Passphrase Secure Erase to the `SetPassphrase`,
+`DisablePassphrase`, `FreezeSecurityState` and `PassphraseSecureErase`
+actions of `CXLLogicalDevice`, and added Unlock (Annex A). cxl-fmd serves
+the 1.2.0 mapping, on `Memory`, and none of these actions on
+`CXLLogicalDevice` (see Known Gaps).
 
 ### Life Used
 
@@ -125,9 +142,11 @@ rather than reporting 0% life left.
 ### Set Partition Info
 
 DSP0288 maps Next Persistent Capacity to `StagedPersistentSizeMiB`, which
-the `Memory` schema does not have; cxl-fmd uses `StagedNonVolatileSizeMiB`
+the `Memory` schema does not have; cxl-fmd uses `CXL/StagedNonVolatileSizeMiB`
 ("Total device non-volatile memory capacity in MiB staged for next
-activation") in its place. That is cxl-fmd's choice.
+activation") in its place. That is cxl-fmd's choice. Next Volatile
+Capacity is served as `CXL/StagedVolatileSizeMiB`, where the schema has
+`StagedVolatileSizeMiB`.
 
 `StagedVolatileSizeMiB` and `StagedNonVolatileSizeMiB` are totals, as Get
 Partition Info's Next Volatile and Next Persistent Capacity are: "the sum
@@ -256,59 +275,59 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
 
 ## Table 2 - CXL FM-API to Redfish Mapping
 
-Mapping between CXL Fabric Management API (FM-API) commands and Redfish resources.
+DSP0288 1.4.0 Section 4, Table 2 — CXL FM-API to Redfish mapping, given as
+Table 1 is above: DSP0288's rows and names, and a last column that is
+cxl-fmd's.
 
-| CXL Command | CXL Field | Redfish Resource | Redfish Property | Implemented |
-|-------------|-----------|------------------|------------------|:-----------:|
-| Identify Switch Device | All | `Switch` | `SwitchType` | Yes |
-| Identify Switch Device | Number of VCSs | `Switch` | `CXL/MaxVCSSupported` | Yes |
-| Identify Switch Device | Total Number of vPPBs | `Switch` | `CXL/TotalNumbervPPBs` | Yes |
-| Identify Switch Device | Total Number of Bound vPPBs | `Switch` | `CXL/NumberOfBoundvPPBs` | Yes |
-| Identify Switch Device | Number of HDM Decoders available per USP | `Switch` | `CXL/HDMDecoders` | Yes |
-| Get Physical Port State | Port Information List, PBR Capable | `Switch` | `CXL/PBRCapable` | Yes |
-| Get Physical Port State | Port Information List, Current Port Configuration State | `Port` | `CXL/CurrentPortConfigurationState` | Yes |
-| Get Physical Port State | Port Information List, Connected Device Mode | `Port` | `CXL/ConnectedDeviceMode` | Yes |
-| Get Physical Port State | Port Information List, Connected Device Type | `Port` | `CXL/ConnectedDeviceType` | Yes |
-| Get Physical Port State | Port Information List, Supported CXL Modes | `Port` | `CXL/SupportedCXLModes` | Yes |
-| Get Physical Port State | Port Information List, Supported LD Count | `Port` | `CXL/MaxLogicalDeviceCount` | Yes |
-| Get Physical Port State | Port Information List, Negotiated Link Width | `Port` | `ActiveWidth` | Yes |
-| Get Physical Port State | Port Information List, Supported Link Speeds Vector | `Port` | `LinkConfiguration/CapableLinkSpeedGbps` | Yes |
-| Get Physical Port State | Port Information List, Max Link Speed | `Port` | `MaxSpeedGbps` | Yes |
-| Get Physical Port State | Port Information List, Current Link Speed | `Port` | `CurrentSpeedGbps` | Yes |
-| Physical Port Control | Port Opcode 02h: Reset PPB | `Port` | `ResetPPB` action | Yes |
-| Physical Port Control | Port Opcode 00h and 01h: Assert and Deassert PERST | `Port` | `Reset` action | No |
-| Get Virtual CXL Switch Info | Virtual CXL Switch ID | `VirtualCXLSwitch` | `VCSId` | Yes |
-| Get Virtual CXL Switch Info | VCS State | `VirtualCXLSwitch` | `Status` | Yes |
-| Get Virtual CXL Switch Info | vPPB Array Index | `VirtualPCI2PCIBridge` | `VPPBId` | Yes |
-| Get Virtual CXL Switch Info | vPPB[Array Index] Binding Status | `VirtualPCI2PCIBridge` | `BindingStatus` | Yes |
-| Get Virtual CXL Switch Info | vPPB[Array Index] Bound Port Id | `VirtualPCI2PCIBridge` | `BoundPortId` | Yes |
-| Get Virtual CXL Switch Info | vPPB[Array Index] Bound LD Id | `VirtualPCI2PCIBridge` | `BoundLDId` | Yes |
-| Get Virtual CXL Switch Info | vPPB[Array Index] Bound PID | `VirtualPCI2PCIBridge` | `BoundPBRId` | Yes |
-| Get Virtual CXL Switch Info | vPPB[Array Index] PCIe Device Serial Number + Bound LD Id | `VirtualPCI2PCIBridge` | `GCXLID` | Yes |
-| Get LD Info | Memory Size | `MemoryDomain` | `MemorySizeMiB` | Yes |
-| Get LD Info | LD Count | `PCIeDevice` | `CXLDevice/MaxNumberLogicalDevices` | Yes |
-| Get LD Info | QoS Telemetry Capabilities[0]: Egress Port Congestion Supported | `Port` | `CXL/QoSTelemetryCapabilities/EgressPortBackpressureSupported` | Yes |
-| Get LD Info | QoS Telemetry Capabilities[1]: Temporary Throughput Reduction Supported | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionSupported` | Yes |
-| Get LD Allocations | Memory Granularity | `MemoryDomain` | `MemoryChunkIncrementMiB` | Yes |
-| Get LD Allocations | Memory Granularity, LD Allocation List | `CXLLogicalDevice` | `MemorySizeMiB` | Yes |
-| Set LD Allocations | LD Allocation List | `MemoryChunks` | POST/DELETE | Yes |
-| Get QoS Control | QoS Telemetry Control[0]: Egress Port Congestion Enable | `Port` | `CXL/Congestion/CongestionTelemetryEnabled` | Yes |
-| Get QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | Yes |
-| Get QoS Control | Egress Moderate Percentage | `Port` | `CXL/Congestion/EgressModeratePercentage` | Yes |
-| Get QoS Control | Egress Severe Percentage | `Port` | `CXL/Congestion/EgressSeverePercentage` | Yes |
-| Get QoS Control | Backpressure Sample Interval | `Port` | `CXL/Congestion/BackpressureSampleInterval` | Yes |
-| Get QoS Control | ReqCmpBasis | `Port` | `CXL/Congestion/MaxSustainedRequestCmpBias` | Yes |
-| Get QoS Control | Completion Collection Interval | `Port` | `CXL/Congestion/CompletionCollectionInterval` | Yes |
-| Get QoS Status | Backpressure Average Percentage | `PortMetrics` | `CXL/BackpressureAveragePercentage` | Yes |
-| Get QoS Allocated BW | QoS Allocation Fraction | `CXLLogicalDevice` | `QoS/AllocatedBandwidth` | Yes |
-| Get QoS BW Limit | QoS Limit Fraction | `CXLLogicalDevice` | `QoS/LimitPercent` | Yes |
-| Set QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | No |
-| Get PBR Link Partner Info | Port ID - ID of requested Port | `Port` | `LinkPartnerTransmit/PortId` | No |
-| Get PBR Link Partner Info | Far End Port ID - Port ID of Far End Device | `Port` | `LinkPartnerReceived/PortId` | No |
-| Get PBR Link Partner Info | Device UUID | `Port` | `LinkPartnerReceived/LinkPartnerId` | No |
-| Bind vPPB | All | `Connection` | POST /Connections | Yes |
-| Unbind vPPB | All | `Connection` | DELETE /Connections | Yes |
-| MLD Port Event Record | All | `LogEntry` | | Yes |
+| CXL Command | CXL Field | Redfish Resource | Redfish Property | Comment | Implemented (cxl-fmd) |
+|-------------|-----------|------------------|------------------|---------|-----------------------|
+| Identify Switch Device | All | `Switch` | `SwitchType` | Shall contain `CXL`. | Yes |
+| Identify Switch Device | Number of VCSs | `Switch` | `CXL/MaxVCSSupported` | | Yes, as `CXL/MaxVCSsSupported`: DSP8010 has no property named as DSP0288 names it |
+| Identify Switch Device | Total Number of vPPBs | `Switch` | `CXL/TotalNumbervPPBs` | | Yes |
+| Identify Switch Device | Total Number of Bound vPPBs | `Switch` | `CXL/NumberOfBoundvPPBs` | | Yes |
+| Identify Switch Device | Number of HDM Decoders available per USP | `Switch` | `CXL/HDMDecoders` | | Yes, as `CXL/TotalHDMDecoders` ("The total number of HDM (Host Device Memory) decoders available per upstream port", Switch_v1): DSP8010's `Switch` has no `CXL/HDMDecoders`. Which property to use is cxl-fmd's reading |
+| Get Physical Port State | Port Information List, PBR Capable | `Switch` | `CXL/PBRCapable` | | Yes |
+| Get Physical Port State | Port Information List, Current Port Configuration State | `Port` | `CXL/CurrentPortConfigurationState` | | Yes |
+| Get Physical Port State | Port Information List, Connected Device Mode | `Port` | `CXL/ConnectedDeviceMode` | | Yes |
+| Get Physical Port State | Port Information List, Connected Device Type | `Port` | `CXL/ConnectedDeviceType` | | Yes |
+| Get Physical Port State | Port Information List, Supported CXL Modes | `Port` | `CXL/SupportedCXLModes` | | Yes |
+| Get Physical Port State | Port Information List, Supported LD Count | `Port` | `CXL/MaxLogicalDeviceCount` | | Yes |
+| Get Physical Port State | Port Information List, Negotiated Link Width | `Port` | `ActiveWidth` | | Yes |
+| Get Physical Port State | Port Information List, Supported Link Speeds Vector | `Port` | `LinkConfiguration/CapableLinkSpeedGbps` | | Yes |
+| Get Physical Port State | Port Information List, Max Link Speed | `Port` | `MaxSpeedGbps` | | Yes |
+| Get Physical Port State | Port Information List, Current Link Speed | `Port` | `CurrentSpeedGbps` | | Yes |
+| Physical Port Control | Port Opcode 02h: Reset PPB | `Port` | `ResetPPB` action | | Yes, on a DSP only (cxl-fmd's choice, see below) |
+| Physical Port Control | Port Opcode 00h and 01h: Assert and Deassert PERST | `Port` | `Reset` action | ForceRestart shall assert then deassert PERST. | No |
+| Get Virtual CXL Switch Info | Virtual CXL Switch ID | `VirtualCXLSwitch` | `VCSId` | | Yes |
+| Get Virtual CXL Switch Info | VCS State | `VirtualCXLSwitch` | `Status` | | Yes |
+| Get Virtual CXL Switch Info | vPPB Array Index | `VirtualPCI2PCIBridge` | `VPPBId` | | Yes |
+| Get Virtual CXL Switch Info | vPPB[Array Index] Binding Status | `VirtualPCI2PCIBridge` | `BindingStatus` | | Yes |
+| Get Virtual CXL Switch Info | vPPB[Array Index] Bound Port Id | `VirtualPCI2PCIBridge` | `BoundPortId` | | Yes |
+| Get Virtual CXL Switch Info | vPPB[Array Index] Bound LD Id | `VirtualPCI2PCIBridge` | `BoundLDId` | | Yes |
+| Get Virtual CXL Switch Info | vPPB[Array Index] Bound PID | `VirtualPCI2PCIBridge` | `BoundPBRId` | | Yes |
+| Get Virtual CXL Switch Info | vPPB[Array Index] PCIe Device Serial Number + Bound LD Id | `VirtualPCI2PCIBridge` | `GCXLID` | | Yes |
+| Get LD Info | Memory Size | `MemoryDomain` | `MemorySizeMiB` | | Yes |
+| Get LD Info | LD Count | `PCIeDevice` | `CXLDevice/MaxNumberLogicalDevices` | | Yes |
+| Get LD Info | QoS Telemetry Capabilities[0]: Egress Port Congestion Supported | `Port` | `CXL/QoSTelemetryCapabilities/EgressPortBackpressureSupported` | See Comment 1. | Yes, for an MLD on a switch port. An MLD that is not on one has no `Port`: cxl-fmd serves it on its `PCIeDevice` as `CXLDevice/EgressPortCongestionSupport` (cxl-fmd's choice) |
+| Get LD Info | QoS Telemetry Capabilities[1]: Temporary Throughput Reduction Supported | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionSupported` | | Yes |
+| Get LD Allocations | Memory Granularity | `MemoryDomain` | `MemoryChunkIncrementMiB` | | Yes |
+| Get LD Allocations | Memory Granularity, LD Allocation List | `CXLLogicalDevice` | `MemorySizeMiB` | | Yes |
+| Get QoS Control | QoS Telemetry Control[0]: Egress Port Congestion Enable | `Port` | `CXL/Congestion/CongestionTelemetryEnabled` | | Yes |
+| Get QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | | Yes |
+| Get QoS Control | Egress Moderate Percentage | `Port` | `CXL/Congestion/EgressModeratePercentage` | | Yes |
+| Get QoS Control | Egress Severe Percentage | `Port` | `CXL/Congestion/EgressSeverePercentage` | | Yes |
+| Get QoS Control | Backpressure Sample Interval | `Port` | `CXL/Congestion/BackpressureSampleInterval` | | Yes |
+| Get QoS Control | ReqCmpBasis | `Port` | `CXL/Congestion/MaxSustainedRequestCmpBias` | | Yes |
+| Get QoS Control | Completion Collection Interval | `Port` | `CXL/Congestion/CompletionCollectionInterval` | | Yes |
+| Get QoS Status | Backpressure Average Percentage | `PortMetrics` | `CXL/BackpressureAveragePercentage` | | Yes |
+| Get QoS Allocated BW | QoS Allocation Fraction | `CXLLogicalDevice` | `QoS/AllocatedBandwidth` | | Yes |
+| Get QoS BW Limit | QoS Limit Fraction | `CXLLogicalDevice` | `QoS/LimitPercent` | | Yes |
+| Set QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | | No |
+| Get PBR Link Partner Info | Port ID - ID of requested Port | `Port` | `LinkPartnerTransmit/PortId` | | No |
+| Get PBR Link Partner Info | Far End Port ID - Port ID of Far End Device | `Port` | `LinkPartnerReceived/PortId` | | No |
+| Get PBR Link Partner Info | Device UUID | `Port` | `LinkPartnerReceived/LinkPartnerId` | | No |
+| Get PBR Link Partner Info | Device UUID | `Port` | `LinkPartnerReceived/LinkPartnerId` | | No (DSP0288 1.4.0 lists this row twice) |
+| MLD Port Event Record | All | `LogEntry` | | See Comment 2. | Yes |
 
 ### Comments for Table 2
 
@@ -316,15 +335,38 @@ Mapping between CXL Fabric Management API (FM-API) commands and Redfish resource
 
 **Comment 2:** A `LogEntry` resource is used to capture CXL event records. The `CXLEntryType` property shall contain the specific CXL entry type, and the `EntryType` property shall contain `CXL`. Overflow information is captured in properties of the `LogEntry` prior to the overflow condition.
 
-**Comment 3:** Bind vPPB and Unbind vPPB operations are exposed through the Connections API rather than direct OEM actions. POST to `/redfish/v1/Fabrics/CXL/Connections` automatically performs vPPB binding for switch-attached hosts, and DELETE automatically performs unbinding.
+### Reset PPB
+
+Physical Port Control "is used by the FM to control unbound ports and MLD
+ports, including issuing resets and controlling sidebands" (CXL r4.0
+Section 7.6.7.1.3). cxl-fmd offers `ResetPPB` only on a DSP, and answers
+400 for any other port, without sending anything; that is cxl-fmd's
+choice. Whether the DSP is unbound or has an MLD is left to the switch.
+
+## cxl-fmd mapping (not in DSP0288)
+
+DSP0288 maps none of these commands. The mapping is cxl-fmd's own:
+
+| CXL Command | Redfish Resource | Redfish Operation |
+|-------------|------------------|-------------------|
+| Set LD Allocations (5402h) | `MemoryChunks` | `POST` and `DELETE` of a chunk of an MLD, or of a pool LD of a Multi-Headed device (see "Memory Provisioning") |
+| Set Partition Info (4101h) | `MemoryChunks` | `POST` and `DELETE` of a `"Volatile"` chunk of an SLD (see "Memory Provisioning") |
+| Bind vPPB (5201h) | `Connection` | `POST /redfish/v1/Fabrics/CXL/Connections` |
+| Unbind vPPB (5202h) | `Connection` | `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}`, with Unbind Option 1h, Simulate Managed Hot-Remove |
+
+Bind vPPB and Unbind vPPB have no actions: a `POST` to
+`/redfish/v1/Fabrics/CXL/Connections` for a host on a switch binds a vPPB
+of the host's VCS, and a `DELETE` of the connection unbinds it (see
+"Memory Binding (Connections)").
 
 ---
 
 ## HTTP Method Mapping
 
-Implementations shall map CXL commands to HTTP operations as follows:
+DSP0288 Sections 3 and 4: "Implementations shall map the following to HTTP
+operations:"
 
-| CXL Command Type | HTTP Method | Implemented |
+| CXL Command Type | HTTP Method | Implemented (cxl-fmd) |
 |------------------|-------------|:-----------:|
 | CXL "get" commands | `GET` | Yes |
 | CXL "set" commands (not actions) | `PATCH` or `PUT` | Partial |
@@ -371,15 +413,21 @@ All error responses follow the Redfish error format with an `error` object conta
 
 | Status | Meaning | When Used |
 |--------|---------|-----------|
-| 200 OK | Success | GET requests returning data |
-| 201 Created | Resource created | POST to collections (MemoryChunks, Connections) |
-| 204 No Content | Success, no body | DELETE requests |
-| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values |
+| 200 OK | Success | GET requests returning data; actions |
+| 201 Created | Resource created | POST to collections (MemoryChunks; Connections that need no bind, or whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
+| 202 Accepted | Started, not finished | POST and DELETE of a Connection when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; the task monitor while the task runs (see "Binds and unbinds in the background") |
+| 204 No Content | Success, no body | DELETE requests; the task monitor of an unbind once it has succeeded |
+| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection whose host and device are not on the same switch, whose host cannot reach the chunk's LD through its head, or whose chunk names no LD the MLD's port can bind; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path |
 | 405 Method Not Allowed | Method not supported | Using unsupported HTTP method on endpoint |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound to another host's VCS, or for a host whose VCS has no unbound vPPB |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
-| 501 Not Implemented | Feature not implemented | PATCH on read-only resources |
+| 500 Internal Server Error | The operation failed | A bind or unbind the switch refused, or another failure; the task monitor of a task that ended in `Exception` |
+| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none |
+| 503 Service Unavailable | Try again | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE of a Connection whose bind or unbind is under way |
+
+Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
+specification sets it.
 
 ### Error Response Format
 
@@ -554,7 +602,9 @@ Fabric Endpoints represent entities that participate in CXL communication. There
 
 **Target Endpoints (Memory Devices)**
 - Represent SLD and MLD devices that provide CXL memory
-- `EntityType`: `MemoryChunk`
+- `EntityType`: `MemoryChunk`. Endpoint_v1 says of it that "the entity
+  this endpoint represents is a memory chunk", and this Endpoint is the
+  device: cxl-fmd's choice, kept for now (a known gap)
 - `EntityRole`: `Target` (responds to memory requests)
 - `EntityPciId`: Contains VendorId/DeviceId from device
 - `Links.ConnectedPorts`: Switch port the device connects to (if switch-attached)
@@ -588,14 +638,15 @@ Zones represent Virtual CXL Switches (VCS) as access domains. Each Zone contains
 - Zone ID format: `{switch_id}_vcs{N}` (e.g., `cxl_switch_0_vcs0`)
 - `Links.Endpoints`: Array of all endpoints in this VCS:
   - Host endpoints (EntityRole=Initiator) connected via the VCS USP
-  - Device endpoints (EntityRole=Target) bound to the VCS via vPPBs
+  - Device endpoints (EntityRole=Target) bound to the VCS via vPPBs, each
+    once: an MLD two of whose LDs are bound to the VCS is listed once
 - Bidirectional links: Both hosts and devices include `Links.Zones` back-references
 
 ### Actions
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `.../Ports/{port}/Actions/Port.ResetPPB` | POST | Reset Physical Port PPB |
+| `.../Ports/{port}/Actions/Port.ResetPPB` | POST | Reset Physical Port PPB (offered on a DSP only) |
 | `.../Memory/{mem}/Actions/Memory.ScanMedia` | POST | Scan media for errors |
 | `.../Memory/{mem}/Actions/Memory.SetPassphrase` | POST | Set user passphrase |
 | `.../Memory/{mem}/Actions/Memory.SetMasterPassphrase` | POST | Set master passphrase |
@@ -693,7 +744,7 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
 ### MLD Memory Model
 
 For Multi-Logical Devices (MLDs), the memory hierarchy is:
-- **MLD Device** → Chassis with `ChassisType: "RackMount"`
+- **MLD Device** → Chassis with `ChassisType: "Component"`
 - **Memory Domain** → One domain per MLD, represents the device's total capacity
 - **Memory Chunk** → One chunk per Logical Device (LD), 1:1 mapping
 - **Memory** → Individual LDs as memory resources
@@ -704,7 +755,16 @@ For Phase 1 (direct-attached devices):
 - POST resizes an existing LD's allocation
 - DELETE reduces the LD's allocation
 
-Chunk IDs follow the format: `{domain_id}_chunk{N}` (e.g., `cxl_mld_0_domain0_chunk0`)
+Chunk IDs:
+
+- the chunk of an LD, found at discovery: `{device}_ld{N}_chunk` (e.g.,
+  `cxl_mld_0_ld0_chunk`), for an MLD and for a pool LD of a Multi-Headed
+  device;
+- the chunk of an SLD, found at discovery: `{device}_chunk0`;
+- a chunk made with `POST`: `{domain_id}_chunk{N}`, N the number of chunks
+  the domain had before it;
+- in the `{switch}_pool` domain of a switch's Chassis: `{device}_chunk` for
+  an SLD on one of its ports, `{device}_ld{N}_chunk` for an LD of an MLD.
 
 ### MHD Memory Model
 
@@ -735,7 +795,7 @@ FM Redfish view: all pool LDs 0-5 visible as CXLLogicalDevices/0 through /5
 ### SLD Memory Model
 
 For Single Logical Devices (SLDs):
-- **SLD Device** → Chassis with `ChassisType: "RackMount"`
+- **SLD Device** → Chassis with `ChassisType: "Component"`
 - **Memory Domain** → Represents the device's total capacity
 - **Memory Chunk** → Volatile and/or persistent partitions
 - **Memory** → Single memory resource for the SLD
@@ -781,11 +841,26 @@ Content-Type: application/json
 | `MemoryChunkInfo[].MemoryChunk` | object | Yes | Reference to the MemoryChunk |
 | `MemoryChunkInfo[].AccessCapabilities` | array | No | `["Read"]`, `["Write"]`, or `["Read", "Write"]` (default) |
 
-**Response:** Returns the created Connection resource with HTTP 201 Created.
+**Response:** `201 Created` and the Connection when no bind is needed (a
+direct-attached host, or a port or LD already bound to the host's VCS) or
+the switch finished the bind before answering; `202 Accepted` with a
+`Task`, and the task monitor in `Location`, when the switch binds in the
+background (see "Binds and unbinds in the background" below). The errors
+are in "HTTP Status Codes".
 
 **Hardware Behavior (Switch-Attached Hosts):**
-- Automatically finds an available vPPB in the host's VCS
-- Issues `Bind vPPB (0x5201h)` to bind the device port (and LD for MLD/MHD) to the vPPB
+- Automatically finds an unbound vPPB in the host's VCS (409 if there is none)
+- Issues `Bind vPPB (0x5201h)` to bind the device's port to the vPPB: for an
+  MLD, its LD, by the LD-ID of the chunk (400 if the chunk names none); for
+  an SLD, the whole port, with LD ID FFFFh. The port of a head of a
+  Multi-Headed device is bound as a whole, with LD ID FFFFh: that is
+  cxl-fmd's assumption, that the head presents an SLD. A head that
+  presents an MLD binds LD-IDs "from 0 to n-1 relative to that head" (CXL
+  r4.0 Section 2.5.1); cxl-fmd has no map from a pool LD to them, and such a
+  bind is refused (a known gap)
+- A Retry Required answer is sent once more ("An optional single retry may
+  resolve the issue", Table 8-208); a second one, or Busy, is answered with
+  503
 
 **Binds and unbinds in the background:**
 "All binding operations are executed as background commands" (CXL r4.0 Section
@@ -826,11 +901,18 @@ After creating a connection, the bound memory appears in the host's Systems view
 DELETE /redfish/v1/Fabrics/CXL/Connections/{conn_id}
 ```
 
-**Response:** HTTP 204 No Content on success.
+**Response:** `204 No Content` when no unbind is needed or the switch
+finished it before answering; `202 Accepted` with a `Task` when the switch
+unbinds in the background (see "Binds and unbinds in the background").
 
 **Hardware Behavior (Switch-Attached Hosts):**
-- Issues `Unbind vPPB (0x5202h)` with Managed Hot-Remove option
+- Issues `Unbind vPPB (0x5202h)` with Unbind Option 1h, Simulate Managed
+  Hot-Remove, if the connection bound the vPPB
 - Releases the vPPB for reuse
+- The task follows the unbind for as long as the switch takes: no time
+  limit is set, and the switch, which runs one background command at a
+  time, answers every other bind and unbind Busy (503) until the host has
+  released the device (a known gap)
 
 ### Connection Lifecycle
 
@@ -853,19 +935,31 @@ For direct-attached hosts (`host.direct_attached = true`), connections track the
 
 ### When a Device Is Removed
 
-A device pulled out of a switch port is removed: the switch records it as a
-Physical Switch Event Record, and the port then reports no device, or one of
-another kind (CXL r4.0 Section 7.6.6.7). Its `Endpoint`, `PCIeDevice`,
-`CXLLogicalDevice`s, `Memory`, `MemoryDomains` and `MemoryChunks` go, and the
-event records kept for it with them. A port whose link is down and that still
-reports its device keeps it (a surprise Link Down).
+A device on a switch port is removed when the port, read again, reports no
+device, or one of another kind. Deciding it from Connected Device Type is
+cxl-fmd's; the specification does not say what a port reports after a
+removal. A port whose link is down and that still reports its device keeps
+it (a surprise Link Down). Its `Endpoint`, `PCIeDevice`,
+`CXLLogicalDevice`s, `Memory`, `MemoryDomains` and `MemoryChunks` go, and
+the event records kept for it with them.
+
+The port is read again when a Physical Switch Event Record names it, after a
+log overflowed, or on the `--rescan` timer. Which record the switch makes
+depends on the removal (CXL r4.0): from an unbound port, "The switch
+notifies the FM by generating Physical Switch Event Records" (Section
+7.6.6.7); for a surprise removal, "The switch notifies the FM of a surprise
+removal by generating Virtual CXL Switch Event Records" (Section 7.6.6.8),
+which cxl-fmd does not act on (see Known Gaps); for an SLD or PCIe device on
+a bound port, "the FM can be notified but is not involved" (Section
+7.6.6.7), and the removal may be seen only on the `--rescan` timer.
 
 Its connections are the switch's to decide, and can change without a request:
 
 | The device was | The switch | The connection |
 |----------------|------------|------------|
-| An MLD | "will automatically unbind any existing LD bindings" (Section 7.6.6.8) | Goes, once the vPPBs are read as unbound. Nothing deletes it |
-| An SLD on a bound port | keeps the vPPB bound to the port: "the FM can be notified but is not involved" | Stands, with `Status.State` `Absent` and no `TargetEndpoints` or `MemoryChunkInfo`. `DELETE` unbinds the vPPB as usual. A device plugged back into the port is the host's again, and the connection has its device again |
+| An MLD, removed by surprise | "The switch will automatically unbind any existing LD bindings" (Section 7.6.6.8) | Goes, once the vPPBs are read as unbound. Nothing deletes it |
+| An MLD, removed by a managed hot-removal | Nothing: "The FM unbinds each assigned LD with the Unbind vPPB command as it receives notifications from each host" (Section 7.6.6.7), and cxl-fmd does not (see Known Gaps) | Stands for as long as its vPPB is bound |
+| An SLD on a bound port | The specification does not say what becomes of the binding: "the FM can be notified but is not involved" (Section 7.6.6.7). A vPPB bound to an SLD port "behaves the same as a PPB in a PCIe switch" (Section 7.2.3.1), so cxl-fmd assumes it stays bound to the port | Stands, with `Status.State` `Absent` and no `TargetEndpoints` or `MemoryChunkInfo`. `DELETE` unbinds the vPPB as usual. A device plugged back into the port is the host's again, and the connection has its device again |
 | Being bound or unbound | finishes the operation | Its task decides, as for any other |
 
 A device attached directly to an MCTP endpoint of its own, and a Multi-Headed
@@ -892,6 +986,33 @@ These are known gaps in what cxl-fmd does, not properties of a schema:
 - The managed hot-removal of an MLD (Section 7.6.6.7) is not carried out:
   cxl-fmd does not act on a host's Attention Indicator, unbind the LDs, or
   set the MLD port's Attention LED.
+
+### Binding
+
+These are known gaps in what cxl-fmd does:
+
+- An unbind is followed for as long as the switch takes: there is no time
+  limit, and no abort. "The timeout value for the host handshakes to
+  complete is implementation specific" (Section 7.6.6.7). A host that does
+  not release the device keeps the task running, and the switch, busy with
+  that background command, refuses every other bind and unbind (503).
+- The port of a Multi-Headed device's head is always bound whole, with LD
+  ID FFFFh. A head that presents an MLD cannot be bound per LD: nothing maps
+  a pool LD to the LD-ID the head uses for it.
+- A host's binding is seen only on a Connection cxl-fmd made, or on the
+  vPPB: a vPPB bound before cxl-fmd started, or by another FM, gets no
+  Connection with `InitiatorEndpoints`, and the host's `MemoryDomains` do
+  not list it. An MLD is one `Endpoint`, whichever of its LDs a host has.
+
+### DSP0288 mappings
+
+These are known gaps against DSP0288 1.4.0 (see Tables 1 and 2):
+
+- The security actions are served on `Memory`, as DSP0288 1.2.0 mapped
+  them, not as actions of `CXLLogicalDevice`, where 1.3.0 and 1.4.0 map
+  them; `Unlock` is not served at all.
+- `Status/Conditions` is not served: Comments 3 and 4 of Table 1 are not
+  met.
 
 ### Memory device writes
 
