@@ -172,7 +172,9 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   `Overflow` `true` until `LogService.ClearLog`: that is cxl-fmd's choice,
   not DSP0288's.
 - The overflow is put on the last record of the first page of Get Event
-  Records that said Overflow: no record is stored while the flag is set, so
+  Records that said Overflow: cxl-fmd reads Table 8-232 as saying that no
+  record is stored while the flag is set (it is set "when errors occur that
+  the device cannot log without overwriting an existing log event"), so
   every record of that page was stored before the overflow, as Comment 1
   asks. It is not always the last record before the overflow: more of those
   can follow on later pages. An LD of an MLD that did not keep that record
@@ -187,9 +189,10 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   for the Dynamic Capacity Event Log): under a Response Message Limit of 256
   to 1024 bytes (Table 8-218), a page holds from 1 to 7 records of 128
   bytes after its 32-byte header. A log with more than that is
-  emptied by the next reads, on the `--event-poll` timer; with
-  `--event-poll 0` such a log is not emptied, and its notification is not
-  re-armed. A switch is asked for notifications of its four logs and of a
+  emptied by the next reads, on the `--event-poll` timer. With
+  `--event-poll 0` it is emptied only when that component's logs are read
+  for another reason, a notification for another of its logs or a re-scan
+  that finds a new device; until then its notification is not re-armed. A switch is asked for notifications of its four logs and of a
   completed background operation (Set MCTP Event Interrupt Policy,
   Bits[3:0] and Bit[15]), and a memory device on an MCTP endpoint of its own
   for the logs that are read (Bits[3:0], and Bit[4] for a DCD), unless its
