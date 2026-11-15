@@ -23,6 +23,7 @@ SLD_RELEASE = SLD_LD0 + "/Actions/CXLLogicalDevice.DynamicCapacityRelease"
 SLD_REFERENCE = SLD + "/Actions/PCIeDevice.CXLReferenceDCMemory"
 
 MLD = "/redfish/v1/Chassis/cxl_dcd_mld0/PCIeDevices/cxl_dcd_mld0"
+MLD_REFERENCE = MLD + "/Actions/PCIeDevice.CXLReferenceDCMemory"
 
 TAG_SEED = "6f1a2c3e-0000-4000-8000-000000000001"   # extent present at startup
 TAG_SHARED = "6f1a2c3e-0000-4000-8000-000000000002"
@@ -281,6 +282,13 @@ class TestDynamicCapacityAdd:
         regions = {r["@odata.id"] for r in data["Links"]["MemoryRegions"]}
         assert MLD + "/CXLLogicalDevices/0/MemoryRegions/0" in regions
 
+    def test_shared_access_empty_tag_400(self, api_client):
+        add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
+        for tag in ("", "00000000-0000-0000-0000-000000000000"):
+            status, _, _ = api_client.post(add, {
+                "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": tag})
+            assert status == 400
+
     def test_prescriptive_on_unshareable_region_409(self, api_client):
         """Region 0 of the SLD is not shareable, so a second host can't join."""
         # The SLD has a single host, so prescriptive re-add of an owned extent is EEXIST
@@ -449,29 +457,43 @@ class TestSetDCRegionConfig:
 class TestCXLReferenceDCMemory:
 
     def test_reference_keeps_released_capacity(self, api_client):
-        status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED, "FMReference": True})
+        rel = MLD + "/MemoryExtents/ext_280000000"
+        status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": True})
         assert status == 200
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        status, data = api_client.get(rel)
         assert data["FMReferencedExtent"] is True
 
         # Host releases it: extent survives with no region links
-        assert api_client.delete(SLD + "/MemoryExtents/ext_400000000") == 204
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        assert api_client.delete(rel) == 204
+        status, data = api_client.get(rel)
         assert status == 200
         assert data["Links"]["MemoryRegions"] == []
 
         # A second DELETE has nothing to release from a host
-        assert api_client.delete(SLD + "/MemoryExtents/ext_400000000") == 409
+        assert api_client.delete(rel) == 409
 
         # Dropping the FM reference frees it
-        status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED, "FMReference": False})
+        status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": False})
         assert status == 200
-        assert extent_ids(api_client) == []
+        assert "ext_280000000" not in extent_ids(api_client, MLD)
 
-    def test_reference_unknown_tag_404(self, api_client):
+    def test_reference_unknown_tag_400(self, api_client):
+        """5606h: "Invalid Input if the Tag ... does not match an existing sharable tag"."""
         status, _, _ = api_client.post(SLD_REFERENCE, {
             "Tag": "00000000-0000-0000-0000-0000000000ff", "FMReference": True})
-        assert status == 404
+        assert status == 400
+
+    def test_reference_unsharable_tag_400(self, api_client):
+        """The SLD's tag is in a region that is not Sharable."""
+        status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED, "FMReference": True})
+        assert status == 400
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        assert data["FMReferencedExtent"] is False
+
+    def test_reference_empty_tag_400(self, api_client):
+        for tag in ("", "00000000-0000-0000-0000-000000000000"):
+            status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": tag, "FMReference": True})
+            assert status == 400
 
     def test_reference_requires_parameters(self, api_client):
         status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED})

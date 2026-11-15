@@ -986,7 +986,7 @@ static int action_dc_reference_locked(struct fmd_ctx *ctx, const char *chassis_i
 	if (rc == -ENOENT)
 		*msg = "No extents carry the given Tag";
 	else if (rc == -EINVAL)
-		*msg = "The device refused the Tag as invalid";
+		*msg = "The Tag names no sharable capacity (an empty or all-zero Tag is none)";
 	else if (rc == -EAGAIN)
 		*msg = DC_RETRY_MSG;
 	else if (rc)

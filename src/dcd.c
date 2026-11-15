@@ -273,6 +273,18 @@ static int hexval(char c)
 }
 
 /*
+ * An all-zero tag, which cxl-fmd shows as the empty string and takes for
+ * no tag. The specification calls the Tag "Optional" (Table 8-230) and does
+ * not say which value means none: this is cxl-fmd's convention.
+ */
+static bool dc_tag_is_zero(const uint8_t *tag)
+{
+	static const uint8_t zero[FMD_DC_TAG_LEN];
+
+	return !tag || memcmp(tag, zero, FMD_DC_TAG_LEN) == 0;
+}
+
+/*
  * Accepts "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", 32 bare hex digits, or the
  * empty string (all-zero tag). Returns 0 on success, -1 on parse error.
  */
@@ -692,11 +704,44 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 	}
 }
 
+/*
+ * Flags of the region an extent is in. Every host's view of a region has
+ * the same flags; an extent no host holds any more (FM-referenced) is
+ * found through any host that sees its region.
+ */
+static uint8_t extent_region_flags(struct fmd_component *dev, struct fmd_dc_extent *ext)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	for (int h = 0; dcd && h < dcd->num_hosts; h++) {
+		struct fmd_dc_region *r = fmd_dc_find_region(dev, h, ext->region_id);
+
+		if (r)
+			return r->flags;
+	}
+	return 0;
+}
+
+/*
+ * 5606h and 5607h "shall return Invalid Input if the Tag in the payload
+ * does not match an existing sharable tag" (Sections 7.6.7.6.7 and
+ * 7.6.7.6.8): the tag must be on an extent in a Sharable region.
+ */
 static int mock_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 			     const uint8_t tag[FMD_DC_TAG_LEN], bool add)
 {
 	struct fmd_component *child, *next;
-	int matched = 0;
+	bool sharable = false;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+		if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) == 0 &&
+		    (extent_region_flags(dev, ext) & FMD_DC_REGION_SHAREABLE))
+			sharable = true;
+	}
+	if (!sharable)
+		return -EINVAL;
 
 	for (child = dev->first_child; child; child = next) {
 		struct fmd_dc_extent *ext;
@@ -708,13 +753,12 @@ static int mock_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 			continue;
 
-		matched++;
 		ext->fm_referenced = add;
 		if (!add && ext->host_mask == 0)
 			fmd_topology_remove(&ctx->topology, &ext->base);
 	}
 
-	return matched ? 0 : -ENOENT;
+	return 0;
 }
 
 /* Apply a region configuration change to every host's view of the region */
@@ -1460,6 +1504,14 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		return -EINVAL;
 	if (!fmd_dc_host_component(dev, host_id))
 		return -ENOENT;
+	/*
+	 * Enable Shared Access adds the capacity "designated by the
+	 * specified tag value" (Section 7.6.7.6.5); in a Sharable region
+	 * the Tag "is required" (Table 8-230). cxl-fmd takes an all-zero
+	 * Tag for none.
+	 */
+	if (policy == FMD_DC_POLICY_SHARED_ACCESS && dc_tag_is_zero(tag))
+		return -EINVAL;
 
 	if (unlikely(!dev_is_hw(dev)))
 		return mock_dc_add(ctx, dev, host_id, policy, region_id, length,
@@ -1618,6 +1670,9 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 {
 	if (!fmd_memdev_dcd(dev))
 		return -ENOENT;
+	/* cxl-fmd takes an all-zero Tag for none: it names no sharable tag */
+	if (dc_tag_is_zero(tag))
+		return -EINVAL;
 
 	if (unlikely(!dev_is_hw(dev)))
 		return mock_dc_reference(ctx, dev, tag, add);
