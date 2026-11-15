@@ -381,8 +381,12 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 		/*
 		 * The head of a Multi-Headed device on this port. It presents
 		 * an SLD or an MLD (Section 2.5), and that is what the port
-		 * sees: Connected Device Type 04h or 05h, on a DSP whose link
-		 * is up.
+		 * sees: Connected Device Type 04h or 05h, on a DSP.
+		 *
+		 * The link of a port with a device is not checked: Table 7-21
+		 * does not tie Connected Device Type to the link, and after a
+		 * surprise Link Down "the presence pin ... will remain
+		 * asserted" (Section 7.6.6.8). cxl-fmd keeps the device then.
 		 */
 		if (port->head) {
 			struct fmd_head *head = port->head;
@@ -401,10 +405,6 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 			if (port->state != FMD_PORT_DSP)
 				invalid(v, port_rule, "%s: port %d has head %d of "
 					"%s and is not a DSP", sw->base.id,
-					port->port_number, head->head_id, mhd_id);
-			if (port->link_status != FMD_LINK_UP)
-				invalid(v, port_rule, "%s: port %d has head %d of "
-					"%s and its link is not up", sw->base.id,
 					port->port_number, head->head_id, mhd_id);
 			if (port->conn_dev_type != (head->presentation == FMD_HEAD_MLD ?
 						    FMD_CONN_MLD : FMD_CONN_SLD))
@@ -438,9 +438,6 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 			invalid(v, port_rule, "%s: port %d has MLD %s and Connected "
 				"Device Type %d, not 05h", sw->base.id, port->port_number,
 				dev->id, port->conn_dev_type);
-		if (port->link_status != FMD_LINK_UP)
-			invalid(v, port_rule, "%s: port %d has device %s and its link "
-				"is not up", sw->base.id, port->port_number, dev->id);
 	}
 
 	/*

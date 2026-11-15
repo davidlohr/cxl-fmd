@@ -149,8 +149,8 @@ stand between a file and the daemon:
 - **The topology is checked against the CXL specification**
   (`src/validate.c`). Each check enforces a rule of CXL r4.0 and names it when
   it fails: a port or an LD bound to more than one vPPB, an MLD port bound as
-  a whole, a VCS whose upstream port is not one, a device on a port whose link
-  is down or whose Connected Device Type is another, capacities that do not
+  a whole, an enabled VCS whose USP ID is not an upstream port or a Fabric
+  Port, a device on a port whose Connected Device Type is another, capacities that do not
   add up, an MLD with no LDs or more than 16, a head of a Multi-Headed device
   with no LD mapped, DC regions and extents that are not aligned or overlap,
   two devices with one serial number.

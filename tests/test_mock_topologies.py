@@ -110,10 +110,6 @@ def duplicate_vppb_id(t):
     t["switches"][0]["vcs"][1]["vppbs"][4]["vppb_id"] = 3
 
 
-def device_on_a_port_that_is_down(t):
-    port(t, 2)["link_status"] = "down"
-
-
 def port_type_is_not_the_device(t):
     port(t, 2)["conn_dev_type"] = "mld"
 
@@ -227,10 +223,6 @@ def head_port_is_not_an_sld_port(t):
     port(t, 3)["conn_dev_type"] = "mld"
 
 
-def head_on_a_port_that_is_down(t):
-    port(t, 3)["link_status"] = "down"
-
-
 # hot-removal.json
 def unplug_twice(t):
     t["unplug"] = ["sld_0", "sld_0"]
@@ -311,7 +303,6 @@ BROKEN = [
     ("multi-host-vcs.json", usp_is_not_upstream, "is not an upstream port"),
     ("multi-host-vcs.json", two_vcs_one_usp, "have the same upstream port"),
     ("multi-host-vcs.json", duplicate_vppb_id, "has two vPPBs with ID"),
-    ("multi-host-vcs.json", device_on_a_port_that_is_down, "its link is not up"),
     ("multi-host-vcs.json", port_type_is_not_the_device, "and Connected Device Type"),
     ("multi-host-vcs.json", duplicate_serial, "have the same serial number"),
     ("multi-host-vcs.json", serial_too_long, "is not a number that fits"),
@@ -334,7 +325,6 @@ BROKEN = [
     ("unit/unit-switch-mhsld.json", head_on_a_missing_port, "which the topology does not have"),
     ("unit/unit-switch-mhsld.json", mld_head_on_a_switch, "presents an MLD on a switch port"),
     ("unit/unit-switch-mhsld.json", head_port_is_not_an_sld_port, "which presents an SLD"),
-    ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down, "and its link is not up"),
     ("hot-removal.json", unplug_twice, "sld_0 is pulled out twice"),
     ("hot-removal.json", unplug_a_switch, "switch_0 is not an SLD or an MLD"),
     ("hot-removal.json", unplug_nothing_there, "sld_9 is not an SLD or an MLD"),
@@ -379,9 +369,23 @@ def disabled_vcs_with_a_stale_usp(t):
         {"vcs_id": 2, "state": 0, "upstream_port_id": 0, "vppbs": []})
 
 
+# A device, or a head, on a port whose link is down: after a surprise Link
+# Down "the presence pin ... will remain asserted" (Section 7.6.6.8), and
+# Table 7-21 does not tie Connected Device Type to the link.
+def device_on_a_port_that_is_down(t):
+    port(t, 2)["link_status"] = "down"
+
+
+# unit/unit-switch-mhsld.json
+def head_on_a_port_that_is_down(t):
+    port(t, 3)["link_status"] = "down"
+
+
 ACCEPTED = [
     # (base topology, what to change)
     ("multi-host-vcs.json", disabled_vcs_with_a_stale_usp),
+    ("multi-host-vcs.json", device_on_a_port_that_is_down),
+    ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down),
 ]
 
 

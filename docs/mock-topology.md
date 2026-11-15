@@ -640,7 +640,9 @@ Each port in the `ports` array defines a physical switch port.
 | `"mld"` | CXL Type 3 Multi-Logical Device |
 
 Any other value is an error. A port with a memory device in `devices` has
-`"sld"` or `"mld"`, the type of that device, and a link that is up.
+`"sld"` or `"mld"`, the type of that device. Its link is not checked: a
+device can be on a port whose link is down, as after a surprise Link Down,
+when "the presence pin ... will remain asserted" (CXL r4.0 Section 7.6.6.8).
 
 ### VCS Configuration
 
@@ -698,8 +700,7 @@ Each head is on a host, or on a switch port of its own:
 | `attached_host` | string | The host a head is connected to directly |
 | `parent_switch`, `parent_port` | string, integer | The switch port a head is on; both or neither |
 
-The port a head is on has the `conn_dev_type` the head presents and a link
-that is up. Only a head that presents an SLD can be on a switch port; see
+The port a head is on has the `conn_dev_type` the head presents. Only a head that presents an SLD can be on a switch port; see
 [mock/README.md](../mock/README.md) for why. `unit/unit-switch-mhsld.json` is
 the example.
 
