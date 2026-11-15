@@ -368,6 +368,38 @@ def test_broken_topology_is_refused(cxl_fmd_executable, tmp_path, base, breakage
     assert message in output, output
 
 
+# ---------------------------------------------------------------------------
+# Valid fabrics the checker once refused
+# ---------------------------------------------------------------------------
+
+# multi-host-vcs.json: a third VCS, disabled. Its USP ID is "Valid only when
+# the VCS is enabled" (Table 7-34), so a stale one names VCS 0's USP.
+def disabled_vcs_with_a_stale_usp(t):
+    t["switches"][0]["vcs"].append(
+        {"vcs_id": 2, "state": 0, "upstream_port_id": 0, "vppbs": []})
+
+
+ACCEPTED = [
+    # (base topology, what to change)
+    ("multi-host-vcs.json", disabled_vcs_with_a_stale_usp),
+]
+
+
+@pytest.mark.parametrize("base,change", ACCEPTED,
+                         ids=[a[1].__name__ for a in ACCEPTED])
+def test_valid_topology_is_accepted(cxl_fmd_executable, tmp_path, base, change):
+    topology = json.loads((ROOT / "mock" / base).read_text())
+    changed = copy.deepcopy(topology)
+    change(changed)
+    assert changed != topology, "the case changes nothing"
+
+    path = tmp_path / "changed.json"
+    path.write_text(json.dumps(changed))
+
+    rc, output = check(cxl_fmd_executable, path)
+    assert rc == 0, f"refused a topology with {change.__name__}\n{output}"
+
+
 def test_broken_topology_does_not_serve(cxl_fmd_executable, tmp_path):
     """Without --check, a topology that is not valid is still refused: the
     daemon exits instead of serving it."""

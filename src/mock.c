@@ -1687,12 +1687,17 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 
 	/*
 	 * Create hosts for each VCS (switch-attached hosts)
-	 * Each VCS represents a host connection via its USP.
+	 * Each VCS represents a host connection via its USP. A VCS that is
+	 * not enabled has none: its USP ID is "Valid only when the VCS is
+	 * enabled" (Table 7-34).
 	 */
 	for (int i = 0; i < sw->num_vcs; i++) {
 		struct fmd_vcs *vcs = &sw->vcs[i];
 		char host_id[FMD_MAX_ID_LEN];
 		struct fmd_host *host;
+
+		if (vcs->state != 0x01)		/* VCS State 01h: Enabled */
+			continue;
 
 		snprintf(host_id, sizeof(host_id), "%.50s_host%d", id, vcs->vcs_id);
 

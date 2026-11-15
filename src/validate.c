@@ -41,6 +41,7 @@ static void invalid(struct validation *v, const char *rule, const char *fmt, ...
 }
 
 #define MB256 CXL_CAPACITY_UNIT
+#define VCS_ENABLED 0x01	/* VCS State 01h, Table 7-34 */
 
 static bool is_pow2(uint64_t x)
 {
@@ -442,26 +443,37 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 				"is not up", sw->base.id, port->port_number, dev->id);
 	}
 
-	/* VCSs and their vPPBs */
+	/*
+	 * VCSs and their vPPBs. USP ID: "Physical Port ID of the current
+	 * VCS's Upstream Port, or the current VCS's fabric physical Port ID of
+	 * a Downstream ES VCS. Valid only when the VCS is enabled." (Table
+	 * 7-34). So the USP ID of a VCS that is not enabled (VCS State 01h)
+	 * is not checked, and it may name a Fabric Port. Two enabled VCSs on
+	 * one Upstream Port is refused; the table does not say whether two
+	 * Downstream ES VCSs may share a Fabric Port, so that is not checked.
+	 */
 	for (int i = 0; i < sw->num_vcs; i++) {
 		struct fmd_vcs *vcs = &sw->vcs[i];
 		struct fmd_port *usp = switch_port(sw, vcs->upstream_port_id);
+		bool enabled = vcs->state == VCS_ENABLED;
 
 		for (int j = i + 1; j < sw->num_vcs; j++) {
 			if (sw->vcs[j].vcs_id == vcs->vcs_id)
 				invalid(v, vcs_rule, "%s: two VCSs with ID %d",
 					sw->base.id, vcs->vcs_id);
-			if (sw->vcs[j].upstream_port_id == vcs->upstream_port_id)
+			if (enabled && sw->vcs[j].state == VCS_ENABLED &&
+			    usp && usp->state == FMD_PORT_USP &&
+			    sw->vcs[j].upstream_port_id == vcs->upstream_port_id)
 				invalid(v, vcs_rule, "%s: VCS %d and VCS %d have the same "
 					"upstream port %d", sw->base.id, vcs->vcs_id,
 					sw->vcs[j].vcs_id, vcs->upstream_port_id);
 		}
 
-		/* USP ID: "Physical Port ID of the current VCS's Upstream Port" */
-		if (!usp || usp->state != FMD_PORT_USP)
+		if (enabled && (!usp || (usp->state != FMD_PORT_USP &&
+					 usp->state != FMD_PORT_FABRIC)))
 			invalid(v, vcs_rule, "%s: VCS %d: USP ID %d is not an upstream "
-				"port of the switch", sw->base.id, vcs->vcs_id,
-				vcs->upstream_port_id);
+				"port or a Fabric Port of the switch", sw->base.id,
+				vcs->vcs_id, vcs->upstream_port_id);
 
 		for (int p = 0; p < vcs->num_vppbs; p++) {
 			struct fmd_vppb *vppb = &vcs->vppbs[p];

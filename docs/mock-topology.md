@@ -654,7 +654,7 @@ Virtual CXL Switches partition switch resources for multi-host configurations.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `vcs_id` | integer | array index | VCS identifier |
-| `state` | integer | 1 | VCS state (0=disabled, 1=enabled) |
+| `state` | integer | 1 | VCS State (0=disabled, 1=enabled). The USP ID of a VCS is "Valid only when the VCS is enabled" (Table 7-34): a VCS that is not enabled gets no host, and its `upstream_port_id` is not checked |
 | `upstream_port_id` | integer | 0 | Upstream port for this VCS |
 | `hdm_decoders` | integer | 8 | Number of HDM decoders |
 | `vppbs` | array | [] | Virtual PPB bindings |

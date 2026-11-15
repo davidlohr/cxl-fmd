@@ -2947,6 +2947,67 @@ static void test_not_ready(void)
 	report("device not ready", before);
 }
 
+/*
+ * Get Virtual CXL Switch Info, Table 7-34. USP ID: "Physical Port ID of the
+ * current VCS's Upstream Port, or the current VCS's fabric physical Port ID
+ * of a Downstream ES VCS. Valid only when the VCS is enabled." A Downstream
+ * ES VCS on a Fabric Port, and a disabled VCS whose USP ID is that of
+ * another VCS, are both valid.
+ */
+static struct fmd_port *add_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
+				 uint8_t number, enum fmd_port_state state)
+{
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_port *port;
+
+	snprintf(id, sizeof(id), "%.40s_port%d", sw->base.id, number);
+	port = fmd_port_create(id, number);
+	if (!port) {
+		printf("FAIL  cannot create a port\n");
+		exit(1);
+	}
+	port->state = state;
+	fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+	return port;
+}
+
+static void test_validate_usp_id(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct fmd_switch *sw = fmd_switch_create("sw_validate");
+	int before = failures, invalid;
+
+	if (!sw) {
+		printf("FAIL  cannot create a switch\n");
+		exit(1);
+	}
+	fmd_topology_add(&ctx->topology, &sw->base, NULL);
+	add_port(ctx, sw, 0, FMD_PORT_USP);
+	add_port(ctx, sw, 1, FMD_PORT_FABRIC);
+
+	sw->num_vcs = 3;
+	sw->vcs[0].vcs_id = 0;			/* on the USP */
+	sw->vcs[0].state = 0x01;
+	sw->vcs[0].upstream_port_id = 0;
+	sw->vcs[1].vcs_id = 1;			/* a Downstream ES VCS */
+	sw->vcs[1].state = 0x01;
+	sw->vcs[1].upstream_port_id = 1;
+	sw->vcs[2].vcs_id = 2;			/* disabled: USP ID not valid */
+	sw->vcs[2].state = 0x00;
+	sw->vcs[2].upstream_port_id = 0;
+
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 0, "%d rule(s) broken", invalid);
+
+	/* enabled, the third VCS is on the first one's USP */
+	sw->vcs[2].state = 0x01;
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 1, "%d rule(s) broken by two VCSs on one USP", invalid);
+
+	fmd_ctx_free(ctx);
+	report("USP ID of a Downstream ES VCS and of a disabled VCS", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -2991,6 +3052,7 @@ int main(void)
 	test_mhd(false);
 	test_mhd(true);
 	test_not_ready();
+	test_validate_usp_id();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);
