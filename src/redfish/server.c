@@ -1310,6 +1310,9 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -2)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Chunk does not belong to specified domain");
+		if (rc == -4)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The device cannot be given that partition");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete memory chunk");
 	}

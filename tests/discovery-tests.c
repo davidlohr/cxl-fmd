@@ -3685,6 +3685,35 @@ static void test_notification_ack(void)
 	report("event notifications acknowledged as responses", before);
 }
 
+/*
+ * Deleting a Volatile chunk of an SLD moves its partition, which a device
+ * whose Partition Alignment is 0 cannot do (Table 8-309): that is the
+ * request's fault, 400, as it is for a POST, and the chunk stays.
+ */
+static void test_chunk_delete_partition_refused(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], chunk[FMD_MAX_ID_LEN + 16];
+	int before = failures, rc;
+
+	answer_identify(ep, 0xed, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xed);
+	snprintf(dom, sizeof(dom), "%.50s_domain0", id);
+	snprintf(chunk, sizeof(chunk), "%.50s_chunk0", id);
+	CHECK(fmd_topology_find_chunk(&ctx->topology, chunk), "no chunk %s", chunk);
+
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == -4, "delete: %d, not a refused partition", rc);
+	CHECK(fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "the chunk went although its partition could not");
+
+	fmd_ctx_free(ctx);
+	report("a chunk whose partition cannot be moved", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -3832,6 +3861,7 @@ int main(void)
 	test_dc_refresh_after_failed_read();
 	test_rescan_reads_new_logs();
 	test_notification_route();
+	test_chunk_delete_partition_refused();
 	test_notification_ack();
 	test_log_ring();
 	test_overcount_switch();

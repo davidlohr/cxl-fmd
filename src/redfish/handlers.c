@@ -4399,6 +4399,9 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 			}
 		}
 
+		/* a partition the device cannot be given, as for a POST */
+		if (rc == -EINVAL || rc == -EOPNOTSUPP)
+			return -4;
 		if (rc < 0)
 			return -3;  /* CCI command failed */
 	}
