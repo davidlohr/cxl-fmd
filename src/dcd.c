@@ -1229,8 +1229,19 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 		rc = cxlmi_cmd_fmapi_dc_list_tags(ep, ti, &req, rsp);
 		if (rc) {
-			/* Optional on r3.0 devices: not fatal */
-			fmd_dbg(ctx, "%s: DC list tags failed: %d", dev->id, rc);
+			/*
+			 * Not fatal: the extents are kept, with no FM
+			 * reference and nothing pending. 5608h is "DCO" and
+			 * "DCS" in CXL r4.0 Table 8-397, as every 56xxh
+			 * command is: "Optional for DCDs", and "Mandatory for
+			 * all DCDs that implement an MCTP-based CCI". A
+			 * device without it answers Unsupported; anything
+			 * else is worth a warning.
+			 */
+			if (rc == CXLMI_RET_UNSUPPORTED)
+				fmd_dbg(ctx, "%s: DC list tags unsupported", dev->id);
+			else
+				fmd_warn(ctx, "%s: DC list tags failed: %d", dev->id, rc);
 			rc = 0;
 			break;
 		}
