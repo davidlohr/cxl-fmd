@@ -72,6 +72,23 @@ class TestFMBootsFirst:
         assert list(now.values()) == [("BoundPhysicalPort", 2, None)]
         assert all(vcs == "0" for vcs, _ in now)
 
+    def test_the_hosts_view_of_its_memory(self, api_client):
+        """The host's MemoryDomain and MemoryChunks for a connection have the
+        properties their schemas define (MemoryDomain v1.5, MemoryChunks
+        v1.6): the domain's size is MemorySizeMiB."""
+        status, conn = connect(api_client, "switch_0_host0", "sld_0")
+        assert status == 201
+        base = "/redfish/v1/Systems/switch_0_host0/MemoryDomains"
+        status, domains = api_client.get(base)
+        assert status == 200 and len(domains["Members"]) == 1
+        status, domain = api_client.get(domains["Members"][0]["@odata.id"])
+        assert status == 200
+        assert domain["MemorySizeMiB"] == 16384 and "MemorySize" not in domain
+        status, chunks = api_client.get(domain["MemoryChunks"]["@odata.id"])
+        status, chunk = api_client.get(chunks["Members"][0]["@odata.id"])
+        assert status == 200
+        assert chunk["MemoryChunkSizeMiB"] == 16384 and "AccessState" not in chunk
+
     def test_an_sld_goes_to_one_host(self, api_client):
         assert connect(api_client, "switch_0_host0", "sld_0")[0] == 201
         before = bindings(api_client, "switch_0")

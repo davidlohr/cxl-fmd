@@ -275,7 +275,7 @@ json_t *fmd_redfish_system_memory_domain(struct fmd_ctx *ctx,
 		"@odata.type", "#MemoryDomain.v1_5_1.MemoryDomain",
 		"Id", domain_id,
 		"Name", conn->target_id,
-		"MemorySize", (int64_t)(chunk->size / (1024 * 1024)),
+		"MemorySizeMiB", (int64_t)(chunk->size / (1024 * 1024)),
 		"MemoryChunks", "@odata.id", chunks_id
 	);
 }
@@ -337,7 +337,6 @@ json_t *fmd_redfish_system_memory_chunk(struct fmd_ctx *ctx,
 	struct fmd_host *host;
 	struct fmd_connection *conn;
 	struct fmd_mem_chunk *chunk;
-	json_t *access_state;
 	char odata_id[192];
 
 	host = fmd_topology_find_host(&ctx->topology, system_id);
@@ -360,13 +359,10 @@ json_t *fmd_redfish_system_memory_chunk(struct fmd_ctx *ctx,
 		 "/redfish/v1/Systems/%s/MemoryDomains/%s/MemoryChunks/%s",
 		 system_id, domain_id, chunk_id);
 
-	/* Build access capabilities array */
-	access_state = json_array();
-	if (conn->access_caps & FMD_ACCESS_READ)
-		json_array_append_new(access_state, json_string("Read"));
-	if (conn->access_caps & FMD_ACCESS_WRITE)
-		json_array_append_new(access_state, json_string("Write"));
-
+	/*
+	 * How the host may use it is the Connection's: AccessCapabilities of
+	 * its MemoryChunkInfo. MemoryChunks has no property for it.
+	 */
 	return json_pack(
 		"{"
 		"  s:s,"
@@ -374,16 +370,14 @@ json_t *fmd_redfish_system_memory_chunk(struct fmd_ctx *ctx,
 		"  s:s,"
 		"  s:s,"
 		"  s:I,"
-		"  s:s,"
-		"  s:o"
+		"  s:s"
 		"}",
 		"@odata.id", odata_id,
 		"@odata.type", "#MemoryChunks.v1_6_1.MemoryChunks",
 		"Id", chunk_id,
 		"Name", chunk_id,
 		"MemoryChunkSizeMiB", (int64_t)(chunk->size / (1024 * 1024)),
-		"AddressRangeType", chunk->address_range_type,
-		"AccessState", access_state
+		"AddressRangeType", chunk->address_range_type
 	);
 }
 
