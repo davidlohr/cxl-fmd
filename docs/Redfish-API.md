@@ -352,7 +352,8 @@ include switch MLD Ports, valid LDs within an MLD, and the LD Pool CCI in
 a Multi-Headed device" (CXL r4.0 Section 7.6.7.3.1). Its `PCIeDevice` has
 no `CXLDevice/Timestamp`, a `PATCH` of the timestamp returns 400, and the
 `Memory` writes and actions fail. An MLD on a switch port is reached
-through that port.
+through that port. In mock mode (`--mock`) no command is sent for any
+device, and these requests act on the mock's state as for any other.
 - `POST /redfish/v1/Fabrics/CXL/Switches/{sw}/Ports/{port}/Actions/Port.ResetPPB` - Reset PPB
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}` - Set DC Region Configuration
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd` - Initiate Dynamic Capacity Add

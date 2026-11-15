@@ -4643,8 +4643,6 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 	if (comp->type == FMD_COMPONENT_SLD) {
 		if (strcmp(mem_id, chassis_id) != 0)
 			return -1;
-		if (fmd_sld_behind_switch(comp))
-			return -4;
 		struct fmd_sld *sld = fmd_to_sld(comp);
 		memdev = &sld->memdev;
 		partition = &sld->partition;
@@ -4727,9 +4725,13 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 	struct cxlmi_tunnel_info ti_buf, *ti = CXLMI_NO_TUNNEL;
 
 	/* mock mode: the same checks, local state only */
-	if (likely(!fmd_is_mock(ctx)) &&
-	    memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
+	if (likely(!fmd_is_mock(ctx))) {
+		if (fmd_sld_behind_switch(comp))
+			return -4;
+		if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf,
+					  &ti) != 0)
+			return -1;
+	}
 
 	rc = fmd_memdev_set_partition(ctx, mem_id, ep, ti, memdev, partition,
 				      next_volatile, false);
