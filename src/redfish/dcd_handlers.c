@@ -872,7 +872,7 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	if (val) {
 		if (!json_is_integer(val) || json_integer_value(val) < 0) {
 			json_decref(root);
-			*msg = "Length must be a non-negative integer (MiB, 0 = all)";
+			*msg = "Length must be a positive integer (MiB)";
 			return -EINVAL;
 		}
 		length = (uint64_t)json_integer_value(val) * FMD_MIB;
@@ -900,6 +900,12 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	if (policy == FMD_DC_REL_POLICY_TAG_BASED && (!have_tag || !have_length)) {
 		free(extents);
 		*msg = "Tag and Length are required for TagBased";
+		return -EINVAL;
+	}
+	/* Length "Shall be > 0" (Table 7-73): there is no "release everything" */
+	if (policy == FMD_DC_REL_POLICY_TAG_BASED && length == 0) {
+		free(extents);
+		*msg = "Length must be a positive integer (MiB) for TagBased";
 		return -EINVAL;
 	}
 	if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE && ext_count == 0) {

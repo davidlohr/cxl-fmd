@@ -299,7 +299,7 @@ class TestDynamicCapacityRelease:
 
     def test_release_tag_based_all(self, api_client):
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
-            "TagBased", Tag=TAG_SEED, Length=0))
+            "TagBased", Tag=TAG_SEED, Length=4096))
         assert status == 200
         assert extent_ids(api_client) == []
         status, data = api_client.get(SLD_LD0)
@@ -343,15 +343,30 @@ class TestDynamicCapacityRelease:
 
     def test_release_unknown_tag_404(self, api_client):
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
-            "TagBased", Tag="00000000-0000-0000-0000-0000000000ff", Length=0))
+            "TagBased", Tag="00000000-0000-0000-0000-0000000000ff", Length=256))
         assert status == 404
+
+    def test_release_tag_based_length_zero_400(self, api_client):
+        """Length "Shall be > 0" (Table 7-73): 0 does not mean everything."""
+        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+            "TagBased", Tag=TAG_SEED, Length=0))
+        assert status == 400
+        assert extent_ids(api_client) == ["ext_400000000"]
+
+    def test_release_tag_based_more_than_held_409(self, api_client):
+        """More than the host holds with the tag is Resources Exhausted."""
+        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+            "TagBased", Tag=TAG_SEED, Length=4096 + 256))
+        assert status == 409
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        assert data["ExtentSizeMiB"] == 4096
 
     def test_release_requires_booleans(self, api_client):
         status, _, _ = api_client.post(SLD_RELEASE, {
-            "Policy": "TagBased", "Tag": TAG_SEED, "Length": 0})
+            "Policy": "TagBased", "Tag": TAG_SEED, "Length": 256})
         assert status == 400
         status, _, _ = api_client.post(SLD_RELEASE, {
-            "Policy": "TagBased", "Tag": TAG_SEED, "Length": 0,
+            "Policy": "TagBased", "Tag": TAG_SEED, "Length": 256,
             "ForcedRemoval": "no", "SanitizeOnRelease": False})
         assert status == 400
 

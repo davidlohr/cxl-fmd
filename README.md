@@ -323,7 +323,7 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cx
 # Release it again (Initiate Dynamic Capacity Release)
 curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease \
   -H 'Content-Type: application/json' \
-  -d '{"Policy": "TagBased", "Tag": "6f1a2c3e-0000-4000-8000-0000000000aa", "Length": 0, "ForcedRemoval": false, "SanitizeOnRelease": true}'
+  -d '{"Policy": "TagBased", "Tag": "6f1a2c3e-0000-4000-8000-0000000000aa", "Length": 1024, "ForcedRemoval": false, "SanitizeOnRelease": true}'
 ```
 
 ## Limitations

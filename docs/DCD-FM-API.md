@@ -394,7 +394,7 @@ int cxlmi_cmd_fmapi_initiate_dc_release(struct cxlmi_endpoint *ep,
 | `flags[3:0]` | removal policy: 0 Tag-based, 1 Prescriptive | `Policy` (required) |
 | `flags[4]` | Forced Removal | `ForcedRemoval` (required). `true` means the device does not wait for the host's Release Dynamic Capacity; the host loses access immediately. |
 | `flags[5]` | Sanitize on Release | `SanitizeOnRelease` (required); only honoured where the region allows it |
-| `length` | bytes | `Length` MiB (required for TagBased) |
+| `length` | bytes; "Shall be > 0" and reserved for Prescriptive (Table 7-73) | `Length` MiB (required for TagBased, and greater than 0: there is no "release everything"; sent as 0 for Prescriptive) |
 | `tag` | 16 bytes | `Tag` (required for TagBased) |
 | `ext_count` + `extents[]` | | `ExtentList[]` (required for Prescriptive) |
 

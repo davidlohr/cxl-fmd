@@ -626,17 +626,32 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 {
 	struct fmd_component *child, *next;
 	uint64_t bit = fmd_dc_host_bit(host_id);
-	uint64_t remaining = length;
-	int matched = 0;
+	uint64_t remaining = length, held = 0;
 
 	switch (policy) {
 	case FMD_DC_REL_POLICY_TAG_BASED:
 		/*
-		 * Release Length bytes (0 = everything) carrying Tag. An extent
-		 * only this host holds can be trimmed from the tail; a shared
-		 * extent is released whole.
+		 * Release Length bytes carrying Tag. Length "Shall be > 0"
+		 * (Table 7-73), and more than the host holds with the tag is
+		 * Resources Exhausted (Section 7.6.7.6.6). An extent only
+		 * this host holds can be trimmed from the tail; a shared
+		 * extent is released whole, which is the mock's choice.
 		 */
-		for (child = dev->first_child; child; child = next) {
+		if (length == 0)
+			return -EINVAL;
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			if ((ext->host_mask & bit) &&
+			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) == 0)
+				held += ext->len;
+		}
+		if (!held)
+			return -ENOENT;
+		if (length > held)
+			return -ENOSPC;
+
+		for (child = dev->first_child; child && remaining; child = next) {
 			struct fmd_dc_extent *ext;
 
 			next = child->next_sibling;
@@ -646,22 +661,18 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			if (!(ext->host_mask & bit) ||
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
-			if (length && remaining == 0)
-				break;
 
-			matched++;
-			if (length && remaining < ext->len && ext->host_mask == bit) {
+			if (remaining < ext->len && ext->host_mask == bit) {
 				ext->len -= remaining;
 				remaining = 0;
 				continue;
 			}
-			if (length)
-				remaining = (ext->len >= remaining) ? 0 : remaining - ext->len;
+			remaining = (ext->len >= remaining) ? 0 : remaining - ext->len;
 
 			fmd_dc_adjust_available_extents(dev, host_id, 1);
 			extent_drop_host(ctx, ext, host_id);
 		}
-		return matched ? 0 : -ENOENT;
+		return 0;
 
 	case FMD_DC_REL_POLICY_PRESCRIPTIVE:
 		if (ext_count <= 0 || !extents)
@@ -1529,6 +1540,9 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	if (!dcd || host_id < 0 || host_id >= FMD_MAX_DC_HOSTS)
 		return -ENOENT;
 	if (!cap_bit || !(dcd->release_policies & cap_bit))
+		return -EINVAL;
+	/* Length: "Shall be > 0" unless the policy is Prescriptive (Table 7-73) */
+	if (policy == FMD_DC_REL_POLICY_TAG_BASED && length == 0)
 		return -EINVAL;
 	if (!fmd_dc_host_component(dev, host_id))
 		return -ENOENT;
