@@ -208,7 +208,9 @@ XML metadata responses include:
 | 1 (Not Ready) | Starting |
 | 2 (Write Persistency Lost) | Degraded |
 | 3 (All Data Lost) | UnavailableOffline |
-| 4 (Prior Loss Event) | Degraded |
+| 4 (Write Persistency Loss in the Event of Power Loss) | Degraded |
+| 5 to 9 (write persistency or all data may be lost) | Degraded |
+| Reserved (0Ah and up) | Degraded (cxl-fmd's choice) |
 
 ## Mock Topology
 

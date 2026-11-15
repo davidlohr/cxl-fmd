@@ -227,7 +227,13 @@ The `media_status` field indicates media condition:
 | 1 | Not Ready | Starting |
 | 2 | Write Persistency Lost | Degraded |
 | 3 | All Data Lost | UnavailableOffline |
-| 4 | Write Persistency Loss Event (in prior power cycle) | Degraded |
+| 4 | Write Persistency Loss in the Event of Power Loss | Degraded |
+| 5 | Write Persistency Loss in Event of Shutdown | Degraded |
+| 6 | Write Persistency Loss Imminent | Degraded |
+| 7 | All Data Loss in the Event of Power Loss | Degraded |
+| 8 | All Data Loss in the Event of Shutdown | Degraded |
+| 9 | All Data Loss Imminent | Degraded |
+| 10 and up | Reserved | Degraded (cxl-fmd's choice) |
 
 ### QoS Control (FM-API 0x5403)
 
@@ -1312,7 +1318,9 @@ This example demonstrates:
 | 1 (Not Ready) | Starting |
 | 2 (Write Persistency Lost) | Degraded |
 | 3 (All Data Lost) | UnavailableOffline |
-| 4 (Prior Loss Event) | Degraded |
+| 4 (Write Persistency Loss in the Event of Power Loss) | Degraded |
+| 5 to 9 (write persistency or all data may be lost) | Degraded |
+| Reserved (0Ah and up) | Degraded (cxl-fmd's choice) |
 
 ### Device Type → Semantics Supported
 

@@ -1479,6 +1479,12 @@ static void test_health_mapping(void)
 	for (int media = 0x04; media <= 0x09; media++)
 		CHECK(fmd_map_media_status(media) == STATE_DEGRADED,
 		      "Media Status %02xh is reported as normal", media);
+	/* "All other encodings are reserved": not Normal either */
+	CHECK(fmd_map_media_status(0x0a) == STATE_DEGRADED &&
+	      fmd_map_media_status(0xff) == STATE_DEGRADED,
+	      "a reserved Media Status is reported as normal");
+	CHECK(fmd_worse_media_status(0x00, 0x0a) == 0x0a,
+	      "worse of 00h and reserved 0Ah");
 
 	/* the worse of two is by meaning: 03h (all data lost) over 09h */
 	CHECK(fmd_worse_media_status(0x03, 0x09) == 0x03 &&
