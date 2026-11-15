@@ -59,14 +59,14 @@ table is cxl-fmd's proposal, not DSP0288 text.
 | Get DC Region Extent Lists | Extent Length | `MemoryExtent` | `ExtentSizeMiB` | Yes |
 | Get DC Region Extent Lists | Extent Tag | `MemoryExtent` | `Tag` | Yes |
 | Get DC Region Extent Lists | Shared Extent Sequence | `MemoryExtent` | `SequenceNumber` | Yes |
-| Get DC Region Extent Lists | Total Extent Count (per region) | `MemoryRegion` | `ExtentsCount`, `MemoryExtents[].ExtentLink` | Yes |
+| Get DC Region Extent Lists | Extent List ("for the specified host", all regions) | `MemoryRegion` | `ExtentsCount`, `MemoryExtents[].ExtentLink`: the host's extents in that region, counted by cxl-fmd | Yes |
 | Initiate Dynamic Capacity Add (5604h) | All | `CXLLogicalDevice` | `DynamicCapacityAdd` action | Yes |
 | Initiate Dynamic Capacity Release (5605h) | All | `CXLLogicalDevice` | `DynamicCapacityRelease` action | Yes |
 | Initiate Dynamic Capacity Release | Prescriptive, single extent | `MemoryExtent` | DELETE | Yes |
 | Dynamic Capacity Add Reference (5606h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `true` | Yes |
 | Dynamic Capacity Remove Reference (5607h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `false` | Yes |
 | Dynamic Capacity List Tags (5608h) | Tag Flags: FM reference | `MemoryExtent` | `FMReferencedExtent` | Yes |
-| Dynamic Capacity List Tags | Pending Reference Bitmap | `MemoryRegion` | `MemoryExtents[].Pending` | Yes |
+| Dynamic Capacity List Tags | Pending Reference Bitmap | `MemoryRegion` | `MemoryExtents[].Pending`, per tag, see Comment 5 | Partial |
 | Dynamic Capacity List Tags | Reference Bitmap (per-host) | | No standard property, see Comment 4 | No |
 | Dynamic Capacity Event Record (via Get Event Records) | Event Types 04h (Add Capacity Response) and 05h (Capacity Released) | `LogEntry` | `CXLEntryType` = `DynamicCapacity`, in the `DeviceLog` of the host's LD; not for Multi-Headed devices | Yes |
 
@@ -78,17 +78,44 @@ region on a multi-host DCD appears once under each LD that can see
 it, with the host-specific `RegionBaseOffsetMiB` reported by 5601h for that
 Host ID.
 
-**Comment 2:** Extents are device-wide (keyed by DPA and tag), so the
-`MemoryExtent` collection hangs off the `PCIeDevice`. A `MemoryRegion`
-refers to its extents through `MemoryExtents[].ExtentLink`; the inline
+**Comment 2:** cxl-fmd keeps one extent object per Starting DPA for the
+whole device, a child of the Type 3 device, with a bit for each host that
+5603h lists it for; the `MemoryExtent` collection hangs off the
+`PCIeDevice`, and an extent's Id is made of its DPA alone. When 5603h lists
+the same DPA for a second host, cxl-fmd takes it for the same extent: the
+length, tag and sequence are overwritten with the second host's, and the
+host's bit is added. **This is a known limitation, not the specification's
+model.** The DPA space is per host: "The DCD controls which DPA range it
+assigns to each region for each host. The DPA ranges exposed by the device
+to each host are independent of one another." (Section 9.13.3). Shared
+capacity is identified by its Tag and Shared Extent Sequence (Table 8-230),
+not by its DPA, and an extent has one region for all its hosts here, so a
+share whose hosts see it in different regions cannot be shown. Keying
+extents per host is deferred. A `MemoryRegion` refers to its extents
+through `MemoryExtents[].ExtentLink`; the inline
 `ExtentOffsetMiB`/`ExtentSizeMiB`/`Tag`/`SequenceNumber` members are
-deprecated since `MemoryRegion v1.1.0` and should not be emitted.
+deprecated since `MemoryRegion v1.1.0` and are not emitted.
 
-**Comment 3:** All FM-API DC lengths and offsets are bytes aligned to the
-region block size. Redfish uses MiB throughout. cxl-fmd shall reject a
-request whose MiB value does not convert to a block-size multiple with
-`400 Bad Request` and a `PropertyValueIncorrect` message rather than
-rounding.
+**Comment 3:** FM-API DC lengths and offsets are bytes; a Length is
+"Always a multiple of the configured Region Block Size" (Table 7-72).
+Redfish uses MiB throughout, and cxl-fmd multiplies by 2^20. A Free or
+Contiguous add whose Length is not a multiple of the region's block size is
+refused with `400 Bad Request` before anything is sent, in the mock and on
+hardware; nothing is rounded. Sizes are shown in whole MiB, so a block size
+below 1 MiB (Table 7-65 allows any power of two from 2^6 bytes) is not
+listed in `MemoryBlockSizesSupported`, shows as `BlockSizeMiB` 0, and cannot
+be chosen with PATCH: a known limitation.
+
+Errors are a Redfish error object whose `code` is always
+`Base.1.0.GeneralError` and whose `message` says what was wrong; no Base
+registry MessageId such as `PropertyValueIncorrect`, `PropertyNotWritable`
+or `ResourceInUse` is emitted, and there is no `@Message.ExtendedInfo`. The
+HTTP status says what kind of failure it is. When the device refuses a
+command, its return code decides it: Invalid Input, Invalid Extent List and
+Invalid Physical Address are `400`, Resources Exhausted is `409`, Retry
+Required and Busy are `503` (with no `Retry-After`), Unsupported from 5602h
+is `409`; a command that could not be carried, and any other return code,
+is `500`.
 
 **Comment 4:** The per-host reference bitmaps returned by 5608h (which hosts
 currently hold a shared tag, and which have an add pending) have no standard
@@ -100,9 +127,20 @@ them as `Oem/Cxl/HostReferences[]` on `MemoryExtent`, or push for a
 request returns once the device has queued the add/release toward the host,
 and completion is signalled by a DC event record. The Redfish actions should
 therefore return `202 Accepted` with a `Task`, which is the "BG
-commands/context" item in `TODO`. Until the task service exists, returning
-`204 No Content` after the FM-API command succeeds is acceptable, but the
-extent will show `Pending = true` until the host accepts it.
+commands/context" item in `TODO`. Until the task service exists, they
+return `200 OK` once the FM-API command succeeds.
+
+Whether an extent shows `Pending = true` until the host accepts it depends
+on the device, and is a known gap. On hardware, `Pending` is the host's bit
+in the 5608h Pending Reference Bitmap of the extent's tag, and only for an
+extent that 5603h lists for that host. Table 7-71 says only that the list
+is the "Extent list for the specified host", and does not say whether it
+includes extents still pending; if a device leaves them out, `Pending`
+is never true. The bitmap is per tag, so every extent with the same tag
+(all untagged extents among them) shares one pending state. The mock host
+accepts added capacity at once, so in the mock `Pending` is only true for
+extents a topology file declares pending. Building pending extents from the
+5608h bitmap and the DC event records is deferred.
 
 ---
 
@@ -127,13 +165,16 @@ extent will show `Pending = true` until the host accepts it.
 /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions           <- 5601h
 /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}  PATCH -> 5602h
 
-/redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
-    Links/MemoryExtent                                 -> the extent this chunk backs
 ```
 
-Extent IDs should be stable across rescans. Use the DPA of the extent in
-hex (`ext_0x40000000`), since the extent list index shifts whenever an
-extent is released. Region IDs are the region index (`0`..`7`).
+`Links/MemoryExtent` on a `MemoryChunks` resource (`MemoryChunks v1.7.0`)
+is not served.
+
+Extent IDs are stable across rescans: `ext_` and the Starting DPA of the
+extent in hex, with no `0x` (`ext_400000000`), since the extent list index
+shifts whenever an extent is released. Being the DPA alone, they are not
+unique across hosts (Comment 2). Region IDs are the region index
+(`0`..`7`).
 
 ---
 
@@ -144,9 +185,18 @@ r3.2. Byte offsets are omitted; the struct order is the wire order.
 
 ### Get DCD Info (5600h)
 
-Read on discovery for every Type 3 device whose CEL includes 5600h, directly
-for SLDs and through `CXLMI_TUNNEL_MLD`/`CXLMI_TUNNEL_MHD` for the FM-owned
-LD of an MLD or MHD.
+Sent on discovery to every Type 3 device, whatever its CEL says; a device
+that does not answer it with Success is taken not to be a DCD. Like every
+56xxh command, it is sent on the device's own FM-API endpoint, or, for an
+MLD on a switch port, through that port with
+`DEFINE_CXLMI_TUNNEL_SWITCH` (see `dcd_tunnel()` in `src/dcd.c` and
+[Host ID Resolution](#host-id-resolution)). The FM-owned LD itself is no
+tunnel target: "The FM-owned LD (LD=FFFFh) is an invalid target in MLDs."
+(Section 7.6.7.3.1). For a Multi-Headed device, the specification names
+"the LD Pool CCI in a Multi-Headed device" among the valid tunnel targets,
+"targeted using the Target Type field"; cxl-fmd sends to the MHD's endpoint
+with no tunnel, which assumes that endpoint is the LD Pool CCI. No tunnel to
+the LD Pool CCI is built.
 
 ```c
 int cxlmi_cmd_fmapi_get_dcd_info(struct cxlmi_endpoint *ep,
@@ -158,11 +208,11 @@ int cxlmi_cmd_fmapi_get_dcd_info(struct cxlmi_endpoint *ep,
 |----------------|----------|---------|
 | `num_hosts` | count | `MaxHosts` |
 | `num_supported_dc_regions` | count, 1..8 | `MaxDynamicCapacityRegions` |
-| `capacity_selection_policies` | bitmask: bit 0 Free, bit 1 Contiguous, bit 2 Prescriptive; bit 3 "must be 0" in CXL r4.0 Table 7-65, so a device cannot advertise Enable Shared Access | `AddCapacityPoliciesSupported[]` with `Free`, `Contiguous`, `Prescriptive` (`EnableSharedAccess` only where a mock topology lists it). An `EnableSharedAccess` request to a device is sent whatever the mask says: the device refuses it with Invalid Input if the region is not Sharable |
+| `capacity_selection_policies` | bitmask: bit 0 Free, bit 1 Contiguous, bit 2 Prescriptive; bit 3 "Must be 0" in CXL r4.0 Table 7-65, so a device cannot advertise Enable Shared Access | `AddCapacityPoliciesSupported[]` with `Free`, `Contiguous`, `Prescriptive`; no shipped mock topology lists `EnableSharedAccess`. An `EnableSharedAccess` request is served whatever the mask says, by the mock and by a device: the device refuses it with Invalid Input if the region is not Sharable (Section 7.6.7.6.5) |
 | `capacity_removal_policies` | bitmask: bit 0 Tag-based, bit 1 Prescriptive | `ReleaseCapacityPoliciesSupported[]` with `TagBased`, `Prescriptive` |
 | `sanitize_on_release_config_mask` | bit N set = region N's Sanitize on Release is configurable | `SanitizationOnReleaseSupport[]` of `{RegionNumber, SanitizationOnReleaseSupported}` |
 | `total_dynamic_capacity` | multiples of 256 MB | `TotalDynamicCapacityMiB` = value * 256 |
-| `region_N_supported_blk_sz_mask` | bit n set = block size 2^n bytes supported; valid for N < `num_supported_dc_regions` | `MemoryBlockSizesSupported[]` of `{RegionNumber, BlockSizeMiB[]}` listing every set bit >= 20 as 2^(n-20) MiB |
+| `region_N_supported_blk_sz_mask` | bit n set = block size 2^n bytes supported; valid for N < `num_supported_dc_regions` | `MemoryBlockSizesSupported[]` of `{RegionNumber, BlockSizeMiB[]}` listing every set bit >= 20 as 2^(n-20) MiB; sizes below 1 MiB are not listed (Comment 3) |
 
 ```json
 "CXLDevice": {
@@ -215,10 +265,14 @@ Request: `host_id`, `region_cnt` (max to return), `start_region_id`.
 | `num_extents_supported` / `num_extents_available` | `CXLLogicalDevice.TotalSupportedExtents` / `AvailableExtents` |
 | `num_tags_supported` / `num_tags_available` | `CXLLogicalDevice.TotalSupportedTags` / `AvailableTags` |
 
-Always set `RegionType` to `Dynamic` and `InterconnectSpecificDCManagement`
-to `true` for regions discovered this way. A region with `region_len == 0`
-is not configured and should be omitted from the collection rather than
-shown empty.
+`RegionType` is always `Dynamic`. `InterconnectSpecificDCManagement` is
+Bit[5] of Attributes1 as the device reports it. A DCD "shall set the
+Dynamic Capacity DSMAS Flag in each structure to indicate a Dynamic
+Capacity supported range" (Section 9.13.3), so it is expected to be set for
+every DC region; that Bit[5] is that flag is cxl-fmd's reading, not
+confirmed against the CDAT specification. A region with `region_len == 0`
+is not configured and is omitted from the collection rather than shown
+empty.
 
 ```json
 {
@@ -241,13 +295,7 @@ shown empty.
   "MemoryExtents": [
     {
       "Pending": false,
-      "ExtentLink": { "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents/ext_0x400000000" }
-    }
-  ],
-  "MemoryChunks": [
-    {
-      "ChunkOffsetMiB": 0,
-      "ChunkLink": { "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/MemoryDomains/cxl_dcd0_domain0/MemoryChunks/dc_chunk0" }
+      "ExtentLink": { "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents/ext_400000000" }
     }
   ],
   "Status": { "State": "Enabled", "Health": "OK" }
@@ -257,7 +305,9 @@ shown empty.
 ### Set DC Region Configuration (5602h)
 
 `PATCH` on a `MemoryRegion`. Only `BlockSizeMiB` and `SanitizeOnRelease` are
-writable; anything else in the body gets `PropertyNotWritable`.
+writable; any other property in the body is refused with `400` and the
+message "Property is not writable" (Comment 3). OData annotations (`@...`)
+are ignored.
 
 ```c
 int cxlmi_cmd_fmapi_set_dc_region_config(struct cxlmi_endpoint *ep,
@@ -273,10 +323,14 @@ int cxlmi_cmd_fmapi_set_dc_region_config(struct cxlmi_endpoint *ep,
 
 Validation before issuing the command:
 
-- The region must have no extents allocated to any host (`ExtentsCount == 0`
-  across all LDs that see it). The device rejects it otherwise, but a
-  `409 Conflict` with `ResourceInUse` is a better error than the generic
-  CCI failure.
+- The region must have no extent that a host holds or has been offered,
+  and none that an FM reference keeps. 5602h "shall fail with Unsupported"
+  "When all capacity has been released from the DC Region on all hosts, and
+  one or more blocks are allocated to the specified region" (Section
+  7.6.7.6.3), and capacity with an FM reference "will remain allocated ...
+  even if all DCD Extents that reference it are removed" (Section
+  7.6.7.6.7). cxl-fmd refuses it with `409` before sending anything; a
+  device's Unsupported is also `409`.
 - Omitted properties are re-sent with their current values; 5602h has no
   "leave unchanged" encoding.
 
@@ -289,7 +343,8 @@ curl -X PATCH .../CXLLogicalDevices/0/MemoryRegions/0 \
 ### Get DC Region Extent Lists (5603h)
 
 Read once per host; the result populates the device-wide `MemoryExtents`
-collection and each region's `MemoryExtents[]` link array. Page with
+collection and each region's `MemoryExtents[]` link array (with the
+limitation of Comment 2). Page with
 `start_ext_index`/`extent_count` until `extents_returned` accumulates to
 `total_extents`; restart if `list_generation_num` changes between pages.
 
@@ -311,20 +366,14 @@ int cxlmi_cmd_fmapi_get_dc_region_ext_list(struct cxlmi_endpoint *ep,
 ```json
 {
   "@odata.type": "#MemoryExtent.v1_0_0.MemoryExtent",
-  "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents/ext_0x400000000",
-  "Id": "ext_0x400000000",
-  "Name": "DC Extent",
+  "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents/ext_400000000",
+  "Id": "ext_400000000",
+  "Name": "Dynamic Capacity Extent",
   "ExtentOffsetMiB": 16384,
   "ExtentSizeMiB": 4096,
   "Tag": "6f1a2c3e-0000-4000-8000-000000000001",
   "SequenceNumber": 0,
   "FMReferencedExtent": false,
-  "MemoryChunks": [
-    {
-      "ChunkOffsetMiB": 0,
-      "ChunkLink": { "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/MemoryDomains/cxl_dcd0_domain0/MemoryChunks/dc_chunk0" }
-    }
-  ],
   "Links": {
     "MemoryRegions": [
       { "@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/CXLLogicalDevices/0/MemoryRegions/0" }
@@ -348,21 +397,32 @@ int cxlmi_cmd_fmapi_initiate_dc_add(struct cxlmi_endpoint *ep,
 |---------------|----------|------------------|
 | `host_id` | see [Host ID Resolution](#host-id-resolution) | derived from `{ld}`, not a parameter |
 | `selection_policy` | 0 Free, 1 Contiguous, 2 Prescriptive, 3 Enable Shared Access | `Policy` (required) |
-| `region_num` | region index | `RegionNumber` (required for Free, Contiguous, EnableSharedAccess) |
-| `length` | bytes, block-size multiple | `Length` in MiB (required for Free, Contiguous); the schema leaves the unit unannotated, cxl-fmd treats it as MiB like every other size property |
-| `tag` | 16 bytes | `Tag` UUID string (required for Free, Contiguous, EnableSharedAccess) |
+| `region_num` | region index; reserved for Prescriptive (Table 7-72) | `RegionNumber` (required for Free, Contiguous, EnableSharedAccess); sent as 0 for Prescriptive |
+| `length` | bytes, block-size multiple; reserved for Prescriptive and Enable Shared Access | `Length` in MiB (required for Free, Contiguous; sent as 0 for the other policies); the schema leaves the unit unannotated, cxl-fmd treats it as MiB like every other size property |
+| `tag` | 16 bytes; reserved for Prescriptive | `Tag` UUID string (required for Free, Contiguous, EnableSharedAccess; sent as zeros for Prescriptive). An empty or all-zero `Tag` is refused with `400` for EnableSharedAccess: cxl-fmd takes all zeros for no tag, its own convention, as the specification calls the Tag "Optional" (Table 8-230) without saying which value means none |
 | `ext_count` + `extents[]` | DPA/length/tag/shared_seq per extent | `ExtentList[]` of `MemoryExtent` links (required for Prescriptive); cxl-fmd resolves each link back to its cached DPA, length and tag |
 
 Policy semantics (CXL r3.2 7.6.7.6.5):
 
 - **Free**: the device picks any blocks in `RegionNumber` totalling `Length`.
 - **Contiguous**: same, but a single DPA-contiguous extent.
-- **Prescriptive**: the FM names the exact extents. The extents in
-  `ExtentList` must already exist (for example created on another host with
-  a shared tag) or be representable as device-free space; cxl-fmd should
-  only accept links to existing `MemoryExtent` resources.
+- **Prescriptive**: the FM names the exact extents. The specification
+  does not require them to exist already; it fails the command with
+  Invalid Extent List "When the Selection Policy is set to Prescriptive and
+  any of the DPAs are already accessible to the same LD" (Section
+  7.6.7.6.5). `ExtentList` takes only links to `MemoryExtent` resources
+  cxl-fmd already has, which is cxl-fmd's limitation: there is no way to
+  name free capacity, as `POST` on the `MemoryExtents` collection is not
+  served. The mock refuses an extent the host already holds (`400`) and
+  one another host holds (`409`, the mock's choice: shared capacity is
+  added with EnableSharedAccess), so it is left with extents an FM
+  reference keeps after every host released them.
 - **EnableSharedAccess**: give this host access to the extents already
-  tagged `Tag` in `RegionNumber`; `Length` is ignored.
+  tagged `Tag` in `RegionNumber`; `Length` is not sent. The device fails it
+  with Invalid Input "When the specified region is not Sharable", "When
+  the tagged capacity is already mapped to any Host ID via a non-Sharable
+  region" and "When the same tagged capacity is currently accessible by the
+  same LD" (Section 7.6.7.6.5); the mock does the same.
 
 ```bash
 curl -X POST .../CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd \
@@ -371,12 +431,18 @@ curl -X POST .../CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd
        "Tag": "6f1a2c3e-0000-4000-8000-000000000001"}'
 ```
 
-Validation: `Policy` must be in `AddCapacityPoliciesSupported`; `Length`
-must be a multiple of the region's `BlockSizeMiB` and not exceed
-`RegionSizeMiB` minus allocated extents; `AvailableExtents` and
-`AvailableTags` must be non-zero. On success rescan 5601h/5603h for that
-host so the new extent shows up as `Pending` until the host's Add Capacity
-Response arrives.
+What cxl-fmd checks before sending: `Policy` must be in
+`AddCapacityPoliciesSupported`, except EnableSharedAccess, which is always
+sent (see Get DCD Info); a Free or Contiguous `Length` must be a multiple of
+the region's `BlockSizeMiB`. cxl-fmd does not check the capacity left in
+the region, nor `AvailableExtents` or `AvailableTags`: the device does, and
+fails with Resources Exhausted "if the Extent List would cause the device
+to exceed its extent or tag tracking ability" or when the capacity would
+exceed the region's decode length (Section 7.6.7.6.5), which is `409`
+(Comment 3). The mock checks the region's free space itself (`409`, or
+`400` for more than the region's length). On success cxl-fmd rescans
+5601h, 5603h and 5608h for that host; whether the new extent then shows as
+`Pending` depends on the device (Comment 5).
 
 ### Initiate Dynamic Capacity Release (5605h)
 
@@ -393,9 +459,9 @@ int cxlmi_cmd_fmapi_initiate_dc_release(struct cxlmi_endpoint *ep,
 | `host_id` | derived | from `{ld}` |
 | `flags[3:0]` | removal policy: 0 Tag-based, 1 Prescriptive | `Policy` (required) |
 | `flags[4]` | Forced Removal | `ForcedRemoval` (required). `true` means the device does not wait for the host's Release Dynamic Capacity; the host loses access immediately. |
-| `flags[5]` | Sanitize on Release | `SanitizeOnRelease` (required); only honoured where the region allows it |
-| `length` | bytes; "Shall be > 0" and reserved for Prescriptive (Table 7-73) | `Length` MiB (required for TagBased, and greater than 0: there is no "release everything"; sent as 0 for Prescriptive) |
-| `tag` | 16 bytes | `Tag` (required for TagBased) |
+| `flags[5]` | Sanitize on Release | `SanitizeOnRelease` (required). If set, the device "shall sanitize all released capacity", for shared capacity "after the last host has released the capacity" (Table 7-73). A device that does not support it refuses the request: 5605h fails with Invalid Input "When Sanitize on Release is set but is not supported by the device" (Section 7.6.7.6.6), which is `400` |
+| `length` | bytes; "Shall be > 0" and reserved for Prescriptive (Table 7-73) | `Length` MiB (required for TagBased, and greater than 0: there is no "release everything"; sent as 0 for Prescriptive). More than the host holds with the tag is Resources Exhausted, `409` |
+| `tag` | 16 bytes; reserved for Prescriptive | `Tag` (required for TagBased; sent as zeros for Prescriptive) |
 | `ext_count` + `extents[]` | | `ExtentList[]` (required for Prescriptive) |
 
 ```bash
@@ -403,14 +469,23 @@ curl -X POST .../CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRel
   -H 'Content-Type: application/json' \
   -d '{"Policy": "Prescriptive", "ForcedRemoval": false, "SanitizeOnRelease": true,
        "ExtentList": [
-         {"@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents/ext_0x400000000"}
+         {"@odata.id": "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/MemoryExtents/ext_400000000"}
        ]}'
 ```
 
-`DELETE .../MemoryExtents/{ext}` is sugar for a Prescriptive release of that
-one extent from every host holding it, with `ForcedRemoval = false` and
-`SanitizeOnRelease` taken from the owning region. This mirrors how `DELETE`
-on a `MemoryChunk` already maps to Set LD Allocations. An extent with
+`DELETE .../MemoryExtents/{ext}` is sugar, cxl-fmd's own, for a Prescriptive
+release of that one extent from every host holding it, one host after the
+other, with `ForcedRemoval = false` and `SanitizeOnRelease` taken from the
+owning region's setting. This mirrors how `DELETE` on a `MemoryChunk`
+already maps to Set LD Allocations. It does not fit shared capacity, a
+known gap: "To remove a host's access to the shared extent, the FM issues
+Initiate Dynamic Capacity Release Request with Selection Policy=Tag-based"
+(Section 7.6.7.6.6), and a device fails with Invalid Input "When the Tag
+represents sharable capacity, and the Extent List covers only a portion of
+the capacity associated with the Tag", so a `DELETE` of one extent of a
+shared tag that has several is refused (`400`). A device whose
+`ReleaseCapacityPoliciesSupported` lacks `Prescriptive` has every `DELETE`
+refused (`400`); cxl-fmd does not fall back to TagBased. An extent with
 `FMReferencedExtent = true` survives the release of its last host with an
 empty `Links/MemoryRegions`; only `CXLReferenceDCMemory` with
 `FMReference = false` frees it, and a `DELETE` on such an orphan returns
@@ -436,7 +511,12 @@ int cxlmi_cmd_fmapi_dc_remove_reference(struct cxlmi_endpoint *ep,
 | `FMReference` = `false` | 5607h: drop the FM reference; if no host references remain the capacity is freed |
 
 Both commands are device-wide (no Host ID), which is why the action lives on
-`PCIeDevice`. After either, refresh 5608h so `FMReferencedExtent` on every
+`PCIeDevice`. Both "shall return Invalid Input if the Tag in the payload
+does not match an existing sharable tag" (Sections 7.6.7.6.7 and
+7.6.7.6.8), which is `400`; the mock does the same, so a tag no extent has,
+or one on capacity outside a Sharable region, is `400`. An empty or
+all-zero `Tag` is refused with `400` before anything is sent (cxl-fmd's
+convention that all zeros is no tag). After either, refresh 5608h so `FMReferencedExtent` on every
 extent carrying that tag is updated.
 
 ```bash
@@ -463,7 +543,7 @@ int cxlmi_cmd_fmapi_dc_list_tags(struct cxlmi_endpoint *ep,
 | `validity_bitmap` | bit 0: `ref_bitmap` valid, bit 1: `pending_ref_bitmap` valid | gate the two mappings below |
 | `tags_list[i].flags` | bit 0: FM reference held | `MemoryExtent.FMReferencedExtent` on every extent with this tag |
 | `tags_list[i].ref_bitmap` | 256-bit, one bit per Host ID that has accepted the tag | no standard property (Comment 4); could feed `Links/MemoryRegions[]` on the extent |
-| `tags_list[i].pending_ref_bitmap` | hosts with an add outstanding | `MemoryRegion.MemoryExtents[].Pending` for that host's region |
+| `tags_list[i].pending_ref_bitmap` | hosts with an add outstanding | `MemoryRegion.MemoryExtents[].Pending` for that host's region, on every extent with that tag that 5603h lists for the host (Comment 5) |
 
 ---
 
@@ -497,7 +577,8 @@ the existing `Connection` for that LD; no new routing is needed.
 
 The DSP8010 zip on dmtf.org sits behind a bot challenge, so the files that
 changed for DCD (`MemoryExtent`, `MemoryExtentCollection`, `MemoryRegion
-v1.1.0`, `CXLLogicalDevice v1.5.0`, `PCIeDevice v1.23.0`, `MemoryChunks
+v1.1.0`, `CXLLogicalDevice v1.4.0` for the DCD actions and counters, of
+which the v1.5.0 file is installed, `PCIeDevice v1.23.0`, `MemoryChunks
 v1.7.0`) were fetched individually from `https://redfish.dmtf.org/schemas/v1/`
 and installed with their symlinks. `scripts/update_schemas.py` lists the
 MemoryExtent schemas in its defaults so a future bundle update keeps them.
@@ -535,7 +616,7 @@ struct fmd_dc_region {
 	uint32_t extent_count;
 };
 
-/* Device-wide extent, from 5603h decorated with 5608h. Child of the Type 3 device. */
+/* Device-wide extent keyed by DPA (Comment 2), from 5603h decorated with 5608h. */
 struct fmd_dc_extent {
 	struct fmd_component base;
 	uint64_t start_dpa;
@@ -543,10 +624,11 @@ struct fmd_dc_extent {
 	uint8_t  tag[FMD_DC_TAG_LEN];
 	uint16_t shared_seq;
 	uint8_t  region_id;
-	uint16_t host_id;                   /* host this extent was listed for */
-	bool     pending;                   /* host has not accepted yet */
+	uint64_t host_mask;                 /* bit h: 5603h lists it for host h */
+	uint64_t pending_mask;              /* bit h: host h in the tag's Pending Reference Bitmap */
 	bool     fm_referenced;
 };
+/* Host IDs 0..63 (FMD_MAX_DC_HOSTS) are tracked; an MHD pool is capped at 64 LDs */
 ```
 
 - Add `struct fmd_dcd_info *dcd` to `fmd_sld`, `fmd_mld` and `fmd_mhd`
@@ -587,7 +669,8 @@ POST   /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/Actions
 
 Plus the additive properties on existing handlers: `CXLDevice/DynamicCapacity`
 and `Actions` on `PCIeDevice`; `MemoryRegions`, the four counters and
-`Actions` on `CXLLogicalDevice`; `Links/MemoryExtent` on `MemoryChunks`.
+`Actions` on `CXLLogicalDevice`. `Links/MemoryExtent` on `MemoryChunks` is
+not served.
 Tag conversion (16 bytes to UUID string and back) belongs in
 `cci_redfish_map.c` next to the existing enum mappers.
 
@@ -642,19 +725,20 @@ region reconfiguration, reference/unreference a tag, shared access).
 1. **Units of the `Length` action parameter.** The 2026.1 schema does not
    annotate it with `MiBy`. cxl-fmd assumes MiB. This is worth raising with
    the Redfish Forum together with the missing DCD rows in DSP0288.
-2. **Task support.** Comment 5 above. The completion signal now exists:
-   the DC event drain (item 3) clears the host's bit in the extent's
-   `pending_mask` when the host accepts or the add is withdrawn, so a
-   `Task` could be moved to `Completed` or `Exception` from that path
-   without polling the device. What is missing is the `TaskService`
-   plumbing itself. Until it lands the actions return `204 No Content` at
-   "device accepted the request", and clients have to watch the extent's
-   `Pending` property to learn when the host accepted the capacity.
+2. **Task support.** Comment 5 above. A completion signal exists: the DC
+   event drain (item 3) refreshes a host that an Add Capacity Response or
+   Capacity Released record names, which re-reads 5608h and so the
+   extent's `pending_mask`. A `Task` could be moved on from that path; the
+   `TaskService` plumbing for it is missing. Until it lands the actions
+   return `200 OK` at "device accepted the request", and clients have to
+   watch the extent, whose `Pending` property is only as good as Comment 5
+   says.
 3. **Events.** Hosts learn about add/release through DC event records on
    their own mailbox. The FM sees the FM-side records (types 04h/05h) by
    reading Get Event Records on the FM-owned LD; cxl-fmd does this on a
-   timer (`--event-poll`) and early on MCTP Event Notification, and the
-   records drive the `Pending` transition instead of a rescan.
+   timer (`--event-poll`) and early on MCTP Event Notification; a record
+   makes cxl-fmd rescan the host it names (5601h, 5603h and 5608h), or
+   every host after an overflow.
 4. **GFD.** The GFAM equivalents (4907h-490Bh) share the same shapes but
    address the device via PBR. Out of scope here and listed separately in
    `TODO`.
