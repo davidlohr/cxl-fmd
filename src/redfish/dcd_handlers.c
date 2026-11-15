@@ -17,6 +17,9 @@
 
 #include "handlers_internal.h"
 
+/* -EAGAIN: the device answered Retry Required or Busy */
+#define DC_RETRY_MSG "The device cannot carry out the request now; try again"
+
 /*
  * ============================================================================
  * Helpers
@@ -438,7 +441,8 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		rc = fmd_dc_release(ctx, dev, h, FMD_DC_REL_POLICY_PRESCRIPTIVE,
 				    false, sanitize, 0, cur->tag, &cur, 1);
 		if (rc) {
-			*msg = "Dynamic capacity release failed";
+			*msg = rc == -EAGAIN ? DC_RETRY_MSG :
+			       "Dynamic capacity release failed";
 			return rc;
 		}
 	}
@@ -657,6 +661,9 @@ static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassi
 	case -EBUSY:
 		*msg = "Region has extents allocated; release them before reconfiguring";
 		return rc;
+	case -EAGAIN:
+		*msg = DC_RETRY_MSG;
+		return rc;
 	default:
 		*msg = "Set DC Region Configuration failed";
 		return rc;
@@ -781,10 +788,14 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	case 0:
 		return 0;
 	case -EINVAL:
-		*msg = "Policy not supported by the device, or Length is not a block-size multiple";
+		*msg = "Invalid request: a Policy the device does not support, a Length that is not "
+		       "a block-size multiple, or a request the device refused as invalid";
 		return rc;
 	case -ENOSPC:
-		*msg = "Insufficient free capacity in the region";
+		*msg = "Insufficient free capacity in the region, or no room left to track the extents or tag";
+		return rc;
+	case -EAGAIN:
+		*msg = DC_RETRY_MSG;
 		return rc;
 	case -ENOENT:
 		*msg = "Region or extents not found for this host";
@@ -904,10 +915,17 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	case 0:
 		return 0;
 	case -EINVAL:
-		*msg = "Policy not supported by the device";
+		*msg = "Invalid request: a Policy the device does not support, or a request the "
+		       "device refused as invalid";
 		return rc;
 	case -ENOENT:
 		*msg = "No matching extents allocated to this host";
+		return rc;
+	case -ENOSPC:
+		*msg = "Length exceeds the capacity assigned with the Tag";
+		return rc;
+	case -EAGAIN:
+		*msg = DC_RETRY_MSG;
 		return rc;
 	default:
 		*msg = "Initiate Dynamic Capacity Release failed";
@@ -961,6 +979,10 @@ static int action_dc_reference_locked(struct fmd_ctx *ctx, const char *chassis_i
 	rc = fmd_dc_reference(ctx, dev, tag, add);
 	if (rc == -ENOENT)
 		*msg = "No extents carry the given Tag";
+	else if (rc == -EINVAL)
+		*msg = "The device refused the Tag as invalid";
+	else if (rc == -EAGAIN)
+		*msg = DC_RETRY_MSG;
 	else if (rc)
 		*msg = "Dynamic Capacity reference update failed";
 	return rc;

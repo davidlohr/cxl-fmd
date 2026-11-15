@@ -745,6 +745,62 @@ static struct cxlmi_tunnel_info *dcd_tunnel(struct fmd_component *dev,
 	return CXLMI_NO_TUNNEL;
 }
 
+/*
+ * What a DCD Management command that failed comes to. A negative @rc is
+ * libcxlmi failing to carry the command, which says nothing of the request;
+ * anything else is the Return Code the device gave. Initiate Dynamic
+ * Capacity Add (5604h) and Release (5605h) fail with Invalid Input, Invalid
+ * Extent List or Invalid Physical Address for what was asked, with
+ * Resources Exhausted when the device has no room for it, and with Retry
+ * Required when the LD's Dynamic Capacity Event Log would overflow (CXL
+ * r4.0 Sections 7.6.7.6.5 and 7.6.7.6.6). Set DC Region Configuration
+ * (5602h) "shall fail with Unsupported" when "one or more blocks are
+ * allocated to the specified region" (Section 7.6.7.6.3); its other
+ * Unsupported case, a Sanitize on Release that cannot be changed, is
+ * refused before the command is sent.
+ *
+ * Returns -EINVAL, -ENOSPC, -EAGAIN (Retry Required or Busy), -EBUSY
+ * (5602h Unsupported) or -EIO for anything else.
+ */
+static int dc_cmd_errno(int rc, bool unsupported_is_busy)
+{
+	if (rc < 0)
+		return -EIO;
+
+	switch (rc) {
+	case CXLMI_RET_INPUT:
+	case CXLMI_RET_EXTLIST:
+	case CXLMI_RET_PADDR:
+		return -EINVAL;
+	case CXLMI_RET_RESOURCEEXHAUSTED:
+		return -ENOSPC;
+	case CXLMI_RET_RETRY:
+	case CXLMI_RET_BUSY:
+		return -EAGAIN;
+	case CXLMI_RET_UNSUPPORTED:
+		return unsupported_is_busy ? -EBUSY : -EIO;
+	default:
+		return -EIO;
+	}
+}
+
+static void dc_cmd_failed(struct fmd_ctx *ctx, struct fmd_component *dev,
+			  const char *what, int rc)
+{
+	if (rc < 0)
+		fmd_warn(ctx, "%s: %s was not carried out: %d", dev->id, what, rc);
+	else
+		fmd_warn(ctx, "%s: %s failed: %d (%s)", dev->id, what, rc,
+			 cxlmi_cmd_retcode_tostr(rc));
+}
+
+/*
+ * The refresh after a command the device accepted. A list that keeps
+ * changing as it is read (-EAGAIN) is not a reason to send the command
+ * again, which a client told to retry would do.
+ */
+static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id);
+
 /* Host IDs a device exposes: SLD 0, MLD and MHD each LD */
 static int dc_hosts(struct fmd_component *dev, int *hosts, int max)
 {
@@ -1089,6 +1145,13 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 	return hw_refresh_tags(ctx, dev, ep, ti);
 }
 
+static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
+{
+	int rc = dcd_refresh_locked(ctx, dev, host_id);
+
+	return rc == -EAGAIN ? -EIO : rc;
+}
+
 int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
 {
 	int rc;
@@ -1347,11 +1410,10 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 		rc = cxlmi_cmd_fmapi_set_dc_region_config(dev->ep, ti, &req);
 		if (rc) {
-			fmd_warn(ctx, "%s: set DC region %u config failed: %d",
-				 dev->id, region->region_id, rc);
-			return -EIO;
+			dc_cmd_failed(ctx, dev, "Set DC Region Configuration", rc);
+			return dc_cmd_errno(rc, true);
 		}
-		return dcd_refresh_locked(ctx, dev, -1);
+		return dc_refresh_after(ctx, dev, -1);
 	}
 
 	fmd_info(ctx, "%s: mock set DC region %u block size %" PRIu64 " MB sanitize=%d",
@@ -1425,12 +1487,11 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		rc = cxlmi_cmd_fmapi_initiate_dc_add(dev->ep, ti, req);
 		free(req);
 		if (rc) {
-			fmd_warn(ctx, "%s: initiate DC add (host %d) failed: %d",
-				 dev->id, host_id, rc);
-			return -EIO;
+			dc_cmd_failed(ctx, dev, "Initiate Dynamic Capacity Add", rc);
+			return dc_cmd_errno(rc, false);
 		}
 
-		return dcd_refresh_locked(ctx, dev, host_id);
+		return dc_refresh_after(ctx, dev, host_id);
 	}
 }
 
@@ -1500,12 +1561,11 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		rc = cxlmi_cmd_fmapi_initiate_dc_release(dev->ep, ti, req);
 		free(req);
 		if (rc) {
-			fmd_warn(ctx, "%s: initiate DC release (host %d) failed: %d",
-				 dev->id, host_id, rc);
-			return -EIO;
+			dc_cmd_failed(ctx, dev, "Initiate Dynamic Capacity Release", rc);
+			return dc_cmd_errno(rc, false);
 		}
 
-		return dcd_refresh_locked(ctx, dev, host_id);
+		return dc_refresh_after(ctx, dev, host_id);
 	}
 }
 
@@ -1533,9 +1593,9 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		}
 
 		if (rc) {
-			fmd_warn(ctx, "%s: DC %s reference failed: %d",
-				 dev->id, add ? "add" : "remove", rc);
-			return -EIO;
+			dc_cmd_failed(ctx, dev, add ? "Dynamic Capacity Add Reference" :
+				      "Dynamic Capacity Remove Reference", rc);
+			return dc_cmd_errno(rc, false);
 		}
 
 		return hw_refresh_tags(ctx, dev, dev->ep, ti);

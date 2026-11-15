@@ -162,6 +162,9 @@ static enum MHD_Result send_errno(struct MHD_Connection *conn, int rc,
 	case EEXIST:
 		status = MHD_HTTP_CONFLICT;
 		break;
+	case EAGAIN:	/* the device said Retry Required or Busy */
+		status = MHD_HTTP_SERVICE_UNAVAILABLE;
+		break;
 	default:
 		status = MHD_HTTP_INTERNAL_SERVER_ERROR;
 		break;

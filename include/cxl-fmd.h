@@ -1881,8 +1881,16 @@ int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
  */
 
 /*
+ * The four return, when the device refused the command: -EINVAL for
+ * Invalid Input, Invalid Extent List or Invalid Physical Address, -ENOSPC
+ * for Resources Exhausted, -EAGAIN for Retry Required or Busy; -EIO when
+ * the command was not carried, or for any other return code.
+ */
+
+/*
  * Set DC Region Configuration (5602h)
- * Returns 0, -EINVAL (unsupported value), -EBUSY (extents allocated), -EIO.
+ * Returns 0, -EINVAL (unsupported value), -EBUSY (extents allocated, or the
+ * device answered Unsupported), -EAGAIN, -EIO.
  */
 int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 			     struct fmd_dc_region *region, uint64_t block_size,
@@ -1891,7 +1899,8 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 /*
  * Initiate Dynamic Capacity Add (5604h)
  * @policy: FMD_DC_POLICY_*; @extents/@ext_count used for Prescriptive.
- * Returns 0, -EINVAL, -ENOSPC (no room), -ENOENT (region/extent missing), -EIO.
+ * Returns 0, -EINVAL, -ENOSPC (no room), -ENOENT (region/extent missing),
+ * -EEXIST, -EBUSY, -EAGAIN, -EIO.
  */
 int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	       uint8_t policy, uint8_t region_id, uint64_t length,

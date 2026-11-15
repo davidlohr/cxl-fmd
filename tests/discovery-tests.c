@@ -1946,6 +1946,149 @@ static void test_dcd_info(void)
 }
 
 /*
+ * A one-host DCD (an SLD) with region 0 at 1 GiB, 1 GiB long, in 256 MB
+ * blocks, with Attributes1 @flags, and one 256 MB extent at its base tagged
+ * dc_tag. The refresh after a command the device accepts is answered as
+ * discovery was: Get Host DC Region Configuration (5601h, Tables 7-67 and
+ * 7-68), Get DC Region Extent Lists (5603h, Tables 7-70 and 7-71), and
+ * Dynamic Capacity List Tags (5608h) unsupported.
+ */
+static const uint8_t dc_tag[16] = {
+	0x6f, 0x1a, 0x2c, 0x3e, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x01,
+};
+
+static void answer_dc_refresh(struct cxlmi_endpoint *ep, uint8_t flags)
+{
+	uint8_t regions[0x04 + 0x28 + 0x10] = { 0 };
+	uint8_t extents[0x18 + 0x28] = { 0 };
+
+	regions[0x02] = 1;			/* Number of Available Regions */
+	regions[0x03] = 1;			/* Number of Regions Returned */
+	put64(regions + 0x04, 1ULL << 30);	/* Region Base */
+	put64(regions + 0x0c, 4);		/* Region Decode Length, 256 MB units */
+	put64(regions + 0x14, 1ULL << 30);	/* Region Length */
+	put64(regions + 0x1c, 1ULL << 28);	/* Region Block Size */
+	regions[0x24] = flags;			/* Attributes1 */
+	put16(regions + 0x2c, 64);		/* Number of Extents Supported */
+	put16(regions + 0x30, 63);		/* Number of Extents Available */
+	put16(regions + 0x34, 16);		/* Number of Tags Supported */
+	put16(regions + 0x38, 15);		/* Number of Tags Available */
+	answer(ep, 0x5601, regions, sizeof(regions));
+
+	put16(extents + 0x08, 1);		/* Number of Extents Returned */
+	put16(extents + 0x0c, 1);		/* Total Number of Extents */
+	put64(extents + 0x18, 1ULL << 30);	/* Starting DPA */
+	put64(extents + 0x20, 1ULL << 28);	/* Length */
+	memcpy(extents + 0x28, dc_tag, 16);	/* Tag */
+	answer(ep, 0x5603, extents, sizeof(extents));
+
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+}
+
+static struct fmd_component *hw_dcd(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+				    uint64_t serial, uint8_t flags)
+{
+	uint8_t info[0x54] = { 0 };
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_component *dev;
+
+	answer_identify(ep, serial, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	info[0x00] = 1;				/* Number of Hosts */
+	info[0x01] = 1;				/* Number of Supported DC Regions */
+	put16(info + 0x04, 0x07);		/* Free, Contiguous, Prescriptive */
+	put16(info + 0x08, 0x03);		/* Tag-based, Prescriptive */
+	put64(info + 0x0c, 4);			/* Total Dynamic Capacity: 1 GiB */
+	put64(info + 0x14, 1ULL << 28);		/* Region 0: 256 MB blocks */
+	answer(ep, 0x5600, info, sizeof(info));
+	answer_dc_refresh(ep, flags);
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), serial);
+	dev = fmd_topology_find(&ctx->topology, id);
+	CHECK(dev && fmd_memdev_dcd(dev) && fmd_dc_find_region(dev, 0, 0) &&
+	      fmd_dc_find_extent(dev, 1ULL << 30), "no DCD %s with its region and extent", id);
+	if (!dev || !fmd_dc_find_region(dev, 0, 0) || !fmd_dc_find_extent(dev, 1ULL << 30))
+		return NULL;
+	return dev;
+}
+
+/*
+ * What a DCD Management command the device refused comes to. Initiate
+ * Dynamic Capacity Add (5604h) "shall fail with Invalid Input", "with
+ * Invalid Extent List", "with Resources Exhausted" and "with Retry Required"
+ * (Section 7.6.7.6.5); Release (5605h) also "with Invalid Physical Address"
+ * (Section 7.6.7.6.6); Set DC Region Configuration (5602h) "shall fail with
+ * Unsupported" while blocks are allocated (Section 7.6.7.6.3). A command
+ * that is not carried is a failure of the daemon, not of the request.
+ */
+static void test_dc_return_codes(void)
+{
+	static const struct { uint16_t rc; int err; } add[] = {
+		{ CXLMI_RET_INPUT, -EINVAL },
+		{ CXLMI_RET_EXTLIST, -EINVAL },
+		{ CXLMI_RET_RESOURCEEXHAUSTED, -ENOSPC },
+		{ CXLMI_RET_RETRY, -EAGAIN },
+		{ CXLMI_RET_BUSY, -EAGAIN },
+		{ CXLMI_RET_INTERNAL, -EIO },
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	struct fmd_component *dev = hw_dcd(ctx, ep, 0xd1, 0);
+	struct fmd_dc_extent *ext;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+
+	for (size_t i = 0; i < sizeof(add) / sizeof(add[0]); i++) {
+		answer_rc(ep, 0x5604, add[i].rc);
+		rc = fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_FREE, 0, 1ULL << 28,
+				dc_tag, NULL, 0);
+		CHECK(rc == add[i].err, "5604h return code %u: %d, not %d",
+		      add[i].rc, rc, add[i].err);
+	}
+
+	/* a payload where 5604h has none: libcxlmi fails to carry it */
+	answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
+	rc = fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_FREE, 0, 1ULL << 28,
+			dc_tag, NULL, 0);
+	CHECK(rc == -EIO, "5604h not carried: %d", rc);
+
+	ext = fmd_dc_find_extent(dev, 1ULL << 30);
+	answer_rc(ep, 0x5605, CXLMI_RET_PADDR);
+	rc = fmd_dc_release(ctx, dev, 0, FMD_DC_REL_POLICY_PRESCRIPTIVE, false,
+			    false, 0, dc_tag, &ext, 1);
+	CHECK(rc == -EINVAL, "5605h Invalid Physical Address: %d", rc);
+
+	answer_rc(ep, 0x5605, CXLMI_RET_RESOURCEEXHAUSTED);
+	rc = fmd_dc_release(ctx, dev, 0, FMD_DC_REL_POLICY_TAG_BASED, false,
+			    false, 1ULL << 29, dc_tag, NULL, 0);
+	CHECK(rc == -ENOSPC, "5605h Resources Exhausted: %d", rc);
+
+	answer_rc(ep, 0x5606, CXLMI_RET_INPUT);
+	rc = fmd_dc_reference(ctx, dev, dc_tag, true);
+	CHECK(rc == -EINVAL, "5606h Invalid Input: %d", rc);
+
+	answer_rc(ep, 0x5607, CXLMI_RET_RETRY);
+	rc = fmd_dc_reference(ctx, dev, dc_tag, false);
+	CHECK(rc == -EAGAIN, "5607h Retry Required: %d", rc);
+
+	/*
+	 * cxl-fmd refuses 5602h itself while it knows of an extent; the
+	 * device's refusal is seen once that extent has been released.
+	 */
+	fmd_topology_remove(&ctx->topology, &ext->base);
+	answer_rc(ep, 0x5602, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dc_set_region_config(ctx, dev, fmd_dc_find_region(dev, 0, 0),
+				      1ULL << 28, false);
+	CHECK(rc == -EBUSY, "5602h Unsupported: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("a DCD's return codes", before);
+}
+
+/*
  * A bind in the background, to its end. The switch answers Bind vPPB with
  * Background Command Started; Background Operation Status (0002h, Table
  * 8-217) then says whether it is in progress (Bit[0]), how far it is
@@ -3626,6 +3769,7 @@ int main(void)
 	test_switch_sld_placeholder();
 	test_set_partition();
 	test_dcd_info();
+	test_dc_return_codes();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);
