@@ -125,14 +125,29 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
 
 - Records are read with Get Event Records and then cleared, so what cxl-fmd
   keeps is the only copy: each record is kept before it is cleared, whatever
-  its kind. `LogService.ClearLog` drops cxl-fmd's copies.
+  its kind, with these exceptions, which are cleared and lost:
+  - a record of an MLD whose LD-ID Valid Flag names an LD that cxl-fmd does
+    not have;
+  - a record of a DCD's Dynamic Capacity Event Log other than Add Capacity
+    Response (04h) and Capacity Released (05h); of each of the event types
+    00h to 03h, CXL r4.0 Table 8-229 says "This event shall only be reported
+    to the host";
+  - every record of a Multi-Headed device's Dynamic Capacity Event Log, which
+    is drained to refresh its hosts' capacity, and whose records are not kept
+    (a known gap).
+
+  `LogService.ClearLog` drops cxl-fmd's copies.
 - Only logs that are the FM's are read: a component's own MCTP CCI, and the
   FM-owned LD of an MLD behind a switch port, if its LDs could be read: the
   records of one whose LDs could not have nothing to be kept on. The logs of a component reached
   through the kernel's mailbox are shared with the kernel's driver (CXL r4.0
   Section 9.20.1) and are left to it; its `DeviceLog` has `ServiceEnabled`
-  `false`. So does that of a pool LD of a Multi-Headed device, whose records
-  name an LD-ID relative to a head that nothing maps to the pool.
+  `false`. So does that of a pool LD of a Multi-Headed device: cxl-fmd does
+  not read a Multi-Headed device's logs (a known gap). A record of an MH-MLD
+  with its LD-ID Valid Flag set names an LD-ID "from 0 to n-1 relative to
+  that head" (Section 2.5.1), and the specification gives no map from it to
+  the LD of the pool; records about the whole device, or about a whole head
+  (Table 8-221), could be placed, and are not read either.
 - `Severity` is cxl-fmd's: `OK` for the Informational log, `Warning` for the
   Warning log, `Critical` for the Failure and Fatal logs.
 - `EventTimestamp` is the record's Timestamp, left out when it is 0;
@@ -147,12 +162,40 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   and their `Severity` `OK`: every one is Informational (Section
   8.2.10.2.1.6). They count towards the same `MaxNumberOfRecords`, the sum of
   the four log sizes Comment 2 names; DSP0288 does not add the Dynamic
-  Capacity Event Log's. Those of a Multi-Headed device are not kept, as its
-  pool LDs' logs are not read.
+  Capacity Event Log's. Those of a Multi-Headed device are not kept (see
+  above).
+- `Overflow` comes from the Overflow flag of Get Event Records (Table 1
+  above),
+  which the device keeps set only "until the host has consumed one or more
+  events and returned the event handles to the device" (Table 8-232), and
+  cxl-fmd returns them as it reads. Once a log has reported it, cxl-fmd keeps
+  `Overflow` `true` until `LogService.ClearLog`: that is cxl-fmd's choice,
+  not DSP0288's.
+- The overflow is put on the last record of the first page of Get Event
+  Records that said Overflow: no record is stored while the flag is set, so
+  every record of that page was stored before the overflow, as Comment 1
+  asks. It is not always the last record before the overflow: more of those
+  can follow on later pages. An LD of an MLD that did not keep that record
+  has none tagged; its `LogService` still says `Overflow`. The Dynamic
+  Capacity Event Log puts it on the newest record kept of each LD.
+  `OverflowErrorCount` is left out when the device gives an Overflow Error
+  Count of 0, which "indicates the device does not have a count of errors
+  that occurred after the overflow was established" (Table 8-232); each
+  overflow timestamp is left out when it is 0.
 - Each log is read until a Get Event Records comes back empty, which re-arms
-  its MCTP Event Notification (Section 8.2.10.2.8). A memory device on an MCTP
-  endpoint of its own is asked for notifications for the logs that are read
-  (Set MCTP Event Interrupt Policy, Bits[3:0], and Bit[4] for a DCD). One
+  its MCTP Event Notification (Section 8.2.10.2.8), for at most 32 pages (16
+  for the Dynamic Capacity Event Log): under a Response Message Limit of 256
+  to 1024 bytes (Table 8-218), a page holds from 1 to 7 records of 128
+  bytes after its 32-byte header. A log with more than that is
+  emptied by the next reads, on the `--event-poll` timer; with
+  `--event-poll 0` such a log is not emptied, and its notification is not
+  re-armed. A switch is asked for notifications of its four logs and of a
+  completed background operation (Set MCTP Event Interrupt Policy,
+  Bits[3:0] and Bit[15]), and a memory device on an MCTP endpoint of its own
+  for the logs that are read (Bits[3:0], and Bit[4] for a DCD), unless its
+  logs are the host's. The policy is set even when those bits are set
+  already, as "The subsequent enabled events shall be sent to that address"
+  (Section 8.2.10.2.7), with the reserved bits cleared. A memory device
   behind a switch is not: no route is defined for its notifications to reach
   the FM, and its logs are read on the `--event-poll` timer.
 - A notification says only which logs have records; the MCTP address it came
@@ -761,6 +804,22 @@ device, are not removed.
 ## Known Gaps
 
 Properties and links defined in DMTF schemas but not yet implemented.
+
+### Event logs and switch events
+
+These are known gaps in what cxl-fmd does, not properties of a schema:
+
+- The event logs of a Multi-Headed device are not read, and the records of
+  its Dynamic Capacity Event Log are not kept (see "Where cxl-fmd puts CXL
+  event records").
+- Of a Virtual CXL Switch Event Record (Table 7-80), only a Binding Change
+  is acted on, and only to end the task of a bind or unbind cxl-fmd started.
+  A Binding Change cxl-fmd did not ask for, such as the switch's own unbind
+  after an MLD's surprise removal, is seen when the switch is next read: on
+  the `--rescan` timer, or after a log overflowed.
+- The managed hot-removal of an MLD (Section 7.6.6.7) is not carried out:
+  cxl-fmd does not act on a host's Attention Indicator, unbind the LDs, or
+  set the MLD port's Attention LED.
 
 ### MemoryChunks
 

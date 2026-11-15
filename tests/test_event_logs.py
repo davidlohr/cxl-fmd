@@ -67,7 +67,8 @@ def test_event_timestamp_is_the_records(api_client):
     first = entries(api_client, SWITCH_LOG)[0]
     # 1763000000000000000 ns since 1970
     assert first["EventTimestamp"] == "2025-11-13T02:13:20Z"
-    # "If the device does not have a valid timestamp, return 0": none given
+    # "If the device does not have a valid timestamp, return all 0s"
+    # (CXL r4.0 Table 8-221): none given
     assert "EventTimestamp" not in entries(api_client, SWITCH_LOG)[2]
 
 

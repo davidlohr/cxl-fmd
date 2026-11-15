@@ -68,7 +68,7 @@ table is cxl-fmd's proposal, not DSP0288 text.
 | Dynamic Capacity List Tags (5608h) | Tag Flags: FM reference | `MemoryExtent` | `FMReferencedExtent` | Yes |
 | Dynamic Capacity List Tags | Pending Reference Bitmap | `MemoryRegion` | `MemoryExtents[].Pending` | Yes |
 | Dynamic Capacity List Tags | Reference Bitmap (per-host) | | No standard property, see Comment 4 | No |
-| Dynamic Capacity Event Record (via Get Event Records on the FM-owned LD) | All | `LogEntry` | `CXLEntryType` = `DynamicCapacity` | No |
+| Dynamic Capacity Event Record (via Get Event Records) | Event Types 04h (Add Capacity Response) and 05h (Capacity Released) | `LogEntry` | `CXLEntryType` = `DynamicCapacity`, in the `DeviceLog` of the host's LD; not for Multi-Headed devices | Yes |
 
 ### Comments for Table 3
 

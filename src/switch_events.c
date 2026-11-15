@@ -7,14 +7,26 @@
  * returned to it with Clear Event Records (0101h):
  *
  *  - A Physical Switch Event Record (Table 7-79) for a port whose link
- *    state or slot status has changed: a device plugged in or pulled out.
- *    "FM issues the Get Physical Port State command for the physical port
- *    that has linked up to discover the connected device type" (Section
- *    7.6.6.7).
+ *    state or slot status has changed. For a device plugged into a port,
+ *    or pulled out of an unbound one, "The switch notifies the FM by
+ *    generating Physical Switch Event Records" (Section 7.6.6.7), and "FM
+ *    issues the Get Physical Port State command for the physical port that
+ *    has linked up to discover the connected device type". Each port a
+ *    record names is read again.
  *  - A Virtual CXL Switch Event Record (Table 7-80) for a vPPB, among other
  *    things when its binding has changed. "Successful bind and unbind
  *    operations generate events to the Informational Event Log. Failed bind
- *    and unbind operations generate events to the Warning Event Log."
+ *    and unbind operations generate events to the Warning Event Log." A
+ *    Binding Change ends the task following that vPPB, if one is; nothing
+ *    else in these records is acted on.
+ *
+ * Not every removal gives a Physical Switch Event Record. Of a surprise
+ * removal, "The switch notifies the FM ... by generating Virtual CXL Switch
+ * Event Records for the change in link status and Presence Detect, as
+ * applicable" (Section 7.6.6.8), and of an SLD or PCIe device on a bound
+ * port, "the FM can be notified but is not involved" (Section 7.6.6.7).
+ * Such a removal is found when the ports are read again: after a log
+ * overflowed, or on the --rescan timer.
  *
  * A record that is read is cleared: "event records shall be cleared from the
  * device for the device to recycle those entries for a future event". A
