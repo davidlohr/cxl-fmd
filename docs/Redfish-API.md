@@ -1021,10 +1021,13 @@ In summary:
     over MCTP without knowing whether a host is using the device's
     mailboxes (see "Memory device writes").
 12. libcxlmi fails a Get Event Records response that reports more than 20
-    records (`CXLMI_MAX_SUPPORTED_EVENT_RECORDS`). Over MCTP a page holds
-    at most 7 records (see "Where cxl-fmd puts CXL event records"). A page
-    read through the kernel's mailbox (ioctl) could hold more, but cxl-fmd
-    reads no event log that way.
+    records (`CXLMI_MAX_SUPPORTED_EVENT_RECORDS`). A component "shall limit
+    the output payload size of commands with variably sized outputs such
+    that the Message Payload does not exceed" its Response Message Limit
+    (Section 8.2.10.1.3), at most 1024 bytes (Table 8-218), so a page from a
+    component that keeps to it holds at most 7 records; cxl-fmd does not
+    check that one does. A page read through the kernel's mailbox (ioctl)
+    could hold more, but cxl-fmd reads no event log that way.
 
 ### Event logs and switch events
 

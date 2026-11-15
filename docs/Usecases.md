@@ -14,8 +14,8 @@ Scenario 3, the events and migration of Scenario 4, the tenancy features of
 Scenario 5, all of "Orchestration Integration" and "Deployment
 Architectures", and the parts of "Middleware Value Proposition" marked so. None of the Kubernetes,
 OpenStack, vSphere, container runtime or Prometheus components named there
-exists in this repository. cxl-fmd itself has no EventService, no metrics
-endpoint, no authentication or audit log, no `PATCH` of a `Connection` or a
+exists in this repository. cxl-fmd itself has no EventService, no Prometheus
+metrics endpoint (it serves Redfish `PortMetrics` and `MemoryMetrics`), no authentication or audit log, no `PATCH` of a `Connection` or a
 `CXLLogicalDevice`, and no `$filter` query (a query string is ignored). The
 known gaps of what it does implement are listed under "Known Gaps" in
 `docs/Redfish-API.md`.
