@@ -165,6 +165,20 @@ class TestMultiVCSRules:
         # Gen1 is 2.5 GT/s, not 2
         assert data["LinkConfiguration"][0]["CapableLinkSpeedGbps"] == [2.5, 5, 8, 16, 32]
 
+    def test_mock_ports_say_what_their_link_is(self, api_client):
+        """A port with a CXL device and its link up is not in Connected
+        Device Mode 0h, "Connection is not CXL or is disconnected" (Table
+        7-21); the mock gives it 68B Flit and VH mode by default. A USP at
+        32 GT/s has speeds it is capable of, and CXL modes, as a DSP has."""
+        for port in ("dsp2", "dsp5"):
+            status, data = api_client.get(self.SWITCH + "/Ports/cxl_switch_0_" + port)
+            assert status == 200 and data["LinkStatus"] == "LinkUp"
+            assert data["CXL"]["ConnectedDeviceMode"] == "CXL68BFlitAndVH", port
+        status, data = api_client.get(self.SWITCH + "/Ports/cxl_switch_0_usp0")
+        assert status == 200
+        assert data["LinkConfiguration"][0]["CapableLinkSpeedGbps"] == [2.5, 5, 8, 16, 32]
+        assert data["CXL"]["SupportedCXLModes"] == ["CXL68BFlitAndVH", "Standard256BFlit"]
+
     def test_pcie_device_of_an_mld(self, api_client):
         """The PCIeDevice of mld0, on port 5 of the switch."""
         status, data = api_client.get("/redfish/v1/Chassis/mld0/PCIeDevices/mld0")

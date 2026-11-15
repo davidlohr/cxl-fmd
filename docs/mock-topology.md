@@ -656,9 +656,9 @@ Each port in the `ports` array defines a physical switch port.
 | `max_link_width` | integer | 16 | Maximum link width (lanes) |
 | `negotiated_link_width` | integer | 0 | Negotiated link width |
 | `supported_ld_count` | integer | 16 | Supported LD Count of Get Physical Port State, "Number of additional LDs supported by this port" (Table 7-21). cxl-fmd reads it as LDs past the one every port has, so LD-IDs 0 to this value; the text can also be read as the total. Redfish publishes it as `MaxLogicalDeviceCount` unchanged |
-| `conn_dev_cxl_ver` | integer | 0 | Connected device CXL version |
-| `port_cxl_ver_bitmask` | integer | 0x06 | Port CXL version support bitmask |
-| `supported_link_speeds` | integer | 0x1F | Supported link speeds bitmask |
+| `conn_dev_cxl_ver` | integer | 2 for a Type 1, Type 2, SLD or MLD device on a port whose link is up, 0 otherwise | Connected Device Mode (Table 7-21): 0 "Connection is not CXL or is disconnected", 2 CXL 68B Flit and VH mode. The default is the mock's choice. DSPs only |
+| `port_cxl_ver_bitmask` | integer | 0x06 | Supported CXL Modes bitmask (68B Flit and VH, 256B Flit). USPs and DSPs |
+| `supported_link_speeds` | integer | 0x1F | Supported Link Speeds Vector (2.5 to 32 GT/s). USPs and DSPs |
 
 #### Connected Device Types
 

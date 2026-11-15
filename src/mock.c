@@ -1545,6 +1545,9 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 				port->conn_dev_type = FMD_CONN_NONE;
 				port->max_link_width = (uint8_t)json_int_or(jport, "max_link_width", 16);
 				port->negotiated_link_width = (uint8_t)json_int_or(jport, "negotiated_link_width", 16);
+				/* the same defaults as a DSP's, below */
+				port->port_cxl_ver_bitmask = (uint8_t)json_int_or(jport, "port_cxl_ver_bitmask", 0x06);
+				port->supported_link_speeds = (uint8_t)json_int_or(jport, "supported_link_speeds", 0x1F);
 				sw->num_usps++;
 				fmd_topology_add(&ctx->topology, &port->base, &sw->base);
 				fmd_dbg(ctx, "Mock USP %s: link=%s",
@@ -1575,8 +1578,20 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			port->negotiated_link_width = (uint8_t)json_int_or(jport, "negotiated_link_width", 16);
 			port->supported_ld_count = (uint8_t)json_int_or(jport, "supported_ld_count", 16);
 
-			/* CXL mode information (Get Physical Port State) */
-			port->conn_dev_cxl_ver = (uint8_t)json_int_or(jport, "conn_dev_cxl_ver", 0);
+			/*
+			 * CXL mode information (Get Physical Port State). Connected
+			 * Device Mode 0h is "Connection is not CXL or is
+			 * disconnected" (Table 7-21): a CXL device on a port whose
+			 * link is up is given 2h, CXL 68B Flit and VH mode, one of
+			 * the modes of the default Supported CXL Modes below. That
+			 * default is the mock's choice.
+			 */
+			bool cxl_dev = port->conn_dev_type == FMD_CONN_TYPE1 ||
+				       port->conn_dev_type == FMD_CONN_TYPE2 ||
+				       port->conn_dev_type == FMD_CONN_SLD ||
+				       port->conn_dev_type == FMD_CONN_MLD;
+			port->conn_dev_cxl_ver = (uint8_t)json_int_or(jport, "conn_dev_cxl_ver",
+				(cxl_dev && port->link_status == FMD_LINK_UP) ? 0x2 : 0);
 			port->port_cxl_ver_bitmask = (uint8_t)json_int_or(jport, "port_cxl_ver_bitmask", 0x06);
 			port->supported_link_speeds = (uint8_t)json_int_or(jport, "supported_link_speeds", 0x1F);
 
@@ -1642,6 +1657,10 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 					port->link_status = FMD_LINK_UP;
 					int ld_count = (int)json_int_or(jdev, "ld_count", 1);
 					port->conn_dev_type = (ld_count > 1) ? FMD_CONN_MLD : FMD_CONN_SLD;
+					/* as a port the file describes gets by default */
+					port->conn_dev_cxl_ver = 0x2;
+					port->port_cxl_ver_bitmask = 0x06;
+					port->supported_link_speeds = 0x1F;
 					sw->num_dsps++;
 					fmd_topology_add(&ctx->topology, &port->base, &sw->base);
 				}
