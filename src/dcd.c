@@ -418,7 +418,7 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_component *child;
-	const uint8_t **tags = NULL;
+	const uint8_t **tags;
 	size_t n_ext = 0;
 
 	if (!dcd)
@@ -426,11 +426,9 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT)
 		n_ext++;
-	if (n_ext) {
-		tags = calloc(n_ext, sizeof(*tags));
-		if (!tags)
-			return;
-	}
+	tags = calloc(n_ext ? n_ext : 1, sizeof(*tags));
+	if (!tags)
+		return;
 
 	for (int h = 0; h < dcd->num_hosts; h++) {
 		struct fmd_component *owner = fmd_dc_host_component(dev, h);
