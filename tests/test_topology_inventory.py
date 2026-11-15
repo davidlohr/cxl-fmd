@@ -321,6 +321,17 @@ class TestVCSConfiguration:
         binding_status = data.get("BindingStatus", "Unbound")
         assert any(s in binding_status for s in valid_statuses)
 
+    def test_vppbs_advertise_no_actions(self, api_client):
+        """Bind vPPB and Unbind vPPB are reached through Connections: a vPPB
+        advertises no action, as there is no route that would take it."""
+        base = "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs/0/VPPBs"
+        status, vppbs = api_client.get(base)
+        assert status == 200 and vppbs["Members"]
+        for member in vppbs["Members"]:
+            status, data = api_client.get(member["@odata.id"])
+            assert status == 200
+            assert "Actions" not in data, member["@odata.id"]
+
 
 # =============================================================================
 # Host Discovery Tests

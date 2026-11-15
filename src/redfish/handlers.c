@@ -1991,22 +1991,10 @@ json_t *fmd_redfish_vppb(struct fmd_ctx *ctx, const char *fabric_id,
 		}
 	}
 
-	/* Add OEM Actions for bind/unbind operations (CXL FM-API 5201h/5202h) */
-	{
-		char bind_uri[512];
-		char unbind_uri[512];
-		snprintf(bind_uri, sizeof(bind_uri),
-			 "%s/Actions/Oem/CXL.Bind", uri);
-		snprintf(unbind_uri, sizeof(unbind_uri),
-			 "%s/Actions/Oem/CXL.Unbind", uri);
-
-		json_object_set_new(result, "Actions",
-			json_pack("{s:{s:{s:s}, s:{s:s}}}",
-				  "Oem",
-				  "#CXL.Bind", "target", bind_uri,
-				  "#CXL.Unbind", "target", unbind_uri));
-	}
-
+	/*
+	 * No actions: Bind vPPB and Unbind vPPB are reached through
+	 * Connections (POST and DELETE), which is cxl-fmd's mapping.
+	 */
 	return result;
 }
 
