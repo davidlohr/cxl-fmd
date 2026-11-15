@@ -969,7 +969,62 @@ device, are not removed.
 
 ## Known Gaps
 
-Properties and links defined in DMTF schemas but not yet implemented.
+This section lists what cxl-fmd does not do. Each item is a gap in
+cxl-fmd, not a statement of what CXL, DSP0288 or the DMTF schemas
+require. Nothing elsewhere in these documents is meant to imply that
+any of them is done.
+
+In summary:
+
+1. Dynamic capacity extents are kept by Starting DPA for the whole device,
+   not per host. `Pending` comes from the Pending Reference Bitmap of 5608h
+   per tag, and only for extents that 5603h lists for the host. See Comments
+   2 and 5 of [DCD-FM-API.md](DCD-FM-API.md#comments-for-table-3).
+2. The managed hot-removal of an MLD (CXL r4.0 Section 7.6.6.7) is not
+   carried out (see "Event logs and switch events" below).
+3. Connections are not counted. A second Connection to a port or LD
+   already bound to the host's VCS adopts the binding, and only the
+   Connection that made the binding unbinds it when deleted, even while
+   another stands. Deleting an adopted Connection, or one that names a
+   binding made before cxl-fmd started, does not unbind (see "Binding").
+4. No Connection is made for a vPPB bound by someone other than cxl-fmd.
+   The Connections cxl-fmd serves for each device have no
+   `InitiatorEndpoints`, whatever the device's vPPBs are bound to. A device
+   `Endpoint` has `EntityType` `MemoryChunk` and a host `Endpoint` has
+   `Processor`, and an MLD is one `Endpoint`, not one per LD (see
+   "Endpoints" and "Binding").
+5. The security actions are served on `Memory`, not on
+   `CXLLogicalDevice`, where DSP0288 1.3.0 and 1.4.0 put them (see
+   "DSP0288 mappings").
+6. The event logs of a Multi-Headed device are not read (see "Event logs
+   and switch events").
+7. A device on a switch port is taken to be removed when Get Physical Port
+   State reports a different Connected Device Type, or none. The port's
+   Port Presence Pin State (PRSNT#, Bit[2] of Link State Flags, Table 7-21)
+   and its Supported CXL Modes are not used to decide it (see "When a
+   Device Is Removed").
+8. An unbind is followed for as long as the switch takes, with no time
+   limit and no abort (see "Binding").
+9. `Status/Conditions` is not served. The `Status` of the Chassis of an MLD,
+   a Multi-Headed device or a switch is worked out from the Health Status
+   and Media Status of all its LDs or devices together. The Health Status
+   bits are OR'd and then compared as a number: 3 or more is `Critical`
+   with `State` `UnavailableOffline`. So Maintenance Needed with
+   Performance Degraded, or one LD's Media Status, makes the whole Chassis
+   `Critical` and `UnavailableOffline`, and the Chassis can disagree with
+   the device's `PCIeDevice`.
+10. `AddressRangeType` is `Volatile` only for a device or LD with volatile
+    and no persistent capacity. Every other one is `PMEM`, a device with
+    both kinds of capacity or with unknown capacities included. A `POST` of
+    a MemoryChunk without it makes a `PMEM` chunk.
+11. Set Partition Info, Scan Media and the security commands are sent
+    over MCTP without knowing whether a host is using the device's
+    mailboxes (see "Memory device writes").
+12. libcxlmi fails a Get Event Records response that reports more than 20
+    records (`CXLMI_MAX_SUPPORTED_EVENT_RECORDS`). Over MCTP a page holds
+    at most 7 records (see "Where cxl-fmd puts CXL event records"). A page
+    read through the kernel's mailbox (ioctl) could hold more, but cxl-fmd
+    reads no event log that way.
 
 ### Event logs and switch events
 
@@ -1031,14 +1086,18 @@ These are known gaps in what cxl-fmd does:
   effect only at the device's next reset; the chunk has no state that says
   so.
 
-### MemoryChunks
+### Properties not served
+
+Properties and links defined in DMTF schemas but not yet implemented:
+
+#### MemoryChunks
 
 | Property | Schema | Notes |
 |----------|--------|-------|
 | `MediaLocation` | MemoryChunks.v1_5_0+ | Location of memory media (e.g., "Local", "Remote"). |
 | `RequestedOperationalState` | MemoryChunks.v1_5_0+ | Requested operational state for the chunk. |
 
-### CXLLogicalDevice
+#### CXLLogicalDevice
 
 | Property | Schema | Notes |
 |----------|--------|-------|
