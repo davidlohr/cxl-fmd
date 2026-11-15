@@ -2775,68 +2775,145 @@ bool fmd_mhd_ld_accessible_from_head(struct fmd_ld *ld, struct fmd_head *head)
 
 
 /*
- * Set volatile/persistent partition for an SLD via CCI Set Partition Info (4101h)
+ * The Volatile Capacity of Set Partition Info (4101h) that leaves a device
+ * with @next_volatile of volatile capacity in all, in units of 256 MB.
  *
- * For mock mode, updates local state only.
- * For hardware mode, issues the CCI command and updates local state on success.
+ * @next_volatile is a total, as Next Volatile Capacity is: "the sum of the
+ * device's Volatile Only capacity and the capacity that is partitioned for
+ * volatile use" (Table 8-310, of Active Volatile Capacity), which is what
+ * Memory's StagedVolatileSizeMiB maps to. Volatile Capacity is not:
+ * "The amount of partitionable capacity that shall be allocated to
+ * volatile capacity, in multiples of 256 MB aligned to the partition
+ * alignment requirement reported in the Identify Memory Device command"
+ * (Table 8-311), where "Partitionable capacity is equal to (Total Capacity
+ * - Volatile Only Capacity - Persistent Only Capacity)" (Section
+ * 8.2.10.9.2.2).
  *
- * The volatile_bytes is converted to 256MB CXL capacity units.
- * If immediate is true, change takes effect immediately; else at next reset.
+ * Returns 0 with *@volatile_capacity set, -EOPNOTSUPP if the device cannot
+ * be partitioned: "This command shall fail with an Unsupported error if
+ * there is no partitionable capacity (i.e., Identify Memory Device reports
+ * Partition Alignment as zero)", and -EINVAL if @next_volatile is less
+ * than the Volatile Only capacity, leaves less than the Persistent Only
+ * capacity, or is not on the partition alignment: "The device shall
+ * return Invalid Input if the specified capacity is not aligned".
+ */
+int fmd_partition_volatile(const struct cxlmi_cmd_memdev_identify_rsp *id,
+			   uint64_t next_volatile, uint64_t *volatile_capacity)
+{
+	uint64_t fixed = id->volatile_capacity + id->persistent_capacity;
+	uint64_t part;
+
+	if (!id->partition_align)
+		return -EOPNOTSUPP;
+	if (id->total_capacity < fixed || next_volatile < id->volatile_capacity)
+		return -EINVAL;
+
+	part = next_volatile - id->volatile_capacity;
+	if (part > id->total_capacity - fixed || part % id->partition_align)
+		return -EINVAL;
+
+	*volatile_capacity = part;
+	return 0;
+}
+
+/*
+ * Set Partition Info (4101h): have @next_volatile of volatile capacity in
+ * all, in units of 256 MB, at the next reset, or at once if @immediate.
+ * Sent on @ep through @ti; with no @ep (mock mode) only @part changes.
+ *
+ * Changing the persistent capacity loses its data: "Using this command to
+ * change the size of the persistent capacity shall result in the loss of
+ * data stored" (Section 8.2.10.9.2.2).
+ *
+ * Returns 0, -EOPNOTSUPP or -EINVAL as fmd_partition_volatile() does, or
+ * -EIO if the command failed.
+ */
+int fmd_memdev_set_partition(struct fmd_ctx *ctx, const char *name,
+			     struct cxlmi_endpoint *ep,
+			     struct cxlmi_tunnel_info *ti,
+			     const struct cxlmi_cmd_memdev_identify_rsp *id,
+			     struct cxlmi_cmd_memdev_get_partition_info_rsp *part,
+			     uint64_t next_volatile, bool immediate)
+{
+	struct cxlmi_cmd_memdev_set_partition_info_req req = { 0 };
+	uint64_t volatile_capacity;
+	int rc;
+
+	rc = fmd_partition_volatile(id, next_volatile, &volatile_capacity);
+	if (rc) {
+		fmd_warn(ctx, "%s: cannot partition for %" PRIu64 " MB volatile: %s",
+			 name, next_volatile * 256, rc == -EOPNOTSUPP ?
+			 "Partition Alignment is 0" : "out of range or not aligned");
+		return rc;
+	}
+
+	if (ep) {
+		req.volatile_capacity = volatile_capacity;
+		req.flags = immediate ? 0x01 : 0x00;	/* Bit[0]: Immediate */
+		rc = cxlmi_cmd_memdev_set_partition_info(ep, ti, &req);
+		if (rc != 0) {
+			fmd_warn(ctx, "%s: set partition info failed: %d", name, rc);
+			return -EIO;
+		}
+	}
+
+	/*
+	 * Not immediate: "the new configuration shall be reported in the
+	 * Next Volatile Capacity and Next Persistent Capacity fields"
+	 * (Table 8-311). Both are totals, so the persistent one is what the
+	 * volatile one leaves. What an immediate change does to a pending
+	 * one the specification does not say; cxl-fmd takes it as replaced.
+	 */
+	if (immediate) {
+		part->active_vmem = next_volatile;
+		part->active_pmem = id->total_capacity - next_volatile;
+		part->next_vmem = 0;
+		part->next_pmem = 0;
+	} else {
+		part->next_vmem = next_volatile;
+		part->next_pmem = id->total_capacity - next_volatile;
+	}
+
+	fmd_info(ctx, "%s: partition set to volatile=%" PRIu64 " MB (immediate=%d)",
+		 name, next_volatile * 256, immediate);
+	return 0;
+}
+
+/*
+ * The volatile capacity of a memory device, in all and in units of 256 MB,
+ * once what is staged takes effect: Next Volatile Capacity if a change is
+ * pending ("If both this field and the Next Persistent Capacity field are
+ * 0, there is no pending change to the partitioning", Table 8-310), else
+ * Active Volatile Capacity.
+ */
+uint64_t fmd_partition_next_volatile(const struct cxlmi_cmd_memdev_get_partition_info_rsp *part)
+{
+	if (part->next_vmem || part->next_pmem)
+		return part->next_vmem;
+	return part->active_vmem;
+}
+
+/*
+ * Set volatile/persistent partition for an SLD via Set Partition Info
+ * (4101h): see fmd_memdev_set_partition(). @volatile_bytes is the total
+ * volatile capacity wanted, a multiple of 256 MB.
  */
 int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 			  uint64_t volatile_bytes, bool immediate)
 {
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_cmd_memdev_set_partition_info_req req = {0};
-	uint64_t volatile_capacity;
-	int rc;
-
 	if (!ctx || !sld)
 		return -1;
-
-	/* Convert bytes to 256MB CXL capacity units */
-	volatile_capacity = volatile_bytes / CXL_CAPACITY_UNIT;
 
 	if (fmd_sld_behind_switch(&sld->base))
 		return -EOPNOTSUPP;
 
-	/* Mock mode: update local state only */
-	ep = sld->base.ep;
-	if (!ep) {
-		fmd_info(ctx, "%s: mock set partition volatile=%lu MB",
-			 sld->base.id,
-			 (unsigned long)(volatile_bytes / (1024 * 1024)));
-		sld->partition.next_vmem = volatile_capacity;
-		if (immediate) {
-			sld->partition.active_vmem = volatile_capacity;
-			sld->volatile_size = volatile_bytes;
-			sld->persistent_size = sld->memory_size - volatile_bytes;
-		}
-		return 0;
-	}
+	if (volatile_bytes % CXL_CAPACITY_UNIT)
+		return -EINVAL;
 
-	/* Hardware mode: issue CCI command */
-	req.volatile_capacity = volatile_capacity;
-	req.flags = immediate ? 0x01 : 0x00;
-
-	rc = cxlmi_cmd_memdev_set_partition_info(ep, CXLMI_NO_TUNNEL, &req);
-	if (rc != 0) {
-		fmd_warn(ctx, "%s: set partition info failed: %d", sld->base.id, rc);
-		return -1;
-	}
-
-	/* Update local state */
-	sld->partition.next_vmem = volatile_capacity;
-	if (immediate) {
-		sld->partition.active_vmem = volatile_capacity;
-		sld->volatile_size = volatile_bytes;
-		sld->persistent_size = sld->memory_size - volatile_bytes;
-	}
-
-	fmd_info(ctx, "%s: partition set to volatile=%lu MB (immediate=%d)",
-		 sld->base.id,
-		 (unsigned long)(volatile_bytes / (1024 * 1024)),
-		 immediate);
-
-	return 0;
+	/* without an endpoint (mock mode), local state only */
+	return fmd_memdev_set_partition(ctx, sld->base.id, sld->base.ep,
+					CXLMI_NO_TUNNEL, &sld->memdev,
+					&sld->partition,
+					volatile_bytes / CXL_CAPACITY_UNIT,
+					immediate);
 }

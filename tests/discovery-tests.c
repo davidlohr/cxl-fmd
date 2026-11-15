@@ -1419,15 +1419,23 @@ static void test_health_mapping(void)
 	report("health and media status", before);
 }
 
-/* a directly attached SLD of @total, @vol and @pers units of 256 MB */
+/*
+ * A directly attached SLD of @total, Volatile Only @vol and Persistent Only
+ * @pers, with Partition Alignment @align, all in units of 256 MB, and
+ * @active_vol of it volatile now (Get Partition Info, Table 8-310).
+ */
 static struct fmd_sld *direct_sld(struct fmd_ctx *ctx,
 				  struct cxlmi_endpoint **epp, uint64_t serial,
 				  uint64_t total, uint64_t vol, uint64_t pers,
-				  uint64_t align)
+				  uint64_t align, uint64_t active_vol)
 {
 	struct cxlmi_endpoint *ep = new_device(ctx);
 	char id[FMD_MAX_ID_LEN];
-	uint8_t pl[0x45] = { 0 };
+	uint8_t pl[0x45] = { 0 }, part[0x20] = { 0 };
+
+	put64(part + 0x00, active_vol);		/* Active Volatile Capacity */
+	put64(part + 0x08, total - active_vol);	/* Active Persistent Capacity */
+	answer(ep, 0x4100, part, sizeof(part));
 
 	answer_identify(ep, serial, 0x03);
 	/* Identify Memory Device (4000h), Table 8-309 */
@@ -1454,7 +1462,7 @@ static void test_scan_media(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep;
-	struct fmd_sld *sld = direct_sld(ctx, &ep, 0x1101, 64, 64, 0, 0);
+	struct fmd_sld *sld = direct_sld(ctx, &ep, 0x1101, 64, 64, 0, 0, 64);
 	int before = failures, rc;
 	uint8_t pl[64];
 	uint16_t opcode;
@@ -1496,6 +1504,126 @@ static void test_scan_media(void)
 out:
 	fmd_ctx_free(ctx);
 	report("Scan Media length in 64-byte units", before);
+}
+
+/* PATCH Memory with @body, and what it sent as Volatile Capacity, or -1 */
+static int64_t patch_partition(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+			       const char *id, const char *body, int *rc)
+{
+	unsigned int sent = commands_sent(ep);
+	uint8_t pl[16] = { 0 };
+	uint16_t opcode;
+
+	answer(ep, 0x4101, NULL, 0);
+	*rc = fmd_redfish_patch_memory(ctx, id, id, body, strlen(body));
+	if (commands_sent(ep) == sent)
+		return -1;
+	if (last_payload(ep, &opcode, pl, sizeof(pl)) < 9 || opcode != 0x4101)
+		return -2;
+	return (int64_t)get64(pl);
+}
+
+/*
+ * Set Partition Info (4101h). Its Volatile Capacity is "The amount of
+ * partitionable capacity that shall be allocated to volatile capacity, in
+ * multiples of 256 MB aligned to the partition alignment requirement"
+ * (Table 8-311), where "Partitionable capacity is equal to (Total Capacity
+ * - Volatile Only Capacity - Persistent Only Capacity)". The Redfish
+ * StagedVolatileSizeMiB and StagedNonVolatileSizeMiB are totals, as Get
+ * Partition Info's Next capacities are (Table 8-310).
+ *
+ * The device: 16 GiB, 2 GiB Volatile Only, 4 GiB Persistent Only, so 10 GiB
+ * partitionable in steps of 1 GiB; 6 GiB volatile now.
+ */
+static void test_set_partition(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_sld *sld = direct_sld(ctx, &ep, 0x1102, 64, 8, 16, 4, 24);
+	struct fmd_component *dom, *chunk;
+	int before = failures, rc;
+	int64_t sent;
+	char id[FMD_MAX_ID_LEN], dom_id[FMD_MAX_ID_LEN + 16];
+	json_t *rsp = NULL;
+	static const char *const bad[] = {
+		"{\"CXL\": {\"StagedVolatileSizeMiB\": 3000}}",	/* not 256 MB */
+		"{\"CXL\": {\"StagedVolatileSizeMiB\": 1024}}",	/* < Volatile Only */
+		"{\"CXL\": {\"StagedVolatileSizeMiB\": 13312}}",	/* > partitionable */
+		"{\"CXL\": {\"StagedVolatileSizeMiB\": 6656}}",	/* not aligned */
+		"{\"CXL\": {\"StagedNonVolatileSizeMiB\": 512}}",	/* < Persistent Only */
+	};
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+	snprintf(id, sizeof(id), "%s", sld->base.id);
+
+	/* 10 GiB volatile in all: 8 GiB of the partitionable capacity */
+	sent = patch_partition(ctx, ep, id,
+			       "{\"CXL\": {\"StagedVolatileSizeMiB\": 10240}}", &rc);
+	CHECK(rc == 0 && sent == 32, "StagedVolatileSizeMiB 10240: %d, "
+	      "Volatile Capacity %" PRId64, rc, sent);
+	CHECK(sld->partition.next_vmem == 40 && sld->partition.next_pmem == 24,
+	      "next %" PRIu64 "/%" PRIu64, (uint64_t)sld->partition.next_vmem,
+	      (uint64_t)sld->partition.next_pmem);
+
+	/* 6 GiB persistent in all: 10 GiB volatile, as above */
+	sent = patch_partition(ctx, ep, id,
+			       "{\"CXL\": {\"StagedNonVolatileSizeMiB\": 6144}}", &rc);
+	CHECK(rc == 0 && sent == 32, "StagedNonVolatileSizeMiB 6144: %d, "
+	      "Volatile Capacity %" PRId64, rc, sent);
+
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		sent = patch_partition(ctx, ep, id, bad[i], &rc);
+		CHECK(rc == -2 && sent == -1, "%s: %d, Volatile Capacity %" PRId64,
+		      bad[i], rc, sent);
+	}
+
+	/*
+	 * A Volatile chunk of 1 GiB adds to the volatile capacity staged:
+	 * 10 GiB, so 11 GiB in all, 9 of them partitionable. The chunk of
+	 * the whole device is deleted first to make room; it is PMEM, and
+	 * sends nothing.
+	 */
+	dom = fmd_first_child_type(&sld->base, FMD_COMPONENT_DOMAIN);
+	chunk = dom ? fmd_first_child_type(dom, FMD_COMPONENT_CHUNK) : NULL;
+	CHECK(dom && chunk, "no domain or chunk");
+	if (!dom || !chunk)
+		goto out;
+	snprintf(dom_id, sizeof(dom_id), "%s", dom->id);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom_id, chunk->id);
+	CHECK(rc == 0, "delete %s: %d", dom_id, rc);
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom_id,
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}",
+		strlen("{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}"),
+		&rsp);
+	json_decref(rsp);
+	{
+		uint8_t pl[16] = { 0 };
+		uint16_t opcode = 0;
+
+		last_payload(ep, &opcode, pl, sizeof(pl));
+		CHECK(rc == 0 && opcode == 0x4101 && get64(pl) == 36,
+		      "Volatile chunk: %d, %04xh, Volatile Capacity %" PRIu64,
+		      rc, opcode, get64(pl));
+	}
+out:
+	fmd_ctx_free(ctx);
+
+	/* Partition Alignment 0: "shall fail with an Unsupported error" */
+	ctx = new_ctx();
+	sld = direct_sld(ctx, &ep, 0x1103, 64, 32, 32, 0, 32);
+	if (sld) {
+		snprintf(id, sizeof(id), "%s", sld->base.id);
+		sent = patch_partition(ctx, ep, id,
+			"{\"CXL\": {\"StagedVolatileSizeMiB\": 8192}}", &rc);
+		CHECK(rc == -5 && sent == -1,
+		      "no partitionable capacity: %d, Volatile Capacity %" PRId64,
+		      rc, sent);
+	}
+	fmd_ctx_free(ctx);
+	report("Set Partition Info of partitionable capacity", before);
 }
 
 /*
@@ -3287,6 +3415,7 @@ int main(void)
 	test_health_mapping();
 	test_scan_media();
 	test_switch_sld_placeholder();
+	test_set_partition();
 	test_dcd_info();
 	test_paging_ports();
 	test_paging_lds(false);

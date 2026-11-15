@@ -1084,6 +1084,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "Address range overlaps with existing chunk");
+		if (rc == -6)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The device cannot be given that size");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create memory chunk");
 	}
@@ -1230,7 +1233,14 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 		if (rc == -1)
 			return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource not found");
 		if (rc == -2)
-			return send_error(conn, MHD_HTTP_BAD_REQUEST, "Invalid request body");
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "Invalid request body, or a capacity the device cannot be partitioned to");
+		if (rc == -4)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The device cannot be reached: an SLD on a switch port");
+		if (rc == -5)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The device has no partitionable capacity (Partition Alignment is 0)");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "CCI command failed");
 	}
 

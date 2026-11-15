@@ -3972,6 +3972,9 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
  *  -2 = invalid request body
  *  -3 = insufficient capacity
  *  -4 = address overlap
+ *  -5 = CCI command failed
+ *  -6 = the device cannot be given that size (allocation granularity,
+ *       partition alignment, or no partitionable capacity)
  */
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -4147,10 +4150,16 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				rc = fmd_mld_set_ld_allocation(ctx, mld, ld_id, new_size);
 			}
 		} else if (chassis->type == FMD_COMPONENT_SLD) {
-			/* Only adjust partition for volatile chunks */
+			/*
+			 * Only volatile chunks change the partition: the total
+			 * volatile capacity, as staged or else active, grows by
+			 * the chunk. Staged for the next reset, not at once.
+			 */
 			if (strcmp(addr_type, "Volatile") == 0) {
 				struct fmd_sld *sld = fmd_to_sld(chassis);
-				uint64_t new_volatile = sld->volatile_size + size_bytes;
+				uint64_t new_volatile = CXL_TO_BYTES(
+					fmd_partition_next_volatile(&sld->partition)) +
+					size_bytes;
 				rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
 			}
 		} else if (chassis->type == FMD_COMPONENT_MHD) {
@@ -4187,6 +4196,9 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		if (rc < 0) {
 			/* Rollback topology change on CCI failure */
 			fmd_chunk_remove(&ctx->topology, chunk);
+			/* a size the device cannot be given */
+			if (rc == -EINVAL || rc == -EOPNOTSUPP)
+				return -6;
 			return -5;  /* CCI command failed */
 		}
 	}
@@ -4332,12 +4344,14 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				rc = fmd_mld_set_ld_allocation(ctx, mld, ld_id, new_size);
 			}
 		} else if (domain_parent->type == FMD_COMPONENT_SLD) {
-			/* Only adjust partition for volatile chunks */
+			/* Only volatile chunks change the partition */
 			if (strcmp(chunk->address_range_type, "Volatile") == 0) {
 				struct fmd_sld *sld = fmd_to_sld(domain_parent);
+				uint64_t cur = CXL_TO_BYTES(
+					fmd_partition_next_volatile(&sld->partition));
 				uint64_t new_volatile = 0;
-				if (sld->volatile_size > chunk->size)
-					new_volatile = sld->volatile_size - chunk->size;
+				if (cur > chunk->size)
+					new_volatile = cur - chunk->size;
 				rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
 			}
 		}
@@ -4574,13 +4588,23 @@ int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx,
  *
  * DSP0288 Table 1: Set Partition Info (Opcode 4101h) mappings
  * - CXL.StagedVolatileSizeMiB -> Next Volatile Capacity
- * - CXL.StagedNonVolatileSizeMiB -> Next Persistent Capacity (derived)
+ * - Next Persistent Capacity: DSP0288 names StagedPersistentSizeMiB, which
+ *   the Memory schema does not have; cxl-fmd takes StagedNonVolatileSizeMiB
+ *   ("Total device non-volatile memory capacity in MiB staged for next
+ *   activation") and derives the volatile capacity from it.
+ *
+ * Both are totals; Set Partition Info takes the partitionable part, which
+ * fmd_memdev_set_partition() works out. The change is staged for the next
+ * reset (Immediate cleared), and loses the data of the persistent capacity
+ * it changes.
  *
  * Returns:
  *   0 on success
  *  -1 on resource not found
- *  -2 on invalid request body
+ *  -2 on invalid request body, or a size the device cannot be given
  *  -3 on CCI command failure
+ *  -4 if the device cannot be reached: an SLD on a switch port
+ *  -5 if the device cannot be partitioned (Partition Alignment 0)
  */
 int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 			     const char *chassis_id,
@@ -4591,19 +4615,23 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 	struct fmd_component *comp;
 	json_t *root, *cxl, *staged_volatile_j, *staged_nonvolatile_j;
 	json_error_t error;
-	uint64_t total_capacity_mib = 0;
+	const struct cxlmi_cmd_memdev_identify_rsp *memdev = NULL;
 	struct cxlmi_cmd_memdev_get_partition_info_rsp *partition = NULL;
+	uint64_t total, next_volatile;
+	int rc;
 
 	comp = fmd_topology_find(&ctx->topology, chassis_id);
 	if (!comp || !fmd_is_memdev(comp))
 		return -1;
 
-	/* Get device info for total capacity and partition struct */
+	/* Identify Memory Device and Get Partition Info of the device or LD */
 	if (comp->type == FMD_COMPONENT_SLD) {
 		if (strcmp(mem_id, chassis_id) != 0)
 			return -1;
+		if (fmd_sld_behind_switch(comp))
+			return -4;
 		struct fmd_sld *sld = fmd_to_sld(comp);
-		total_capacity_mib = sld->memory_size / (1024ULL * 1024);
+		memdev = &sld->memdev;
 		partition = &sld->partition;
 	} else if (comp->type == FMD_COMPONENT_MLD) {
 		char prefix[128];
@@ -4633,11 +4661,12 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 		if (!target_ld)
 			return -1;
 
-		total_capacity_mib = target_ld->memory_size / (1024ULL * 1024);
+		memdev = &target_ld->memdev;
 		partition = &target_ld->partition;
 	} else {
 		return -1;
 	}
+	total = memdev->total_capacity;
 
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
@@ -4653,58 +4682,47 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 	staged_volatile_j = json_object_get(cxl, "StagedVolatileSizeMiB");
 	staged_nonvolatile_j = json_object_get(cxl, "StagedNonVolatileSizeMiB");
 
-	if (!staged_volatile_j && !staged_nonvolatile_j) {
-		json_decref(root);
-		return -2;  /* Nothing to change */
-	}
-
-	/* Calculate the new volatile capacity in 256MB CXL units */
-	uint64_t new_volatile_mib;
+	/*
+	 * The total volatile capacity wanted, in 256 MB units. Both
+	 * properties are "in multiples of 256 MiB" (Memory_v1): one that is
+	 * not is refused, not rounded.
+	 */
+	json_int_t mib;
 	if (staged_volatile_j && json_is_integer(staged_volatile_j)) {
-		new_volatile_mib = json_integer_value(staged_volatile_j);
-	} else if (staged_nonvolatile_j && json_is_integer(staged_nonvolatile_j)) {
-		/* Derive volatile from: total - nonvolatile */
-		uint64_t nonvolatile_mib = json_integer_value(staged_nonvolatile_j);
-		if (nonvolatile_mib > total_capacity_mib) {
+		mib = json_integer_value(staged_volatile_j);
+		if (mib < 0 || mib % 256) {
 			json_decref(root);
-			return -2;  /* Invalid: nonvolatile > total */
+			return -2;
 		}
-		new_volatile_mib = total_capacity_mib - nonvolatile_mib;
+		next_volatile = (uint64_t)mib / 256;
+	} else if (staged_nonvolatile_j && json_is_integer(staged_nonvolatile_j)) {
+		mib = json_integer_value(staged_nonvolatile_j);
+		if (mib < 0 || mib % 256 || (uint64_t)mib / 256 > total) {
+			json_decref(root);
+			return -2;
+		}
+		next_volatile = total - (uint64_t)mib / 256;
 	} else {
 		json_decref(root);
 		return -2;
 	}
-
-	/* Convert MiB to CXL 256MB units */
-	uint64_t volatile_capacity = new_volatile_mib / 256;
-
 	json_decref(root);
 
-	if (unlikely(fmd_is_mock(ctx))) {
-		/* Update in-memory partition values for mock mode */
-		partition->next_vmem = volatile_capacity;
-		partition->next_pmem = (total_capacity_mib / 256) - volatile_capacity;
-		return 0;
-	}
+	struct cxlmi_endpoint *ep = NULL;
+	struct cxlmi_tunnel_info ti_buf, *ti = CXLMI_NO_TUNNEL;
 
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
+	/* mock mode: the same checks, local state only */
+	if (likely(!fmd_is_mock(ctx)) &&
+	    memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
 		return -1;
 
-	struct cxlmi_cmd_memdev_set_partition_info_req req = {
-		.volatile_capacity = volatile_capacity,
-		.flags = 0,  /* No immediate change */
-	};
-
-	if (cxlmi_cmd_memdev_set_partition_info(ep, ti, &req) != 0)
-		return -3;
-
-	/* Update in-memory partition values */
-	partition->next_vmem = volatile_capacity;
-	partition->next_pmem = (total_capacity_mib / 256) - volatile_capacity;
-
-	return 0;
+	rc = fmd_memdev_set_partition(ctx, mem_id, ep, ti, memdev, partition,
+				      next_volatile, false);
+	if (rc == -EINVAL)
+		return -2;
+	if (rc == -EOPNOTSUPP)
+		return -5;
+	return rc ? -3 : 0;
 }
 
 /*

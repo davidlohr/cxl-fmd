@@ -1752,10 +1752,28 @@ struct fmd_head *fmd_mhd_find_host_head(struct fmd_mhd *mhd, const char *host_id
 bool fmd_mhd_ld_accessible_from_head(struct fmd_ld *ld, struct fmd_head *head);
 
 /*
- * Set volatile/persistent partition for an SLD via CCI Set Partition Info (4101h)
+ * Set Partition Info (4101h). Capacities are in units of 256 MB, and
+ * @next_volatile is the total volatile capacity wanted, Volatile Only
+ * capacity included. See src/discovery.c.
+ */
+int fmd_partition_volatile(const struct cxlmi_cmd_memdev_identify_rsp *id,
+			   uint64_t next_volatile, uint64_t *volatile_capacity);
+int fmd_memdev_set_partition(struct fmd_ctx *ctx, const char *name,
+			     struct cxlmi_endpoint *ep,
+			     struct cxlmi_tunnel_info *ti,
+			     const struct cxlmi_cmd_memdev_identify_rsp *id,
+			     struct cxlmi_cmd_memdev_get_partition_info_rsp *part,
+			     uint64_t next_volatile, bool immediate);
+uint64_t fmd_partition_next_volatile(const struct cxlmi_cmd_memdev_get_partition_info_rsp *part);
+
+/*
+ * Set the volatile/persistent partition of an SLD via Set Partition Info
+ * (4101h). @volatile_bytes is the total volatile capacity wanted, Volatile
+ * Only capacity included, a multiple of 256 MB.
  * For mock mode, updates local state only.
  * If immediate is true, change takes effect immediately; else at next reset.
- * Returns 0 on success, negative on error.
+ * Returns 0, -EINVAL if the device cannot be given that, -EOPNOTSUPP if it
+ * cannot be partitioned or reached, other negative values on error.
  */
 int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 			  uint64_t volatile_bytes, bool immediate);

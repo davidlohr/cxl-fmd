@@ -82,8 +82,8 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 | Get Partition Info | Active Volatile Capacity | `Memory` | `VolatileSizeLimitMiB` | Yes |
 | Get Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | Yes |
 | Get Partition Info | Next Persistent Capacity | `Memory` | `StagedNonVolatileSizeMiB` | Yes |
-| Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | Yes |
-| Set Partition Info | Next Persistent Capacity | `Memory` | `StagedNonVolatileSizeMiB` | Yes |
+| Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | Yes (see "Set Partition Info" below) |
+| Set Partition Info | Next Persistent Capacity | `Memory` | `StagedNonVolatileSizeMiB` | Yes (see "Set Partition Info" below) |
 | Get Health Info | Health Status | Many | `Status` | Yes |
 | Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | Yes |
 | Get Health Info | Corrected Volatile Error Count | `MemoryMetrics` | `CorrectedVolatileErrorCount` | Yes |
@@ -109,6 +109,40 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 **Comment 3:** Redfish resources contain a `Status` property to show the health and state of a device. The `Conditions` property within the `Status` property is used to show why the `Health` property contains a value other than `OK`.
 
 **Comment 4:** The `Conditions` property within the `Status` property of the `Memory` resource shall contain messages to indicate either the Corrected Volatile Error Count or Corrected Persistent Error Count flags are set.
+
+### Set Partition Info
+
+DSP0288 maps Next Persistent Capacity to `StagedPersistentSizeMiB`, which
+the `Memory` schema does not have; cxl-fmd uses `StagedNonVolatileSizeMiB`
+("Total device non-volatile memory capacity in MiB staged for next
+activation") in its place. That is cxl-fmd's choice.
+
+`StagedVolatileSizeMiB` and `StagedNonVolatileSizeMiB` are totals, as Get
+Partition Info's Next Volatile and Next Persistent Capacity are: "the sum
+of the device's Volatile Only capacity and the capacity that is
+partitioned for volatile use" (CXL r4.0 Table 8-310). Set Partition
+Info's Volatile Capacity is not: it is "The amount of partitionable
+capacity that shall be allocated to volatile capacity, in multiples of
+256 MB aligned to the partition alignment requirement reported in the
+Identify Memory Device command" (Table 8-311), where "Partitionable
+capacity is equal to (Total Capacity – Volatile Only Capacity –
+Persistent Only Capacity)" (Section 8.2.10.9.2.2). A `PATCH` of either
+property sends the requested total less the Volatile Only Capacity, and
+is refused with 400, with nothing sent, when:
+
+- the value is not a multiple of 256 MiB;
+- it is less than the Volatile Only Capacity, or leaves less than the
+  Persistent Only Capacity;
+- the partitionable part is not a multiple of the Partition Alignment;
+- the Partition Alignment is 0: "This command shall fail with an
+  Unsupported error if there is no partitionable capacity (i.e., Identify
+  Memory Device reports Partition Alignment as zero)".
+
+The change is sent with Immediate cleared, so it "shall become the
+"next" configuration, to become active on the next reset" (Table 8-311),
+and it can destroy data: "Using this command to change the size of the
+persistent capacity shall result in the loss of data stored" (Section
+8.2.10.9.2.2).
 
 ### Where cxl-fmd puts CXL event records
 
@@ -616,7 +650,13 @@ For MLD chunks, the response includes `Links.CXLLogicalDevices` referencing the 
 
 **Hardware Behavior:**
 - **MLD**: Issues `Set LD Allocations (0x5402h)` to increase the LD's memory allocation
-- **SLD**: Issues `Set Partition Info (0x4101h)` to adjust the volatile/persistent boundary
+- **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
+  the volatile capacity staged (or else active) plus the chunk, worked out
+  and checked as in "Set Partition Info" above. Immediate is cleared: the
+  device takes the new partitioning at its next reset, yet the chunk is
+  in the collection at once (see Known Gaps). Persistent data is lost if
+  the persistent capacity changes. A `"PMEM"` chunk sends no command: it
+  only divides cxl-fmd's own record of the domain.
 
 ### Deleting Memory Chunks (DELETE)
 
@@ -628,7 +668,9 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
 
 **Hardware Behavior:**
 - **MLD**: Issues `Set LD Allocations (0x5402h)` to decrease the LD's memory allocation
-- **SLD**: Issues `Set Partition Info (0x4101h)` to reduce volatile capacity
+- **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
+  the volatile capacity staged (or else active) less the chunk, staged for
+  the next reset as on creation. A `"PMEM"` chunk sends no command.
 
 ### MLD Memory Model
 
@@ -832,6 +874,23 @@ These are known gaps in what cxl-fmd does, not properties of a schema:
 - The managed hot-removal of an MLD (Section 7.6.6.7) is not carried out:
   cxl-fmd does not act on a host's Attention Indicator, unbind the LDs, or
   set the MLD port's Attention LED.
+
+### Memory device writes
+
+These are known gaps in what cxl-fmd does:
+
+- Set Partition Info, Scan Media, Set and Disable Passphrase, Freeze
+  Security State and Passphrase Secure Erase are marked O with note 4 for
+  MCTP in Table 8-308, which reads: "Systems capable of management from
+  Mailbox registers and an MCTP-based CCI shall ensure that these commands
+  are not issued as MCTP messages while a device's mailboxes are
+  operational." cxl-fmd sends them over MCTP whenever a client asks, and
+  does not know whether a host is using the device's mailboxes. Use these
+  operations only on a device no host is driving.
+- A `"Volatile"` chunk of an SLD is in the collection as soon as it is
+  created, though the partition change it asked for is staged and takes
+  effect only at the device's next reset; the chunk has no state that says
+  so.
 
 ### MemoryChunks
 
