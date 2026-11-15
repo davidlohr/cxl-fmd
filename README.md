@@ -77,8 +77,10 @@ See [docs/mock-topology.md](docs/mock-topology.md) for available topologies and 
 |--------|-------|-------------|
 | `--port PORT` | `-p` | HTTP port (default: 8080) |
 | `--mock FILE` | `-M` | Use mock topology from JSON file |
+| `--check` | `-c` | Check that the topology is a valid CXL fabric, report, and exit |
 | `--mctp` | `-m` | Enable MCTP device scanning |
 | `--ioctl` | `-i` | Enable ioctl device scanning |
+| `--event-poll SECS` | `-e` | Read the event logs every SECS seconds (default: 10, 0 disables) |
 | `--rescan SECS` | `-r` | Look for new devices every SECS seconds (default: 30, 0 disables) |
 | `--threads N` | `-N` | Serve requests on N threads, 1 to 256 (default: 8). Requests that only read run together; a change runs alone |
 | `--verbose` | `-v` | Increase verbosity (repeatable) |
@@ -174,10 +176,10 @@ curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0
 curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/Ports
 
 # Get Virtual CXL Switches
-curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCS
+curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs
 
 # Get vPPB bindings for a VCS
-curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCS/0/VPPBs
+curl http://localhost:8080/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs/0/VPPBs
 ```
 
 ### Response Headers
@@ -192,13 +194,16 @@ XML metadata responses include:
 
 ### CXL to Redfish Mapping
 
+The Health Status and Media Status fields are those of Get Health Info (CXL
+r4.0 Table 8-315). Which Redfish value each is given is cxl-fmd's mapping.
+
 #### Health Status
 
 | CXL CCI health_status | Redfish Health |
 |-----------------------|----------------|
 | 0 (no flags) | OK |
-| Bit 0 or 1 set | Warning |
-| Bit 2 set (HW replacement) | Critical |
+| Bit 0 (Maintenance Needed), 1 (Performance Degraded) or 3 (Memory Capacity Degraded) set | Warning |
+| Bit 2 set (Hardware Replacement Needed) | Critical |
 
 #### Media Status
 
@@ -282,7 +287,7 @@ meson test -C build -v
 meson test -C build --suite redfish    # Quick endpoint tests
 meson test -C build --suite api        # Full API tests
 meson test -C build --suite security   # Fuzzing and adversarial tests
-meson test -C build --suite unit       # All 8 CXL topology combinations
+meson test -C build --suite unit       # discovery-tests, the mock topologies, the man page, and 7 attachment/device combinations
 meson test -C build --suite validator  # DMTF schema validation
 ```
 
@@ -303,7 +308,7 @@ python scripts/run_redfish_validator.py --output-dir ./logs
 
 ## Dynamic Capacity
 
-Type 3 devices that implement the FM-API DCD Management command set (CXL r3.2 Section 7.6.7.6) are exposed through the 2026.1 Redfish model. DSP0288 does not cover these commands yet; the mapping cxl-fmd implements is specified in [docs/DCD-FM-API.md](docs/DCD-FM-API.md).
+Type 3 devices that implement the FM-API DCD Management command set (CXL r4.0 Section 7.6.7.6) are exposed through the Redfish model DSP8010 2026.1 introduced. DSP0288 does not cover these commands yet; the mapping cxl-fmd implements is specified in [docs/DCD-FM-API.md](docs/DCD-FM-API.md).
 
 ```bash
 ./build/cxl-fmd --mock mock/dcd-device.json
@@ -330,12 +335,12 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cx
 
 The following CXL features are not yet supported:
 - **Port-Based Routing (PBR)**: PBR fabric discovery and Global Fabric-Attached Memory Devices
-- **Removal of devices**: a switch records a port whose link or presence has changed in its event logs, which are read every `--event-poll` seconds (default 10) and when the switch sends an MCTP Event Notification; the ports it names are read again, and the records cleared. The whole fabric is looked at again every `--rescan` seconds (default 30), which is also what finds new endpoints. New ports, devices that have appeared on a port, new VCSs and new endpoints are added. A device on a switch port is removed when the port reports no device, or one of another kind, in its place (CXL r4.0 Sections 7.6.6.7 and 7.6.6.8), with its LDs, memory domains and chunks. A connection to it goes when the switch unbinds its vPPB, as it does for an MLD's LDs; one whose vPPB stays bound, as an SLD's port does, stands as `Absent` until it is deleted (see [docs/Redfish-API.md](docs/Redfish-API.md#when-a-device-is-removed)). A port whose link is down and that still reports its device keeps it. A directly attached device, and a Multi-Headed device, are not removed: they stay until cxl-fmd is restarted. Where the heads of a Multi-Headed device are plugged in, and an SLD on a switch port, are not discoverable either way
+- **Removal of devices**: a switch records a change of a port's link or slot status in a Physical Switch Event Record (CXL r4.0 Table 7-79). cxl-fmd reads a switch's event logs every `--event-poll` seconds (default 10) and when the switch sends an MCTP Event Notification; the ports that Physical Switch Event Records name are read again, and the records cleared. The whole fabric is looked at again every `--rescan` seconds (default 30), which is also what finds new endpoints. New ports, devices that have appeared on a port, new VCSs and new endpoints are added. A device on a switch port is removed when the port reports no device, or one of another kind, in its place, with its LDs, memory domains and chunks: that rule is cxl-fmd's, as the specification does not say what a port reports after a removal. A connection to it goes once its vPPB is read as unbound, as for the LDs of an MLD removed by surprise: "The switch will automatically unbind any existing LD bindings" (Section 7.6.6.8). One whose vPPB stays bound stands as `Absent` until it is deleted; that the vPPB of an SLD's port stays bound is cxl-fmd's assumption, as of such a removal Section 7.6.6.7 says only that "the FM can be notified but is not involved" (see [docs/Redfish-API.md](docs/Redfish-API.md#when-a-device-is-removed)). The managed hot-removal of an MLD, in which "The FM unbinds each assigned LD with the Unbind vPPB command as it receives notifications from each host" (Section 7.6.6.7), is not carried out, and removal is not decided from the port's presence detect (see Known Gaps there). A port whose link is down and that still reports its device keeps it. A directly attached device, and a Multi-Headed device, are not removed: they stay until cxl-fmd is restarted. On hardware, which host or switch port each head of a Multi-Headed device is plugged into is not discovered
 - **Dynamic Capacity events**: the FM-side DC event log is drained every `--event-poll` seconds (default 10) and early on MCTP Event Notification, so an extent's `Pending` state can lag the host's response by up to one interval on devices or transports without notifications. `Pending` comes from the tag's Pending Reference Bitmap (5608h), per tag, and only for extents the device lists for the host in 5603h, which may leave pending ones out; see Comment 5 of [docs/DCD-FM-API.md](docs/DCD-FM-API.md). Extents are kept by DPA for the whole device, not per host (Comment 2 there)
 
 ## References
 
-- [CXL Specification 3.2](https://www.computeexpresslink.org/spec-landing)
+- [CXL Specification 4.0](https://www.computeexpresslink.org/spec-landing) (section and table numbers in this repository are r4.0's)
 - [DMTF Redfish Specification](https://www.dmtf.org/standards/redfish)
 - [DMTF Redfish CXL Schemas](https://redfish.dmtf.org/schemas/)
 - [DMTF DSP0288 CXL to Redfish Mapping](https://www.dmtf.org/dsp/DSP0288)
