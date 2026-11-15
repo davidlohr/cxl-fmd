@@ -167,8 +167,9 @@ starts.
 After that, on hardware:
 .IP \(bu 2
 The event logs of each switch are read and cleared.
-A port whose link or presence has changed is read again: a device that has
-appeared on it is discovered, and one that is no longer there is removed.
+A port that a Physical Switch Event Record names, for a change of its link
+state or slot status, is read again: a device that has appeared on it is
+discovered, and one that is no longer there is removed.
 .IP \(bu 2
 Every
 .B \-\-rescan
@@ -181,9 +182,19 @@ the extents of the hosts it names are brought up to date.
 A device on a switch port is removed when the port reports no device, or a
 device of another kind, in its place: with its logical devices, memory domains
 and chunks.
-A connection to it goes when its vPPB is no longer bound, as the switch does
-for the logical devices of an MLD; one whose vPPB stays bound, as an SLD's
-port does, stands with its state Absent until it is deleted.
+That rule is
+.BR cxl-fmd 's;
+the CXL specification does not say what a port reports after a removal.
+A connection to it goes once its vPPB is read as unbound, as the switch
+unbinds the logical devices of an MLD removed by surprise (CXL r4.0 Section
+7.6.6.8).
+One whose vPPB stays bound stands with its state Absent until it is deleted;
+that the vPPB of an SLD's port stays bound is
+.BR cxl-fmd 's
+assumption, as the specification says only that the FM \(lqcan be notified
+but is not involved\(rq (Section 7.6.6.7).
+The managed hot-removal of an MLD, in which the FM unbinds each logical
+device as its host releases it (Section 7.6.6.7), is not carried out.
 A port whose link is down and that still reports its device keeps it.
 A device attached directly, on an MCTP endpoint of its own, and a Multi-Headed
 device, are not removed: they stay until
@@ -199,8 +210,17 @@ those of a memory device in the
 .I DeviceLog
 of the CXL logical device they are about.
 .PP
-Only logs that are the Fabric Manager's are read: those of a component's own
-MCTP interface, and of the FM-owned logical device of an MLD behind a switch.
+Only logs that
+.B cxl-fmd
+takes to be the Fabric Manager's are read: those of a component's own MCTP
+interface, and of the FM-owned logical device of an MLD behind a switch,
+to which the FM tunnels its commands (CXL r4.0 Section 7.6.3.1).
+That the FM-owned logical device's logs are the FM's to read and clear is
+.BR cxl-fmd 's
+inference: the specification says that the error messages it generates
+\(lqmust only be routed to the FM\(rq (Section 2.4), not who reads its
+event logs.
+The logs of a Multi-Headed device are not read.
 A component reached through the kernel's mailbox
 .RB ( \-i )
 shares its event logs with the kernel's driver, and they are left to it.
