@@ -623,7 +623,7 @@ Each port in the `ports` array defines a physical switch port.
 | `conn_dev_type` | string | "none" | Connected device type (see below) |
 | `max_link_width` | integer | 16 | Maximum link width (lanes) |
 | `negotiated_link_width` | integer | 0 | Negotiated link width |
-| `supported_ld_count` | integer | 16 | Supported LD Count of Get Physical Port State: the number of *additional* LDs the port supports, so LD-IDs 0 to this value |
+| `supported_ld_count` | integer | 16 | Supported LD Count of Get Physical Port State, "Number of additional LDs supported by this port" (Table 7-21). cxl-fmd reads it as LDs past the one every port has, so LD-IDs 0 to this value; the text can also be read as the total. Redfish publishes it as `MaxLogicalDeviceCount` unchanged |
 | `conn_dev_cxl_ver` | integer | 0 | Connected device CXL version |
 | `port_cxl_ver_bitmask` | integer | 0x06 | Port CXL version support bitmask |
 | `supported_link_speeds` | integer | 0x1F | Supported link speeds bitmask |

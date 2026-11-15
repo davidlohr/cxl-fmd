@@ -147,13 +147,15 @@ stand between a file and the daemon:
   file does not have, an extent outside every region. None of these is rounded,
   truncated, dropped or replaced by a default.
 - **The topology is checked against the CXL specification**
-  (`src/validate.c`). Each check enforces a rule of CXL r4.0 and names it when
-  it fails: a port or an LD bound to more than one vPPB, an MLD port bound as
-  a whole, an enabled VCS whose USP ID is not an upstream port or a Fabric
-  Port, a device on a port whose Connected Device Type is another, capacities that do not
-  add up, an MLD with no LDs or more than 16, a head of a Multi-Headed device
-  with no LD mapped, DC regions and extents that are not aligned or overlap,
-  two devices with one serial number.
+  (`src/validate.c`). A check that comes from CXL r4.0 names its section or
+  table when it fails; the few that are consistency checks of cxl-fmd's own
+  model, or its limits, say so. Among them: a port or an LD bound to more
+  than one vPPB, an MLD port bound as a whole, an enabled VCS whose USP ID is
+  not an upstream port or a Fabric Port, a device on a port whose Connected
+  Device Type is another, capacities that do not add up, an MLD with no LDs
+  or more than 16, a head of a Multi-Headed device with no LD mapped, DC
+  regions and extents that are not aligned, extents that overlap, two
+  devices with one serial number.
 
 A topology that fails either is refused: the daemon exits instead of serving
 it. To check one without serving it:

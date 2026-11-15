@@ -2052,9 +2052,11 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		}
 
 		/*
-		 * Supported LD Count is the number of additional LDs the port
-		 * supports, every port supporting at least one (Table 7-21):
-		 * LD-IDs 0 to Supported LD Count.
+		 * Supported LD Count: "Number of additional LDs supported by
+		 * this port. All ports must support at least one LD." (Table
+		 * 7-21). cxl-fmd reads "additional" as past the one every port
+		 * has, so LD-IDs 0 to Supported LD Count; the text can also be
+		 * read as the total.
 		 */
 		if (is_mld && ld_id > target_port->supported_ld_count) {
 			fmd_err(ctx, "%s: LD-ID %d is past the %d LDs port %d supports",

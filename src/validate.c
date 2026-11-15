@@ -8,8 +8,9 @@
  * discovered topology is what the hardware reported, so the same checks
  * there are warnings about the hardware or about discovery.
  *
- * Each check cites the rule it enforces, by section or table of CXL r4.0.
- * Nothing is checked that the specification does not say.
+ * Checks that come from CXL r4.0 cite their section or table. The others
+ * are consistency checks of cxl-fmd's own model of a topology, or limits
+ * of cxl-fmd, and are labelled "cxl-fmd consistency" or "cxl-fmd limit".
  */
 
 #include <inttypes.h>
@@ -106,8 +107,9 @@ static void check_capacity(struct validation *v, const char *id, uint64_t total,
 }
 
 /*
- * Dynamic Capacity regions and extents, Table 8-347 (and Table 7-68, which
- * refers to it) and the extent of Table 7-71.
+ * Dynamic Capacity regions and extents: the region of Table 8-347 (to which
+ * Table 7-68 refers) and the extent of Table 8-230 (to which Table 7-71
+ * refers).
  */
 static void check_dcd(struct validation *v, struct fmd_component *dev)
 {
@@ -148,8 +150,9 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 
+		/* "The Length shall be > 0." */
 		if (ext->len == 0)
-			invalid(v, "DC Extent, Table 8-350", "%s: extent at %#" PRIx64
+			invalid(v, "Dynamic Capacity Extent, Table 8-230", "%s: extent at %#" PRIx64
 				" has no length", dev->id, ext->start_dpa);
 
 		for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
@@ -201,7 +204,11 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 			}
 		}
 
-		/* one DPA range is one extent */
+		/*
+		 * One DPA range is one extent. An Extent List with "Overlapping
+		 * DPA ranges for multiple extents" is malformed (Sections
+		 * 8.2.10.9.9.3 and 8.2.10.9.9.4).
+		 */
 		for (other = child->next_sibling; other; other = other->next_sibling) {
 			struct fmd_dc_extent *o;
 
@@ -210,7 +217,8 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 			o = fmd_to_dc_extent(other);
 			if (ext->start_dpa < o->start_dpa + o->len &&
 			    o->start_dpa < ext->start_dpa + ext->len)
-				invalid(v, rule, "%s: extents at %#" PRIx64 " and %#" PRIx64
+				invalid(v, "malformed Extent List, Sections 8.2.10.9.9.3 "
+					"and 8.2.10.9.9.4", "%s: extents at %#" PRIx64 " and %#" PRIx64
 					" overlap", dev->id, ext->start_dpa, o->start_dpa);
 		}
 	}
@@ -365,12 +373,17 @@ out:
 
 /*
  * What is bound to what, Sections 7.2.3.1 and 7.3.4 and Tables 7-34 and
- * 7-35: an SLD port is bound to only one VCS, each LD of an MLD is bound to
- * one host or is unbound, and a vPPB is bound to an MLD port by LD.
+ * 7-35. An SLD port "is bound to only one VCS" and the FM "can bind any
+ * unused physical port to the unbound vPPB" (Section 7.2.3.1); "LDs within
+ * an MLD component can be bound to a host or unbound" (Section 7.3.4); a
+ * vPPB is bound to an MLD port by LD (Table 7-35). That a port, or an LD,
+ * is bound to one vPPB is cxl-fmd's reading of that model: no text says
+ * "one vPPB".
  */
 static void check_switch(struct validation *v, struct fmd_switch *sw)
 {
-	static const char bind_rule[] = "Binding, Sections 7.2.3.1 and 7.3.4";
+	static const char bind_rule[] = "Binding, Sections 7.2.3.1 and 7.3.4, "
+					"as cxl-fmd reads them";
 	static const char vcs_rule[] = "Get Virtual CXL Switch Info, Table 7-34";
 	static const char port_rule[] = "Get Physical Port State, Table 7-21";
 	struct fmd_component *child, *other;
@@ -537,9 +550,18 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 						"has no MLD", sw->base.id, vppb->vppb_id,
 						vcs->vcs_id, vppb->bound_ld_id,
 						port->port_number);
-				/* Supported LD Count: additional LDs, so 0 to count */
+				/*
+				 * Supported LD Count: "Number of additional LDs
+				 * supported by this port. All ports must support
+				 * at least one LD." (Table 7-21). cxl-fmd reads
+				 * "additional" as past the one every port has, so
+				 * LD-IDs 0 to the count; the text can also be read
+				 * as the total. An LD the device does not have is
+				 * refused below either way.
+				 */
 				else if (vppb->bound_ld_id > port->supported_ld_count)
-					invalid(v, port_rule, "%s: vPPB %d of VCS %d is "
+					invalid(v, "Get Physical Port State, Table 7-21, "
+						"as cxl-fmd reads it", "%s: vPPB %d of VCS %d is "
 						"bound to LD %d of port %d, which supports "
 						"LD-IDs 0 to %d", sw->base.id, vppb->vppb_id,
 						vcs->vcs_id, vppb->bound_ld_id,
@@ -586,12 +608,14 @@ static void walk(struct validation *v, struct fmd_component *comp, int depth)
 	struct fmd_component *child;
 
 	if (depth > 16) {
-		invalid(v, "topology", "%s: nested more than 16 deep", comp->id);
+		invalid(v, "cxl-fmd consistency", "%s: nested more than 16 deep",
+			comp->id);
 		return;
 	}
 
 	if (depth > 0 && fmd_topology_find(&v->ctx->topology, comp->id) != comp)
-		invalid(v, "topology", "two components with ID %s", comp->id);
+		invalid(v, "cxl-fmd consistency", "two components with ID %s",
+			comp->id);
 
 	switch (comp->type) {
 	case FMD_COMPONENT_SWITCH:
@@ -615,7 +639,7 @@ static void walk(struct validation *v, struct fmd_component *comp, int depth)
 }
 
 /*
- * A serial number is the "unique identifier for this device" (Identify,
+ * Device Serial Number: "Unique identifier for this device" (Identify,
  * Table 8-216). 0 is taken to mean the device has none.
  */
 static void check_serials(struct validation *v)
@@ -666,7 +690,13 @@ static void check_serials(struct validation *v)
 	}
 }
 
-/* a host that reaches its devices through a switch does so through a VCS */
+/*
+ * A host that reaches its devices through a switch does so through a VCS of
+ * that switch. A host is cxl-fmd's model, not the specification's: it is the
+ * hierarchy of one VCS, which "Includes entities within the physical switch
+ * belonging to a single VH" (glossary, VCS), a VH being "Everything from the
+ * CXL RP down" (glossary, VH). This checks that the model is consistent.
+ */
 static void check_hosts(struct validation *v)
 {
 	struct fmd_component *comp, *sw_comp;
@@ -689,7 +719,7 @@ static void check_hosts(struct validation *v)
 				found = true;
 		}
 		if (!found)
-			invalid(v, "Virtual CXL Switch, Section 7.1", "host %s is on "
+			invalid(v, "cxl-fmd consistency", "host %s is on "
 				"VCS %d of switch %s with upstream port %d, which is "
 				"no VCS of the topology", host->base.id, host->vcs_id,
 				host->switch_id[0] ? host->switch_id : "(none)",
