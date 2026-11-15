@@ -285,6 +285,13 @@ def extents_overlap(t):
     extents.append(dict(extents[0], start_mb=extents[0]["start_mb"] + 256))
 
 
+# A region with no length is unavailable (Table 8-347): nothing can be in it
+def extent_in_a_region_with_no_length(t):
+    dcd(t)["regions"].append({"region_id": 2, "base_mb": 65536,
+                              "region_len_mb": 0, "block_size_mb": 0})
+    dcd(t)["extents"].append({"start_mb": 65536, "len_mb": 256})
+
+
 # switch-dcd.json: region 0 of the MLD is Sharable, region 1 is not
 def shared_extent_in_a_region_that_is_not_sharable(t):
     extent = t["devices"][0]["dcd"]["extents"][1]      # in region 1, host 1's
@@ -337,6 +344,8 @@ BROKEN = [
     ("dcd-device.json", extent_not_block_aligned, "is not aligned to the block size"),
     ("dcd-device.json", region_base_not_256mb, "is not aligned to 256 MB"),
     ("dcd-device.json", extents_overlap, "overlap"),
+    ("dcd-device.json", extent_in_a_region_with_no_length,
+     "is empty or is outside region base"),
     ("switch-dcd.json", shared_extent_in_a_region_that_is_not_sharable,
      "is not Sharable"),
 ]
@@ -381,11 +390,19 @@ def head_on_a_port_that_is_down(t):
     port(t, 3)["link_status"] = "down"
 
 
+# dcd-device.json: Region Length "Report 0 if the region is unavailable for
+# Dynamic Capacity", and Region Block Size too (Table 8-347)
+def region_with_no_length(t):
+    t["devices"][0]["dcd"]["regions"].append(
+        {"region_id": 2, "base_mb": 65536, "region_len_mb": 0, "block_size_mb": 0})
+
+
 ACCEPTED = [
     # (base topology, what to change)
     ("multi-host-vcs.json", disabled_vcs_with_a_stale_usp),
     ("multi-host-vcs.json", device_on_a_port_that_is_down),
     ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down),
+    ("dcd-device.json", region_with_no_length),
 ]
 
 

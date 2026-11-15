@@ -461,7 +461,7 @@ Capacity Device. It mirrors the FM-API DCD Management responses; see
 |-------|------|---------|-------------|
 | `region_id` | integer | array index | Region number (0-7) |
 | `base_mb` | integer | 0 | Region base in the device address space (DPA) |
-| `region_len_mb` | integer | - | Region length; a region of length 0 is skipped |
+| `region_len_mb` | integer | 0 | Region length. 0 is a region "unavailable for Dynamic Capacity" (Table 8-347): it counts among the supported regions, is skipped otherwise, may have `block_size_mb` 0, and can hold no extent |
 | `decode_len_mb` | integer | `region_len_mb` | HDM decode length |
 | `block_size_mb` | integer | 256 | Current block size |
 | `supported_block_sizes_mb` | array | [`block_size_mb`] | Block sizes accepted by PATCH |

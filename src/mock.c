@@ -1059,15 +1059,25 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			uint64_t hosts;
 			uint8_t flags = 0;
 
-			if (rid < 0 || rid >= FMD_MAX_DC_REGIONS || len_mb == 0 || bs_mb == 0) {
-				load_error("%s: dcd region %d: no length or block size, "
-					   "or not one of regions 0 to %d", dev->id, rid,
+			if (rid < 0 || rid >= FMD_MAX_DC_REGIONS ||
+			    (len_mb != 0 && bs_mb == 0)) {
+				load_error("%s: dcd region %d: no block size, or not "
+					   "one of regions 0 to %d", dev->id, rid,
 					   FMD_MAX_DC_REGIONS - 1);
 				continue;
 			}
 
 			if (rid + 1 > dcd->num_regions)
 				dcd->num_regions = (uint8_t)(rid + 1);
+
+			/*
+			 * Region Length: "Report 0 if the region is unavailable
+			 * for Dynamic Capacity" (Table 8-347). The region is
+			 * supported and has no capacity: it is skipped, as
+			 * discovery skips it, and no extent can be in it.
+			 */
+			if (len_mb == 0)
+				continue;
 			region_base[rid] = base_mb * FMD_MIB;
 			region_len[rid] = len_mb * FMD_MIB;
 
