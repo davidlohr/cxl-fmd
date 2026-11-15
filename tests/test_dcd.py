@@ -227,6 +227,29 @@ class TestDynamicCapacityAdd:
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions/1")
         assert data["ExtentsCount"] == 5
 
+    def test_shared_extent_sequence(self, api_client):
+        """Table 8-230: in a shareable region, 0 to n-1, "each value appearing only once"."""
+        add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
+        rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
+        other = "6f1a2c3e-0000-4000-8000-0000000000bb"
+        for tag in (TAG_NEW, other, TAG_NEW):
+            status, _, _ = api_client.post(add, {
+                "Policy": "Contiguous", "RegionNumber": 0, "Length": 256, "Tag": tag})
+            assert status == 200
+        status, _, _ = api_client.post(rel, release_body("TagBased", Tag=other, Length=256))
+        assert status == 200
+        # Free across the hole and the tail: two more pieces
+        status, _, _ = api_client.post(add, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 512, "Tag": TAG_NEW})
+        assert status == 200
+
+        seqs = []
+        for ext in extent_ids(api_client, MLD):
+            status, data = api_client.get(MLD + "/MemoryExtents/" + ext)
+            if data["Tag"] == TAG_NEW:
+                seqs.append(data["SequenceNumber"])
+        assert sorted(seqs) == [0, 1, 2, 3]
+
     def test_length_not_block_aligned_400(self, api_client):
         status, _, _ = api_client.post(SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 100, "Tag": TAG_NEW})

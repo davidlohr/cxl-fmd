@@ -497,6 +497,7 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 	uint64_t cursor = region->base_dpa;
 	uint64_t remaining = length;
 	int n_used, n_pieces = 0;
+	unsigned int seq = 0;
 	int rc = 0;
 
 	n_used = collect_region_ranges(dev, region->region_id, &used);
@@ -540,10 +541,32 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 		goto out;
 	}
 
+	/*
+	 * Shared Extent Sequence: "For extents that describe non-shareable
+	 * regions, this field shall be 0. For extents describing shareable
+	 * regions this field shall be within the range of 0 to n-1 where n
+	 * is the number of extents, with each value appearing only once"
+	 * (Table 8-230). The pieces of a Sharable add are numbered on from
+	 * the extents the tag already has.
+	 */
+	if (region->flags & FMD_DC_REGION_SHAREABLE) {
+		struct fmd_component *child;
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+			if (memcmp(e->tag, tag, FMD_DC_TAG_LEN) == 0 &&
+			    (unsigned int)e->shared_seq + 1 > seq)
+				seq = e->shared_seq + 1;
+		}
+	}
+
 	for (int i = 0; i < n_pieces; i++) {
+		bool shared = region->flags & FMD_DC_REGION_SHAREABLE;
 		struct fmd_dc_extent *ext = fmd_dc_extent_add(ctx, dev, pieces[i].start,
 							      pieces[i].end - pieces[i].start,
-							      tag, 0, region->region_id);
+							      tag, shared ? seq + i : 0,
+							      region->region_id);
 		if (!ext) {
 			rc = -ENOMEM;
 			goto out;
