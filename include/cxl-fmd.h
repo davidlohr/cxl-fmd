@@ -1839,8 +1839,11 @@ struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_componen
 					const uint8_t tag[FMD_DC_TAG_LEN],
 					uint16_t shared_seq, uint8_t region_id);
 
-/* Per-host available-extent counter (SLD keeps it on dcd, MLD/MHD on the LD) */
-void fmd_dc_adjust_available_extents(struct fmd_component *dev, int host_id, int delta);
+/*
+ * Recount a mock device's available extents and tags of every host (SLD
+ * keeps them on dcd, MLD/MHD on the LD) from its extents, Section 9.13.3.3
+ */
+void fmd_dc_mock_recount(struct fmd_component *dev);
 
 /* Component (SLD or LD) that owns the DC regions of a host */
 struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_id);

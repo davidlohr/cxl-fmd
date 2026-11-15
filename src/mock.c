@@ -1197,13 +1197,10 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 				ext->host_mask : 0;
 			ext->fm_referenced = json_is_true(json_object_get(item, "fm_referenced"));
 			n_extents++;
-
-			for (int h = 0; h < dcd->num_hosts; h++) {
-				if (ext->host_mask & fmd_dc_host_bit(h))
-					fmd_dc_adjust_available_extents(dev, h, -1);
-			}
 		}
 	}
+	/* Number of Available Extents and Tags, Section 9.13.3.3 */
+	fmd_dc_mock_recount(dev);
 
 	fmd_info(ctx, "Mock DCD %s: %d hosts, %d regions (%d host views), %d extents, %" PRIu64 " MB dynamic",
 		 dev->id, dcd->num_hosts, dcd->num_regions, n_regions, n_extents,

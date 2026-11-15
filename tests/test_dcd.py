@@ -82,6 +82,7 @@ class TestDCDDiscovery:
         assert data["TotalSupportedExtents"] == 64
         assert data["AvailableExtents"] == 63      # one extent in the mock
         assert data["TotalSupportedTags"] == 16
+        assert data["AvailableTags"] == 15         # and one tag
         actions = data["Actions"]
         assert actions["#CXLLogicalDevice.DynamicCapacityAdd"]["target"] == SLD_ADD
         assert actions["#CXLLogicalDevice.DynamicCapacityRelease"]["target"] == SLD_RELEASE
@@ -189,6 +190,7 @@ class TestDynamicCapacityAdd:
 
         status, data = api_client.get(SLD_LD0)
         assert data["AvailableExtents"] == 62
+        assert data["AvailableTags"] == 14         # TAG_NEW is a second tag
 
     def test_add_contiguous_other_region(self, api_client):
         status, _, _ = api_client.post(SLD_ADD, {
@@ -370,6 +372,7 @@ class TestDynamicCapacityRelease:
         assert extent_ids(api_client) == []
         status, data = api_client.get(SLD_LD0)
         assert data["AvailableExtents"] == 64
+        assert data["AvailableTags"] == 16
 
     def test_release_tag_based_partial_trims_extent(self, api_client):
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
@@ -526,6 +529,10 @@ class TestCXLReferenceDCMemory:
         status, data = api_client.get(rel)
         assert status == 200
         assert data["Links"]["MemoryRegions"] == []
+        # and is still tracked, FM-referenced (Section 9.13.3.3)
+        status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
+        assert data["AvailableExtents"] == 254
+        assert data["AvailableTags"] == 62
 
         # A second DELETE has nothing to release from a host
         assert api_client.delete(rel) == 409
@@ -534,6 +541,9 @@ class TestCXLReferenceDCMemory:
         status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": False})
         assert status == 200
         assert "ext_280000000" not in extent_ids(api_client, MLD)
+        status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
+        assert data["AvailableExtents"] == 255
+        assert data["AvailableTags"] == 63
 
     def test_reference_unknown_tag_400(self, api_client):
         """5606h: "Invalid Input if the Tag ... does not match an existing sharable tag"."""

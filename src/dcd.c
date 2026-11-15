@@ -404,31 +404,80 @@ static void extent_drop_host(struct fmd_ctx *ctx, struct fmd_dc_extent *ext, int
 		fmd_topology_remove(&ctx->topology, &ext->base);
 }
 
-void fmd_dc_adjust_available_extents(struct fmd_component *dev, int host_id, int delta)
+/*
+ * The mock's Number of Available Extents and Tags of each host: "its total
+ * capacity minus all extents and tags tracked for capacity in the Pending,
+ * Added, and FM-referenced states, respectively" (Section 9.13.3.3). The
+ * counts are "on this LD" (Table 7-67). An extent a host holds, pending or
+ * not, counts against that host, and each distinct non-zero tag among them
+ * once. Which LD an FM-referenced extent that no host holds any more counts
+ * against the specification does not say: the mock counts it, and its tag,
+ * against every host that sees its region.
+ */
+void fmd_dc_mock_recount(struct fmd_component *dev)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
-	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
-	uint32_t *avail;
-	uint32_t max;
+	struct fmd_component *child;
+	const uint8_t **tags = NULL;
+	size_t n_ext = 0;
 
-	if (!dcd || !owner)
+	if (!dcd)
 		return;
 
-	if (owner->type == FMD_COMPONENT_LD) {
-		struct fmd_ld *ld = fmd_to_ld(owner);
-		avail = &ld->dc_extents_available;
-		max = ld->dc_extents_supported;
-	} else {
-		avail = &dcd->extents_available;
-		max = dcd->extents_supported;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT)
+		n_ext++;
+	if (n_ext) {
+		tags = calloc(n_ext, sizeof(*tags));
+		if (!tags)
+			return;
 	}
 
-	if (delta < 0 && (uint32_t)(-delta) > *avail)
-		*avail = 0;
-	else if (delta > 0 && *avail + delta > max)
-		*avail = max;
-	else
-		*avail += delta;
+	for (int h = 0; h < dcd->num_hosts; h++) {
+		struct fmd_component *owner = fmd_dc_host_component(dev, h);
+		uint32_t *ext_avail, *tag_avail, ext_sup, tag_sup;
+		uint32_t extents = 0, n_tags = 0;
+		uint64_t bit = fmd_dc_host_bit(h);
+
+		if (!owner)
+			continue;
+		if (owner->type == FMD_COMPONENT_LD) {
+			struct fmd_ld *ld = fmd_to_ld(owner);
+
+			ext_avail = &ld->dc_extents_available;
+			tag_avail = &ld->dc_tags_available;
+			ext_sup = ld->dc_extents_supported;
+			tag_sup = ld->dc_tags_supported;
+		} else {
+			ext_avail = &dcd->extents_available;
+			tag_avail = &dcd->tags_available;
+			ext_sup = dcd->extents_supported;
+			tag_sup = dcd->tags_supported;
+		}
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+			uint32_t t;
+
+			if (!(ext->host_mask & bit) &&
+			    !(ext->host_mask == 0 && ext->fm_referenced &&
+			      fmd_dc_find_region(dev, h, ext->region_id)))
+				continue;
+			extents++;
+			if (dc_tag_is_zero(ext->tag))
+				continue;
+			for (t = 0; t < n_tags; t++) {
+				if (!memcmp(tags[t], ext->tag, FMD_DC_TAG_LEN))
+					break;
+			}
+			if (t == n_tags)
+				tags[n_tags++] = ext->tag;
+		}
+
+		*ext_avail = extents < ext_sup ? ext_sup - extents : 0;
+		*tag_avail = n_tags < tag_sup ? tag_sup - n_tags : 0;
+	}
+
+	free(tags);
 }
 
 /*
@@ -573,7 +622,6 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 		}
 		/* The mock host accepts immediately, so nothing is left pending */
 		ext->host_mask = fmd_dc_host_bit(host_id);
-		fmd_dc_adjust_available_extents(dev, host_id, -1);
 
 		fmd_info(ctx, "%s: mock DC add host %d region %u dpa 0x%" PRIx64
 			 " len %" PRIu64 " MB", dev->id, host_id, region->region_id,
@@ -639,7 +687,6 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 		}
 		for (int i = 0; i < ext_count; i++) {
 			extents[i]->host_mask |= bit;
-			fmd_dc_adjust_available_extents(dev, host_id, -1);
 		}
 		return 0;
 
@@ -676,7 +723,6 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
 			ext->host_mask |= bit;
-			fmd_dc_adjust_available_extents(dev, host_id, -1);
 		}
 		return 0;
 
@@ -735,7 +781,6 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			}
 			remaining = (ext->len >= remaining) ? 0 : remaining - ext->len;
 
-			fmd_dc_adjust_available_extents(dev, host_id, 1);
 			extent_drop_host(ctx, ext, host_id);
 		}
 		return 0;
@@ -748,7 +793,6 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 				return -ENOENT;
 		}
 		for (int i = 0; i < ext_count; i++) {
-			fmd_dc_adjust_available_extents(dev, host_id, 1);
 			extent_drop_host(ctx, extents[i], host_id);
 		}
 		return 0;
@@ -1566,9 +1610,13 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	if (policy == FMD_DC_POLICY_SHARED_ACCESS && dc_tag_is_zero(tag))
 		return -EINVAL;
 
-	if (unlikely(!dev_is_hw(dev)))
-		return mock_dc_add(ctx, dev, host_id, policy, region_id, length,
-				   tag, extents, ext_count);
+	if (unlikely(!dev_is_hw(dev))) {
+		int rc = mock_dc_add(ctx, dev, host_id, policy, region_id, length,
+				     tag, extents, ext_count);
+
+		fmd_dc_mock_recount(dev);
+		return rc;
+	}
 
 	{
 		struct cxlmi_cmd_fmapi_initiate_dc_add_req *req;
@@ -1665,9 +1713,13 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		}
 	}
 
-	if (unlikely(!dev_is_hw(dev)))
-		return mock_dc_release(ctx, dev, host_id, policy, length, tag,
-				       extents, ext_count);
+	if (unlikely(!dev_is_hw(dev))) {
+		int rc = mock_dc_release(ctx, dev, host_id, policy, length, tag,
+					 extents, ext_count);
+
+		fmd_dc_mock_recount(dev);
+		return rc;
+	}
 
 	{
 		struct cxlmi_cmd_fmapi_initiate_dc_release_req *req;
@@ -1727,8 +1779,12 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 	if (dc_tag_is_zero(tag))
 		return -EINVAL;
 
-	if (unlikely(!dev_is_hw(dev)))
-		return mock_dc_reference(ctx, dev, tag, add);
+	if (unlikely(!dev_is_hw(dev))) {
+		int rc = mock_dc_reference(ctx, dev, tag, add);
+
+		fmd_dc_mock_recount(dev);
+		return rc;
+	}
 
 	{
 		struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
