@@ -3503,8 +3503,13 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 /*
  * MemoryMetrics - /redfish/v1/Chassis/{id}/Memory/{mem_id}/MemoryMetrics
  *
- * Per DSP0288 Table 8 (Get Health Info mapping):
- * - HealthData.PredictedMediaLifeLeftPercent from life_used
+ * From Get Health Info (4200h), Table 8-315:
+ * - HealthData.PredictedMediaLifeLeftPercent from Life Used. DSP0288
+ *   Table 1 maps Life Used to CapacityUtilizationPercent, which the schema
+ *   defines as "the memory capacity utilization as a percentage", not
+ *   media life; serving 100 - Life Used as the media life left is
+ *   cxl-fmd's choice. Life Used "Returns FFh if not implemented", and any
+ *   value past 100 leaves the property out.
  * - DirtyShutdownCount from dirty_shutdown_count
  * - CorrectedVolatileErrorCount from corrected_volatile_error_count
  * - CorrectedPersistentErrorCount from corrected_persistent_error_count
@@ -3613,9 +3618,6 @@ json_t *fmd_redfish_memory_metrics(struct fmd_ctx *ctx,
 		return NULL;
 	}
 
-	/* life_used is percentage used, convert to remaining */
-	int remaining = (life_used <= 100) ? (100 - life_used) : 0;
-
 	json_t *result = json_pack(
 		"{"
 		"  s:s,"   /* @odata.id */
@@ -3624,8 +3626,7 @@ json_t *fmd_redfish_memory_metrics(struct fmd_ctx *ctx,
 		"  s:s,"   /* Name */
 		"  s:I,"   /* DirtyShutdownCount */
 		"  s:I,"   /* CorrectedVolatileErrorCount */
-		"  s:I,"   /* CorrectedPersistentErrorCount */
-		"  s:{s:i}"  /* HealthData.PredictedMediaLifeLeftPercent */
+		"  s:I"    /* CorrectedPersistentErrorCount */
 		"}",
 		"@odata.id", uri,
 		"@odata.type", "#MemoryMetrics.v1_6_0.MemoryMetrics",
@@ -3633,9 +3634,18 @@ json_t *fmd_redfish_memory_metrics(struct fmd_ctx *ctx,
 		"Name", "Memory Metrics",
 		"DirtyShutdownCount", (json_int_t)dirty_shutdown_count,
 		"CorrectedVolatileErrorCount", (json_int_t)corrected_volatile,
-		"CorrectedPersistentErrorCount", (json_int_t)corrected_persistent,
-		"HealthData", "PredictedMediaLifeLeftPercent", remaining
+		"CorrectedPersistentErrorCount", (json_int_t)corrected_persistent
 	);
+
+	/*
+	 * Life Used is "a percentage value (0 to 100)" and "Returns FFh if
+	 * not implemented" (Table 8-315): only a percentage gives the life
+	 * left. Anything else is not a value to report.
+	 */
+	if (result && life_used <= 100)
+		json_object_set_new(result, "HealthData",
+			json_pack("{s:i}", "PredictedMediaLifeLeftPercent",
+				  100 - life_used));
 
 	return result;
 }

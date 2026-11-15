@@ -85,7 +85,7 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 | Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | Yes (see "Set Partition Info" below) |
 | Set Partition Info | Next Persistent Capacity | `Memory` | `StagedNonVolatileSizeMiB` | Yes (see "Set Partition Info" below) |
 | Get Health Info | Health Status | Many | `Status` | Yes |
-| Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | Yes |
+| Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | No (deviation, see "Life Used" below) |
 | Get Health Info | Corrected Volatile Error Count | `MemoryMetrics` | `CorrectedVolatileErrorCount` | Yes |
 | Get Health Info | Corrected Persistent Error Count | `MemoryMetrics` | `CorrectedPersistentErrorCount` | Yes |
 | Get Health Info | Additional Status[4]: Corrected Volatile Error Count | `Memory` | `Status/Conditions` | No |
@@ -109,6 +109,18 @@ Mapping between CXL Component Command Interface (CCI) commands and Redfish resou
 **Comment 3:** Redfish resources contain a `Status` property to show the health and state of a device. The `Conditions` property within the `Status` property is used to show why the `Health` property contains a value other than `OK`.
 
 **Comment 4:** The `Conditions` property within the `Status` property of the `Memory` resource shall contain messages to indicate either the Corrected Volatile Error Count or Corrected Persistent Error Count flags are set.
+
+### Life Used
+
+DSP0288 maps Life Used to `MemoryMetrics` `CapacityUtilizationPercent`,
+which DSP8010 defines as "the memory capacity utilization as a
+percentage", not the life of the media. cxl-fmd does not serve it.
+Instead it serves `HealthData/PredictedMediaLifeLeftPercent` ("an
+indicator of the percentage, `0` to `100`, of life remaining in the
+media") as 100 - Life Used. That is cxl-fmd's choice. Life Used is "a
+percentage value (0 to 100)" that "Returns FFh if not implemented" (CXL
+r4.0 Table 8-315). When it is not 0 to 100, `HealthData` is left out
+rather than reporting 0% life left.
 
 ### Set Partition Info
 

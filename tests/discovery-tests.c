@@ -1575,6 +1575,47 @@ out:
 	report("Scan Media length in 64-byte units", before);
 }
 
+/*
+ * Life Used (Table 8-315): "The device's used life as a percentage value
+ * (0 to 100) of factory-expected life span. ... Returns FFh if not
+ * implemented." Only a percentage gives a PredictedMediaLifeLeftPercent.
+ */
+static void test_life_used(void)
+{
+	static const uint8_t life[] = { 0, 30, 100, 101, 0xff };
+	int before = failures;
+
+	for (size_t i = 0; i < sizeof(life); i++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		uint8_t health[0x12] = { 0 };
+		char id[FMD_MAX_ID_LEN];
+		json_t *m, *left;
+
+		answer_identify(ep, 0x1201, 0x03);
+		answer_memdev_identify(ep, 64, 64, 0);
+		health[0x03] = life[i];			/* Life Used */
+		answer(ep, 0x4200, health, sizeof(health));
+		fmd_discover(ctx);
+
+		device_id(id, sizeof(id), 0x1201);
+		m = fmd_redfish_memory_metrics(ctx, id, id);
+		CHECK(m, "no MemoryMetrics");
+		left = json_object_get(json_object_get(m, "HealthData"),
+				       "PredictedMediaLifeLeftPercent");
+		if (life[i] <= 100)
+			CHECK(left && json_integer_value(left) == 100 - life[i],
+			      "Life Used %u: %" JSON_INTEGER_FORMAT " left",
+			      life[i], left ? json_integer_value(left) : -1);
+		else
+			CHECK(!left, "Life Used %02xh: %" JSON_INTEGER_FORMAT
+			      " left", life[i], json_integer_value(left));
+		json_decref(m);
+		fmd_ctx_free(ctx);
+	}
+	report("PredictedMediaLifeLeftPercent from Life Used", before);
+}
+
 /* PATCH Memory with @body, and what it sent as Volatile Capacity, or -1 */
 static int64_t patch_partition(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			       const char *id, const char *body, int *rc)
@@ -3484,6 +3525,7 @@ int main(void)
 	test_mld_ld_counts();
 	test_health_mapping();
 	test_scan_media();
+	test_life_used();
 	test_switch_sld_placeholder();
 	test_set_partition();
 	test_dcd_info();
