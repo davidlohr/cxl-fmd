@@ -743,6 +743,41 @@ static void test_port_resource(void)
 		json_decref(port);
 	}
 
+	/*
+	 * 128 GT/s, Max and Current Link Speed encoding 7 as in PCIe 7.0
+	 * (CXL 4.0 "doubles the data rate to 128 GT/s", Section 1.4.1). The
+	 * Supported Link Speeds Vector is Bits[5:0], Bits[7:6] Reserved
+	 * (Table 7-21): bit 6 is not a speed.
+	 */
+	{
+		struct fmd_port *p2 = fmd_topology_find_port(&ctx->topology,
+							    sw_id, 2);
+
+		CHECK(p2, "no port 2");
+		if (p2) {
+			p2->max_link_speed = 7;
+			p2->current_link_speed = 7;
+			p2->supported_link_speeds = 0x7f;
+		}
+		snprintf(port_id, sizeof(port_id), "%s_dsp2", sw_id);
+		port = fmd_redfish_port(ctx, "CXL", sw_id, port_id);
+		CHECK(port, "no Port resource %s", port_id);
+		if (port) {
+			speeds = json_object_get(json_array_get(
+					json_object_get(port, "LinkConfiguration"), 0),
+					"CapableLinkSpeedGbps");
+			CHECK(json_number_value(json_object_get(port, "MaxSpeedGbps")) == 128 &&
+			      json_number_value(json_object_get(port, "CurrentSpeedGbps")) == 128,
+			      "128 GT/s: speeds %g/%g",
+			      json_number_value(json_object_get(port, "MaxSpeedGbps")),
+			      json_number_value(json_object_get(port, "CurrentSpeedGbps")));
+			CHECK(json_array_size(speeds) == 6,
+			      "%d capable speeds from a vector of 7Fh",
+			      (int)json_array_size(speeds));
+			json_decref(port);
+		}
+	}
+
 	/* port 3 is disabled: it has no direction, and its link is down */
 	snprintf(port_id, sizeof(port_id), "%s_dsp3", sw_id);
 	port = fmd_redfish_port(ctx, "CXL", sw_id, port_id);

@@ -1479,12 +1479,17 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 	/*
 	 * Speeds, as DSP0288 maps them from Get Physical Port State: Max
 	 * Link Speed to MaxSpeedGbps, Current Link Speed to CurrentSpeedGbps
-	 * and the Supported Link Speeds Vector to CapableLinkSpeedGbps. The
-	 * PCIe encoding is 1 for 2.5 GT/s up to 6 for 64 GT/s; bit n of the
-	 * vector is encoding n + 1. A speed that is not known is left out.
+	 * and the Supported Link Speeds Vector to CapableLinkSpeedGbps. Each
+	 * "matches" the PCIe field (Table 7-21). The PCIe encoding is 1 for
+	 * 2.5 GT/s up to 6 for 64 GT/s and 7 for 128 GT/s, the rate CXL 4.0
+	 * runs at (Section 1.4.1); that 7 is 128 GT/s is from PCIe 7.0, not
+	 * the CXL specification. Bit n of the vector is encoding n + 1, and
+	 * Table 7-21 has only Bits[5:0] of it, up to 64 GT/s: Bits[7:6] are
+	 * Reserved. A speed that is not known is left out.
 	 */
-	static const double pcie_gts[] = { 0, 2.5, 5, 8, 16, 32, 64 };
+	static const double pcie_gts[] = { 0, 2.5, 5, 8, 16, 32, 64, 128 };
 	const int nspeeds = sizeof(pcie_gts) / sizeof(pcie_gts[0]);
+	const int vector_bits = 6;
 
 	if (port->max_link_speed > 0 && port->max_link_speed < nspeeds)
 		json_object_set_new(result, "MaxSpeedGbps",
@@ -1496,7 +1501,7 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 			json_real(pcie_gts[port->current_link_speed]));
 
 	json_t *capable_speeds = json_array();
-	for (int bit = 0; bit < nspeeds - 1; bit++) {
+	for (int bit = 0; bit < vector_bits; bit++) {
 		if (port->supported_link_speeds & (1 << bit))
 			json_array_append_new(capable_speeds,
 					      json_real(pcie_gts[bit + 1]));
