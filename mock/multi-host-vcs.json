@@ -1,6 +1,6 @@
 {
     "_comment": [
-        "Multi-Host VCS Topology (CXL r3.2 Section 7.6.6 compliant)",
+        "Multi-Host VCS Topology (see CXL r4.0 Section 7.6.6)",
         "",
         "Demonstrates Virtual CXL Switch (VCS) partitioning for multi-host access.",
         "Per CXL spec, Multiple VCS requires multiple Upstream Ports (USPs).",

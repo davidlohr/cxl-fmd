@@ -34,6 +34,9 @@
  *   Bit 0: Maintenance Needed → Warning
  *   Bit 1: Performance Degraded → Warning
  *   Bit 2: Hardware Replacement Needed → Critical
+ *   Bit 3: Memory Capacity Degraded → Warning
+ *
+ * (Table 8-315). The Redfish values are cxl-fmd's mapping.
  */
 enum rf_health fmd_map_health_status(uint8_t cci_health_status)
 {

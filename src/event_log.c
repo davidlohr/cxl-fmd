@@ -548,6 +548,7 @@ void fmd_device_events_enable(struct fmd_ctx *ctx, struct fmd_component *dev)
 	 * another requester set send it, not cxl-fmd, its notifications.
 	 *
 	 * "message reserved bits should be cleared to 0 by the sender"
+	 * (Reserved, Table 1-1)
 	 */
 	pol.event_interrupt_settings = (cur.event_interrupt_settings | want) &
 				       NOTIFY_DEFINED;

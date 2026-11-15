@@ -832,8 +832,10 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 		struct fmd_mld *mld;
 
 		/*
-		 * A command tunnelled to an MLD port is processed by the
-		 * FM-owned LD of the MLD (Section 7.6.7.3.1). Its Identify
+		 * A command tunnelled to an MLD port goes to the FM-owned LD:
+		 * "This command instructs a switch to tunnel the provided
+		 * command to the FM-owned LD of the MLD on the specified port"
+		 * (Section 7.6.7.3.1). Its Identify
 		 * gives the serial number that names the device, the same
 		 * however it is reached. Without one it is named by its port.
 		 */

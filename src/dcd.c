@@ -2,7 +2,7 @@
 /*
  * CXL Fabric Manager Daemon - Dynamic Capacity Device (DCD) management
  *
- * Implements the FM-API DCD Management command set (CXL r3.2 Section
+ * Implements the FM-API DCD Management command set (CXL r4.0 Section
  * 7.6.7.6, opcodes 5600h-5608h) on top of libcxlmi, plus a mock
  * implementation that keeps the same state in memory so the Redfish
  * surface can be exercised without hardware.
@@ -30,7 +30,7 @@
 #define DC_TAG_LIST_PAGE  32
 #define DC_LIST_RETRIES   3
 
-/* Dynamic Capacity Event Log (CXL r3.2 Section 8.2.10.2.2 and Table 8-229) */
+/* Dynamic Capacity Event Log (CXL r4.0 Section 8.2.10.2.2 and Table 8-229) */
 #define DC_EVENT_LOG		4
 #define DC_EVENT_ADD_RESPONSE	0x04
 #define DC_EVENT_RELEASED	0x05
@@ -879,8 +879,12 @@ static void apply_region_config(struct fmd_component *dev, uint8_t region_id,
  */
 
 /*
- * DCD commands are serviced by the FM-owned LD, so the only tunnel ever
- * needed is through a switch for a switch-attached MLD.
+ * The 56xxh commands are sent untunnelled to a device on an MCTP endpoint
+ * of its own, and to a switch-attached MLD with the Tunnel Management
+ * Command, which "instructs a switch to tunnel the provided command to the
+ * FM-owned LD of the MLD on the specified port" (Section 7.6.7.3.1). They are never tunnelled to an
+ * LD: the command set is "used by the FM to manage memory assignment within
+ * an LD-FAM DCD" (Section 7.6.7.6), and names the host by Host ID.
  */
 static struct cxlmi_tunnel_info *dcd_tunnel(struct fmd_component *dev,
 					    struct cxlmi_tunnel_info *buf)

@@ -1,9 +1,9 @@
 {
     "_comment": [
-        "Single VCS Switch-Attached Topology (CXL r3.2 Section 7.6.6 compliant)",
+        "Single VCS Switch-Attached Topology (see CXL r4.0 Section 7.6.6)",
         "",
         "Demonstrates a Single VCS CXL switch with multiple downstream devices.",
-        "Per CXL vPPB Ordering, vPPB #0 is always the USP, DSP vPPBs follow.",
+        "Per CXL vPPB Ordering (Section 7.1.4), vPPB #0 is always the USP, DSP vPPBs follow.",
         "",
         "Physical Layout:",
         "  Switch (cxl_switch_0)",

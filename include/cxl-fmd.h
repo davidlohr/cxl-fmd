@@ -132,7 +132,7 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
 #define FMD_MAX_LD_POOL  64     /* Max LDs in MHD pool (can exceed 16) */
 
 /*
- * Dynamic Capacity Device (DCD) limits (CXL r3.2 Section 7.6.7.6)
+ * Dynamic Capacity Device (DCD) limits (CXL r4.0 Section 7.6.7.6)
  */
 #define FMD_MAX_DC_REGIONS 8      /* DC regions per host */
 #define FMD_DC_TAG_LEN     16     /* Extent tag is a 16-byte UUID */
@@ -394,7 +394,7 @@ enum fmd_vppb_binding_status {
 };
 
 /*
- * vPPB Unbind Options (CXL r3.2 Section 7.6.7.2.3)
+ * vPPB Unbind Options (CXL r4.0 Section 7.6.7.2.3)
  */
 enum fmd_unbind_option {
 	FMD_UNBIND_WAIT_FOR_CLEAN = 0,   /* Wait for host to perform clean removal */
@@ -626,7 +626,7 @@ struct fmd_mld {
  *
  * Note: The FM-owned LD (FMLD) at LD-ID FFFFh is separate from these
  * host-bindable LDs and is accessed implicitly via MLD component commands.
- * See CXL r3.2 Section 7.6.7.4.
+ * See CXL r4.0 Section 7.6.7.4.
  *
  * LDs always require MLD tunneling. If parent MLD is behind a switch,
  * combined switch+MLD tunneling is needed.
@@ -847,7 +847,11 @@ struct fmd_mem_chunk {
 
 
 /*
- * Dynamic Capacity policies (CXL r3.2 Table 7-xx, Get DCD Info 5600h)
+ * Dynamic Capacity policies: the FMD_DC_ADD_* and FMD_DC_REL_* masks are those
+ * of Get DCD Info (CXL r4.0 Table 7-65), whose Bit[3] of the add policies
+ * "Must be 0": cxl-fmd uses it for Enable Shared Access, which a device
+ * cannot advertise. The FMD_DC_POLICY_* values are the Selection Policy of
+ * Table 7-72 and the Removal Policy of Table 7-73.
  */
 #define FMD_DC_ADD_FREE            0x01
 #define FMD_DC_ADD_CONTIGUOUS      0x02
@@ -872,7 +876,7 @@ struct fmd_mem_chunk {
 
 /*
  * DC region flags: 5601h Region Configuration, Attributes1 byte
- * (CXL r3.2 Table 7-68). Bit positions follow the CDAT DSMAS Flags field.
+ * (CXL r4.0 Table 7-68). Bit positions follow the CDAT DSMAS Flags field.
  */
 #define FMD_DC_REGION_NONVOLATILE   (1 << 2)
 #define FMD_DC_REGION_SHAREABLE     (1 << 3)
@@ -1643,7 +1647,7 @@ void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			      uint8_t vcs_id, uint8_t vppb_id, bool failed);
 
 /*
- * VCS Bind/Unbind Operations (CXL r3.2 Section 7.6.7.2)
+ * VCS Bind/Unbind Operations (CXL r4.0 Section 7.6.7.2)
  *
  * These functions implement the FM-API Bind vPPB (5201h) and Unbind vPPB (5202h)
  * commands for dynamically managing port/LD to vPPB bindings.
@@ -1783,7 +1787,7 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 
 
 /*
- * Dynamic Capacity Device (DCD) management (CXL r3.2 Section 7.6.7.6)
+ * Dynamic Capacity Device (DCD) management (CXL r4.0 Section 7.6.7.6)
  *
  * See docs/DCD-FM-API.md for the FM-API to Redfish mapping. All functions
  * work on the Type 3 device component (SLD, MLD or MHD). For mock mode they
@@ -1823,7 +1827,7 @@ static inline int fmd_ilog2_u64(uint64_t v)
 }
 
 /*
- * Policy tables (CXL r3.2 Table 7-xx) keyed by the FMD_DC_POLICY_* /
+ * Policy tables (CXL r4.0 Tables 7-72 and 7-73) keyed by the FMD_DC_POLICY_* /
  * FMD_DC_REL_POLICY_* wire values; names come from the generated
  * PCIeDevice.CXLDynamicCapacityPolicies enum.
  */
