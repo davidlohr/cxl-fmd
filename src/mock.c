@@ -363,11 +363,11 @@ static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
 			continue;
 		}
 		if (comp->type != FMD_COMPONENT_MLD) {
-			fmd_log_overflowed(comp, which, count, first, last);
+			fmd_log_overflowed(comp, which, count, first, last, NULL);
 			continue;
 		}
 		fmd_for_each_child_type(comp, child, FMD_COMPONENT_LD)
-			fmd_log_overflowed(child, which, count, first, last);
+			fmd_log_overflowed(child, which, count, first, last, NULL);
 	}
 }
 

@@ -117,7 +117,8 @@ static int drain_log(struct fmd_ctx *ctx, struct fmd_switch *sw, int log,
 				 switch_record, ev, &o);
 	if (o.set) {
 		ev->everything = true;
-		fmd_log_overflowed(&sw->base, log, o.count, o.first_ns, o.last_ns);
+		fmd_log_overflowed(&sw->base, log, o.count, o.first_ns, o.last_ns,
+				   o.marked ? &o.before : NULL);
 	}
 	return rc;
 }

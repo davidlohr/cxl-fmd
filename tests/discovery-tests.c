@@ -1954,6 +1954,104 @@ out:
 	report("event logs of memory devices", before);
 }
 
+/* the record kept in @comp's log with @handle */
+static struct fmd_log_entry *log_handle(struct fmd_component *comp, uint16_t handle)
+{
+	struct fmd_log *log = comp->log;
+
+	for (int i = 0; log && i < log->count; i++) {
+		struct fmd_log_entry *e = &log->entries[(log->first + i) % log->allocated];
+
+		if (e->record.handle == handle)
+			return e;
+	}
+	return NULL;
+}
+
+/*
+ * The overflow is on a record stored before it. The Overflow flag "shall
+ * remain set until the host has consumed one or more events" (Table
+ * 8-232): a record read after the first page that said Overflow was cleared
+ * may have been stored after it, in the room that clearing made. The last
+ * record of that page carries it. An LD of an MLD that the record was not
+ * about has none tagged. An Overflow Error Count of 0 is no count, and
+ * OverflowErrorCount is left out.
+ */
+static void test_overflow_entry(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *sld_ep = new_device(ctx), *mld_ep;
+	int before = failures;
+	char sld_id[FMD_MAX_ID_LEN], mld_id[FMD_MAX_ID_LEN];
+	struct fmd_component *sld;
+	struct fmd_ld *ld0, *ld1;
+	struct fmd_log_entry *a, *b;
+	json_t *entry;
+
+	answer_identify(sld_ep, 0xe7, 0x03);
+	answer_memdev_identify(sld_ep, 64, 64, 0);
+	mld_ep = new_mld(ctx, 0xe8, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sld_id, sizeof(sld_id), 0xe7);
+	sld = fmd_topology_find(&ctx->topology, sld_id);
+	device_id(mld_id, sizeof(mld_id), 0xe8);
+	ld0 = fmd_topology_find_ld(&ctx->topology, mld_id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, mld_id, 1);
+	CHECK(sld && ld0 && ld1, "devices not discovered");
+	if (!sld || !ld0 || !ld1)
+		goto out;
+
+	/*
+	 * The SLD's Warning log: a page that says Overflow, with record 0x21,
+	 * then one that does not, with 0x22, then empty.
+	 */
+	answer_no_events(sld_ep, false);
+	answer_device_event(sld_ep, general_media_event, 0x21, 0x01, 0, 0x03);
+	answer_device_event(sld_ep, general_media_event, 0x22, 0x01, 0, 0x00);
+	answer_no_events(sld_ep, false);
+	answer_no_events(sld_ep, false);
+	answer_no_events(sld_ep, false);
+	/* the MLD's Informational log: Overflow, on a record about LD 1 */
+	answer_device_event(mld_ep, general_media_event, 0x31, 0x80, 1, 0x01);
+	answer_no_events(mld_ep, false);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(mld_ep, false);
+	fmd_switch_events_poll(ctx);
+
+	a = log_handle(sld, 0x21);
+	b = log_handle(sld, 0x22);
+	CHECK(a && b, "records not kept");
+	CHECK(a && a->overflow && a->overflow_count == 7,
+	      "the record of the page that said Overflow does not carry it");
+	CHECK(b && !b->overflow, "a record read after the overflow carries it");
+
+	a = log_handle(&ld1->base, 0x31);
+	CHECK(a && a->overflow, "LD 1's record does not carry the overflow");
+	CHECK(ld0->base.log && ld0->base.log->overflow,
+	      "LD 0's log service does not say Overflow");
+
+	/* no count: OverflowErrorCount left out, the timestamps given */
+	if (b) {
+		b->overflow = true;
+		b->overflow_count = 0;
+		b->first_overflow_ns = 1000000000ULL;
+		entry = fmd_redfish_ld_log(ctx, sld_id, sld_id, "0", "entry", b->id);
+		CHECK(entry && !json_object_get(entry, "OverflowErrorCount") &&
+		      json_object_get(entry, "FirstOverflowTimestamp"),
+		      "an Overflow Error Count of 0 is given as a count");
+		json_decref(entry);
+	}
+	if (a) {
+		entry = fmd_redfish_ld_log(ctx, mld_id, mld_id, "1", "entry", a->id);
+		CHECK(entry && json_integer_value(json_object_get(entry,
+			"OverflowErrorCount")) == 7, "a count of 7 is not given");
+		json_decref(entry);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("overflow on the record before it", before);
+}
+
 /*
  * A log keeps as many records as its capacity, the newest; the memory for
  * them grows as they come. And a switch-attached SLD's logs, which cannot
@@ -2841,6 +2939,7 @@ int main(void)
 	test_mailbox_events_are_the_hosts();
 	test_device_removal();
 	test_device_logs();
+	test_overflow_entry();
 	test_device_notifications();
 	test_switch_mld_logs();
 	test_dc_records();

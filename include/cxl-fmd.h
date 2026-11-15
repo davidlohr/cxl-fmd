@@ -1565,6 +1565,13 @@ struct fmd_overflow {
 	uint16_t count;
 	uint64_t first_ns;
 	uint64_t last_ns;
+	/*
+	 * The last record of the first page that said Overflow: one stored
+	 * before it, which carries it (fmd_log_overflowed()). Valid if
+	 * @marked.
+	 */
+	bool marked;
+	struct cxlmi_event_record before;
 };
 
 typedef void (*fmd_event_record_fn)(struct fmd_ctx *ctx, struct fmd_component *comp,
@@ -1578,7 +1585,8 @@ int fmd_event_log_drain(struct fmd_ctx *ctx, struct fmd_component *comp,
 int fmd_log_add(struct fmd_component *comp, int which,
 		const struct cxlmi_event_record *rec);
 void fmd_log_overflowed(struct fmd_component *comp, int which, uint16_t count,
-			uint64_t first_ns, uint64_t last_ns);
+			uint64_t first_ns, uint64_t last_ns,
+			const struct cxlmi_event_record *before);
 void fmd_log_clear(struct fmd_component *comp);
 void fmd_log_free(struct fmd_component *comp);
 bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev);

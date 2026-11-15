@@ -233,11 +233,28 @@ int fmd_log_add(struct fmd_component *comp, int which,
 /*
  * A log that reported Overflow. "When an event log overflows, the device
  * shall retain all event records, in the specific event log, that occurred
- * before the overflow event" (Section 8.2.10.2.2): the last record read
- * from it is the one before the overflow, and carries it.
+ * before the overflow event" (Section 8.2.10.2.2), and Overflow is set
+ * "when errors occur that the device cannot log without overwriting an
+ * existing log event" and "shall remain set until the host has consumed one
+ * or more events and returned the event handles to the device or cleared
+ * all the events using the Clear Event Records command" (Table 8-232). So
+ * the records of the first page that says Overflow were all stored before
+ * it: none is stored in a full log, and none of it has been cleared yet.
+ * The last of them, @before, carries it: "Overflow information is captured in properties of the
+ * LogEntry prior to the overflow condition" (DSP0288, Table 1, Comment 1).
+ *
+ * Records stored before the overflow may follow on later pages: the one
+ * tagged is then not the last of those, but one of them. A component that
+ * did not keep @before, an LD of an MLD that the record was not about, has
+ * no record tagged; its log service says Overflow all the same.
+ *
+ * With @before NULL, the newest record kept of that log carries it: where
+ * nothing says which record came before the overflow, as for the Dynamic
+ * Capacity Event Log, whose drain is in src/dcd.c, and a mock topology's.
  */
 void fmd_log_overflowed(struct fmd_component *comp, int which, uint16_t count,
-			uint64_t first_ns, uint64_t last_ns)
+			uint64_t first_ns, uint64_t last_ns,
+			const struct cxlmi_event_record *before)
 {
 	struct fmd_log *log = log_of(comp);
 
@@ -248,7 +265,8 @@ void fmd_log_overflowed(struct fmd_component *comp, int which, uint16_t count,
 	for (int i = log->count - 1; i >= 0; i--) {
 		struct fmd_log_entry *entry = log_at(log, i);
 
-		if (entry->log != which)
+		if (entry->log != which ||
+		    (before && memcmp(&entry->record, before, sizeof(*before))))
 			continue;
 		entry->overflow = true;
 		entry->overflow_count = count;
@@ -324,6 +342,12 @@ int fmd_event_log_drain(struct fmd_ctx *ctx, struct fmd_component *comp,
 			break;
 		FMD_CCI_LIST_CLAMP(rsp->record_count,
 				   CXLMI_MAX_SUPPORTED_EVENT_RECORDS);
+
+		/* see fmd_log_overflowed() */
+		if ((rsp->flags & EVENT_FLAG_OVERFLOW) && !overflow->marked) {
+			overflow->marked = true;
+			overflow->before = rsp->records[rsp->record_count - 1];
+		}
 
 		for (int i = 0; i < rsp->record_count; i++) {
 			clr->handles[i] = rsp->records[i].handle;
@@ -436,11 +460,13 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 
 		/* records were lost, to the device and so to every LD */
 		if (dev->type == FMD_COMPONENT_SLD) {
-			fmd_log_overflowed(dev, which, o.count, o.first_ns, o.last_ns);
+			fmd_log_overflowed(dev, which, o.count, o.first_ns, o.last_ns,
+					   o.marked ? &o.before : NULL);
 			continue;
 		}
 		fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
-			fmd_log_overflowed(child, which, o.count, o.first_ns, o.last_ns);
+			fmd_log_overflowed(child, which, o.count, o.first_ns, o.last_ns,
+					   o.marked ? &o.before : NULL);
 	}
 }
 
@@ -557,14 +583,14 @@ void fmd_dc_log_overflowed(struct fmd_component *dev, uint16_t count,
 
 	if (dev->type == FMD_COMPONENT_SLD) {
 		fmd_log_overflowed(dev, FMD_LOG_DYNAMIC_CAPACITY, count,
-				   first_ns, last_ns);
+				   first_ns, last_ns, NULL);
 		return;
 	}
 	if (dev->type != FMD_COMPONENT_MLD)
 		return;
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
 		fmd_log_overflowed(child, FMD_LOG_DYNAMIC_CAPACITY, count,
-				   first_ns, last_ns);
+				   first_ns, last_ns, NULL);
 }
 
 /*
@@ -761,10 +787,19 @@ static json_t *log_entry(struct fmd_component *comp, const char *base, int id,
 		json_object_set_new(result, "Links",
 			json_pack("{s:{s:s}}", "OriginOfCondition", "@odata.id", origin));
 
-	/* the record before the log overflowed carries it */
+	/*
+	 * The record before the log overflowed carries it. Of Overflow Error
+	 * Count, "A value of 0 indicates the device does not have a count of
+	 * errors that occurred after the overflow was established" (Table
+	 * 8-232), while OverflowErrorCount "shall contain the count of
+	 * overflow errors that occurred after this log entry" (LogEntry
+	 * v1.14.0): a 0 would say there were none. It is left out then, and
+	 * each timestamp is given where the device has one.
+	 */
 	if (entry->overflow) {
-		json_object_set_new(result, "OverflowErrorCount",
-				    json_integer(entry->overflow_count));
+		if (entry->overflow_count)
+			json_object_set_new(result, "OverflowErrorCount",
+					    json_integer(entry->overflow_count));
 		if (entry->first_overflow_ns) {
 			cxl_time(entry->first_overflow_ns, ts, sizeof(ts));
 			json_object_set_new(result, "FirstOverflowTimestamp",
