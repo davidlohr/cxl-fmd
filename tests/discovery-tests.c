@@ -2088,6 +2088,80 @@ out:
 	report("a DCD's return codes", before);
 }
 
+static bool all_zero(const uint8_t *p, size_t n)
+{
+	while (n--) {
+		if (*p++)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Fields a policy leaves reserved are sent as zero. Table 7-72 (5604h):
+ * Region Number (03h) and Tag (0Ch) are "reserved when the Selection Policy
+ * is set to Prescriptive", Length (04h) "when the Selection Policy is set to
+ * Prescriptive or Enable Shared Access". Table 7-73 (5605h): Length (04h)
+ * and Tag (0Ch) are reserved "when the Removal Policy is set to
+ * Prescriptive". The device refuses each command, so that it is the last
+ * one sent. A Free Length that is not a multiple of the region's block size
+ * is not sent.
+ */
+static void test_dc_reserved_fields(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	struct fmd_component *dev = hw_dcd(ctx, ep, 0xd2, 0);
+	struct fmd_dc_extent *ext;
+	uint8_t pl[256];
+	uint16_t op;
+	unsigned int sent;
+	size_t n;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+	ext = fmd_dc_find_extent(dev, 1ULL << 30);
+
+	answer_rc(ep, 0x5604, CXLMI_RET_INPUT);
+	fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_PRESCRIPTIVE, 3, 1ULL << 28,
+		   dc_tag, &ext, 1);
+	n = last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(op == 0x5604 && n >= 0x48 && pl[0x02] == 2 && pl[0x03] == 0 &&
+	      all_zero(pl + 0x04, 8) && all_zero(pl + 0x0c, 16) &&
+	      get64(pl + 0x20) == 1ULL << 30,
+	      "Prescriptive add: %04xh, region %u, length %" PRIu64 ", tag %s",
+	      op, pl[0x03], get64(pl + 0x04),
+	      all_zero(pl + 0x0c, 16) ? "zero" : "sent");
+
+	answer_rc(ep, 0x5604, CXLMI_RET_INPUT);
+	fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_SHARED_ACCESS, 0, 1ULL << 28,
+		   dc_tag, NULL, 0);
+	n = last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(op == 0x5604 && n >= 0x20 && pl[0x02] == 3 &&
+	      all_zero(pl + 0x04, 8) && !memcmp(pl + 0x0c, dc_tag, 16),
+	      "Enable Shared Access: %04xh, length %" PRIu64, op, get64(pl + 0x04));
+
+	answer_rc(ep, 0x5605, CXLMI_RET_INPUT);
+	fmd_dc_release(ctx, dev, 0, FMD_DC_REL_POLICY_PRESCRIPTIVE, false, false,
+		       1ULL << 28, dc_tag, &ext, 1);
+	n = last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(op == 0x5605 && n >= 0x48 && (pl[0x02] & 0x0f) == 1 &&
+	      all_zero(pl + 0x04, 8) && all_zero(pl + 0x0c, 16),
+	      "Prescriptive release: %04xh, length %" PRIu64 ", tag %s",
+	      op, get64(pl + 0x04), all_zero(pl + 0x0c, 16) ? "zero" : "sent");
+
+	sent = commands_sent(ep);
+	rc = fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_FREE, 0, 100ULL << 20,
+			dc_tag, NULL, 0);
+	CHECK(rc == -EINVAL && commands_sent(ep) == sent,
+	      "a Length of 100 MB in 256 MB blocks: %d, %u commands sent",
+	      rc, commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("reserved fields of a DCD request", before);
+}
+
 /*
  * A bind in the background, to its end. The switch answers Bind vPPB with
  * Background Command Started; Background Operation Status (0002h, Table
@@ -3770,6 +3844,7 @@ int main(void)
 	test_set_partition();
 	test_dcd_info();
 	test_dc_return_codes();
+	test_dc_reserved_fields();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);

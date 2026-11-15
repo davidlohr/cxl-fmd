@@ -1463,15 +1463,38 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		if (policy == FMD_DC_POLICY_PRESCRIPTIVE && (n <= 0 || !extents))
 			return -EINVAL;
 
+		/*
+		 * Length is "Always a multiple of the configured Region Block
+		 * Size" (Table 7-72), which the device would refuse with
+		 * Invalid Input: not sent when the region is known.
+		 */
+		if (policy == FMD_DC_POLICY_FREE || policy == FMD_DC_POLICY_CONTIGUOUS) {
+			struct fmd_dc_region *region = fmd_dc_find_region(dev, host_id, region_id);
+
+			if (length == 0 || (region && region->block_size &&
+					    length % region->block_size))
+				return -EINVAL;
+		}
+
 		req = calloc(1, sizeof(*req) + n * sizeof(req->extents[0]));
 		if (!req)
 			return -ENOMEM;
 
+		/*
+		 * Table 7-72: Region Number and Tag are "reserved when the
+		 * Selection Policy is set to Prescriptive", Length "when the
+		 * Selection Policy is set to Prescriptive or Enable Shared
+		 * Access". Reserved fields are sent as zero.
+		 */
 		req->host_id = host_id;
 		req->selection_policy = policy;
-		req->region_num = region_id;
-		req->length = length;
-		memcpy(req->tag, tag, FMD_DC_TAG_LEN);
+		if (policy != FMD_DC_POLICY_PRESCRIPTIVE) {
+			req->region_num = region_id;
+			if (tag)
+				memcpy(req->tag, tag, FMD_DC_TAG_LEN);
+		}
+		if (policy == FMD_DC_POLICY_FREE || policy == FMD_DC_POLICY_CONTIGUOUS)
+			req->length = length;
 		req->ext_count = n;
 		for (int i = 0; i < n; i++) {
 			if (!extents[i]) {
@@ -1540,12 +1563,19 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		if (!req)
 			return -ENOMEM;
 
+		/*
+		 * Table 7-73: Length and Tag are reserved "when the Removal
+		 * Policy is set to Prescriptive", and sent as zero.
+		 */
 		req->host_id = host_id;
 		req->flags = (policy & FMD_DC_REL_POLICY_MASK) |
 			     (forced ? FMD_DC_REL_FORCED_REMOVAL : 0) |
 			     (sanitize ? FMD_DC_REL_SANITIZE : 0);
-		req->length = length;
-		memcpy(req->tag, tag, FMD_DC_TAG_LEN);
+		if (policy != FMD_DC_REL_POLICY_PRESCRIPTIVE) {
+			req->length = length;
+			if (tag)
+				memcpy(req->tag, tag, FMD_DC_TAG_LEN);
+		}
 		req->ext_count = n;
 		for (int i = 0; i < n; i++) {
 			if (!extents[i]) {
