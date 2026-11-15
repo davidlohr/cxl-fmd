@@ -200,8 +200,10 @@ int fmd_switch_events_poll_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
  * Ask a switch to send an Event Notification when one of its four logs has
  * a new record, and when a background operation completes (Set MCTP Event
  * Interrupt Policy, 0105h). A switch that will not is still read on the
- * timer.
+ * timer, and so is one whose logs are the host's: those are not asked for.
  */
+#define EVENT_NOTIFY_DEFINED	0x801f	/* Bits[14:5] are reserved */
+
 void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw)
 {
 	struct cxlmi_cmd_get_mctp_event_interrupt_policy_rsp cur = { 0 };
@@ -209,16 +211,35 @@ void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	uint16_t want = EVENT_NOTIFY_LOGS | EVENT_NOTIFY_BG_DONE;
 	int rc;
 
-	if (unlikely(!sw->base.ep))
+	if (unlikely(!sw->base.ep) || !fmd_endpoint_owns_events(ctx, sw->base.ep))
 		return;
 
 	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(sw->base.ep,
 						       CXLMI_NO_TUNNEL, &cur);
-	if (rc == 0 && (cur.event_interrupt_settings & want) != want) {
-		pol.event_interrupt_settings = cur.event_interrupt_settings | want;
-		rc = cxlmi_cmd_set_mctp_event_interrupt_policy(sw->base.ep,
-							       CXLMI_NO_TUNNEL, &pol);
+	if (rc) {
+		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", sw->base.id, rc);
+		return;
 	}
+
+	/*
+	 * Set even when the bits are set already: "The receiver may capture
+	 * the address of the requesting component ... The subsequent enabled
+	 * events shall be sent to that address" (Section 8.2.10.2.7). Bits
+	 * another requester set send it, not cxl-fmd, the notifications.
+	 *
+	 * "message reserved bits should be cleared to 0 by the sender"
+	 */
+	pol.event_interrupt_settings = (cur.event_interrupt_settings | want) &
+				       EVENT_NOTIFY_DEFINED;
+	rc = cxlmi_cmd_set_mctp_event_interrupt_policy(sw->base.ep,
+						       CXLMI_NO_TUNNEL, &pol);
+
+	/* read it back, as fmd_device_events_enable() does */
+	if (rc && cxlmi_cmd_get_mctp_event_interrupt_policy(sw->base.ep,
+							    CXLMI_NO_TUNNEL,
+							    &cur) == 0 &&
+	    (cur.event_interrupt_settings & want) == want)
+		rc = 0;
 	if (rc)
 		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", sw->base.id, rc);
 }

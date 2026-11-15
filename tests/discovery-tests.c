@@ -1657,6 +1657,15 @@ static void answer_no_events(struct cxlmi_endpoint *ep, bool overflow)
 	answer(ep, 0x0100, page, sizeof(page));
 }
 
+static uint16_t last_policy_set(struct cxlmi_endpoint *ep)
+{
+	uint8_t pl[2] = { 0 }, set = 0, cmd = 0;
+	size_t size = sizeof(pl);
+
+	cxlmi_mock_get_last_command(ep, &set, &cmd, pl, &size);
+	return set == 0x01 && cmd == 0x05 ? (uint16_t)(pl[0] | pl[1] << 8) : 0xffff;
+}
+
 static void test_switch_events(void)
 {
 	static const uint8_t ld1[3] = { 0x03, 5, 1 };
@@ -1691,6 +1700,24 @@ static void test_switch_events(void)
 	CHECK(set == 0x01 && cmd == 0x05 && pl[0] == 0x0f && pl[1] == 0x80,
 	      "event notifications asked for with %02x%02xh, %02x%02xh", set,
 	      cmd, pl[1], pl[0]);
+
+	/*
+	 * Set even when the bits are set already, by another requester
+	 * maybe: "The subsequent enabled events shall be sent to that
+	 * address" (Section 8.2.10.2.7). Reserved Bit[5] is cleared.
+	 */
+	answer(ep, 0x0104, (uint8_t[2]){ 0x2f, 0x80 }, 2);
+	answer_rc(ep, 0x0105, CXLMI_RET_SUCCESS);
+	fmd_switch_events_enable(ctx, sw);
+	CHECK(last_policy_set(ep) == 0x800f,
+	      "a switch policy already set: %04x set", last_policy_set(ep));
+
+	/* a Set reported as failed is read back */
+	answer(ep, 0x0104, (uint8_t[2]){ 0x00, 0x00 }, 2);
+	answer_rc(ep, 0x0105, CXLMI_RET_INTERNAL);
+	answer(ep, 0x0104, (uint8_t[2]){ 0x0f, 0x80 }, 2);
+	fmd_switch_events_enable(ctx, sw);
+	CHECK(last_opcode(ep) == 0x0104, "the switch policy was not read back");
 
 	/*
 	 * A Physical Switch Event Record (Table 7-79) for port 4, in the
@@ -2234,14 +2261,6 @@ out:
  * for a DCD's Dynamic Capacity Event Log, read-modify-write, with the
  * reserved Bits[14:5] cleared. Only a device on an endpoint of its own.
  */
-static uint16_t last_policy_set(struct cxlmi_endpoint *ep)
-{
-	uint8_t pl[2] = { 0 }, set = 0, cmd = 0;
-	size_t size = sizeof(pl);
-
-	cxlmi_mock_get_last_command(ep, &set, &cmd, pl, &size);
-	return set == 0x01 && cmd == 0x05 ? (uint16_t)(pl[0] | pl[1] << 8) : 0xffff;
-}
 
 static void test_device_notifications(void)
 {
@@ -2749,6 +2768,8 @@ static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_switch(ctx, 0x500d);
+	char sw_id[FMD_MAX_ID_LEN];
+	struct fmd_switch *sw;
 	int before = failures;
 	unsigned int sent;
 
@@ -2759,6 +2780,17 @@ static void test_mailbox_events_are_the_hosts(void)
 	if (ctx->ioctl_eps)
 		ctx->ioctl_eps[ctx->nioctl_eps++] = ep;
 	CHECK(!fmd_endpoint_owns_events(ctx, ep), "a mailbox endpoint owns its events");
+
+	/* nor are its notifications asked for: they are the host's too */
+	device_id(sw_id, sizeof(sw_id), 0x500d);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw, "no switch %s", sw_id);
+	sent = commands_sent(ep);
+	if (sw)
+		fmd_switch_events_enable(ctx, sw);
+	CHECK(commands_sent(ep) == sent,
+	      "%u commands sent to ask for a mailbox switch's notifications",
+	      commands_sent(ep) - sent);
 
 	sent = commands_sent(ep);
 	answer_event(ep, physical_switch_event, 0x21, (uint8_t[2]){ 4, 0 }, 2);
