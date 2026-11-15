@@ -149,9 +149,13 @@ Capacity is served as `CXL/StagedVolatileSizeMiB`, where the schema has
 `StagedVolatileSizeMiB`.
 
 `StagedVolatileSizeMiB` and `StagedNonVolatileSizeMiB` are totals, as Get
-Partition Info's Next Volatile and Next Persistent Capacity are: "the sum
+Partition Info's Next Volatile and Next Persistent Capacity are. Each
+"shall become the Active Volatile Capacity" (or "the Active Persistent
+Capacity") "on the next reset", and Active Volatile Capacity "is the sum
 of the device's Volatile Only capacity and the capacity that is
-partitioned for volatile use" (CXL r4.0 Table 8-310). Set Partition
+partitioned for volatile use", Active Persistent Capacity "the sum of the
+device's Persistent Only capacity and the capacity that is partitioned
+for persistent use" (CXL r4.0 Table 8-310). Set Partition
 Info's Volatile Capacity is not: it is "The amount of partitionable
 capacity that shall be allocated to volatile capacity, in multiples of
 256 MB aligned to the partition alignment requirement reported in the
