@@ -1995,9 +1995,11 @@ struct fmd_vppb *fmd_switch_bind_target_user(struct fmd_switch *sw,
  *  - LD ID is the LD-ID if the target port is an MLD port and FFFFh for
  *    other endpoint types (Table 7-35).
  *
- * Returns 0 once the switch has accepted the bind, -EINVAL for a VCS, vPPB
- * or LD that does not exist, -EBUSY if the vPPB or the target is in use,
- * -EIO if the switch refused.
+ * Returns 0 once the switch has bound the vPPB, FMD_OP_STARTED if it is
+ * binding it in the background, -EINVAL for a VCS, vPPB or LD that does not
+ * exist, -EALREADY if the vPPB is not unbound, -EBUSY if the target is bound
+ * to a vPPB, -EAGAIN if the switch answered Busy, or Retry Required twice,
+ * and -EIO if it refused.
  */
 int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		  uint8_t vcs_id, uint8_t vppb_id,
@@ -2029,9 +2031,9 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	}
 
 	if (vppb->binding_status != FMD_VPPB_UNBOUND) {
-		fmd_warn(ctx, "%s: vPPB %d in VCS %d is already bound (status=%d)",
+		fmd_warn(ctx, "%s: vPPB %d in VCS %d is not unbound (status=%d)",
 			 sw->base.id, vppb_id, vcs_id, vppb->binding_status);
-		return -EBUSY;
+		return -EALREADY;
 	}
 
 	/* If the port is not in the topology, the switch validates the LD ID */
@@ -2123,6 +2125,13 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	/* the switch may bind in the background: that is not a failure */
 	rc = cxlmi_cmd_fmapi_bind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
+	/* "An optional single retry may resolve the issue" (Table 8-208) */
+	if (rc == CXLMI_RET_RETRY)
+		rc = cxlmi_cmd_fmapi_bind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
+	if (rc == CXLMI_RET_RETRY) {
+		fmd_warn(ctx, "%s: bind vPPB: Retry Required, twice", sw->base.id);
+		return -EAGAIN;
+	}
 	if (rc == CXLMI_RET_BUSY) {
 		/* it runs one background command at a time */
 		fmd_warn(ctx, "%s: bind vPPB: the switch is busy", sw->base.id);
@@ -2247,6 +2256,12 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	/* as for bind, the switch may do this in the background */
 	rc = cxlmi_cmd_fmapi_unbind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
+	if (rc == CXLMI_RET_RETRY)
+		rc = cxlmi_cmd_fmapi_unbind_vppb(sw->base.ep, CXLMI_NO_TUNNEL, &req);
+	if (rc == CXLMI_RET_RETRY) {
+		fmd_warn(ctx, "%s: unbind vPPB: Retry Required, twice", sw->base.id);
+		return -EAGAIN;
+	}
 	if (rc == CXLMI_RET_BUSY) {
 		fmd_warn(ctx, "%s: unbind vPPB: the switch is busy", sw->base.id);
 		return -EAGAIN;

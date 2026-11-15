@@ -5415,8 +5415,15 @@ static uint16_t extract_ld_id_from_chunk(struct fmd_mem_chunk *chunk)
  *  -4 target device not found
  *  -5 memory chunk not found
  *  -6 connection allocation failed
- *  -7 vPPB bind failed (no available vPPB or CCI error)
+ *  -7 vPPB bind failed (the switch refused it, or another error)
  *  -8 cross-head access denied (MHD: host cannot access this LD)
+ *  -9 the port or LD is bound to a vPPB of another host's VCS
+ * -10 the host and the device are not on the same switch
+ * -11 the switch is Busy, answered Retry Required twice, or the vPPB
+ *     chosen was bound by the time it was asked: try again
+ * -12 the host's VCS has no unbound vPPB
+ * -13 the chunk names no LD of the MLD, or one its port does not have
+ * FMD_OP_STARTED: the switch binds in the background; *response is the Task
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -5553,6 +5560,19 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		}
 	}
 
+	/*
+	 * An LD of an MLD on a switch port is bound by its LD-ID (Table
+	 * 7-35), which is taken from the chunk: a chunk that names no LD
+	 * cannot be bound.
+	 */
+	if (!host->direct_attached && target->type == FMD_COMPONENT_MLD &&
+	    connection_port(ctx, target, chunk) &&
+	    extract_ld_id_from_chunk(chunk) == 0xFFFF) {
+		fmd_warn(ctx, "Connection rejected: chunk %s names no LD of %s",
+			 chunk_id, target_id);
+		return -13;
+	}
+
 	/* Create the connection */
 	struct fmd_connection *conn = fmd_connection_create(ctx, initiator_id,
 							    target_id, chunk_id,
@@ -5663,10 +5683,10 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		/* Find an available vPPB in the host's VCS */
 		vppb_id = find_available_vppb(vcs);
 		if (vppb_id < 0) {
-			fmd_err(ctx, "Connection %s: no available vPPB in VCS %d",
-				conn->id, host->vcs_id);
+			fmd_warn(ctx, "Connection %s: no unbound vPPB in VCS %d",
+				 conn->id, host->vcs_id);
 			fmd_connection_remove(ctx, conn);
-			return -7;
+			return -12;
 		}
 
 		/* Perform the vPPB bind */
@@ -5676,11 +5696,17 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			fmd_err(ctx, "Connection %s: vPPB bind failed: %d",
 				conn->id, rc);
 			fmd_connection_remove(ctx, conn);
-			/* the port or LD belongs to another host's VCS */
-			if (rc == -EBUSY)
+			switch (rc) {
+			case -EBUSY:	/* the port or LD is bound to a vPPB */
 				return -9;
-			/* the switch has another operation under way */
-			return rc == -EAGAIN ? -11 : -7;
+			case -EAGAIN:	/* Busy, or Retry Required twice */
+			case -EALREADY:	/* the vPPB chosen is no longer unbound */
+				return -11;
+			case -EINVAL:	/* an LD-ID the port does not have */
+				return -13;
+			default:
+				return -7;
+			}
 		}
 
 		/* Record binding info in connection */

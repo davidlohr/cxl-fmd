@@ -104,6 +104,35 @@ class TestFMBootsFirst:
         # LD 0 is host0's now
         assert connect(api_client, "switch_0_host1", "mld_0", 0)[0] == 409
 
+    def test_no_unbound_vppb_is_a_conflict(self, api_client):
+        """VCS 0 has three downstream vPPBs. Once they are bound, a fourth
+        device cannot be given to host0: that is a conflict with the state
+        of the switch (409, cxl-fmd's choice), not a server error."""
+        for dev, ld in (("sld_0", None), ("sld_1", None), ("mld_0", 0)):
+            assert connect(api_client, "switch_0_host0", dev, ld)[0] == 201
+        before = bindings(api_client, "switch_0")
+        assert connect(api_client, "switch_0_host0", "mld_0", 1)[0] == 409
+        assert bindings(api_client, "switch_0") == before
+        # host1's VCS has vPPBs of its own
+        assert connect(api_client, "switch_0_host1", "mld_0", 1)[0] == 201
+
+    def test_an_mld_chunk_must_name_an_ld(self, api_client):
+        """An LD of an MLD is bound by its LD-ID (Table 7-35), taken from the
+        chunk. A chunk that names no LD of mld_0 is a bad request (400, an
+        error of the client's, cxl-fmd's choice), and nothing is bound."""
+        before = bindings(api_client, "switch_0")
+        status, connections = api_client.get(CONNECTIONS)
+        assert status == 200
+        status, _, _ = api_client.post(CONNECTIONS, {
+            "ConnectionType": "Memory",
+            "Links": {
+                "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
+                "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld_0"}]},
+            "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_of(api_client, "sld_0")}}]})
+        assert status == 400
+        assert bindings(api_client, "switch_0") == before
+        assert api_client.get(CONNECTIONS) == (200, connections)
+
     def test_releasing_makes_it_available_again(self, api_client):
         status, conn = connect(api_client, "switch_0_host0", "sld_0")
         assert status == 201

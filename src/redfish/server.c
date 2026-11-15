@@ -1150,7 +1150,13 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "Cross-head access denied: host cannot access this memory");
 		if (rc == -11)
 			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
-					  "The switch is carrying out another operation; try again");
+					  "The switch cannot bind now; try again");
+		if (rc == -12)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "The host's Virtual CXL Switch has no unbound vPPB");
+		if (rc == -13)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The memory chunk names no logical device that the device's port can bind");
 		if (rc == -10)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The host and the device are not on the same switch");

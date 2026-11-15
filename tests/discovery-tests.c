@@ -844,9 +844,13 @@ static void test_switch_bind(void)
 	rc = try_bind(ctx, ep, sw, 2, 1, 0, 0xffff, &sent);
 	CHECK(rc == -EBUSY && !sent, "bind of a USP: %d", rc);
 
-	/* a vPPB that is bound is not an unbound vPPB */
+	/*
+	 * A vPPB that is bound is not an unbound vPPB. That is told apart
+	 * from a target in use: a vPPB taken since it was chosen is not the
+	 * client's conflict.
+	 */
 	rc = try_bind(ctx, ep, sw, 0, 1, 4, 0xffff, &sent);
-	CHECK(rc == -EBUSY && !sent, "bind of a bound vPPB: %d", rc);
+	CHECK(rc == -EALREADY && !sent, "bind of a bound vPPB: %d", rc);
 
 	/*
 	 * LD ID: the LD-ID if the target port is an MLD port, FFFFh for
@@ -2031,13 +2035,45 @@ static void test_bind_busy(void)
 	sw = fmd_topology_find_switch(&ctx->topology, id);
 	CHECK(sw, "no switch %s", id);
 	if (sw) {
+		unsigned int sent, once;
+
 		answer_rc(ep, 0x5201, CXLMI_RET_BUSY);
+		sent = commands_sent(ep);
 		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
 		CHECK(rc == -EAGAIN, "bind on a busy switch: %d", rc);
+		/* the VCSs are read, then Bind vPPB is sent once */
+		once = commands_sent(ep) - sent;
+
+		/*
+		 * Retry Required: "The command was not completed because of a
+		 * temporary error. An optional single retry may resolve the
+		 * issue." (Table 8-208). It is sent once more; a second Retry
+		 * Required is a temporary condition, as Busy is, not a failure.
+		 */
+		answer_rc(ep, 0x5201, CXLMI_RET_RETRY);
+		answer_rc(ep, 0x5201, CXLMI_RET_RETRY);
+		sent = commands_sent(ep);
+		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
+		CHECK(rc == -EAGAIN, "bind answered Retry Required twice: %d", rc);
+		/* Bind vPPB is sent twice, and not a third time */
+		CHECK(commands_sent(ep) - sent == once + 1 &&
+		      last_opcode(ep) == 0x5201, "%u commands sent, %u for Busy",
+		      commands_sent(ep) - sent, once);
+
+		answer_rc(ep, 0x5201, CXLMI_RET_RETRY);
+		answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
+		CHECK(rc == FMD_OP_STARTED, "bind retried after Retry Required: %d",
+		      rc);
+
+		answer_rc(ep, 0x5202, CXLMI_RET_RETRY);
+		answer_rc(ep, 0x5202, CXLMI_RET_RETRY);
+		rc = fmd_vppb_unbind(ctx, sw, 0, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
+		CHECK(rc == -EAGAIN, "unbind answered Retry Required twice: %d", rc);
 	}
 
 	fmd_ctx_free(ctx);
-	report("bind on a busy switch", before);
+	report("bind on a busy switch, or one that asks for a retry", before);
 }
 
 /*
