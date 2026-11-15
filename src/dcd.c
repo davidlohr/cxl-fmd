@@ -32,7 +32,6 @@
 
 /* Dynamic Capacity Event Log (CXL r3.2 Section 8.2.10.2.2 and Table 8-229) */
 #define DC_EVENT_LOG		4
-#define DC_EVENT_LOG_NOTIFY	(1 << 4)	/* Event Interrupt Settings bit */
 #define DC_EVENT_ADD_RESPONSE	0x04
 #define DC_EVENT_RELEASED	0x05
 /* Flags of Get Event Records, Table 8-232: Bit[0] Overflow, Bit[1] More */
@@ -1103,8 +1102,6 @@ int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
 int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct cxlmi_cmd_fmapi_get_dcd_info_rsp info = {0};
-	struct cxlmi_cmd_get_mctp_event_interrupt_policy_rsp cur = {0};
-	struct cxlmi_cmd_set_mctp_event_interrupt_policy_req pol;
 	struct cxlmi_tunnel_info tbuf, *ti;
 	struct fmd_dcd_info *dcd;
 	int rc;
@@ -1158,18 +1155,9 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 		 (uint64_t)(dcd->total_dc_capacity / FMD_MIB));
 
 	/*
-	 * Ask for an Event Notification whenever the DC event log goes
-	 * non-empty, keeping whatever the other logs were already set to.
+	 * An Event Notification when the DC event log goes non-empty is asked
+	 * for with the device's other logs: see fmd_device_events_enable().
 	 */
-	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(dev->ep, ti, &cur);
-	if (rc == 0 && !(cur.event_interrupt_settings & DC_EVENT_LOG_NOTIFY)) {
-		pol.event_interrupt_settings = cur.event_interrupt_settings |
-					       DC_EVENT_LOG_NOTIFY;
-		rc = cxlmi_cmd_set_mctp_event_interrupt_policy(dev->ep, ti, &pol);
-	}
-	if (rc)
-		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", dev->id, rc);
-
 	return fmd_dcd_refresh(ctx, dev, -1);
 }
 
@@ -1186,7 +1174,7 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_endpoint *ep = dev->ep;
 	uint64_t hosts = 0;
 	bool overflow = false;
-	int rc = 0;
+	int rc = 0, err = 0;
 
 	rsp = calloc(1, sizeof(*rsp) +
 		     CXLMI_MAX_SUPPORTED_EVENT_RECORDS * sizeof(rsp->records[0]));
@@ -1202,8 +1190,17 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 
 	for (int page = 0; page < DC_EVENT_MAX_PAGES; page++) {
 		rc = cxlmi_cmd_get_event_records(ep, ti, &req, rsp);
-		if (rc)
+		if (rc && !page)
 			goto out;
+		/*
+		 * The pages before were cleared: what they named is refreshed
+		 * below, as nothing else will name it again.
+		 */
+		if (rc) {
+			err = rc;
+			rc = 0;
+			break;
+		}
 		if (rsp->flags & EVENT_FLAG_OVERFLOW)
 			overflow = true;
 		if (!rsp->record_count)
@@ -1227,10 +1224,12 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 		clr->event_log = DC_EVENT_LOG;
 		clr->nr_recs = rsp->record_count;
 		rc = cxlmi_cmd_clear_event_records(ep, ti, clr);
-		if (rc)
-			goto out;
-		if (!(rsp->flags & EVENT_FLAG_MORE))
+		if (rc) {
+			err = rc;
+			rc = 0;
 			break;
+		}
+		/* read again until empty: see fmd_event_log_drain() */
 	}
 
 	if (overflow) {
@@ -1243,6 +1242,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 		if (hosts & fmd_dc_host_bit(h))
 			rc = dcd_refresh_locked(ctx, dev, h);
 	}
+	if (!rc)
+		rc = err;
 out:
 	pthread_mutex_unlock(&ctx->dcd_lock);
 	free(rsp);

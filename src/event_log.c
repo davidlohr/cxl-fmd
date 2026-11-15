@@ -45,6 +45,9 @@
 #define EVENT_FLAG_MORE		(1 << 1)
 #define EVENT_MAX_PAGES		32
 
+/* how far back a record read again is looked for: see fmd_log_add() */
+#define FMD_LOG_SAME_SCAN	256
+
 /* records kept for a log whose size no command reports */
 #define FMD_LOG_DEFAULT_SIZE	256
 
@@ -189,6 +192,17 @@ int fmd_log_add(struct fmd_component *comp, int which,
 	if (!log)
 		return -1;
 
+	/*
+	 * A record read again because its Clear Event Records failed is the
+	 * same record: same handle, timestamp and contents. It is kept once.
+	 */
+	for (int i = log->count - 1, n = 0; i >= 0 && n < FMD_LOG_SAME_SCAN; i--, n++) {
+		struct fmd_log_entry *e = log_at(log, i);
+
+		if (e->log == which && !memcmp(&e->record, rec, sizeof(*rec)))
+			return 0;
+	}
+
 	/* full: the oldest goes, as the service says it does */
 	if (log_grow(log) < 0) {
 		if (!log->allocated)
@@ -314,8 +328,15 @@ int fmd_event_log_drain(struct fmd_ctx *ctx, struct fmd_component *comp,
 				 comp->id, which, rc);
 			break;
 		}
-		if (!(rsp->flags & EVENT_FLAG_MORE))
-			break;
+
+		/*
+		 * Read again even when the page did not say there were More
+		 * Event Records: a log's Event Notification is sent when it goes
+		 * from empty to not, and "After clearing log entries, the Get
+		 * Event Records command should be used to confirm that all
+		 * entries have been cleared from the log to ensure that the
+		 * notification trigger has been re-armed" (Section 8.2.10.2.8).
+		 */
 	}
 
 	free(rsp);
@@ -422,7 +443,78 @@ bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev)
 	 */
 	if (dev->type == FMD_COMPONENT_SLD)
 		return !(dev->parent && dev->parent->type == FMD_COMPONENT_PORT);
-	return dev->type == FMD_COMPONENT_MLD;
+	if (dev->type != FMD_COMPONENT_MLD)
+		return false;
+
+	/*
+	 * An MLD whose LDs could not be read: its records would be cleared
+	 * from it with nothing to keep them on, and they are the only copy.
+	 */
+	return fmd_first_child_type(dev, FMD_COMPONENT_LD) != NULL;
+}
+
+/*
+ * Ask a memory device for an MCTP Event Notification when one of the logs
+ * cxl-fmd reads goes from empty to not (Set MCTP Event Interrupt Policy,
+ * Table 8-236): Bits[3:0] for the four logs it keeps, Bit[4] for the
+ * Dynamic Capacity Event Log of a DCD. The bits already set stay set.
+ *
+ * Only a device on an MCTP endpoint of its own: one reached through a
+ * switch's tunnel has no defined way to send the FM a notification, as the
+ * requester it would answer is the switch. Its logs are read on the timer.
+ */
+#define NOTIFY_LOGS		0x000f
+#define NOTIFY_DC_LOG		0x0010
+#define NOTIFY_DEFINED		0x801f	/* Bits[14:5] are reserved */
+
+void fmd_device_events_enable(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct cxlmi_cmd_get_mctp_event_interrupt_policy_rsp cur = { 0 };
+	struct cxlmi_cmd_set_mctp_event_interrupt_policy_req pol = { 0 };
+	uint16_t want = 0;
+	int rc;
+
+	if (unlikely(!dev->ep) || !fmd_endpoint_owns_events(ctx, dev->ep) ||
+	    (dev->parent && dev->parent->type == FMD_COMPONENT_PORT))
+		return;
+
+	if (fmd_device_logs_read(ctx, dev))
+		want |= NOTIFY_LOGS;
+	if (fmd_memdev_dcd(dev))
+		want |= NOTIFY_DC_LOG;
+	if (!want)
+		return;
+
+	rc = cxlmi_cmd_get_mctp_event_interrupt_policy(dev->ep, CXLMI_NO_TUNNEL, &cur);
+	if (rc) {
+		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", dev->id, rc);
+		return;
+	}
+	/*
+	 * Set even when the bits are set already: "The receiver may capture
+	 * the address of the requesting component ... The subsequent enabled
+	 * events shall be sent to that address" (Section 8.2.10.2.7). Bits
+	 * another requester set send it, not cxl-fmd, its notifications.
+	 *
+	 * "message reserved bits should be cleared to 0 by the sender"
+	 */
+	pol.event_interrupt_settings = (cur.event_interrupt_settings | want) &
+				       NOTIFY_DEFINED;
+	rc = cxlmi_cmd_set_mctp_event_interrupt_policy(dev->ep, CXLMI_NO_TUNNEL, &pol);
+
+	/*
+	 * Read it back: a libcxlmi that does not take Set's response payload
+	 * reports a failure when the device has set the policy.
+	 */
+	if (rc && cxlmi_cmd_get_mctp_event_interrupt_policy(dev->ep, CXLMI_NO_TUNNEL,
+							   &cur) == 0 &&
+	    (cur.event_interrupt_settings & want) == want)
+		rc = 0;
+	if (rc)
+		fmd_dbg(ctx, "%s: no MCTP event notifications (%d)", dev->id, rc);
+	else
+		fmd_dbg(ctx, "%s: MCTP event notifications for logs %#x", dev->id,
+			want);
 }
 
 void fmd_device_logs_poll(struct fmd_ctx *ctx)

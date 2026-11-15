@@ -194,7 +194,14 @@ static void rescan_if_due(struct fmd_ctx *ctx, int64_t now)
 	if (now < ctx->next_rescan_ms)
 		return;
 
-	fmd_rescan(ctx);
+	/*
+	 * A device found now may have records in its logs already: those send
+	 * no notification until they have been emptied, so read them.
+	 */
+	if (fmd_rescan(ctx) > 0) {
+		fmd_dcd_poll_events(ctx);
+		fmd_switch_events_poll(ctx);
+	}
 	ctx->next_rescan_ms = now_ms() + interval;
 }
 

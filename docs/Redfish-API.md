@@ -127,7 +127,8 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   keeps is the only copy: each record is kept before it is cleared, whatever
   its kind. `LogService.ClearLog` drops cxl-fmd's copies.
 - Only logs that are the FM's are read: a component's own MCTP CCI, and the
-  FM-owned LD of an MLD behind a switch port. The logs of a component reached
+  FM-owned LD of an MLD behind a switch port, if its LDs could be read: the
+  records of one whose LDs could not have nothing to be kept on. The logs of a component reached
   through the kernel's mailbox are shared with the kernel's driver (CXL r4.0
   Section 9.20.1) and are left to it; its `DeviceLog` has `ServiceEnabled`
   `false`. So does that of a pool LD of a Multi-Headed device, whose records
@@ -140,6 +141,12 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   the others.
 - Dynamic Capacity Event Log records are acted on and not kept: nothing places
   them.
+- Each log is read until a Get Event Records comes back empty, which re-arms
+  its MCTP Event Notification (Section 8.2.10.2.8). A memory device on an MCTP
+  endpoint of its own is asked for notifications for the logs that are read
+  (Set MCTP Event Interrupt Policy, Bits[3:0], and Bit[4] for a DCD). One
+  behind a switch is not: no route is defined for its notifications to reach
+  the FM, and its logs are read on the `--event-poll` timer.
 
 ---
 

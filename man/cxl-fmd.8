@@ -97,7 +97,10 @@ memory device whose logs are the FM's, and the Dynamic Capacity event log of
 each dynamic capacity device.
 Records are cleared as they are read, and served as Redfish log entries.
 The default is 10; 0 disables it.
-The logs are also read when a component sends an MCTP Event Notification.
+The logs are read once when
+.B cxl-fmd
+starts, and also when a component sends an MCTP Event Notification, which
+switches and memory devices on MCTP endpoints of their own are asked to send.
 .TP
 .BI \-r\  secs \fR,\ \fB\-\-rescan\  secs
 Look at the whole fabric again every

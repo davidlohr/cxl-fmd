@@ -257,6 +257,17 @@ struct fmd_component {
 	for ((child) = (parent)->first_child; (child); (child) = (child)->next_sibling) \
 		if ((child)->type == (ctype))
 
+/* The first child of @parent of type @ctype, or NULL */
+static inline struct fmd_component *
+fmd_first_child_type(struct fmd_component *parent, enum fmd_component_type ctype)
+{
+	struct fmd_component *child;
+
+	fmd_for_each_child_type(parent, child, ctype)
+		return child;
+	return NULL;
+}
+
 /*
  * Iterate all components of a specific type in the topology hash table.
  * Usage:
@@ -1550,6 +1561,7 @@ bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev);
 void fmd_device_record_keep(struct fmd_ctx *ctx, struct fmd_component *dev,
 			    int which, const struct cxlmi_event_record *rec,
 			    void *arg);
+void fmd_device_events_enable(struct fmd_ctx *ctx, struct fmd_component *dev);
 void fmd_device_logs_poll(struct fmd_ctx *ctx);
 int fmd_event_record_kind_from_name(const char *name, uint8_t uuid[16]);
 

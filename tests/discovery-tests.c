@@ -1367,15 +1367,18 @@ static void test_dcd_info(void)
 	}
 
 	/*
-	 * Draining the Dynamic Capacity Event Log. In the Flags of Get Event
-	 * Records, Bit[1] is More Event Records: there are more to get, and
-	 * the log is read again. Bit[0] is Overflow. One record, more to
-	 * come; then none.
+	 * Draining the Dynamic Capacity Event Log. It is read until Get Event
+	 * Records returns no records, whatever More Event Records (Bit[1] of
+	 * its Flags) says: "After clearing log entries, the Get Event Records
+	 * command should be used to confirm that all entries have been
+	 * cleared from the log to ensure that the notification trigger has
+	 * been re-armed" (Section 8.2.10.2.8). One record, no more said; then
+	 * none.
 	 */
 	if (sld && sld->dcd) {
 		uint8_t page[0x20 + 0x80] = { 0 };
 
-		page[0x00] = 0x02;			/* More Event Records */
+		page[0x00] = 0x00;			/* not More Event Records */
 		put16(page + 0x14, 1);			/* Event Record Count */
 		put16(page + 0x20 + 0x14, 7);		/* Event Record Handle */
 		answer(ep, 0x0100, page, sizeof(page));
@@ -1385,7 +1388,7 @@ static void test_dcd_info(void)
 
 		fmd_dcd_poll_events(ctx);
 		CHECK(last_opcode(ep) == 0x0100,
-		      "the log was not read again after More Event Records: "
+		      "the log was not read again after it was cleared: "
 		      "last command %04xh", last_opcode(ep));
 	}
 
@@ -1788,9 +1791,10 @@ static const uint8_t general_media_event[16] = {	/* fbcd0a77-c260-... */
 static const uint8_t unknown_event[16] = { 0x12, 0x34 };
 
 /* a page with one record, with Event Record Flags and an LD-ID */
-static void answer_device_event(struct cxlmi_endpoint *ep, const uint8_t *uuid,
-				uint16_t handle, uint8_t flags0, uint16_t ld_id,
-				uint8_t page_flags)
+/* the page alone; its Clear Event Records is answered with @clear_rc */
+static void answer_device_page(struct cxlmi_endpoint *ep, const uint8_t *uuid,
+			       uint16_t handle, uint8_t flags0, uint16_t ld_id,
+			       uint8_t page_flags, uint16_t clear_rc)
 {
 	uint8_t page[0x20 + 0x80] = { 0 }, *rec = page + 0x20;
 
@@ -1807,7 +1811,15 @@ static void answer_device_event(struct cxlmi_endpoint *ep, const uint8_t *uuid,
 	put16(rec + 0x14, handle);
 	put16(rec + 0x22, ld_id);			/* LD-ID */
 	answer(ep, 0x0100, page, sizeof(page));
-	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_rc(ep, 0x0101, clear_rc);
+}
+
+static void answer_device_event(struct cxlmi_endpoint *ep, const uint8_t *uuid,
+				uint16_t handle, uint8_t flags0, uint16_t ld_id,
+				uint8_t page_flags)
+{
+	answer_device_page(ep, uuid, handle, flags0, ld_id, page_flags,
+			   CXLMI_RET_SUCCESS);
 }
 
 static int log_count(struct fmd_component *comp)
@@ -1853,7 +1865,9 @@ static void test_device_logs(void)
 	 */
 	answer_device_event(sld_ep, general_media_event, 1, 0x00, 0, 0x02);
 	answer_device_event(sld_ep, unknown_event, 2, 0x00, 0, 0x00);
+	answer_no_events(sld_ep, false);	/* read again: empty */
 	answer_device_event(sld_ep, general_media_event, 3, 0x01, 0, 0x01);
+	answer_no_events(sld_ep, false);
 	answer_no_events(sld_ep, false);
 	answer_no_events(sld_ep, false);
 	for (int log = 0; log < 4; log++)
@@ -1887,6 +1901,7 @@ static void test_device_logs(void)
 		answer_no_events(sld_ep, false);
 	answer_device_event(mld_ep, general_media_event, 4, 0x80, 1, 0x02);
 	answer_device_event(mld_ep, general_media_event, 5, 0x00, 0, 0x00);
+	answer_no_events(mld_ep, false);
 	for (int log = 1; log < 4; log++)
 		answer_no_events(mld_ep, false);
 	fmd_switch_events_poll(ctx);
@@ -2210,6 +2225,319 @@ out:
 	report("devices removed from a switch", before);
 }
 
+/*
+ * MCTP Event Notifications from a memory device (Set MCTP Event Interrupt
+ * Policy, Table 8-236): Bits[3:0] for the four logs cxl-fmd reads, Bit[4]
+ * for a DCD's Dynamic Capacity Event Log, read-modify-write, with the
+ * reserved Bits[14:5] cleared. Only a device on an endpoint of its own.
+ */
+static uint16_t last_policy_set(struct cxlmi_endpoint *ep)
+{
+	uint8_t pl[2] = { 0 }, set = 0, cmd = 0;
+	size_t size = sizeof(pl);
+
+	cxlmi_mock_get_last_command(ep, &set, &cmd, pl, &size);
+	return set == 0x01 && cmd == 0x05 ? (uint16_t)(pl[0] | pl[1] << 8) : 0xffff;
+}
+
+static void test_device_notifications(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *sld_ep = new_device(ctx), *dcd_ep = new_device(ctx);
+	struct cxlmi_endpoint *sw_ep = new_switch(ctx, 0x5012);
+	uint8_t info[0x54] = { 0 };
+	int before = failures;
+	char id[FMD_MAX_ID_LEN + 16], sw_id[FMD_MAX_ID_LEN];
+	struct fmd_component *sld, *dcd, *mld;
+	unsigned int sent;
+
+	answer_identify(sld_ep, 0xe5, 0x03);
+	answer_memdev_identify(sld_ep, 64, 64, 0);
+	answer_identify(dcd_ep, 0xe6, 0x03);
+	answer_memdev_identify(dcd_ep, 64, 64, 0);
+	info[0x00] = 1;
+	info[0x01] = 1;
+	put16(info + 0x04, 0x07);
+	put16(info + 0x08, 0x03);
+	put64(info + 0x0c, 4);
+	put64(info + 0x14, 1ULL << 28);
+	answer(dcd_ep, 0x5600, info, sizeof(info));
+	answer_ld_info(sw_ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(sw_ep, 2, 0, 4);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xe5);
+	sld = fmd_topology_find(&ctx->topology, id);
+	device_id(id, sizeof(id), 0xe6);
+	dcd = fmd_topology_find(&ctx->topology, id);
+	device_id(sw_id, sizeof(sw_id), 0x5012);
+	snprintf(id, sizeof(id), "%.32s_port5_dev", sw_id);
+	mld = fmd_topology_find(&ctx->topology, id);
+	CHECK(sld && dcd && fmd_memdev_dcd(dcd) && mld, "devices not discovered");
+	if (!sld || !dcd || !mld)
+		goto out;
+
+	/* Bit[15] already set stays; reserved Bit[5] is cleared */
+	answer(sld_ep, 0x0104, (uint8_t[2]){ 0x20, 0x80 }, 2);
+	answer_rc(sld_ep, 0x0105, CXLMI_RET_SUCCESS);
+	fmd_device_events_enable(ctx, sld);
+	CHECK(last_policy_set(sld_ep) == 0x800f, "SLD policy set to %04x",
+	      last_policy_set(sld_ep));
+
+	/* a DCD: and its Dynamic Capacity Event Log */
+	answer(dcd_ep, 0x0104, (uint8_t[2]){ 0x00, 0x00 }, 2);
+	answer_rc(dcd_ep, 0x0105, CXLMI_RET_SUCCESS);
+	fmd_device_events_enable(ctx, dcd);
+	CHECK(last_policy_set(dcd_ep) == 0x001f, "DCD policy set to %04x",
+	      last_policy_set(dcd_ep));
+
+	/*
+	 * Already set, by another requester maybe: set again, so that the
+	 * device sends cxl-fmd the notifications (Section 8.2.10.2.7).
+	 */
+	answer(dcd_ep, 0x0104, (uint8_t[2]){ 0x1f, 0x00 }, 2);
+	answer_rc(dcd_ep, 0x0105, CXLMI_RET_SUCCESS);
+	fmd_device_events_enable(ctx, dcd);
+	CHECK(last_policy_set(dcd_ep) == 0x001f,
+	      "a policy already set was not set again: %04x",
+	      last_policy_set(dcd_ep));
+
+	/*
+	 * A Set reported as failed, the policy read back set: a libcxlmi
+	 * that does not take Set's response payload says that.
+	 */
+	answer(sld_ep, 0x0104, (uint8_t[2]){ 0x00, 0x00 }, 2);
+	answer_rc(sld_ep, 0x0105, CXLMI_RET_INTERNAL);
+	answer(sld_ep, 0x0104, (uint8_t[2]){ 0x0f, 0x00 }, 2);
+	fmd_device_events_enable(ctx, sld);
+	CHECK(last_opcode(sld_ep) == 0x0104, "the policy was not read back");
+
+	/* an MLD behind a switch has no way to notify the FM: not asked */
+	sent = commands_sent(sw_ep);
+	fmd_device_events_enable(ctx, mld);
+	CHECK(commands_sent(sw_ep) == sent,
+	      "%u commands sent to enable notifications through a tunnel",
+	      commands_sent(sw_ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("MCTP event notifications from memory devices", before);
+}
+
+/*
+ * The logs of an MLD behind a switch port, read through the switch: its
+ * records go to its LDs. The mock answers a tunnelled command as any
+ * other, and records the tunnel it was sent through: the MLD's are sent
+ * to its port (Tunnel Management Command, 5300h), the switch's to none.
+ */
+static void test_switch_mld_logs(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5010);
+	struct fmd_ctx *ctx2 = new_ctx();
+	struct cxlmi_endpoint *ep2 = new_switch(ctx2, 0x5011);
+	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
+	struct fmd_component *mld, *sw;
+	struct fmd_ld *ld0, *ld1;
+	int before = failures;
+	unsigned int sent;
+
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5010);
+	snprintf(id, sizeof(id), "%.32s_port5_dev", sw_id);
+	sw = fmd_topology_find(&ctx->topology, sw_id);
+	mld = fmd_topology_find(&ctx->topology, id);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	CHECK(sw && mld && ld0 && ld1, "no MLD with two LDs on port 5");
+	if (!sw || !mld || !ld0 || !ld1)
+		goto out;
+	CHECK(mld->ep == ep && fmd_to_mld(mld)->switch_port == 5 &&
+	      fmd_device_logs_read(ctx, mld), "the MLD's logs are not read");
+
+	/* the switch's logs are empty */
+	for (int log = 0; log < 4; log++)
+		answer_no_events(ep, false);
+	/* the MLD's: a record for LD 1, more to come; one for the device */
+	answer_device_event(ep, general_media_event, 0x41, 0x80, 1, 0x02);
+	answer_device_event(ep, general_media_event, 0x42, 0x00, 0, 0x00);
+	answer_no_events(ep, false);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(ep, false);
+
+	sent = commands_sent(ep);
+	fmd_switch_events_poll(ctx);
+	/* 4 for the switch; 3 Gets and 2 Clears for log 0; 3 Gets for 1-3 */
+	CHECK(commands_sent(ep) - sent == 12, "%u commands", commands_sent(ep) - sent);
+	CHECK(log_count(sw) == 0 && log_count(mld) == 0 &&
+	      log_count(&ld1->base) == 2 && log_count(&ld0->base) == 1,
+	      "records: switch %d, MLD %d, LD 0 %d, LD 1 %d", log_count(sw),
+	      log_count(mld), log_count(&ld0->base), log_count(&ld1->base));
+	{
+		struct cxlmi_tunnel_info ti;
+
+		/* the last command was the MLD's: through the tunnel to port 5 */
+		cxlmi_mock_get_last_tunnel(ep, &ti);
+		CHECK(last_opcode(ep) == 0x0100 && ti.level == 1 && ti.port == 5,
+		      "the MLD's log was read through tunnel level %d, port %d",
+		      ti.level, ti.port);
+	}
+
+	/*
+	 * An MLD whose LDs could not be read has nothing to keep its records
+	 * on: they would be cleared from it and lost. Its logs are not read.
+	 */
+	fmd_discover(ctx2);
+	device_id(sw_id, sizeof(sw_id), 0x5011);
+	snprintf(id, sizeof(id), "%.32s_port5_dev", sw_id);
+	mld = fmd_topology_find(&ctx2->topology, id);
+	CHECK(mld && !mld->first_child, "no MLD without LDs");
+	if (mld)
+		CHECK(!fmd_device_logs_read(ctx2, mld),
+		      "the logs of an MLD with no LDs are read");
+	for (int log = 0; log < 4; log++)
+		answer_no_events(ep2, false);
+	answer_device_event(ep2, general_media_event, 0x51, 0x00, 0, 0x00);
+	sent = commands_sent(ep2);
+	fmd_switch_events_poll(ctx2);
+	CHECK(commands_sent(ep2) - sent == 4,
+	      "%u commands: the MLD's records were read", commands_sent(ep2) - sent);
+	{
+		struct cxlmi_tunnel_info ti;
+
+		/* so the last command was the switch's own: through none */
+		cxlmi_mock_get_last_tunnel(ep2, &ti);
+		CHECK(ti.level == 0, "the switch's log was read through a tunnel "
+		      "of level %d", ti.level);
+	}
+out:
+	fmd_ctx_free(ctx);
+	fmd_ctx_free(ctx2);
+	report("event logs of an MLD behind a switch", before);
+}
+
+/* A Dynamic Capacity Event Record (Table 8-229) */
+static const uint8_t dc_event[16] = {	/* ca95afa7-f183-4018-... */
+	0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
+	0x8c, 0x2f, 0x95, 0x26, 0x8e, 0x10, 0x1a, 0x2a,
+};
+
+/*
+ * A record whose Clear Event Records failed is still in the device, and is
+ * read again: it is kept once.
+ */
+static void test_record_read_again(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_component *sld;
+	int before = failures;
+
+	answer_identify(ep, 0xe8, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xe8);
+	sld = fmd_topology_find(&ctx->topology, id);
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+
+	/* read, and its Clear fails: the drain of that log stops */
+	answer_device_page(ep, general_media_event, 9, 0x00, 0, 0x00,
+			   CXLMI_RET_INTERNAL);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(ep, false);
+	fmd_switch_events_poll(ctx);
+
+	/* read again, cleared this time, then the log is empty */
+	answer_device_event(ep, general_media_event, 9, 0x00, 0, 0x00);
+	answer_no_events(ep, false);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(ep, false);
+	fmd_switch_events_poll(ctx);
+
+	CHECK(log_count(sld) == 1, "a record read twice is kept %d times",
+	      log_count(sld));
+out:
+	fmd_ctx_free(ctx);
+	report("a record read again", before);
+}
+
+/*
+ * A host's Add Capacity Response, cleared, then a Get Event Records that
+ * fails: the host is still refreshed, as nothing will name it again. The
+ * refresh starts with Get Host DC Region Configuration (5601h).
+ */
+static void test_dc_refresh_after_failed_read(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0xe9, 2, 0, 4);
+	uint8_t info[0x54] = { 0 }, page[0x20 + 0x80] = { 0 };
+	int before = failures;
+
+	info[0x00] = 2;
+	info[0x01] = 1;
+	put16(info + 0x04, 0x07);
+	put16(info + 0x08, 0x03);
+	put64(info + 0x0c, 4);
+	put64(info + 0x14, 1ULL << 28);
+	answer(ep, 0x5600, info, sizeof(info));
+	fmd_discover(ctx);
+
+	put16(page + 0x14, 1);
+	memcpy(page + 0x20, dc_event, 16);
+	page[0x20 + 0x10] = 0x80;
+	put16(page + 0x20 + 0x14, 0x71);
+	page[0x20 + 0x30] = 0x04;		/* Add Capacity Response */
+	put16(page + 0x20 + 0x32, 1);		/* by host 1 */
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_rc(ep, 0x0100, CXLMI_RET_INTERNAL);
+	fmd_dcd_poll_events(ctx);
+	CHECK(last_opcode(ep) == 0x5601,
+	      "host 1 was not refreshed: last command %04xh", last_opcode(ep));
+
+	fmd_ctx_free(ctx);
+	report("a DC refresh after a failed read", before);
+}
+
+/*
+ * A device found on a re-scan with records in its logs already: those send
+ * no notification until they have been emptied, so the re-scan reads them.
+ */
+static void test_rescan_reads_new_logs(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_component *sld;
+	int before = failures;
+
+	fmd_discover(ctx);
+	ctx->config.event_poll_sec = 0;		/* no timer: notifications only */
+	ctx->config.rescan_sec = 30;
+	ctx->next_rescan_ms = 1;		/* due */
+
+	ep = new_device(ctx);
+	answer_identify(ep, 0xea, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	answer_device_event(ep, general_media_event, 0x81, 0x00, 0, 0x00);
+	answer_no_events(ep, false);
+	for (int log = 1; log < 4; log++)
+		answer_no_events(ep, false);
+	fmd_events_poll(ctx, 0);
+
+	device_id(id, sizeof(id), 0xea);
+	sld = fmd_topology_find(&ctx->topology, id);
+	CHECK(sld && log_count(sld) == 1,
+	      "the logs of a device found on a re-scan were not read");
+
+	fmd_ctx_free(ctx);
+	report("a re-scan reads the logs of what it finds", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -2274,6 +2602,11 @@ int main(void)
 	test_mailbox_events_are_the_hosts();
 	test_device_removal();
 	test_device_logs();
+	test_device_notifications();
+	test_switch_mld_logs();
+	test_record_read_again();
+	test_dc_refresh_after_failed_read();
+	test_rescan_reads_new_logs();
 	test_log_ring();
 	test_overcount_switch();
 	test_overcount_mld();

@@ -330,6 +330,16 @@ int main(int argc, char *argv[])
 	if (!mock_path && use_mctp)
 		fmd_events_init(ctx);
 
+	/*
+	 * Read the event logs once now: a log that already has records when
+	 * notifications are enabled sends none until it has been emptied, and
+	 * the timer, if there is one, is not due for an interval.
+	 */
+	if (!mock_path) {
+		fmd_dcd_poll_events(ctx);
+		fmd_switch_events_poll(ctx);
+	}
+
 	/* Start Redfish server */
 	if (fmd_redfish_start(ctx) < 0) {
 		fmd_err(ctx, "Failed to start Redfish server");
