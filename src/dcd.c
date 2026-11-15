@@ -1262,6 +1262,11 @@ out:
 
 int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 {
+	return fmd_dcd_poll_events_ep(ctx, NULL) < 0 ? -1 : 0;
+}
+
+int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
 	static const enum fmd_component_type types[] = {
 		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
 	};
@@ -1281,6 +1286,7 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 			/* a log that is the host's is not drained */
 			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) &&
 			    fmd_endpoint_owns_events(ctx, comp->ep) &&
+			    fmd_component_on_ep(comp, ep) &&
 			    n < DC_EVENT_MAX_DEVS)
 				devs[n++] = comp;
 		}
@@ -1294,7 +1300,7 @@ int fmd_dcd_poll_events(struct fmd_ctx *ctx)
 			rc = r;
 	}
 	pthread_rwlock_unlock(&ctx->fabric_lock);
-	return rc;
+	return rc ? -1 : n;
 }
 
 /*

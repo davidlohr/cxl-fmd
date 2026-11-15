@@ -126,11 +126,52 @@ static void handle_notification(struct fmd_ctx *ctx, int sd)
 	memcpy(&events, &pl->event, sizeof(events));
 	events = le16toh(events);
 
-	fmd_dbg(ctx, "event notification from EID %u: logs 0x%04x",
-		from.smctp_addr.s_addr, events);
+	fmd_events_route(ctx, from.smctp_network, from.smctp_addr.s_addr, events);
+}
 
-	if (events & CCI_EVENT_DC_LOG)
-		fmd_dcd_poll_events(ctx);
+/*
+ * The endpoint at @net:@eid, if cxl-fmd has one there. One opened on
+ * MCTP_NET_ANY reports network 0, and its messages come from whichever
+ * network the kernel chose: 0 matches any.
+ */
+static struct cxlmi_endpoint *endpoint_at(struct fmd_ctx *ctx, unsigned int net,
+					  uint8_t eid)
+{
+	struct cxlmi_endpoint *ep;
+
+	cxlmi_for_each_endpoint(ctx->cxlmi, ep) {
+		unsigned int n;
+		uint8_t e;
+
+		if (cxlmi_endpoint_get_mctp_addr(ep, &n, &e) == 0 &&
+		    (n == net || n == MCTP_NET_ANY) && e == eid)
+			return ep;
+	}
+	return NULL;
+}
+
+/*
+ * An Event Notification carries nothing that names its sender but the
+ * MCTP address it came from: the logs read are those of the component on
+ * that endpoint. A notification from an address that is no endpoint of
+ * cxl-fmd's, or from one with no component whose logs are read, has every
+ * log read, as all of them are when the timer is due. One whose component
+ * was read and failed does not: the others did not send it.
+ */
+void fmd_events_route(struct fmd_ctx *ctx, unsigned int net, uint8_t eid,
+		      uint16_t events)
+{
+	struct cxlmi_endpoint *ep = endpoint_at(ctx, net, eid);
+	int read = 0;
+
+	fmd_dbg(ctx, "event notification from network %u EID %u: logs 0x%04x%s",
+		net, eid, events, ep ? "" : ", from no endpoint of ours");
+
+	if (events & CCI_EVENT_DC_LOG) {
+		read = ep ? fmd_dcd_poll_events_ep(ctx, ep) : 0;
+		if (!read)
+			fmd_dcd_poll_events(ctx);
+	}
 
 	/*
 	 * One of the other four logs: a switch records there a port whose
@@ -138,8 +179,11 @@ static void handle_notification(struct fmd_ctx *ctx, int sd)
 	 * them now. Bit[15], a background operation that has completed, needs
 	 * nothing here: the tasks are looked at on every turn of the loop.
 	 */
-	if (events & CCI_EVENT_LOGS)
-		fmd_switch_events_poll(ctx);
+	if (events & CCI_EVENT_LOGS) {
+		read = ep ? fmd_switch_events_poll_ep(ctx, ep) : 0;
+		if (!read)
+			fmd_switch_events_poll(ctx);
+	}
 }
 
 static int64_t now_ms(void)

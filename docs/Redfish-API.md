@@ -155,6 +155,10 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   (Set MCTP Event Interrupt Policy, Bits[3:0], and Bit[4] for a DCD). One
   behind a switch is not: no route is defined for its notifications to reach
   the FM, and its logs are read on the `--event-poll` timer.
+- A notification says only which logs have records; the MCTP address it came
+  from says who sent it. The logs read are those of the switch or memory
+  device on that endpoint, and every component's when the address is none of
+  cxl-fmd's endpoints.
 
 ---
 

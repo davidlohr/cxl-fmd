@@ -1511,6 +1511,22 @@ void fmd_switch_settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw);
 int fmd_switch_events_poll(struct fmd_ctx *ctx);
 
 /*
+ * The logs of the components on endpoint @ep alone, which sent an MCTP
+ * Event Notification: a switch, or a memory device on an endpoint of its
+ * own. NULL is every component, as fmd_switch_events_poll() and
+ * fmd_dcd_poll_events() read. Return how many components were read, or -1.
+ */
+int fmd_switch_events_poll_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
+int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
+
+/* An Event Notification from @net:@eid saying logs @events have records */
+void fmd_events_route(struct fmd_ctx *ctx, unsigned int net, uint8_t eid,
+		      uint16_t events);
+
+/* Whether @comp is the component on @ep that sends its notifications */
+bool fmd_component_on_ep(struct fmd_component *comp, struct cxlmi_endpoint *ep);
+
+/*
  * Event records kept for Redfish (src/event_log.c). All of it runs with
  * fabric_lock held: exclusively to change, shared to read.
  */
@@ -1570,7 +1586,7 @@ void fmd_dc_record_keep(struct fmd_component *dev,
 			const struct cxlmi_event_record *rec);
 void fmd_dc_log_overflowed(struct fmd_component *dev, uint16_t count,
 			   uint64_t first_ns, uint64_t last_ns);
-void fmd_device_logs_poll(struct fmd_ctx *ctx);
+int fmd_device_logs_poll(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
 int fmd_event_record_kind_from_name(const char *name, uint8_t uuid[16]);
 
 json_t *fmd_redfish_ld_log(struct fmd_ctx *ctx, const char *chassis_id,

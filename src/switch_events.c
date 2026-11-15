@@ -156,9 +156,14 @@ static void switch_events(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 int fmd_switch_events_poll(struct fmd_ctx *ctx)
 {
+	return fmd_switch_events_poll_ep(ctx, NULL) < 0 ? -1 : 0;
+}
+
+int fmd_switch_events_poll_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
 	struct fmd_component *comp;
 	struct fmd_switch **switches;
-	int n = 0;
+	int n = 0, devices;
 
 	if (!ctx || !ctx->cxlmi)
 		return -1;
@@ -175,6 +180,7 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx)
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SWITCH) {
 		/* a log that is the host's is not drained */
 		if (likely(comp->ep) && fmd_endpoint_owns_events(ctx, comp->ep) &&
+		    fmd_component_on_ep(comp, ep) &&
 		    n < ctx->topology.root->switch_count)
 			switches[n++] = fmd_to_switch(comp);
 	}
@@ -184,10 +190,10 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx)
 	free(switches);
 
 	/* and the logs of the memory devices, which are kept the same way */
-	fmd_device_logs_poll(ctx);
+	devices = fmd_device_logs_poll(ctx, ep);
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);
-	return 0;
+	return n + devices;
 }
 
 /*

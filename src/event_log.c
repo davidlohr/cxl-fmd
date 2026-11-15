@@ -567,7 +567,24 @@ void fmd_dc_log_overflowed(struct fmd_component *dev, uint16_t count,
 				   first_ns, last_ns);
 }
 
-void fmd_device_logs_poll(struct fmd_ctx *ctx)
+/*
+ * A component is on @ep, and the one whose notifications come from it, if
+ * it is reached through @ep and not through a tunnel: a device behind a
+ * switch is reached through the switch's endpoint, and does not notify.
+ * Every component is on NULL.
+ */
+bool fmd_component_on_ep(struct fmd_component *comp, struct cxlmi_endpoint *ep)
+{
+	if (!ep)
+		return true;
+	if (comp->ep != ep)
+		return false;
+	if (comp->type == FMD_COMPONENT_MLD)
+		return fmd_to_mld(comp)->switch_port < 0;
+	return !(comp->parent && comp->parent->type == FMD_COMPONENT_PORT);
+}
+
+int fmd_device_logs_poll(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 {
 	static const enum fmd_component_type types[] = {
 		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD,
@@ -577,16 +594,18 @@ void fmd_device_logs_poll(struct fmd_ctx *ctx)
 
 	devs = calloc(max ? max : 1, sizeof(*devs));
 	if (!devs)
-		return;
+		return 0;
 	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
 		fmd_for_each_type(&ctx->topology, comp, types[t]) {
-			if (fmd_device_logs_read(ctx, comp) && n < max)
+			if (fmd_device_logs_read(ctx, comp) &&
+			    fmd_component_on_ep(comp, ep) && n < max)
 				devs[n++] = comp;
 		}
 	}
 	for (int i = 0; i < n; i++)
 		device_logs(ctx, devs[i]);
 	free(devs);
+	return n;
 }
 
 /*

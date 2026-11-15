@@ -2619,6 +2619,100 @@ static void test_rescan_reads_new_logs(void)
 	report("a re-scan reads the logs of what it finds", before);
 }
 
+/*
+ * An Event Notification says only which logs have records; who sent it is
+ * the MCTP address it came from. The logs read are those of the component
+ * on that endpoint, and every component's for an address that is none of
+ * cxl-fmd's endpoints.
+ */
+static void test_notification_route(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *sw = new_switch(ctx, 0x5013);
+	struct cxlmi_endpoint *sld = new_device(ctx), *dcd = new_device(ctx);
+	uint8_t info[0x54] = { 0 };
+	unsigned int s0, d0, c0;
+	int before = failures;
+
+	answer_identify(sld, 0xeb, 0x03);
+	answer_memdev_identify(sld, 64, 64, 0);
+	answer_identify(dcd, 0xec, 0x03);
+	answer_memdev_identify(dcd, 64, 64, 0);
+	info[0x00] = 1;
+	info[0x01] = 1;
+	put16(info + 0x04, 0x07);
+	put16(info + 0x08, 0x03);
+	put64(info + 0x0c, 4);
+	put64(info + 0x14, 1ULL << 28);
+	answer(dcd, 0x5600, info, sizeof(info));
+	fmd_discover(ctx);
+
+	cxlmi_mock_set_mctp_addr(sw, 1, 10);
+	cxlmi_mock_set_mctp_addr(sld, 1, 11);
+	cxlmi_mock_set_mctp_addr(dcd, 1, 12);
+
+#define SENT() do { s0 = commands_sent(sw); d0 = commands_sent(sld); \
+		     c0 = commands_sent(dcd); } while (0)
+#define READ(ep, n0) (commands_sent(ep) != (n0))
+
+	/* from the SLD: its logs, no one else's */
+	SENT();
+	fmd_events_route(ctx, 1, 11, 0x0001);
+	CHECK(READ(sld, d0) && !READ(sw, s0) && !READ(dcd, c0),
+	      "from the SLD: SLD %d, switch %d, DCD %d", READ(sld, d0),
+	      READ(sw, s0), READ(dcd, c0));
+
+	/* from the switch: its logs alone */
+	SENT();
+	fmd_events_route(ctx, 1, 10, 0x0002);
+	CHECK(READ(sw, s0) && !READ(sld, d0) && !READ(dcd, c0),
+	      "from the switch: switch %d, SLD %d, DCD %d", READ(sw, s0),
+	      READ(sld, d0), READ(dcd, c0));
+
+	/*
+	 * The Dynamic Capacity Event Log of the DCD: its alone. Its drain
+	 * fails, the log unanswered: that is not a reason to read anyone's
+	 * again, its own included.
+	 */
+	SENT();
+	fmd_events_route(ctx, 1, 12, 0x0010);
+	CHECK(READ(dcd, c0) && !READ(sw, s0) && !READ(sld, d0),
+	      "DC log from the DCD: DCD %d, switch %d, SLD %d", READ(dcd, c0),
+	      READ(sw, s0), READ(sld, d0));
+	CHECK(commands_sent(dcd) - c0 == 1,
+	      "%u commands to a DCD whose drain failed: it was read again",
+	      commands_sent(dcd) - c0);
+
+	/* the same address on another network is none of ours: everyone's */
+	SENT();
+	fmd_events_route(ctx, 2, 11, 0x0001);
+	CHECK(READ(sw, s0) && READ(sld, d0) && READ(dcd, c0),
+	      "from no endpoint of ours: switch %d, SLD %d, DCD %d",
+	      READ(sw, s0), READ(sld, d0), READ(dcd, c0));
+
+	/*
+	 * An endpoint opened on MCTP_NET_ANY reports network 0, and its
+	 * notifications come from whichever network the kernel chose.
+	 */
+	cxlmi_mock_set_mctp_addr(sld, 0, 11);
+	SENT();
+	fmd_events_route(ctx, 5, 11, 0x0001);
+	CHECK(READ(sld, d0) && !READ(sw, s0) && !READ(dcd, c0),
+	      "from an endpoint on any network: SLD %d, switch %d, DCD %d",
+	      READ(sld, d0), READ(sw, s0), READ(dcd, c0));
+	cxlmi_mock_set_mctp_addr(sld, 1, 11);
+
+	/* the DC log from a device that is no DCD: every DCD's */
+	SENT();
+	fmd_events_route(ctx, 1, 11, 0x0010);
+	CHECK(READ(dcd, c0), "a DC log notification read no DC log");
+#undef SENT
+#undef READ
+
+	fmd_ctx_free(ctx);
+	report("event notifications routed to their sender", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -2689,6 +2783,7 @@ int main(void)
 	test_record_read_again();
 	test_dc_refresh_after_failed_read();
 	test_rescan_reads_new_logs();
+	test_notification_route();
 	test_log_ring();
 	test_overcount_switch();
 	test_overcount_mld();

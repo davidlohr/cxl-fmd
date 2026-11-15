@@ -99,8 +99,9 @@ Records are cleared as they are read, and served as Redfish log entries.
 The default is 10; 0 disables it.
 The logs are read once when
 .B cxl-fmd
-starts, and also when a component sends an MCTP Event Notification, which
-switches and memory devices on MCTP endpoints of their own are asked to send.
+starts, and those of a component when it sends an MCTP Event Notification,
+which switches and memory devices on MCTP endpoints of their own are asked to
+send.
 .TP
 .BI \-r\  secs \fR,\ \fB\-\-rescan\  secs
 Look at the whole fabric again every
