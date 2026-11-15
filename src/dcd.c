@@ -563,6 +563,8 @@ out:
 	return rc;
 }
 
+static uint8_t extent_region_flags(struct fmd_component *dev, struct fmd_dc_extent *ext);
+
 static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		       uint8_t policy, uint8_t region_id, uint64_t length,
 		       const uint8_t tag[FMD_DC_TAG_LEN],
@@ -608,6 +610,13 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 		return 0;
 
 	case FMD_DC_POLICY_SHARED_ACCESS:
+		/*
+		 * Section 7.6.7.6.5: Enable Shared Access "shall also fail
+		 * with Invalid Input" "When the specified region is not
+		 * Sharable", "When the tagged capacity is already mapped to
+		 * any Host ID via a non-Sharable region" and "When the same
+		 * tagged capacity is currently accessible by the same LD".
+		 */
 		region = fmd_dc_find_region(dev, host_id, region_id);
 		if (!region)
 			return -ENOENT;
@@ -615,16 +624,27 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 			return -EINVAL;
 		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
+				continue;
+			if (!(extent_region_flags(dev, ext) & FMD_DC_REGION_SHAREABLE) ||
+			    (ext->host_mask & bit))
+				return -EINVAL;
+			if (ext->region_id == region_id)
+				matched++;
+		}
+		if (!matched)
+			return -ENOENT;
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
 			if (ext->region_id != region_id ||
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
-			if (!(ext->host_mask & bit)) {
-				ext->host_mask |= bit;
-				fmd_dc_adjust_available_extents(dev, host_id, -1);
-			}
-			matched++;
+			ext->host_mask |= bit;
+			fmd_dc_adjust_available_extents(dev, host_id, -1);
 		}
-		return matched ? 0 : -ENOENT;
+		return 0;
 
 	default:
 		return -EINVAL;
@@ -1491,16 +1511,15 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	/*
 	 * The policies a device supports are Bits[2:0] of Supported Add
 	 * Capacity Selection Policies: Free, Contiguous and Prescriptive.
-	 * Bit[3] "must be 0" (CXL r4.0 Table 7-65), so a device has no way to
+	 * Bit[3] "Must be 0" (CXL r4.0 Table 7-65), so a device has no way to
 	 * say it supports Enable Shared Access, and one that follows the
-	 * table would have every such request refused here. On a device it
-	 * is the device that refuses it, with Invalid Input, as when the
-	 * region is not Sharable (Section 7.6.7.6.5).
+	 * table would have every such request refused here. It is the device
+	 * that refuses it, with Invalid Input, as when the region is not
+	 * Sharable (Section 7.6.7.6.5); the mock does as a device does.
 	 */
 	if (!cap_bit)
 		return -EINVAL;
-	if (!(dcd->add_policies & cap_bit) &&
-	    !(dev_is_hw(dev) && policy == FMD_DC_POLICY_SHARED_ACCESS))
+	if (!(dcd->add_policies & cap_bit) && policy != FMD_DC_POLICY_SHARED_ACCESS)
 		return -EINVAL;
 	if (!fmd_dc_host_component(dev, host_id))
 		return -ENOENT;

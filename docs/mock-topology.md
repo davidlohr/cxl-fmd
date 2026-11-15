@@ -453,7 +453,7 @@ Capacity Device. It mirrors the FM-API DCD Management responses; see
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `num_hosts` | integer | 1 (SLD), `ld_count` (MLD), the size of the LD pool (MHD) | Number of hosts the device serves |
-| `add_policies` | array | Free, Contiguous, Prescriptive | Supported add policies; `EnableSharedAccess` for shared regions |
+| `add_policies` | array | Free, Contiguous, Prescriptive | Supported add policies. A device cannot list `EnableSharedAccess`: Bit[3] of Supported Add Capacity Selection Policies "Must be 0" (Table 7-65). Enable Shared Access is served whatever this says, as it is sent to a device whatever its mask says |
 | `release_policies` | array | TagBased, Prescriptive | Supported release policies |
 | `max_extents` | integer | 256 | Extents supported per host (`TotalSupportedExtents`) |
 | `max_tags` | integer | 64 | Tags supported per host (`TotalSupportedTags`) |

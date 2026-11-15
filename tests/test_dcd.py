@@ -28,6 +28,7 @@ MLD_REFERENCE = MLD + "/Actions/PCIeDevice.CXLReferenceDCMemory"
 TAG_SEED = "6f1a2c3e-0000-4000-8000-000000000001"   # extent present at startup
 TAG_SHARED = "6f1a2c3e-0000-4000-8000-000000000002"
 TAG_PENDING = "6f1a2c3e-0000-4000-8000-000000000003"
+TAG_UNSHARED = "6f1a2c3e-0000-4000-8000-000000000004"   # MLD region 1, not Sharable
 TAG_NEW = "6f1a2c3e-0000-4000-8000-0000000000aa"
 
 
@@ -281,6 +282,30 @@ class TestDynamicCapacityAdd:
         status, data = api_client.get(MLD + "/MemoryExtents/ext_280000000")
         regions = {r["@odata.id"] for r in data["Links"]["MemoryRegions"]}
         assert MLD + "/CXLLogicalDevices/0/MemoryRegions/0" in regions
+
+    def test_shared_access_not_advertised(self, api_client):
+        """Bit[3] of the add policies "Must be 0" (Table 7-65): never listed, still served."""
+        status, data = api_client.get(MLD)
+        assert "EnableSharedAccess" not in data["CXLDevice"]["DynamicCapacity"]["AddCapacityPoliciesSupported"]
+
+    def test_shared_access_tag_already_held_400(self, api_client):
+        """Invalid Input "When the same tagged capacity is currently accessible by the same LD"."""
+        add = MLD + "/CXLLogicalDevices/1/Actions/CXLLogicalDevice.DynamicCapacityAdd"
+        status, _, _ = api_client.post(add, {
+            "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_PENDING})
+        assert status == 400
+        status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
+        assert data["AvailableExtents"] == 254     # unchanged: two extents held
+
+    def test_shared_access_tag_in_unsharable_region_400(self, api_client):
+        """Invalid Input "When the tagged capacity is already mapped to any Host ID via a non-Sharable region"."""
+        add = MLD + "/CXLLogicalDevices/1/Actions/CXLLogicalDevice.DynamicCapacityAdd"
+        status, _, _ = api_client.post(add, {
+            "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_UNSHARED})
+        assert status == 400
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_600000000")
+        assert data["Links"]["MemoryRegions"] == [
+            {"@odata.id": MLD + "/CXLLogicalDevices/0/MemoryRegions/1"}]
 
     def test_shared_access_empty_tag_400(self, api_client):
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
