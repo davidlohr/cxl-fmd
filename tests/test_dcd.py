@@ -116,6 +116,8 @@ class TestDCDDiscovery:
         assert status == 200
         assert data["NonVolatileRegion"] is True
         assert data["SanitizeOnRelease"] is False
+        # the file does not say: every DC region has it (Section 9.13.3)
+        assert data["InterconnectSpecificDCManagement"] is True
         assert data["ExtentsCount"] == 0
 
     def test_unknown_region_404(self, api_client):

@@ -1093,7 +1093,15 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 				flags |= FMD_DC_REGION_NONVOLATILE;
 			if (json_is_true(json_object_get(item, "hw_coherency")))
 				flags |= FMD_DC_REGION_HW_COHERENT;
-			if (json_is_true(json_object_get(item, "interconnect_dcm")))
+			/*
+			 * A DCD "shall set the Dynamic Capacity DSMAS Flag" of
+			 * each region (Section 9.13.3). Bit[5] of Attributes1,
+			 * "Interconnect specific Dynamic Capacity Management",
+			 * is taken to be that flag, which cannot be confirmed
+			 * without the CDAT specification: set unless the file
+			 * says false.
+			 */
+			if (!json_is_false(json_object_get(item, "interconnect_dcm")))
 				flags |= FMD_DC_REGION_INTERCONNECT_DCM;
 			if (json_is_true(json_object_get(item, "read_only")))
 				flags |= FMD_DC_REGION_READ_ONLY;

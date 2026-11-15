@@ -476,7 +476,7 @@ Capacity Device. It mirrors the FM-API DCD Management responses; see
 | `shareable` | boolean | false | Region can be shared between hosts |
 | `nonvolatile` | boolean | false | Non-volatile region |
 | `hw_coherency` | boolean | false | Hardware-managed coherency |
-| `interconnect_dcm` | boolean | false | Interconnect-specific dynamic capacity management (CDAT DSMAS flag) |
+| `interconnect_dcm` | boolean | true | Attributes1 Bit[5], "Interconnect specific Dynamic Capacity Management" (Table 7-68), `InterconnectSpecificDCManagement`. A DCD "shall set the Dynamic Capacity DSMAS Flag" of each region (Section 9.13.3); that this bit is that flag is the mock's reading, not confirmed against the CDAT specification |
 | `read_only` | boolean | false | Read-only region |
 | `hosts` | array | all hosts | Hosts that see this region. Host IDs are the LD-ID (MLD) or the pool LD index (MHD; cxl-fmd's interpretation, see [DCD-FM-API.md](DCD-FM-API.md)) |
 
