@@ -2,6 +2,24 @@
 
 This document outlines potential users, deployment scenarios, and integration opportunities for cxl-fmd as middleware between CXL hardware and orchestration systems.
 
+**What is implemented and what is not.** The Redfish requests in "Memory
+Lifecycle and Provisioning" and in Scenarios 1, 2 and 6 are ones cxl-fmd
+serves, with resource IDs named as cxl-fmd names them (device and host
+names are placeholders, except where an example says which mock topology
+it comes from); `docs/Redfish-API.md` is the reference. The "cxl-fmd Value"
+lists under "Target Users" are aims, not features: no scheduler,
+orchestrator or DCIM integration ships with cxl-fmd. Everything else is a
+design sketch, marked **Not implemented** where it appears: the QoS writes of
+Scenario 3, the events and migration of Scenario 4, the tenancy features of
+Scenario 5, all of "Orchestration Integration" and "Deployment
+Architectures", and the parts of "Middleware Value Proposition" marked so. None of the Kubernetes,
+OpenStack, vSphere, container runtime or Prometheus components named there
+exists in this repository. cxl-fmd itself has no EventService, no metrics
+endpoint, no authentication or audit log, no `PATCH` of a `Connection` or a
+`CXLLogicalDevice`, and no `$filter` query (a query string is ignored). The
+known gaps of what it does implement are listed under "Known Gaps" in
+`docs/Redfish-API.md`.
+
 ## Table of Contents
 
 1. [Target Users](#target-users)
@@ -41,7 +59,7 @@ This document outlines potential users, deployment scenarios, and integration op
 
 **cxl-fmd Value**:
 - Memory expansion without server replacement
-- Centralized fabric management with audit logging
+- Centralized fabric management (no audit logging: not implemented)
 - Integration with existing DCIM/ITSM platforms via Redfish
 
 ### High-Performance Computing (HPC) Facilities
@@ -104,20 +122,22 @@ This document outlines potential users, deployment scenarios, and integration op
 
 ## Memory Lifecycle and Provisioning
 
-cxl-fmd provides a complete memory lifecycle management API via Redfish, enabling dynamic provisioning and connection management.
+cxl-fmd provides a memory lifecycle API via Redfish: MemoryChunks are created and deleted, and Connections bind them to hosts.
 
 ### Memory Resource Model
 
 ```
 Device (SLD/MLD/MHD)
 └── MemoryDomain
-    ├── capacity: Total addressable memory
-    ├── remaining: Unallocated capacity
+    ├── MemorySizeMiB: capacity of the device
+    ├── MemoryChunkIncrementMiB: granularity of a chunk
+    │   (the free capacity is kept by cxl-fmd, not served: MemoryDomain
+    │    has no property for it; a POST larger than it is refused with 409)
     │
     ├── MemoryChunk (allocation 1)
     │   ├── MemoryChunkSizeMiB
     │   ├── AddressRangeType: "PMEM" or "Volatile"
-    │   └── InterleaveSets[]: Reference to source Memory/LD
+    │   └── Links.CXLLogicalDevices: the LD (MLD, MHD)
     │
     └── MemoryChunk (allocation 2)
         └── ...
@@ -135,23 +155,28 @@ Content-Type: application/json
     "AddressRangeType": "PMEM",
     "InterleaveSets": [{
         "Memory": {
-            "@odata.id": "/redfish/v1/Chassis/{device}/Memory/LD0"
+            "@odata.id": "/redfish/v1/Chassis/{device}/Memory/{device}_ld0"
         },
         "SizeMiB": 8192
     }]
 }
 ```
 
-Response (201 Created):
+Response (201 Created; a chunk made with `POST` is named
+`{domain}_chunk{N}`, N the number of chunks the domain had before it):
 ```json
 {
-    "@odata.id": "/redfish/v1/Chassis/{device}/MemoryDomains/{dom}/MemoryChunks/chunk_1",
-    "Id": "chunk_1",
+    "@odata.id": "/redfish/v1/Chassis/{device}/MemoryDomains/{dom}/MemoryChunks/{dom}_chunk4",
+    "Id": "{dom}_chunk4",
     "MemoryChunkSizeMiB": 8192,
     "AddressRangeType": "PMEM",
-    "InterleaveSets": [...]
+    ...
 }
 ```
+
+`AddressRangeType` defaults to `"PMEM"` (a known gap). For an MLD the
+chunk grows the LD with Set LD Allocations; see "Memory Provisioning" in
+`docs/Redfish-API.md` for what each device type sends.
 
 **Delete a Memory Chunk:**
 ```bash
@@ -186,11 +211,17 @@ Content-Type: application/json
 }
 ```
 
+The answer is `201 Created`, or `202 Accepted` with a `Task` when the
+switch binds in the background (see "Binds and unbinds in the background"
+in `docs/Redfish-API.md`).
+
 **Delete a Connection:**
 ```bash
 DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}
 ```
-For switch-attached devices, this triggers vPPB unbind.
+For switch-attached devices, this unbinds the vPPB if this Connection made
+the binding; one that found the port or LD already bound to the host's VCS
+does not unbind it (a known gap).
 
 ### MHD Access Control
 
@@ -209,7 +240,7 @@ Host B (Head 1) ─── Pool LDs 2,3 ─┘
 POST /Connections → OK
 
 # Invalid: Host A accessing LD 2 (assigned to Head 1)
-POST /Connections → 403 Forbidden
+POST /Connections → 400 Bad Request
 ```
 
 ### Complete Provisioning Workflow
@@ -219,9 +250,10 @@ POST /Connections → 403 Forbidden
    GET /redfish/v1/Chassis → List devices
    GET /redfish/v1/Systems → List hosts
 
-2. Check Available Capacity
+2. Check Capacity
    GET /Chassis/{dev}/MemoryDomains/{dom}
-   → "RemainingCapacityMiB": 65536
+   → "MemorySizeMiB", and the chunks already in it
+     (the free capacity is not served)
 
 3. Create Memory Chunk
    POST /Chassis/{dev}/MemoryDomains/{dom}/MemoryChunks
@@ -229,10 +261,10 @@ POST /Connections → 403 Forbidden
 
 4. Create Connection (bind to host)
    POST /Fabrics/CXL/Connections
-   → Host can now access the memory
+   → 201, or 202 and a Task while the switch binds
 
 5. Use Memory
-   (Kernel detects via hotplug, applications use the memory)
+   (outside cxl-fmd: the host's kernel and applications)
 
 6. Release Memory
    DELETE /Fabrics/CXL/Connections/{conn}
@@ -280,27 +312,30 @@ POST /Connections → 403 Forbidden
 
 cxl-fmd exposes each VCS (Virtual CXL Switch) as a Redfish **Zone**. Zones define which devices are accessible from each host:
 
+The examples below are what cxl-fmd serves for `mock/multi-host-vcs.json`
+(two VCSs, three SLDs and an MLD with four LDs), not for the figure above.
+
 ```bash
 # List all zones (VCS partitions)
 GET /redfish/v1/Fabrics/CXL/Zones
 {
     "Members": [
-        {"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/switch_0_vcs0"},
-        {"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/switch_0_vcs1"},
-        {"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/switch_0_vcs2"}
+        {"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/cxl_switch_0_vcs0"},
+        {"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/cxl_switch_0_vcs1"}
     ]
 }
 
 # Get zone details - shows bound endpoints
-GET /redfish/v1/Fabrics/CXL/Zones/switch_0_vcs1
+GET /redfish/v1/Fabrics/CXL/Zones/cxl_switch_0_vcs0
 {
-    "Id": "switch_0_vcs1",
+    "Id": "cxl_switch_0_vcs0",
     "ZoneType": "ZoneOfEndpoints",
     "Links": {
         "Endpoints": [
-            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/host1"},
-            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld_1"},
-            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld_2"}
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host0"},
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/dev0"},
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/dev1"},
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld0"}
         ]
     }
 }
@@ -311,54 +346,55 @@ GET /redfish/v1/Fabrics/CXL/Zones/switch_0_vcs1
 Each Zone has vPPBs (virtual PCI-to-PCI Bridges) that bind devices/LDs to hosts:
 
 ```bash
-# View vPPB bindings for VCS 1
-GET /redfish/v1/Fabrics/CXL/Switches/switch_0/VCSs/1/vPPBs
+# View vPPBs of VCS 0
+GET /redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs/0/VPPBs
 {
     "Members": [
-        {"@odata.id": ".../vPPBs/0"},  # USP binding
-        {"@odata.id": ".../vPPBs/1"},  # MLD1/LD1 binding
-        {"@odata.id": ".../vPPBs/2"}   # MLD2 whole device
+        {"@odata.id": ".../VPPBs/0"},
+        {"@odata.id": ".../VPPBs/1"},
+        {"@odata.id": ".../VPPBs/2"},
+        {"@odata.id": ".../VPPBs/3"},
+        {"@odata.id": ".../VPPBs/4"}
     ]
 }
 
 # Get specific vPPB - shows binding details
-GET /redfish/v1/Fabrics/CXL/Switches/switch_0/VCSs/1/vPPBs/1
+GET /redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs/0/VPPBs/3
 {
-    "Id": "1",
+    "Id": "3",
+    "VPPBId": "3",
     "BindingStatus": "BoundLD",
-    "CurrentPortNumber": 1,
-    "CurrentLDID": 1,
+    "BoundPortId": 5,
+    "BoundLDId": 0,
     "Links": {
-        "PCIeDevices": [{"@odata.id": "/redfish/v1/Chassis/mld_1/PCIeDevices/mld_1"}],
-        "CXLLogicalDevices": [{"@odata.id": ".../CXLLogicalDevices/LD1"}]
+        "Port": {"@odata.id": "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/Ports/cxl_switch_0_dsp5"}
     }
 }
 ```
 
 #### Pool Capacity Visibility
 
-cxl-fmd provides real-time visibility into pool capacity across all devices:
+cxl-fmd serves the capacity of each device and of what is allocated from it.
+The free capacity of a domain is not served (MemoryDomain_v1 has no property
+for it); a client works it out from the chunks:
 
 ```bash
-# Get total pool capacity
+# All devices, as Chassis (switches too)
 GET /redfish/v1/Chassis
-→ Lists all memory devices (MLDs, SLDs, MHDs)
 
-# Per-device capacity with remaining (unallocated) memory
-GET /redfish/v1/Chassis/mld_1/MemoryDomains/mld_1_domain0
+# Per-device capacity
+GET /redfish/v1/Chassis/mld0/MemoryDomains/mld0_domain0
 {
-    "MemoryChunks": {"@odata.id": ".../MemoryChunks"},
-    "InterleavableMemorySets": [...],
-    "CapacityMiB": 524288,
-    "RemainingCapacityMiB": 262144,   # 256GB available
-    "AllowsMemoryChunkCreation": true,
-    "AllowsBlockProvisioning": false
+    "Id": "mld0_domain0",
+    "MemorySizeMiB": 131072,
+    "MemoryChunkIncrementMiB": 256,
+    "MemoryChunks": {"@odata.id": ".../MemoryChunks"}
 }
 
-# Per-LD capacity for fine-grained allocation
-GET /redfish/v1/Chassis/mld_1/PCIeDevices/mld_1/CXLLogicalDevices/LD0
+# Per-LD capacity and QoS (read only)
+GET /redfish/v1/Chassis/mld0/PCIeDevices/mld0/CXLLogicalDevices/0
 {
-    "MemorySizeMiB": 262144,
+    "MemorySizeMiB": 32768,
     "QoS": {
         "AllocatedBandwidth": 100,
         "LimitPercent": 100
@@ -372,15 +408,14 @@ When workload demands change, orchestrators can dynamically rebalance memory acr
 
 ```bash
 # Step 1: Release memory from underutilized Host 1
-DELETE /redfish/v1/Fabrics/CXL/Connections/conn_host1_mld2
-→ vPPB automatically unbound
+DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}
+→ the vPPB is unbound if this Connection bound it (204, or 202 and a Task)
 
-DELETE /redfish/v1/Chassis/mld_2/MemoryDomains/.../MemoryChunks/chunk_1
+DELETE /redfish/v1/Chassis/mld_2/MemoryDomains/.../MemoryChunks/{chunk}
 → Capacity returned to pool
 
-# Step 2: Verify capacity returned to pool
-GET /redfish/v1/Chassis/mld_2/MemoryDomains/mld_2_domain0
-→ "RemainingCapacityMiB": 1048576  (1TB now available)
+# Step 2: Verify the chunk is gone
+GET /redfish/v1/Chassis/mld_2/MemoryDomains/mld_2_domain0/MemoryChunks
 
 # Step 3: Allocate to memory-hungry Host 2
 POST /redfish/v1/Chassis/mld_2/MemoryDomains/.../MemoryChunks
@@ -417,9 +452,9 @@ MLD with 4 LDs (256GB each = 1TB total):
 ```
 
 ```bash
-# Host 1 has LD0 and LD1 (512GB)
-GET /redfish/v1/Fabrics/CXL/Connections?$filter=InitiatorEndpoints/any(e:e eq 'host1')
-→ conn_host1_ld0, conn_host1_ld1
+# Host 1 has LD0 and LD1 (512GB): list the Connections and look at their
+# Links.InitiatorEndpoints ($filter is not supported: it is ignored)
+GET /redfish/v1/Fabrics/CXL/Connections
 
 # Host 2 has LD2 (256GB)
 # LD3 remains in pool for future allocation
@@ -429,7 +464,7 @@ POST /Chassis/mld_0/MemoryDomains/.../MemoryChunks
 {
     "MemoryChunkSizeMiB": 262144,
     "InterleaveSets": [{
-        "Memory": {"@odata.id": "/redfish/v1/Chassis/mld_0/Memory/LD3"}
+        "Memory": {"@odata.id": "/redfish/v1/Chassis/mld_0/Memory/mld_0_ld3"}
     }]
 }
 POST /Fabrics/CXL/Connections  # Bind to host3
@@ -439,9 +474,10 @@ POST /Fabrics/CXL/Connections  # Bind to host3
 - Discover and inventory all memory devices, switches, and VCS configurations
 - Expose VCS partitions as Zones for host isolation visibility
 - Track vPPB bindings and automatically manage them during Connection create/delete
-- Provide real-time capacity metrics (total, remaining) per device and domain
+- Serve the capacity of each device and domain, and its chunks
 - Support per-LD allocation for fine-grained MLD pooling
-- Monitor health and performance across the entire fabric
+- Serve health (Get Health Info, read when a device is discovered) and
+  switch port metrics; performance is not monitored
 
 ### Scenario 2: Dynamic Memory Provisioning
 
@@ -452,16 +488,16 @@ POST /Fabrics/CXL/Connections  # Bind to host3
 1. Monitoring detects memory pressure on Host A
    → Prometheus alert: cxl_memory_pressure{host="hostA"} > 0.9
 
-2. Orchestrator queries cxl-fmd for available capacity
+2. Orchestrator queries cxl-fmd for capacity
    GET /redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0
-   → "RemainingCapacityMiB": 32768
+   → "MemorySizeMiB", and the chunks already in it
 
 3. Create memory chunk from available capacity
    POST /redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks
    {
        "MemoryChunkSizeMiB": 16384,
        "InterleaveSets": [{
-           "Memory": {"@odata.id": "/redfish/v1/Chassis/mld_0/Memory/LD1"},
+           "Memory": {"@odata.id": "/redfish/v1/Chassis/mld_0/Memory/mld_0_ld1"},
            "SizeMiB": 16384
        }]
    }
@@ -474,10 +510,11 @@ POST /Fabrics/CXL/Connections  # Bind to host3
            "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld_0"}]
        },
        "MemoryChunkInfo": [{
-           "MemoryChunk": {"@odata.id": "/redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks/chunk_new"}
+           "MemoryChunk": {"@odata.id": "/redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks/{chunk}"}
        }]
    }
    → cxl-fmd performs vPPB binding for switch-attached devices
+     (201, or 202 and a Task while the switch binds)
 
 5. Host A kernel detects new memory via hotplug
    → Linux CXL driver adds new NUMA node
@@ -486,18 +523,20 @@ POST /Fabrics/CXL/Connections  # Bind to host3
 
 7. (Later) Release memory when no longer needed
    DELETE /redfish/v1/Fabrics/CXL/Connections/{conn_id}
-   DELETE /redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks/chunk_new
+   DELETE /redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks/{chunk}
 ```
 
+Steps 1, 5 and 6 are outside cxl-fmd.
+
 **cxl-fmd Role**:
-- Provide real-time capacity via MemoryDomain.RemainingCapacityMiB
+- Serve each domain's MemorySizeMiB and chunks (the free capacity is not served)
 - Create/delete MemoryChunks for allocation management
 - Create/delete Connections to bind memory to hosts
 - For switch-attached: automatic vPPB bind/unbind via FM-API
 - For MHD: enforce head-to-host access validation
-- Emit events for allocation changes
+- Emit events for allocation changes: **not implemented** (there is no EventService)
 
-**Latency Requirements**:
+**Latency targets** (goals, not measured):
 - Discovery: < 5 seconds
 - Chunk creation: < 100ms
 - Connection creation (includes vPPB bind): < 1 second
@@ -506,6 +545,13 @@ POST /Fabrics/CXL/Connections  # Bind to host3
 ### Scenario 3: Memory Tiering with QoS
 
 **Description**: Workloads access memory tiers with different performance characteristics, managed by cxl-fmd QoS policies.
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+cxl-fmd serves each LD's QoS (`QoS.AllocatedBandwidth`, `QoS.LimitPercent`)
+read only: Set QoS Allocated BW and Set QoS BW Limit are never sent, Set QoS
+Control is marked "No" in Table 2 of `docs/Redfish-API.md`, and no latency
+or bandwidth of a tier is served.
 
 **Memory Hierarchy**:
 ```
@@ -521,13 +567,14 @@ Tier 3: CXL-attached Persistent Memory (highest latency, persistent)
 - Monitor tier utilization for placement decisions
 - Support memory migration hints to kernel
 
-**QoS Configuration**:
+**QoS Configuration** (not implemented: this `PATCH` is answered 501; the
+schema's properties are `AllocatedBandwidth` and `LimitPercent`):
 ```
-PATCH /redfish/v1/Chassis/{dev}/CXLLogicalDevices/{ld}
+PATCH /redfish/v1/Chassis/{dev}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}
 {
   "QoS": {
     "AllocatedBandwidth": 25,  // percentage
-    "BandwidthLimit": 50       // percentage
+    "LimitPercent": 50         // percentage
   }
 }
 ```
@@ -543,14 +590,20 @@ PATCH /redfish/v1/Chassis/{dev}/CXLLogicalDevices/{ld}
 - Device communication failures
 - Switch port failures
 
-**cxl-fmd Role**:
-- Poll device health via Get Health Info (4200h)
-- Monitor poison lists via Get Poison List (4300h)
-- Generate Redfish events for threshold violations
+**cxl-fmd Role** (what is done today):
+- Read Get Health Info (4200h) when a device is discovered, and serve it
+  as `Status` and `MemoryMetrics`; it is not polled
+- Read and clear the event logs of switches and memory devices, and serve
+  the records as `LogEntry` resources
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+- Monitor poison lists via Get Poison List (4300h): not sent
+- Generate Redfish events for threshold violations: there is no EventService
 - Support graceful LD migration before failure
 - Coordinate with kernel for memory offlining
 
-**Event Flow**:
+**Event Flow** (not implemented):
 ```
 1. cxl-fmd detects health threshold crossed
 2. POST /redfish/v1/EventService/Subscriptions/{id}
@@ -571,8 +624,11 @@ PATCH /redfish/v1/Chassis/{dev}/CXLLogicalDevices/{ld}
 - Per-tenant billing based on allocation
 
 **cxl-fmd Role**:
+- Enforce access control via vPPB binding and MHD head mapping (implemented)
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
 - Map tenants to LD allocations
-- Enforce access control via vPPB binding and MHD head mapping
 - Track per-tenant utilization for billing
 - Support overcommit policies with fair sharing
 
@@ -608,7 +664,7 @@ POST /Chassis/mhd_0/MemoryDomains/mhd_0_domain0/MemoryChunks
 {
     "MemoryChunkSizeMiB": 4096,
     "InterleaveSets": [{
-        "Memory": {"@odata.id": "/redfish/v1/Chassis/mhd_0/Memory/LD0"}
+        "Memory": {"@odata.id": "/redfish/v1/Chassis/mhd_0/Memory/mhd_0_ld0"}
     }]
 }
 
@@ -632,14 +688,16 @@ POST /Fabrics/CXL/Connections
     },
     "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_from_ld2"}}]
 }
-→ 403 Forbidden: Host hostA (head 0) cannot access pool LD 2 (head 1)
+→ 400 Bad Request: "Cross-head access denied: host cannot access this memory"
 ```
 
 **cxl-fmd Role**:
 - Discover MHD head-to-host mappings from topology
 - Validate all Connection requests against head assignments
-- Reject cross-head access attempts with clear error messages
-- Support both direct-attached and switch-attached MHD configurations
+- Reject cross-head access attempts (400)
+- Support both direct-attached and switch-attached MHD configurations; a
+  head on a switch port is bound whole, with LD ID FFFFh, so a head that
+  presents an MLD cannot be bound per LD (a known gap)
 
 ---
 
@@ -648,6 +706,15 @@ POST /Fabrics/CXL/Connections
 ### Kubernetes Integration
 
 This section describes how cxl-fmd integrates with Kubernetes for cluster-wide CXL memory management, following the OCP (Open Compute Project) Memory Fabric Manager (MFM) architecture using Dynamic Resource Allocation (DRA).
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+None of the MFM Controller, MFM Node Agent, exporters or controllers in
+this section exist. The sketches read `CapacityMiB` and
+`RemainingCapacityMiB` from a MemoryDomain, which has neither: cxl-fmd serves
+`MemorySizeMiB` and the domain's chunks. They read health from
+`/Memory/LD0`; cxl-fmd names a Memory resource `{device}_ld{N}` and has no
+`Oem` health properties. cxl-fmd serves no QoS writes.
 
 #### OCP MFM Architecture Overview
 
@@ -1150,23 +1217,16 @@ A Kubernetes controller can poll cxl-fmd health endpoints and trigger actions ba
 **Polling Device Health**:
 ```bash
 # Get device health via Memory resource
-GET /redfish/v1/Chassis/{dev}/Memory/LD0
+GET /redfish/v1/Chassis/{dev}/Memory/{dev}_ld0
 {
     "Status": {
-        "Health": "Warning",    # Healthy, Warning, or Critical
+        "Health": "Warning",    # OK, Warning, or Critical
         "State": "Enabled"
-    },
-    "Oem": {
-        "CXL": {
-            "HealthStatus": 1,   # From CCI Get Health Info
-            "MediaStatus": 0,
-            "LifeUsedPercent": 85
-        }
     }
 }
 
-# Get memory metrics
-GET /redfish/v1/Chassis/{dev}/Memory/LD0/MemoryMetrics
+# Get memory metrics (HealthData.PredictedMediaLifeLeftPercent, error counts)
+GET /redfish/v1/Chassis/{dev}/Memory/{dev}_ld0/MemoryMetrics
 ```
 
 **Health-Based Pod Eviction Controller**:
@@ -1408,7 +1468,8 @@ POST /redfish/v1/Chassis/{dev}/MemoryDomains/{dom}/MemoryChunks
     "InterleaveSets": [...]
 }
 
-# Add to existing connection
+# Add to existing connection (not implemented: cxl-fmd answers a PATCH of a
+# Connection with 501)
 PATCH /redfish/v1/Fabrics/CXL/Connections/{conn}
 {
     "MemoryChunkInfo": [
@@ -1424,14 +1485,14 @@ Integrating Kubernetes resource metrics with fabric-level telemetry enables smar
 
 | Metric | cxl-fmd API | Use Case |
 |--------|------------|----------|
-| Memory utilization | `GET /MemoryDomains/{dom}` (RemainingCapacityMiB) | Capacity planning |
+| Memory utilization | `GET /MemoryDomains/{dom}` (MemorySizeMiB) and its MemoryChunks | Capacity planning |
 | Device health | `GET /Memory/{ld}` (Status.Health) | Predictive migration |
-| QoS bandwidth | `GET /CXLLogicalDevices/{ld}` (QoS) | Tier selection |
+| QoS bandwidth | `GET /CXLLogicalDevices/{ld}` (QoS, read only) | Tier selection |
 | Switch port status | `GET /Switches/{sw}/Ports` | Fabric health |
 
 **QoS and Bandwidth-Aware Scheduling**
 
-Different memory slices may offer varying performance characteristics. cxl-fmd's QoS configuration enables tiered scheduling:
+Different memory slices may offer varying performance characteristics. cxl-fmd serves each LD's QoS read only; configuring it is not implemented:
 
 ```yaml
 # ResourceClaimTemplate with QoS requirements
@@ -1479,7 +1540,7 @@ Security Levels (per OCP):
 - Default: Software-enforced isolation via vPPB binding
 
 cxl-fmd provides:
-- MHD head-to-host access control (403 on cross-head access)
+- MHD head-to-host access control (400 on cross-head access)
 - vPPB binding enforcement for switch-attached devices
 - Zone-based isolation via VCS partitioning
 ```
@@ -1500,6 +1561,10 @@ Future DRA requests will include additional factors that cxl-fmd can support:
 #### Nova CXL Memory Backend
 
 OpenStack Nova can use cxl-fmd to provide CXL-backed memory to VM instances.
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+The driver below reads `RemainingCapacityMiB`, which cxl-fmd does not serve.
 
 **Flavor Definition**:
 ```
@@ -1580,7 +1645,9 @@ class CXLResourceProvider:
 
 #### vSphere CXL Memory Resource Pool
 
-cxl-fmd can integrate with vSphere via the CIM/WBEM or REST API to expose CXL resources.
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+cxl-fmd could integrate with vSphere via the CIM/WBEM or REST API to expose CXL resources.
 
 **Resource Pool Configuration**:
 ```
@@ -1648,9 +1715,11 @@ spec:
 
 ## Middleware Value Proposition
 
+> **Partly implemented.** Parts of this section describe features cxl-fmd does not have; each is marked below.
+
 ### Abstraction Layer Benefits
 
-cxl-fmd provides a standardized abstraction between hardware-specific CXL implementations and orchestration systems:
+cxl-fmd provides an abstraction between hardware-specific CXL implementations and orchestration systems:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -1678,13 +1747,19 @@ cxl-fmd provides a standardized abstraction between hardware-specific CXL implem
 
 1. **Vendor Independence**: Orchestrators don't need vendor-specific drivers
 2. **Protocol Abstraction**: Hide MCTP/PCIe transport complexity
-3. **Schema Compliance**: Guarantee DMTF Redfish schema conformance
-4. **Version Compatibility**: Handle CXL spec version differences
-5. **Security Boundary**: Centralized access control and audit logging
+3. **Schema Compliance**: responses are checked with the DMTF Redfish Service Validator over mock topologies (`meson test --suite validator`)
+4. **Version Compatibility**: not implemented; section and table numbers follow CXL r4.0
+5. **Security Boundary**: not implemented; cxl-fmd does not authenticate clients or keep an audit log (see `man cxl-fmd`, SECURITY)
 
 ### Event-Driven Architecture
 
 cxl-fmd can serve as an event source for reactive orchestration:
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+cxl-fmd has no EventService. CXL event records are served as `LogEntry`
+resources (see "Where cxl-fmd puts CXL event records" in
+`docs/Redfish-API.md`), which a client has to poll.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -1711,6 +1786,10 @@ cxl-fmd can serve as an event source for reactive orchestration:
 ### Metrics and Observability
 
 cxl-fmd can expose Prometheus-compatible metrics for observability platforms:
+
+> **Not implemented.** This describes what cxl-fmd could do; the code does not do it today.
+
+cxl-fmd serves no metrics endpoint; the names below are a proposal.
 
 ```prometheus
 # Memory capacity metrics
@@ -1739,6 +1818,8 @@ cxl_fabric_healthy_devices 11
 ---
 
 ## Deployment Architectures
+
+> **Not implemented.** These are design sketches: no deployment manifest, image or BMC integration ships with cxl-fmd.
 
 ### Single-Node Deployment
 
@@ -1932,7 +2013,7 @@ spec:
 
 ## Summary
 
-cxl-fmd serves as the **MFM (Memory Fabric Manager)** component in the OCP CMS (Composable Memory Systems) architecture, providing the external service that maintains topology, zone, and capacity information for all memory pools and connected nodes.
+cxl-fmd is meant to serve as the **MFM (Memory Fabric Manager)** component in the OCP CMS (Composable Memory Systems) architecture, providing the external service that maintains topology, zone, and capacity information for all memory pools and connected nodes. The MFM Controller and Node Agent below are not part of this repository.
 
 ### Role in OCP Architecture
 
@@ -1955,8 +2036,8 @@ cxl-fmd serves as the **MFM (Memory Fabric Manager)** component in the OCP CMS (
 3. **Memory Lifecycle Management**: Full CRUD operations for MemoryChunks and Connections
 4. **Access Control**: MHD head-to-host validation, vPPB binding automation
 5. **Topology Information**: Zones (VCS), switches, ports, endpoints for scheduler hints
-6. **Capacity Tracking**: Per-domain RemainingCapacityMiB for ResourceSlice generation
-7. **Health Monitoring**: Device health status for predictive workload migration
+6. **Capacity Tracking**: Per-domain MemorySizeMiB and MemoryChunks (the free capacity is not served)
+7. **Health Monitoring**: Device health status, read when a device is discovered
 
 ### Key API Capabilities
 
@@ -1984,8 +2065,8 @@ cxl-fmd enables the OCP DRA-based Kubernetes integration:
 | Enhancement | cxl-fmd Support |
 |-------------|-----------------|
 | NUMA-Aware Co-Scheduling | Fabric topology via `/Fabrics/CXL/Zones` |
-| Dynamic Memory Resizing | Additional MemoryChunks, Connection updates |
-| QoS-Aware Scheduling | Per-LD QoS configuration |
+| Dynamic Memory Resizing | Additional MemoryChunks (no Connection updates: not implemented) |
+| QoS-Aware Scheduling | Per-LD QoS, read only (configuration not implemented) |
 | Security Domains | MHD access control, vPPB isolation |
 
 The combination of cxl-fmd's Redfish API and the OCP MFM architecture enables composable memory in Kubernetes without modifying Kubernetes core, maintaining a standard and maintainable integration.
