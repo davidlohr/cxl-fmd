@@ -17,7 +17,7 @@ It fills a gap in the published DMTF material, which was checked on
 
 So the JSON schema has everything the DCD surface needs and the vendored
 bundle carries it, but DSP0288 has not caught up with it. Everything below
-follows the 2026.1 model, with the FM-API field semantics taken from CXL r3.2
+follows the 2026.1 model, with the FM-API field semantics taken from CXL r4.0
 Section 7.6.7.6 as encoded in libcxlmi (`struct cxlmi_cmd_fmapi_*` in
 `src/cxlmi/api-types.h`), which already implements all nine commands.
 
@@ -180,8 +180,9 @@ unique across hosts (Comment 2). Region IDs are the region index
 
 ## Command Details
 
-Field layouts are quoted from libcxlmi's `api-types.h`, which tracks CXL
-r3.2. Byte offsets are omitted; the struct order is the wire order.
+Field layouts are quoted from libcxlmi's `api-types.h`. Byte offsets are
+omitted; the struct order is the wire order. Section and table numbers are
+CXL r4.0's.
 
 ### Get DCD Info (5600h)
 
@@ -260,7 +261,7 @@ Request: `host_id`, `region_cnt` (max to return), `start_region_id`.
 | `region_configs[i].decode_len` | not exposed; it is the HDM decode window the host programs (multiple of 256 MB) |
 | `region_configs[i].region_len` | `RegionSizeMiB` |
 | `region_configs[i].block_size` | `BlockSizeMiB` |
-| `region_configs[i].flags` | Attributes1 (CXL r3.2 Table 7-68, byte 20h); the bits are the CDAT DSMAS Flags positions: bit 2 NonVolatile -> `NonVolatileRegion`, bit 3 Sharable -> `ShareableRegion`, bit 4 Hardware Managed Coherency -> `HardwareManagedCoherencyRegion`, bit 5 Interconnect specific Dynamic Capacity Management -> `InterconnectSpecificDCManagement`, bit 6 Read-Only -> `ReadOnlyRegion`. Bits 1:0 and 7 are reserved |
+| `region_configs[i].flags` | Attributes1 (CXL r4.0 Table 7-68, byte 20h); the bits are the CDAT DSMAS Flags positions: bit 2 NonVolatile -> `NonVolatileRegion`, bit 3 Sharable -> `ShareableRegion`, bit 4 Hardware Managed Coherency -> `HardwareManagedCoherencyRegion`, bit 5 Interconnect specific Dynamic Capacity Management -> `InterconnectSpecificDCManagement`, bit 6 Read-Only -> `ReadOnlyRegion`. Bits 1:0 and 7 are reserved |
 | `region_configs[i].sanitize_on_release` | Attributes2 (byte 24h), bit 0 -> `SanitizeOnRelease`; bits 7:1 reserved |
 | `num_extents_supported` / `num_extents_available` | `CXLLogicalDevice.TotalSupportedExtents` / `AvailableExtents` |
 | `num_tags_supported` / `num_tags_available` | `CXLLogicalDevice.TotalSupportedTags` / `AvailableTags` |
@@ -402,7 +403,7 @@ int cxlmi_cmd_fmapi_initiate_dc_add(struct cxlmi_endpoint *ep,
 | `tag` | 16 bytes; reserved for Prescriptive | `Tag` UUID string (required for Free, Contiguous, EnableSharedAccess; sent as zeros for Prescriptive). An empty or all-zero `Tag` is refused with `400` for EnableSharedAccess: cxl-fmd takes all zeros for no tag, its own convention, as the specification calls the Tag "Optional" (Table 8-230) without saying which value means none |
 | `ext_count` + `extents[]` | DPA/length/tag/shared_seq per extent | `ExtentList[]` of `MemoryExtent` links (required for Prescriptive); cxl-fmd resolves each link back to its cached DPA, length and tag |
 
-Policy semantics (CXL r3.2 7.6.7.6.5):
+Policy semantics (CXL r4.0 Section 7.6.7.6.5):
 
 - **Free**: the device picks any blocks in `RegionNumber` totalling `Length`.
 - **Contiguous**: same, but a single DPA-contiguous extent.
@@ -559,12 +560,17 @@ DCD. Redfish never exposes it; cxl-fmd derives it from the
 | MLD DCD | the LD-ID (`fmd_ld.ld_id`) |
 | MH-SLD / MH-MLD DCD | the pool LD-ID (`fmd_ld.ld_id`). This is cxl-fmd's interpretation: the specification says only that the Host ID is, "For an LD-FAM device, the LD-ID of the host interface" (Tables 7-66 and 8-229), and does not say which LD-ID numbering 56xxh uses on a Multi-Headed DCD. The LD-IDs at a head run "from 0 to n-1 relative to that head" (Section 2.5.1), so they are not unique on the device; the pool index is, and 5500h already names LDs by it (Start LD ID and LD Map). The per-head LD-ID a host sees is not used. An open question for CXL clarification |
 
-The 56xxh set is serviced by the FM-owned LD, so the host is always named by
-the Host ID in the payload, never by the tunnel. For switch-attached devices
+The 56xxh set names the host by the Host ID in the payload, never by the
+tunnel: it is "used by the FM to manage memory assignment within an LD-FAM
+DCD" (Section 7.6.7.6). A switch-attached MLD gets it through the Tunnel
+Management Command, which "instructs a switch to tunnel the provided command
+to the FM-owned LD of the MLD on the specified port" (Section 7.6.7.3.1). For switch-attached devices
 the command is tunnelled with `DEFINE_CXLMI_TUNNEL_SWITCH(ti, port)` exactly
 as the existing 54xxh MLD commands are (see `dcd_tunnel()` in `src/dcd.c`).
-The two-level `DEFINE_CXLMI_TUNNEL_SWITCH_MLD(ti, port, ld)` tunnel reaches an
-individual LD's mailbox, which does not service these commands.
+cxl-fmd does not send them through the two-level
+`DEFINE_CXLMI_TUNNEL_SWITCH_MLD(ti, port, ld)` tunnel, which reaches an
+individual LD: that is cxl-fmd's choice, as the specification does not say
+whether an LD answers them.
 
 The `Systems/{host}` that ultimately receives the capacity is found through
 the existing `Connection` for that LD; no new routing is needed.
