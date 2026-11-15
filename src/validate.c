@@ -182,9 +182,10 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 
 		/*
 		 * Capacity that one host has can be given to another only
-		 * through a Sharable region: Initiate Dynamic Capacity Add
-		 * fails "when the tagged capacity is already mapped to any
-		 * Host ID via a non-Sharable region" (Section 7.6.7.6.5).
+		 * through a Sharable region: Initiate Dynamic Capacity Add with
+		 * Enable Shared Access "shall also fail with Invalid Input"
+		 * "When the tagged capacity is already mapped to any Host ID
+		 * via a non-Sharable region" (Section 7.6.7.6.5).
 		 */
 		if (ext->host_mask & (ext->host_mask - 1)) {
 			for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
