@@ -504,7 +504,11 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 				"/redfish/v1/Fabrics/CXL/Connections" : conn_uri,
 			"HttpOperation", task->kind == FMD_TASK_BIND ? "POST" : "DELETE");
 
-	/* TaskStatus and EndTime "shall not be set until the task completes" */
+	/*
+	 * TaskStatus "shall not be set until the task completes", and EndTime
+	 * "shall not appear if the task is running or otherwise has not been
+	 * completed" (Task_v1)
+	 */
 	if (task->state != FMD_TASK_RUNNING) {
 		bool ok = task->state == FMD_TASK_COMPLETED;
 		char end[32];
@@ -995,9 +999,10 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 
 		/*
 		 * Its device has been removed from the switch port, and the
-		 * vPPB is still bound to the port: "This function or resource
-		 * is either not present or detected". Deleting it unbinds the
-		 * vPPB; the device and its memory are not there to link to.
+		 * vPPB is still bound to the port: Absent, "This function or
+		 * device is not currently present or detected" (Resource_v1).
+		 * Deleting it unbinds the vPPB; the device and its memory are
+		 * not there to link to.
 		 */
 		if (result && !fmd_topology_find(&ctx->topology, conn->target_id)) {
 			json_object_set_new(result, "Status", rf_status("Absent", "OK"));
@@ -1314,9 +1319,15 @@ json_t *fmd_redfish_switch(struct fmd_ctx *ctx, const char *fabric_id, const cha
 
 	/*
 	 * DSP0288 Table 2: Identify Switch Device mappings
+	 * - Number of VCSs -> CXL/MaxVCSSupported
 	 * - Total Number of vPPBs -> CXL/TotalNumbervPPBs
 	 * - Total Number of Bound vPPBs -> CXL/NumberOfBoundvPPBs
 	 * - Number of HDM Decoders available per USP -> CXL/HDMDecoders
+	 *
+	 * DSP8010's Switch has no CXL/MaxVCSSupported or CXL/HDMDecoders.
+	 * They are served as CXL/MaxVCSsSupported and CXL/TotalHDMDecoders
+	 * ("The total number of HDM (Host Device Memory) decoders available
+	 * per upstream port", Switch_v1), which is cxl-fmd's reading.
 	 */
 	int total_vppbs = sw->sw_identify.num_total_vppb;
 	int bound_vppbs = sw->sw_identify.num_active_vppb;
@@ -1478,7 +1489,9 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 	/*
 	 * PortType: a USP "connects to a host device", a DSP "to a target
 	 * device", a Fabric Port "to another switch". A port in any other
-	 * state has no direction to report.
+	 * state has no direction to report. DSP0288 maps no CXL field to
+	 * PortType: deriving it from Current Port Configuration State is
+	 * cxl-fmd's.
 	 */
 	const char *port_type = NULL;
 	switch (port->state) {
@@ -1601,8 +1614,12 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 					dev_child->id));
 
 			/*
-			 * DSP0288 Table 2, Comment 1: For an MLD, represent
-			 * Egress Port Backpressure Supported in the Port resource
+			 * DSP0288 Table 2, Get LD Info: QoS Telemetry
+			 * Capabilities[0], Egress Port Congestion Supported, ->
+			 * Port CXL/QoSTelemetryCapabilities/
+			 * EgressPortBackpressureSupported; Comment 1: "For an
+			 * MLD, implementations shall represent Egress Port
+			 * Congestion Supported in the Port resource."
 			 */
 			if (dev_child->type == FMD_COMPONENT_MLD) {
 				struct fmd_mld *mld = fmd_to_mld(dev_child);
@@ -1708,8 +1725,9 @@ json_t *fmd_redfish_port_metrics(struct fmd_ctx *ctx, const char *fabric_id,
 	);
 
 	/*
-	 * DSP0288 Table 2, Comment 1: For an MLD, get backpressure average
-	 * percentage from Get QoS Status command and report in PortMetrics.
+	 * DSP0288 Table 2, Get QoS Status: Backpressure Average Percentage ->
+	 * PortMetrics CXL/BackpressureAveragePercentage. The row has no
+	 * comment; it is served for a port with an MLD on it.
 	 */
 	struct fmd_component *dev_child;
 	fmd_for_each_child(&port->base, dev_child) {
@@ -2899,6 +2917,11 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	 * Bit[1] of the QoS Telemetry Capabilities of Identify Memory Device
 	 * (Table 8-309), or of Get LD Info (Table 7-46) for an MLD. Whether
 	 * a mechanism is enabled is a setting, reported elsewhere.
+	 *
+	 * DSP0288 does not map anything to CXLLogicalDevice
+	 * QoSTelemetryCapabilities: it puts Bit[0] on the Port (MLD) or the
+	 * PCIeDevice (SLD), and Bit[1] on the PCIeDevice. This copy on the LD
+	 * is cxl-fmd's addition.
 	 */
 	json_object_set_new(result, "QoSTelemetryCapabilities",
 		json_pack("{s:b, s:b}",
@@ -3302,7 +3325,13 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 			  "MasterPassphraseAttemptCountReached", (sec_state >> 5) & 1));
 
 	/*
-	 * DSP0288 Table 1: Memory actions
+	 * Security actions on Memory, as DSP0288 1.2.0 Table 1 mapped them
+	 * (SetPassphrase, SetMasterPassphrase, DisablePassphrase,
+	 * DisableMasterPassphrase, FreezeSecurityState, SecureEraseUnit).
+	 * DSP0288 1.3.0 and 1.4.0 map Set Passphrase, Disable Passphrase,
+	 * Freeze Security State and Passphrase Secure Erase to actions of
+	 * CXLLogicalDevice instead, which cxl-fmd does not serve (a known
+	 * gap). Scan Media is on Memory in both.
 	 */
 	char scan_uri[256], set_pass_uri[256], set_master_uri[256];
 	char disable_pass_uri[256], disable_master_uri[256], freeze_uri[256];
@@ -5649,16 +5678,24 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 
 		/*
 		 * For an MLD, the LD-ID from the chunk's interleave set. The
-		 * head of a Multi-Headed device on a switch port presents an
-		 * SLD: the port is bound as a whole.
+		 * port of a head of a Multi-Headed device is bound as a whole,
+		 * with LD ID FFFFh: that is cxl-fmd's assumption, that the
+		 * head presents an SLD. A head may present an MLD instead, and
+		 * then its LDs are bound by an LD-ID "from 0 to n-1 relative
+		 * to that head" (Section 2.5.1); no command cxl-fmd sends maps
+		 * a pool LD to it, and fmd_vppb_bind() refuses FFFFh on an MLD
+		 * port.
 		 */
 		if (target->type == FMD_COMPONENT_MLD)
 			ld_id = extract_ld_id_from_chunk(chunk);
 
 		/*
-		 * A port is bound to one VCS, and an LD to one host (CXL r4.0
-		 * Sections 7.2.3.1 and 7.3.4): only an unused port or LD can
-		 * be bound. If the host's own VCS has it already there is
+		 * An SLD port "is bound to only one VCS", and "The Fabric
+		 * Manager can bind any unused physical port to the unbound
+		 * vPPB" (CXL r4.0 Section 7.2.3.1); "LDs within an MLD
+		 * component can be bound to a host or unbound" (Section
+		 * 7.3.4). That an LD, too, is bound to one vPPB only is
+		 * cxl-fmd's reading of that model. If the host's own VCS has it already there is
 		 * nothing to bind, and nothing for the connection to unbind
 		 * when it goes. If another VCS has it, it is not this host's
 		 * to have.

@@ -1074,21 +1074,33 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
  */
 /* A port of a switch, from its Get Physical Port State information block */
 /*
- * The device on a switch port is no longer there: the port reports no
- * device, or another kind of one (CXL r4.0 Section 7.6.6.7: "the switch
- * notifies the FM by generating Physical Switch Event Records as the
- * Presence Detect sideband is deasserted and the associated port links
- * down", after which the FM reads the port's state).
+ * The device on a switch port is no longer there: when the port is read
+ * again, it reports no device, or another kind of one. Deciding that from
+ * Connected Device Type is cxl-fmd's; the specification does not say what
+ * a port reports after a removal.
+ *
+ * How the FM learns of it depends on the port (CXL r4.0): "When a device
+ * is Hot-Removed from an unbound port on a switch ... The switch notifies
+ * the FM by generating Physical Switch Event Records" (Section 7.6.6.7);
+ * of a surprise removal, "The switch notifies the FM of a surprise removal
+ * by generating Virtual CXL Switch Event Records" (Section 7.6.6.8); of an
+ * SLD or PCIe device on a bound port, "the FM can be notified but is not
+ * involved" (Section 7.6.6.7), and it may hear of it only when the port is
+ * read again on the --rescan timer.
  *
  * It goes, with its LDs, memory domains and chunks, its dynamic capacity
  * and the event records kept for it.
  *
  * The connections to it are the switch's to decide: a connection is a vPPB
- * bound for a host, and "When a Surprise or Managed Hot-Removal of an SLD
- * or PCIe device occurs on a bound port, the FM can be notified but is not
- * involved": the vPPB stays bound to the port, and a device plugged back
- * into it is the host's again. When an MLD is removed, "the switch will
- * automatically unbind any existing LD bindings" (Section 7.6.6.8). So the
+ * bound for a host. For an SLD on a bound port, neither section says what
+ * becomes of the binding; a vPPB bound to an SLD port "behaves the same as
+ * a PPB in a PCIe switch" (Section 7.2.3.1), so cxl-fmd assumes that it
+ * stays bound to the port, and that a device plugged back into it is the
+ * host's again. On a surprise removal of an MLD, "The switch will
+ * automatically unbind any existing LD bindings" (Section 7.6.6.8). On a
+ * managed hot-removal of an MLD, "The FM unbinds each assigned LD with the
+ * Unbind vPPB command as it receives notifications from each host"
+ * (Section 7.6.6.7), which cxl-fmd does not do (a known gap). So the
  * vPPBs are read again after the ports, and a connection whose device has
  * gone stands for as long as its vPPB is bound: see
  * fmd_switch_settle_connections().
@@ -1221,8 +1233,10 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	}
 
 	/*
-	 * Connected Device Type is reserved unless the port is a DSP: only a
-	 * DSP says what is on it. One that reports no device where there was
+	 * Connected Device Type "is reserved for all values of Current Port
+	 * Configuration State except 3h (DSP) or 5h (Fabric Port)" (Table
+	 * 7-21). Only a DSP can have a memory device on it, so only DSPs are
+	 * checked for removals. One that reports no device where there was
 	 * one, or another kind of device ("A bound port will not advertise
 	 * support for MLDs during negotiation, so MLD components will link up
 	 * as an SLD"), no longer has the one that was there. A link that is

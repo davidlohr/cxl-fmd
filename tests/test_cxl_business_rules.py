@@ -93,7 +93,7 @@ class TestMultiVCSRules:
         assert bound_count >= 2
 
 
-    # Binding, CXL r4.0 Section 7.2.3: "The Fabric Manager can bind any unused
+    # Binding, CXL r4.0 Section 7.2.3.1: "The Fabric Manager can bind any unused
     # physical port to the unbound vPPB". An SLD port is bound to only one
     # VCS, and each LD of an MLD is bound to one host or is unbound (7.3.4).
     #

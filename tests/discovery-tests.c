@@ -827,7 +827,7 @@ static int try_bind(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 
 /*
  * Bind vPPB (5201h), Section 7.6.7.2.2 and Table 7-35, and what Section
- * 7.2.3 says may be bound: "The Fabric Manager can bind any unused physical
+ * 7.2.3.1 says may be bound: "The Fabric Manager can bind any unused physical
  * port to the unbound vPPB". An SLD port is bound to only one VCS, and each
  * LD of an MLD is bound to one host or is unbound (Section 7.3.4).
  */

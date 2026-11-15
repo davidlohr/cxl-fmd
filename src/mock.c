@@ -2019,9 +2019,9 @@ void fmd_mock_free(struct fmd_mock_fabric *fabric)
 
 /*
  * A device pulled out of a switch port: the port links down and reports no
- * device (Connected Device Type 00h). For an MLD, "The switch will
- * automatically unbind any existing LD bindings" (CXL r4.0 Section 7.6.6.8).
- * For an SLD on a bound port, "the FM can be notified but is not involved"
+ * device (Connected Device Type 00h). This is a surprise removal, and for
+ * an MLD "The switch will automatically unbind any existing LD bindings"
+ * (CXL r4.0 Section 7.6.6.8). For an SLD on a bound port, "the FM can be notified but is not involved"
  * (Section 7.6.6.7), and neither section says what becomes of the binding.
  * A vPPB bound to an SLD port "behaves the same as a PPB in a PCIe switch"
  * (Section 7.2.3.1), so cxl-fmd assumes it stays bound, and so it stays.
