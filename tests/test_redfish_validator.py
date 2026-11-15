@@ -150,6 +150,29 @@ class TestRedfishValidator:
 
         assert result.returncode == 0, f"Validator failed with code {result.returncode}"
 
+    @pytest.mark.mock_topology("mock/hot-removal.json")
+    def test_hot_removal_validation(self, cxl_fmd_daemon, api_client, schema_dir,
+                                    validator_venv):
+        """Validate after a device has been pulled out of a bound switch
+        port: its resources are gone, and its connection stands, Absent."""
+        from test_hot_removal import unplug
+        from test_orchestration import connect
+
+        assert connect(api_client, "switch_0_host0", "sld_0")[0] == 201
+        assert connect(api_client, "switch_0_host1", "mld_0", ld=1)[0] == 201
+        unplug(cxl_fmd_daemon, api_client, "sld_0")
+
+        result = self._run_validator(
+            validator_venv.validator, cxl_fmd_daemon["url"], schema_dir)
+
+        print("=== Validator stdout ===")
+        print(result.stdout)
+        if result.stderr:
+            print("=== Validator stderr ===")
+            print(result.stderr)
+
+        assert result.returncode == 0, f"Validator failed with code {result.returncode}"
+
     @pytest.mark.mock_topology("mock/mld-device.json")
     def test_mld_validation(self, cxl_fmd_daemon, schema_dir, validator_venv):
         """Validate MLD topology against Redfish schemas."""

@@ -1485,6 +1485,15 @@ int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
+ * A device that a switch port no longer has, and the connections through
+ * the switch once its vPPBs say what became of them (src/discovery.c).
+ * fabric_lock held exclusively.
+ */
+void fmd_switch_port_device_removed(struct fmd_ctx *ctx, struct fmd_switch *sw,
+				    struct fmd_port *port, struct fmd_component *dev);
+void fmd_switch_settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw);
+
+/*
  * The event logs of the switches (src/switch_events.c): read, acted on and
  * cleared. Takes fabric_lock.
  */

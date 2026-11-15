@@ -70,6 +70,14 @@ struct fmd_mock_fabric {
 	char id[FMD_MAX_ID_LEN];
 	char description[256];
 	int version;
+
+	/*
+	 * Devices to pull out of their switch ports, in order: one each time
+	 * the daemon is sent SIGUSR1 (see fmd_mock_unplug_next()).
+	 */
+	char (*unplug)[FMD_MAX_ID_LEN];
+	int unplug_count;
+	int unplug_next;
 };
 
 /*
@@ -86,6 +94,12 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path);
  * Free mock fabric resources
  */
 void fmd_mock_free(struct fmd_mock_fabric *fabric);
+
+/*
+ * Pull the next device of the topology's "unplug" list out of its switch
+ * port. Returns 0, or -1 if there is none left. Takes fabric_lock.
+ */
+int fmd_mock_unplug_next(struct fmd_ctx *ctx);
 
 /*
  * Discover devices from mock topology

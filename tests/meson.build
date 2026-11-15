@@ -165,6 +165,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Devices pulled out of a switch port
+    test(
+        'hot-removal',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_hot_removal.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # CXL event records as Redfish log entries
     test(
         'event-logs',
@@ -352,6 +370,7 @@ if pytest_available and run_validator
         ['redfish-validator-sld', 'test_single_sld_validation'],
         ['redfish-validator-mld', 'test_mld_validation'],
         ['redfish-validator-event-logs', 'test_event_logs_validation'],
+        ['redfish-validator-hot-removal', 'test_hot_removal_validation'],
     ]
         test(
             t[0],

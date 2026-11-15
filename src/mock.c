@@ -311,6 +311,61 @@ static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
 }
 
 /*
+ * "unplug": the devices to pull out of their switch ports, in order, one
+ * each time the daemon is sent SIGUSR1. Each is an SLD or an MLD on a
+ * switch port, named once.
+ */
+static void parse_unplug(struct fmd_ctx *ctx, struct fmd_mock_fabric *fabric,
+			 json_t *list)
+{
+	json_t *item;
+	size_t idx;
+
+	if (!list)
+		return;
+	if (!json_is_array(list)) {
+		load_error("unplug is not a list of device IDs");
+		return;
+	}
+	fabric->unplug = calloc(json_array_size(list) ? json_array_size(list) : 1,
+				sizeof(*fabric->unplug));
+	if (!fabric->unplug) {
+		load_error("unplug: out of memory");
+		return;
+	}
+
+	json_array_foreach(list, idx, item) {
+		const char *id = json_string_value(item);
+		struct fmd_component *dev = id ? fmd_topology_find(&ctx->topology, id) : NULL;
+
+		if (!id) {
+			load_error("unplug %zu: not a device ID", idx);
+			continue;
+		}
+		if (!dev || (dev->type != FMD_COMPONENT_SLD &&
+			     dev->type != FMD_COMPONENT_MLD)) {
+			load_error("unplug %zu: %s is not an SLD or an MLD", idx, id);
+			continue;
+		}
+		if (!dev->parent || dev->parent->type != FMD_COMPONENT_PORT) {
+			load_error("unplug %zu: %s is not on a switch port: only a "
+				   "switch reports a device that is pulled out", idx, id);
+			continue;
+		}
+		for (int i = 0; i < fabric->unplug_count; i++) {
+			if (!strcmp(fabric->unplug[i], id)) {
+				load_error("unplug %zu: %s is pulled out twice", idx, id);
+				id = NULL;
+				break;
+			}
+		}
+		if (id)
+			snprintf(fabric->unplug[fabric->unplug_count++],
+				 FMD_MAX_ID_LEN, "%s", id);
+	}
+}
+
+/*
  * Parse supported commands from CEL array
  */
 static uint64_t parse_cel_commands(json_t *jcel)
@@ -1824,6 +1879,8 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 		}
 	}
 
+	parse_unplug(ctx, fabric, json_object_get(root, "unplug"));
+
 	/* a device on a switch or port that is not there was never added */
 	if (devices && json_is_array(devices)) {
 		size_t idx;
@@ -1872,7 +1929,76 @@ void fmd_mock_free(struct fmd_mock_fabric *fabric)
 		return;
 
 	/* The topology tree owns all components now */
+	free(fabric->unplug);
 	free(fabric);
+}
+
+/*
+ * A device pulled out of a switch port, as a switch would have it (CXL r4.0
+ * Sections 7.6.6.7 and 7.6.6.8): the port links down and reports no device
+ * (Connected Device Type 00h). For an MLD, "the switch will automatically
+ * unbind any existing LD bindings"; for an SLD on a bound port, "the FM can
+ * be notified but is not involved", and the vPPB stays bound to the port.
+ * Then cxl-fmd does what it does when a switch reports this: the same calls
+ * as a port read again after a Physical Switch Event Record.
+ */
+int fmd_mock_unplug_next(struct fmd_ctx *ctx)
+{
+	struct fmd_mock_fabric *fabric = ctx->mock_fabric;
+	struct fmd_component *dev;
+	struct fmd_switch *sw;
+	struct fmd_port *port;
+	const char *id;
+
+	if (!fabric || fabric->unplug_next >= fabric->unplug_count)
+		return -1;
+	id = fabric->unplug[fabric->unplug_next++];
+
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+
+	dev = fmd_topology_find(&ctx->topology, id);
+	if (!dev || !dev->parent || dev->parent->type != FMD_COMPONENT_PORT ||
+	    !dev->parent->parent ||
+	    dev->parent->parent->type != FMD_COMPONENT_SWITCH) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		fmd_warn(ctx, "mock: %s is not on a switch port to be unplugged", id);
+		return 0;
+	}
+	port = fmd_to_port(dev->parent);
+	sw = fmd_to_switch(dev->parent->parent);
+	fmd_info(ctx, "mock: %s is pulled out of port %d of %s", id,
+		 port->port_number, sw->base.id);
+
+	if (dev->type == FMD_COMPONENT_MLD) {
+		for (int v = 0; v < sw->num_vcs; v++) {
+			struct fmd_vcs *vcs = &sw->vcs[v];
+
+			for (int i = 0; i < vcs->num_vppbs; i++) {
+				struct fmd_vppb *vppb = &vcs->vppbs[i];
+
+				if (vppb->binding_status != FMD_VPPB_BOUND_LD ||
+				    vppb->bound_port_id != port->port_number)
+					continue;
+				vppb->binding_status = FMD_VPPB_UNBOUND;
+				vppb->bound_port_id = 0;
+				vppb->bound_ld_id = 0;
+				vppb->port = NULL;
+				vppb->ld = NULL;
+			}
+		}
+	}
+
+	port->conn_dev_type = FMD_CONN_NONE;
+	port->conn_dev_cxl_ver = 0;
+	port->link_status = FMD_LINK_DOWN;
+	port->negotiated_link_width = 0;
+	port->current_link_speed = 0;
+
+	fmd_switch_port_device_removed(ctx, sw, port, dev);
+	fmd_switch_settle_connections(ctx, sw);
+
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+	return 0;
 }
 
 int fmd_mock_discover(struct fmd_ctx *ctx)

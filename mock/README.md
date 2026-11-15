@@ -23,6 +23,7 @@ From the simplest to the largest. "Bound" is what the hosts already have;
 | `multi-host-vcs.json` | One switch, two hosts: three SLDs and an MLD, everything bound | Two VCSs sharing an MLD by LD |
 | `fm-boots-first.json` | One switch, two hosts: two SLDs, an MLD, an empty port, a PCIe device; **nothing bound** | Where an orchestrator starts (Section 7.2.1.2) |
 | `background-bind.json` | `fm-boots-first.json` with a switch that takes 1.5 s over a bind or unbind | Binds and unbinds in the background: 202 Accepted, tasks, a switch that is busy |
+| `hot-removal.json` | `fm-boots-first.json` with `sld_0`, then `mld_0`, pulled out of their switch ports, one each time the daemon is sent `SIGUSR1` | Devices removed from a switch, and what becomes of their connections |
 | `event-logs.json` | `multi-host-vcs.json` with records in the event logs of the switch and of two devices | CXL event records as Redfish log entries |
 | `switch-dcd.json` | One switch, two hosts: an MLD and an SLD with dynamic capacity | Dynamic capacity through a switch, an extent shared by two hosts |
 | `large-fabric.json` | Two switches, six hosts: six SLDs, MLDs of 4, 8 and 16 LDs; bound and unbound capacity; links down and training | Scale, more than one switch, partly provisioned pools |

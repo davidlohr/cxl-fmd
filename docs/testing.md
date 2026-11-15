@@ -87,7 +87,7 @@ meson test -C build --list
 | `api` | topology-inventory, memory-lifecycle, connections, cxl-business-rules, error-handling | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
 | `unit` | unit-topologies | All 8 CXL topology combinations | pytest, requests |
-| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json` and `event-logs.json` (a switch, its VCSs, connections, tasks and log services) | pytest, `.venv-validator` |
+| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services) and `hot-removal.json` after a device with a connection has been pulled out | pytest, `.venv-validator` |
 
 ### Test Timeouts
 

@@ -231,6 +231,19 @@ def head_on_a_port_that_is_down(t):
     port(t, 3)["link_status"] = "down"
 
 
+# hot-removal.json
+def unplug_twice(t):
+    t["unplug"] = ["sld_0", "sld_0"]
+
+
+def unplug_a_switch(t):
+    t["unplug"] = ["switch_0"]
+
+
+def unplug_nothing_there(t):
+    t["unplug"] = ["sld_9"]
+
+
 # event-logs.json
 def records(t, dev):
     return device(t, dev)["event_records"]
@@ -322,6 +335,9 @@ BROKEN = [
     ("unit/unit-switch-mhsld.json", mld_head_on_a_switch, "presents an MLD on a switch port"),
     ("unit/unit-switch-mhsld.json", head_port_is_not_an_sld_port, "which presents an SLD"),
     ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down, "and its link is not up"),
+    ("hot-removal.json", unplug_twice, "sld_0 is pulled out twice"),
+    ("hot-removal.json", unplug_a_switch, "switch_0 is not an SLD or an MLD"),
+    ("hot-removal.json", unplug_nothing_there, "sld_9 is not an SLD or an MLD"),
     ("event-logs.json", event_in_no_log, "log is not informational"),
     ("event-logs.json", event_of_no_kind, "no known kind"),
     ("event-logs.json", event_ld_on_an_sld, "ld_id is for an MLD"),

@@ -150,6 +150,12 @@ and the format, are described in
 and
 .I docs/mock-topology.md
 in the source.
+.PP
+A topology can name devices to be pulled out of their switch ports, in its
+.I unplug
+list: each
+.B SIGUSR1
+pulls out the next one, and the mock switch reports it as a switch would.
 .SH KEEPING UP WITH THE FABRIC
 The fabric is discovered when
 .B cxl-fmd
@@ -214,6 +220,11 @@ and is to be tried again.
 .TP
 .BR SIGINT ", " SIGTERM
 Stop serving and exit with status 0.
+.TP
+.B SIGUSR1
+In mock mode, pull the next device of the topology's
+.I unplug
+list out of its switch port.
 .SH EXIT STATUS
 .TP
 .B 0

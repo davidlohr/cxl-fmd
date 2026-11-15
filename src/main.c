@@ -17,6 +17,15 @@
 
 static volatile sig_atomic_t g_running = 1;
 
+/* SIGUSR1 in mock mode: pull out the next device of the topology's list */
+static volatile sig_atomic_t g_unplug;
+
+static void unplug_handler(int sig)
+{
+	(void)sig;
+	g_unplug++;
+}
+
 static void signal_handler(int sig)
 {
 	(void)sig;
@@ -335,9 +344,19 @@ int main(int argc, char *argv[])
 	 * and follow the binds and unbinds the switches have under way, more
 	 * often while there are any.
 	 */
+	if (mock_path)
+		signal(SIGUSR1, unplug_handler);
+
 	while (g_running && ctx->running) {
+		static sig_atomic_t unplugged;
+
 		fmd_events_poll(ctx, fmd_tasks_running(ctx) ? 100 : 1000);
 		fmd_tasks_poll(ctx);
+
+		for (; unplugged != g_unplug; unplugged++) {
+			if (fmd_mock_unplug_next(ctx) < 0)
+				fmd_warn(ctx, "mock: there is no device left to unplug");
+		}
 	}
 
 	fmd_info(ctx, "Shutting down...");

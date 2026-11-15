@@ -703,6 +703,30 @@ that is up. Only a head that presents an SLD can be on a switch port; see
 [mock/README.md](../mock/README.md) for why. `unit/unit-switch-mhsld.json` is
 the example.
 
+## Unplugging Devices
+
+A topology can list devices to pull out of their switch ports, in order. Each
+time the daemon is sent `SIGUSR1`, the next one is pulled out:
+
+```json
+"unplug": ["sld_0", "mld_0"]
+```
+
+```bash
+kill -USR1 $(pidof cxl-fmd)
+```
+
+The mock switch does what CXL r4.0 Sections 7.6.6.7 and 7.6.6.8 say a switch
+does: the port links down and reports no device; for an MLD, "the switch will
+automatically unbind any existing LD bindings", and for an SLD on a bound
+port the vPPB stays bound. cxl-fmd then removes the device as it does when a
+switch reports it: see *When a Device Is Removed* in
+[Redfish-API.md](Redfish-API.md).
+
+Each entry is an SLD or an MLD on a switch port, named once: only a switch
+reports a device that is pulled out. A signal with nothing left to pull out
+is logged and changes nothing. Outside mock mode, `SIGUSR1` is not handled.
+
 ## Event Records
 
 A switch, an SLD or an MLD can have records in its event logs, as Get Event

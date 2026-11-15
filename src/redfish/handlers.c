@@ -201,9 +201,14 @@ json_t *fmd_redfish_system_memory_domains(struct fmd_ctx *ctx, const char *syste
 
 	members = json_array();
 
-	/* Find all connections for this host */
+	/*
+	 * Find all connections for this host. One whose device has been
+	 * removed, and that stands while its vPPB is bound, gives the host no
+	 * memory: its chunk went with the device.
+	 */
 	for (conn = ctx->connections; conn; conn = conn->next) {
-		if (strcmp(conn->initiator_id, system_id) == 0) {
+		if (strcmp(conn->initiator_id, system_id) == 0 &&
+		    fmd_topology_find_chunk(&ctx->topology, conn->chunk_id)) {
 			json_array_append_new(members,
 				rf_link("/redfish/v1/Systems/%s/MemoryDomains/%s",
 					system_id, conn->id));

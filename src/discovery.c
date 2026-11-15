@@ -197,7 +197,6 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld);
 static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 		       struct fmd_mld *mld);
 static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw);
-static void settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
  * Link status from the LTSSM State of Get Physical Port State and of Get
@@ -1084,10 +1083,11 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
  * into it is the host's again. When an MLD is removed, "the switch will
  * automatically unbind any existing LD bindings" (Section 7.6.6.8). So the
  * vPPBs are read again after the ports, and a connection whose device has
- * gone stands for as long as its vPPB is bound: see settle_connections().
+ * gone stands for as long as its vPPB is bound: see
+ * fmd_switch_settle_connections().
  */
-static void remove_port_device(struct fmd_ctx *ctx, struct fmd_switch *sw,
-			       struct fmd_port *port, struct fmd_component *dev)
+void fmd_switch_port_device_removed(struct fmd_ctx *ctx, struct fmd_switch *sw,
+				    struct fmd_port *port, struct fmd_component *dev)
 {
 	fmd_info(ctx, "%s: port %d no longer has %s, which is removed",
 		 sw->base.id, port->port_number, dev->id);
@@ -1226,7 +1226,7 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		return;
 
 	if (dev && port->conn_dev_type != memdev_conn_type(dev)) {
-		remove_port_device(ctx, sw, port, dev);
+		fmd_switch_port_device_removed(ctx, sw, port, dev);
 		dev = NULL;
 	}
 
@@ -1312,7 +1312,7 @@ static int read_switch_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * Not called from fmd_vcs_refresh(): that is also how a deletion of a
  * connection reads the vPPB it is about to unbind.
  */
-static void settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw)
+void fmd_switch_settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw)
 {
 	struct fmd_connection *conn, *next;
 
@@ -1355,7 +1355,7 @@ int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	rc = read_switch_ports(ctx, sw, port_ids, nports);
 	fmd_vcs_refresh(ctx, sw);
-	settle_connections(ctx, sw);
+	fmd_switch_settle_connections(ctx, sw);
 	return rc;
 }
 
@@ -1400,7 +1400,7 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 	/* Step 3: Discover VCS configuration */
 	fmd_vcs_refresh(ctx, sw);
-	settle_connections(ctx, sw);
+	fmd_switch_settle_connections(ctx, sw);
 
 	/*
 	 * Step 4: Create host entries for each VCS
@@ -1812,7 +1812,7 @@ static int discover_new_endpoints(struct fmd_ctx *ctx)
  * discovered as at start-up.
  *
  * A device that a port no longer reports is removed, with what it had:
- * see remove_port_device(). Requests hold pointers into the topology only
+ * see fmd_switch_port_device_removed(). Requests hold pointers into the topology only
  * while they hold fabric_lock, which this holds exclusively.
  *
  * Returns how many components were added.
