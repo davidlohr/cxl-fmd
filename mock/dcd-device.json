@@ -80,6 +80,21 @@
                 "persistent_capacity_mb": 0
             },
 
+            "event_records": [
+                {
+                    "_comment": "Table 8-229: Add Capacity Response (04h) from host 1, its Host ID at 32h",
+                    "log": "dynamic_capacity",
+                    "kind": "dynamic_capacity",
+                    "timestamp_ns": 1763000005000000000,
+                    "data": "04000100"
+                },
+                {
+                    "_comment": "Capacity Released (05h) by host 0",
+                    "log": "dynamic_capacity",
+                    "kind": "dynamic_capacity",
+                    "data": "05000000"
+                }
+            ],
             "logical_devices": [
                 { "ld_id": 0, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 },
                 { "ld_id": 1, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 }

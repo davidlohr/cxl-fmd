@@ -2417,11 +2417,92 @@ out:
 	report("event logs of an MLD behind a switch", before);
 }
 
-/* A Dynamic Capacity Event Record (Table 8-229) */
+/*
+ * The Dynamic Capacity Event Log of a DCD: Add Capacity Response (04h) and
+ * Capacity Released (05h) name the host, by its LD-ID (Table 8-229 Host
+ * ID), and are kept in that LD's log; the host's events (00h-03h) are not
+ * the FM's.
+ */
 static const uint8_t dc_event[16] = {	/* ca95afa7-f183-4018-... */
 	0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
 	0x8c, 0x2f, 0x95, 0x26, 0x8e, 0x10, 0x1a, 0x2a,
 };
+
+static void test_dc_records(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0xe7, 2, 0, 4);
+	uint8_t info[0x54] = { 0 }, page[0x20 + 0x80 * 3] = { 0 };
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_ld *ld0, *ld1;
+	struct fmd_log_entry *e;
+	int before = failures;
+
+	info[0x00] = 2;				/* Number of Hosts */
+	info[0x01] = 1;
+	put16(info + 0x04, 0x07);
+	put16(info + 0x08, 0x03);
+	put64(info + 0x0c, 4);
+	put64(info + 0x14, 1ULL << 28);
+	answer(ep, 0x5600, info, sizeof(info));
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xe7);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	CHECK(ld0 && ld1, "no DCD MLD with two LDs");
+	if (!ld0 || !ld1)
+		goto out;
+
+	/*
+	 * One page, overflowed: Capacity Released by host 1, Add Capacity
+	 * Response by host 0, and an Add Capacity (00h), which is the host's.
+	 */
+	page[0x00] = 0x01;			/* Overflow */
+	put16(page + 0x02, 5);			/* Overflow Error Count */
+	put16(page + 0x14, 3);
+	for (int i = 0; i < 3; i++) {
+		uint8_t *rec = page + 0x20 + i * 0x80;
+		static const uint8_t types[3] = { 0x05, 0x04, 0x00 };
+		static const uint8_t hosts[3] = { 1, 0, 1 };
+
+		memcpy(rec, dc_event, 16);
+		rec[0x10] = 0x80;
+		put16(rec + 0x14, 0x61 + i);
+		rec[0x30] = types[i];		/* Dynamic Capacity Event Type */
+		put16(rec + 0x32, hosts[i]);	/* Host ID */
+	}
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	fmd_dcd_poll_events(ctx);
+
+	CHECK(log_count(&ld1->base) == 1 && log_count(&ld0->base) == 1,
+	      "LD 0 has %d records, LD 1 %d", log_count(&ld0->base),
+	      log_count(&ld1->base));
+	e = log_newest(&ld1->base);
+	CHECK(e && e->log == FMD_LOG_DYNAMIC_CAPACITY && e->record.data[0] == 0x05,
+	      "LD 1's record is not the Capacity Released");
+	CHECK(e && e->overflow && e->overflow_count == 5,
+	      "the overflow is not on the last record of the log");
+	e = log_newest(&ld0->base);
+	CHECK(e && e->log == FMD_LOG_DYNAMIC_CAPACITY && e->record.data[0] == 0x04,
+	      "LD 0's record is not the Add Capacity Response");
+	if (e) {
+		json_t *entry = NULL;
+		char ld[8];
+
+		snprintf(ld, sizeof(ld), "0");
+		entry = fmd_redfish_ld_log(ctx, id, id, ld, "entry", e->id);
+		CHECK(entry && !strcmp(json_string_value(json_object_get(entry,
+		      "CXLEntryType")) ?: "", "DynamicCapacity") &&
+		      !strcmp(json_string_value(json_object_get(entry,
+		      "Severity")) ?: "", "OK"), "the entry is not a DynamicCapacity one");
+		json_decref(entry);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("Dynamic Capacity records", before);
+}
 
 /*
  * A record whose Clear Event Records failed is still in the device, and is
@@ -2604,6 +2685,7 @@ int main(void)
 	test_device_logs();
 	test_device_notifications();
 	test_switch_mld_logs();
+	test_dc_records();
 	test_record_read_again();
 	test_dc_refresh_after_failed_read();
 	test_rescan_reads_new_logs();

@@ -496,3 +496,42 @@ class TestNonDCDDevice:
             base + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd",
             {"Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
         assert status == 404
+
+
+# =============================================================================
+# Dynamic Capacity Event Log records, as log entries
+# =============================================================================
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+class TestDCDEventRecords:
+    """The records of a DCD's Dynamic Capacity Event Log that are the FM's,
+    Add Capacity Response (04h) and Capacity Released (05h), name their host
+    by its LD-ID (Table 8-229 Host ID). Each is a LogEntry, CXLEntryType
+    DynamicCapacity, in the DeviceLog of that host's CXLLogicalDevice."""
+
+    BASE = "/redfish/v1/Chassis/cxl_dcd_mld0/PCIeDevices/cxl_dcd_mld0/CXLLogicalDevices"
+
+    def entries(self, api_client, ld):
+        status, data = api_client.get(f"{self.BASE}/{ld}/DeviceLog/Entries")
+        assert status == 200
+        return data["Members"]
+
+    def test_each_in_the_log_of_its_host(self, api_client):
+        (ld1,) = self.entries(api_client, 1)
+        assert ld1["EntryType"] == "CXL"
+        assert ld1["CXLEntryType"] == "DynamicCapacity"
+        assert ld1["Severity"] == "OK"
+        assert ld1["Message"] == "Host 1: Add Capacity Response"
+        assert ld1["EventTimestamp"] == "2025-11-13T02:13:25Z"
+        assert ld1["Links"]["OriginOfCondition"]["@odata.id"] == f"{self.BASE}/1"
+
+        (ld0,) = self.entries(api_client, 0)
+        assert ld0["CXLEntryType"] == "DynamicCapacity"
+        assert ld0["Message"] == "Host 0: Capacity Released"
+        assert "EventTimestamp" not in ld0
+
+    def test_the_log_service(self, api_client):
+        status, service = api_client.get(f"{self.BASE}/1/DeviceLog")
+        assert status == 200
+        assert service["LogEntryType"] == "CXL"
+        assert service["Overflow"] is False

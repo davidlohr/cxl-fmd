@@ -139,8 +139,16 @@ does allow one under each `CXLLogicalDevice`, and this is cxl-fmd's mapping:
   `Created` is when cxl-fmd read the record. `Message` decodes the Physical
   Switch, Virtual CXL Switch and MLD Port Event Records, and names the kind of
   the others.
-- Dynamic Capacity Event Log records are acted on and not kept: nothing places
-  them.
+- The records of a DCD's Dynamic Capacity Event Log that are the FM's, Add
+  Capacity Response (04h) and Capacity Released (05h), are in the `DeviceLog`
+  of the LD whose host they are about: their Host ID is, "for an LD-FAM
+  device, the LD-ID of the host interface that triggered the generation of the
+  event" (CXL r4.0 Table 8-229). Their `CXLEntryType` is `DynamicCapacity`
+  and their `Severity` `OK`: every one is Informational (Section
+  8.2.10.2.1.6). They count towards the same `MaxNumberOfRecords`, the sum of
+  the four log sizes Comment 2 names; DSP0288 does not add the Dynamic
+  Capacity Event Log's. Those of a Multi-Headed device are not kept, as its
+  pool LDs' logs are not read.
 - Each log is read until a Get Event Records comes back empty, which re-arms
   its MCTP Event Notification (Section 8.2.10.2.8). A memory device on an MCTP
   endpoint of its own is asked for notifications for the logs that are read

@@ -1174,6 +1174,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_endpoint *ep = dev->ep;
 	uint64_t hosts = 0;
 	bool overflow = false;
+	uint16_t overflow_count = 0;
+	uint64_t first_ns = 0, last_ns = 0;
 	int rc = 0, err = 0;
 
 	rsp = calloc(1, sizeof(*rsp) +
@@ -1201,8 +1203,12 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			rc = 0;
 			break;
 		}
-		if (rsp->flags & EVENT_FLAG_OVERFLOW)
+		if (rsp->flags & EVENT_FLAG_OVERFLOW) {
 			overflow = true;
+			overflow_count = rsp->overflow_err_count;
+			first_ns = rsp->first_overflow_timestamp;
+			last_ns = rsp->last_overflow_timestamp;
+		}
 		if (!rsp->record_count)
 			break;
 		/* clr has room for no more handles than this */
@@ -1215,6 +1221,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			int host = rec->data[2] | (rec->data[3] << 8);
 
 			clr->handles[i] = rec->handle;
+			/* the record is gone once cleared: kept for Redfish */
+			fmd_dc_record_keep(dev, rec);
 			if (memcmp(rec->uuid, dc_event_uuid, sizeof(dc_event_uuid)))
 				continue;
 			if (type == DC_EVENT_ADD_RESPONSE || type == DC_EVENT_RELEASED)
@@ -1233,6 +1241,7 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	}
 
 	if (overflow) {
+		fmd_dc_log_overflowed(dev, overflow_count, first_ns, last_ns);
 		fmd_warn(ctx, "%s: DC event log overflowed, refreshing all hosts", dev->id);
 		rc = dcd_refresh_locked(ctx, dev, -1);
 		goto out;

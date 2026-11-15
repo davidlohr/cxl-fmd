@@ -26,8 +26,13 @@
  *    Switch resource has LogServices, and the schema allows no URI for
  *    them; the Chassis is where it allows one.
  *
- * Dynamic Capacity Event Log records are acted on (src/dcd.c) and not kept:
- * nothing places them.
+ * The Dynamic Capacity Event Log's records that are the FM's, Add Capacity
+ * Response and Capacity Released, are in the DeviceLog of the logical device
+ * whose host they are about: their Host ID is, "for an LD-FAM device, the
+ * LD-ID of the host interface that triggered the generation of the event"
+ * (Table 8-229). Their CXLEntryType is DynamicCapacity. They count towards
+ * the same MaxNumberOfRecords as the other four logs, which is what DSP0288
+ * says it is: there is not a fifth size in it.
  */
 
 #define _GNU_SOURCE
@@ -73,9 +78,14 @@ static const struct {
 	    0xa5, 0xda, 0x3d, 0x47, 0x26, 0x3a, 0xf4, 0x25 }, "Virtual Switch Event Record" },
 	{ { 0x8d, 0xc4, 0x43, 0x63, 0x0c, 0x96, 0x47, 0x10,
 	    0xb7, 0xbf, 0x04, 0xbb, 0x99, 0x53, 0x4c, 0x3f }, "MLD Port Event Record" },
+	{ { 0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
+	    0x8c, 0x2f, 0x95, 0x26, 0x8e, 0x10, 0x1a, 0x2a }, "Dynamic Capacity Event Record" },
 };
 
-enum { KIND_PHYSICAL_SWITCH = 4, KIND_VIRTUAL_SWITCH = 5, KIND_MLD_PORT = 6 };
+enum {
+	KIND_PHYSICAL_SWITCH = 4, KIND_VIRTUAL_SWITCH = 5, KIND_MLD_PORT = 6,
+	KIND_DYNAMIC_CAPACITY = 7,
+};
 
 static int record_kind(const uint8_t uuid[16])
 {
@@ -91,6 +101,7 @@ int fmd_event_record_kind_from_name(const char *name, uint8_t uuid[16])
 	static const char *const names[] = {
 		"general_media", "dram", "memory_module", "memory_sparing",
 		"physical_switch", "virtual_switch", "mld_port",
+		"dynamic_capacity",
 	};
 
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -517,6 +528,45 @@ void fmd_device_events_enable(struct fmd_ctx *ctx, struct fmd_component *dev)
 			want);
 }
 
+/*
+ * A record of the Dynamic Capacity Event Log of @dev, before it is cleared.
+ * The two that are the FM's, Add Capacity Response (04h) and Capacity
+ * Released (05h), are kept in the log of the LD whose host they name. A
+ * Multi-Headed device's are not kept: its pool LDs' logs are not read.
+ */
+void fmd_dc_record_keep(struct fmd_component *dev,
+			const struct cxlmi_event_record *rec)
+{
+	struct fmd_component *comp;
+	uint8_t type = rec->data[0];
+
+	if (record_kind(rec->uuid) != KIND_DYNAMIC_CAPACITY ||
+	    (type != 0x04 && type != 0x05) || dev->type == FMD_COMPONENT_MHD)
+		return;
+
+	comp = fmd_dc_host_component(dev, rec->data[2] | (rec->data[3] << 8));
+	if (comp)
+		fmd_log_add(comp, FMD_LOG_DYNAMIC_CAPACITY, rec);
+}
+
+/* The Dynamic Capacity Event Log of @dev overflowed: every host's LD */
+void fmd_dc_log_overflowed(struct fmd_component *dev, uint16_t count,
+			   uint64_t first_ns, uint64_t last_ns)
+{
+	struct fmd_component *child;
+
+	if (dev->type == FMD_COMPONENT_SLD) {
+		fmd_log_overflowed(dev, FMD_LOG_DYNAMIC_CAPACITY, count,
+				   first_ns, last_ns);
+		return;
+	}
+	if (dev->type != FMD_COMPONENT_MLD)
+		return;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
+		fmd_log_overflowed(child, FMD_LOG_DYNAMIC_CAPACITY, count,
+				   first_ns, last_ns);
+}
+
 void fmd_device_logs_poll(struct fmd_ctx *ctx)
 {
 	static const enum fmd_component_type types[] = {
@@ -560,16 +610,18 @@ static void cxl_time(uint64_t ns, char *buf, size_t len)
 }
 
 static const char *const entry_types[] = {
-	"Informational", "Warning", "Failure", "Fatal",
+	"Informational", "Warning", "Failure", "Fatal", "DynamicCapacity",
 };
 
 /*
  * Severity of the Redfish entry, by the log the record was in. This is
  * cxl-fmd's mapping: nothing gives one. Informational is OK, Warning is
- * Warning, and Failure and Fatal are Critical.
+ * Warning, and Failure and Fatal are Critical. Every Dynamic Capacity
+ * record "shall set the Event Record Severity field ... to Informational
+ * Event" (Section 8.2.10.2.1.6): OK.
  */
 static const char *const severities[] = {
-	"OK", "Warning", "Critical", "Critical",
+	"OK", "Warning", "Critical", "Critical", "OK",
 };
 
 /* What a record says, for the kinds whose fields are acted on */
@@ -603,6 +655,12 @@ static void entry_message(const struct fmd_log_entry *entry, char *buf, size_t l
 		snprintf(buf, len, "MLD port %d: %s", rec->data[1],
 			 rec->data[0] < 3 ? mld_events[rec->data[0]] :
 			 "event of a reserved type");
+		return;
+	case KIND_DYNAMIC_CAPACITY:	/* Table 8-229: 30h Type, 32h Host ID */
+		snprintf(buf, len, "Host %d: %s", rec->data[2] | (rec->data[3] << 8),
+			 rec->data[0] == 0x04 ? "Add Capacity Response" :
+			 rec->data[0] == 0x05 ? "Capacity Released" :
+			 "Dynamic Capacity event of a type for the host");
 		return;
 	case -1:
 		snprintf(buf, len, "Event record "

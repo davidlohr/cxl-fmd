@@ -173,6 +173,21 @@ class TestRedfishValidator:
 
         assert result.returncode == 0, f"Validator failed with code {result.returncode}"
 
+    @pytest.mark.mock_topology("mock/dcd-device.json")
+    def test_dcd_validation(self, cxl_fmd_daemon, schema_dir, validator_venv):
+        """Validate the DCDs: their regions and extents, and the Dynamic
+        Capacity records in their logical devices' logs."""
+        result = self._run_validator(
+            validator_venv.validator, cxl_fmd_daemon["url"], schema_dir)
+
+        print("=== Validator stdout ===")
+        print(result.stdout)
+        if result.stderr:
+            print("=== Validator stderr ===")
+            print(result.stderr)
+
+        assert result.returncode == 0, f"Validator failed with code {result.returncode}"
+
     @pytest.mark.mock_topology("mock/mld-device.json")
     def test_mld_validation(self, cxl_fmd_daemon, schema_dir, validator_venv):
         """Validate MLD topology against Redfish schemas."""

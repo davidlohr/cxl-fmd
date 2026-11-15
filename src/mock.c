@@ -182,12 +182,12 @@ static const char *json_str_or(json_t *obj, const char *key, const char *def)
  * from the component are.
  */
 static const char *const log_names[] = {
-	"informational", "warning", "failure", "fatal",
+	"informational", "warning", "failure", "fatal", "dynamic_capacity",
 };
 
 static int log_from_name(const char *name)
 {
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		if (!strcmp(name, log_names[i]))
 			return i;
 	}
@@ -208,6 +208,53 @@ static int parse_uuid(const char *str, uint8_t uuid[16])
 		n++;
 	}
 	return n == 32 ? 0 : -1;
+}
+
+/*
+ * A record of the Dynamic Capacity Event Log (Table 8-229), as one kept:
+ * an Add Capacity Response (04h) or Capacity Released (05h) of a DCD that
+ * is not multi-headed, whose Host ID (32h) is the LD-ID of one of its LDs.
+ * Returns 0 if it is, and loads it with the severity every one has.
+ */
+static int parse_dc_record(struct fmd_ctx *ctx, struct fmd_component *comp,
+			   size_t idx, json_t *item, struct cxlmi_event_record *rec)
+{
+	static const uint8_t dc_uuid[16] = {
+		0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
+		0x8c, 0x2f, 0x95, 0x26, 0x8e, 0x10, 0x1a, 0x2a,
+	};
+	int host = rec->data[2] | (rec->data[3] << 8);
+
+	(void)ctx;
+	if (!fmd_memdev_dcd(comp) || comp->type == FMD_COMPONENT_MHD) {
+		load_error("%s: event record %zu: a dynamic_capacity record of a "
+			   "device that is not a DCD, or is multi-headed", comp->id, idx);
+		return -1;
+	}
+	if (memcmp(rec->uuid, dc_uuid, sizeof(dc_uuid))) {
+		load_error("%s: event record %zu: a dynamic_capacity record is a "
+			   "dynamic_capacity kind", comp->id, idx);
+		return -1;
+	}
+	if (rec->data[0] != 0x04 && rec->data[0] != 0x05) {
+		load_error("%s: event record %zu: type %02xh is the host's: only "
+			   "04h and 05h are reported to the FM", comp->id, idx,
+			   rec->data[0]);
+		return -1;
+	}
+	if (json_object_get(item, "ld_id")) {
+		load_error("%s: event record %zu: a dynamic_capacity record names "
+			   "its host in its data, Host ID at 32h", comp->id, idx);
+		return -1;
+	}
+	if (!fmd_dc_host_component(comp, host)) {
+		load_error("%s: event record %zu: host %d is none of its LDs",
+			   comp->id, idx, host);
+		return -1;
+	}
+	/* "shall set the Event Record Severity field ... to Informational" */
+	rec->flags[0] = 0;
+	return 0;
 }
 
 static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
@@ -234,7 +281,8 @@ static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
 
 		if (which < 0) {
 			load_error("%s: event record %zu: log is not informational, "
-				   "warning, failure or fatal", comp->id, idx);
+				   "warning, failure, fatal or dynamic_capacity",
+				   comp->id, idx);
 			continue;
 		}
 		if (kind ? fmd_event_record_kind_from_name(kind, rec.uuid) < 0 :
@@ -279,6 +327,11 @@ static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
 			}
 		}
 
+		if (which == FMD_LOG_DYNAMIC_CAPACITY) {
+			if (!parse_dc_record(ctx, comp, idx, item, &rec))
+				fmd_dc_record_keep(comp, &rec);
+			continue;
+		}
 		if (comp->type == FMD_COMPONENT_SWITCH)
 			fmd_log_add(comp, which, &rec);
 		else
@@ -301,6 +354,14 @@ static void parse_event_records(struct fmd_ctx *ctx, json_t *jobj,
 		uint64_t first = json_uint_or(item, "first_ns", 0);
 		uint64_t last = json_uint_or(item, "last_ns", 0);
 
+		if (which == FMD_LOG_DYNAMIC_CAPACITY) {
+			if (!fmd_memdev_dcd(comp))
+				load_error("%s: event_log_overflow: dynamic_capacity "
+					   "of a device that is not a DCD", comp->id);
+			else
+				fmd_dc_log_overflowed(comp, count, first, last);
+			continue;
+		}
 		if (comp->type != FMD_COMPONENT_MLD) {
 			fmd_log_overflowed(comp, which, count, first, last);
 			continue;

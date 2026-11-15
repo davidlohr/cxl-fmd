@@ -1516,7 +1516,8 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx);
  */
 struct fmd_log_entry {
 	int id;                              /* LogEntry Id: increasing */
-	int log;                             /* 0 Informational to 3 Fatal */
+	int log;                             /* 0 Informational to 3 Fatal,
+						FMD_LOG_DYNAMIC_CAPACITY */
 	time_t created;                      /* when it was read */
 	struct cxlmi_event_record record;    /* as Get Event Records gave it */
 	bool overflow;                       /* the log overflowed after it */
@@ -1562,6 +1563,13 @@ void fmd_device_record_keep(struct fmd_ctx *ctx, struct fmd_component *dev,
 			    int which, const struct cxlmi_event_record *rec,
 			    void *arg);
 void fmd_device_events_enable(struct fmd_ctx *ctx, struct fmd_component *dev);
+
+/* The log of a kept record that came from the Dynamic Capacity Event Log */
+#define FMD_LOG_DYNAMIC_CAPACITY	4
+void fmd_dc_record_keep(struct fmd_component *dev,
+			const struct cxlmi_event_record *rec);
+void fmd_dc_log_overflowed(struct fmd_component *dev, uint16_t count,
+			   uint64_t first_ns, uint64_t last_ns);
 void fmd_device_logs_poll(struct fmd_ctx *ctx);
 int fmd_event_record_kind_from_name(const char *name, uint8_t uuid[16]);
 

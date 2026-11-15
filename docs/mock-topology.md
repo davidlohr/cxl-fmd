@@ -748,11 +748,19 @@ read from hardware are: see *Where cxl-fmd puts CXL event records* in
 
 | Field | Description |
 |-------|-------------|
-| `log` | `informational`, `warning`, `failure` or `fatal` |
-| `kind` | `general_media`, `dram`, `memory_module`, `memory_sparing`, `physical_switch`, `virtual_switch` or `mld_port`; or give `uuid`, the Event Record Identifier |
+| `log` | `informational`, `warning`, `failure`, `fatal`, or `dynamic_capacity` for a DCD's Dynamic Capacity Event Log |
+| `kind` | `general_media`, `dram`, `memory_module`, `memory_sparing`, `physical_switch`, `virtual_switch`, `mld_port` or `dynamic_capacity`; or give `uuid`, the Event Record Identifier |
 | `data` | The bytes of the record from offset 30h, in hex, up to 80 bytes |
 | `timestamp_ns` | Nanoseconds since 1970; 0 or absent is no timestamp |
 | `ld_id` | For an MLD: the record is about this LD (LD-ID Valid Flag). Without it, a record is about every LD |
+
+A `dynamic_capacity` record is of a DCD that is not multi-headed, of kind
+`dynamic_capacity`, and one of the two the FM is given (Table 8-229): its
+`data` starts with the Dynamic Capacity Event Type, `04` (Add Capacity
+Response) or `05` (Capacity Released), then the Validity Flags, then the Host
+ID, two bytes little-endian, which must be the LD-ID of one of its LDs:
+`"04000100"` is an Add Capacity Response from host 1. It is kept in that LD's
+log. `ld_id` is not given: the Host ID names the LD.
 
 The identify block of an SLD can give `info_event_log_size`,
 `warning_event_log_size`, `failure_event_log_size` and `fatal_event_log_size`.

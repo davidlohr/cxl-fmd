@@ -371,6 +371,7 @@ if pytest_available and run_validator
         ['redfish-validator-mld', 'test_mld_validation'],
         ['redfish-validator-event-logs', 'test_event_logs_validation'],
         ['redfish-validator-hot-removal', 'test_hot_removal_validation'],
+        ['redfish-validator-dcd', 'test_dcd_validation'],
     ]
         test(
             t[0],
