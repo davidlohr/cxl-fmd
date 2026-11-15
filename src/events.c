@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * MCTP Event Notification (CXL r3.2 Section 8.2.10.2.8) receive path.
+ * MCTP Event Notification (CXL r4.0 Section 8.2.10.2.8) receive path.
  *
  * Devices send Event Notification requests to the EID that enabled them with
  * Set MCTP Event Interrupt Policy. AF_MCTP only delivers inbound requests to a
- * socket bound to the message type, so the daemon binds one listener for CXL
- * CCI messages and one for FM-API messages forwarded by a switch.
+ * socket bound to the message type, so the daemon binds one listener for MCTP
+ * message type 08h, the CXL CCI type a memory device is opened with, and one
+ * for type 07h (CXL FM-API), the type a switch CCI is opened with.
  */
 
 #include <errno.h>
@@ -83,13 +84,27 @@ void fmd_events_cleanup(struct fmd_ctx *ctx)
 	}
 }
 
+/*
+ * The address an acknowledgement of a request from @from goes to. A request
+ * is received with MCTP_TAG_OWNER set in smctp_tag, its Tag Owner bit, and
+ * the kernel sends a message addressed with it set as a new request, with a
+ * tag of its own; with it clear, as a response with the tag given: sockets
+ * "may only respond (with TO=0) to requests they have received" (Linux
+ * Documentation/networking/mctp.rst). The device's tag is kept.
+ */
+void fmd_events_ack_addr(const struct sockaddr_mctp *from, struct sockaddr_mctp *to)
+{
+	*to = *from;
+	to->smctp_tag = from->smctp_tag & MCTP_TAG_MASK;
+}
+
 static void handle_notification(struct fmd_ctx *ctx, int sd)
 {
 	uint8_t buf[sizeof(struct cxlmi_cci_msg) +
 		    sizeof(struct cxlmi_cmd_event_notification_req)];
 	struct cxlmi_cci_msg *msg = (struct cxlmi_cci_msg *)buf;
 	struct cxlmi_cmd_event_notification_req *pl;
-	struct sockaddr_mctp from;
+	struct sockaddr_mctp from, to;
 	socklen_t fromlen = sizeof(from);
 	struct cxlmi_cci_msg rsp;
 	uint16_t events;
@@ -108,15 +123,22 @@ static void handle_notification(struct fmd_ctx *ctx, int sd)
 		return;
 	}
 
-	/* The device retransmits until it gets a response */
+	/*
+	 * "The recipient of this message may optionally acknowledge a
+	 * notification by returning a response" (Section 8.2.10.2.8), and
+	 * Section 8.2.10.2.7 speaks of "the retransmission of Event
+	 * Notification requests that have not been acknowledged": acknowledge
+	 * it, as a response to that request.
+	 */
 	rsp = (struct cxlmi_cci_msg) {
 		.category = CCI_CATEGORY_RSP,
 		.tag = msg->tag,
 		.command = msg->command,
 		.command_set = msg->command_set,
 	};
-	if (sendto(sd, &rsp, sizeof(rsp), 0, (struct sockaddr *)&from,
-		   sizeof(from)) < 0)
+	fmd_events_ack_addr(&from, &to);
+	if (sendto(sd, &rsp, sizeof(rsp), 0, (struct sockaddr *)&to,
+		   sizeof(to)) < 0)
 		fmd_warn(ctx, "event notification ack: %s", strerror(errno));
 
 	if (len < (ssize_t)sizeof(buf))

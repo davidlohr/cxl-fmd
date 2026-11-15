@@ -1519,6 +1519,13 @@ int fmd_switch_events_poll(struct fmd_ctx *ctx);
 int fmd_switch_events_poll_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
 int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
 
+/*
+ * Where the acknowledgement of a request received from @from is sent: to
+ * its sender, as a response with its tag (src/events.c)
+ */
+struct sockaddr_mctp;
+void fmd_events_ack_addr(const struct sockaddr_mctp *from, struct sockaddr_mctp *to);
+
 /* An Event Notification from @net:@eid saying logs @events have records */
 void fmd_events_route(struct fmd_ctx *ctx, unsigned int net, uint8_t eid,
 		      uint16_t events);

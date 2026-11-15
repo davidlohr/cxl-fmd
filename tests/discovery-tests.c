@@ -27,6 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/socket.h>
+#include <linux/mctp.h>
+
 #include <libcxlmi.h>
 #include <cxlmi/test.h>
 
@@ -2713,6 +2716,35 @@ static void test_notification_route(void)
 	report("event notifications routed to their sender", before);
 }
 
+/*
+ * An Event Notification is a request, received with its Tag Owner bit set
+ * (MCTP_TAG_OWNER in smctp_tag). Its acknowledgement is a response to it:
+ * to its sender, with that bit clear and the device's tag, or the kernel
+ * sends a new request with a tag of its own.
+ */
+static void test_notification_ack(void)
+{
+	struct sockaddr_mctp from = {
+		.smctp_family = AF_MCTP,
+		.smctp_network = 3,
+		.smctp_addr.s_addr = 42,
+		.smctp_type = 0x08,
+		.smctp_tag = MCTP_TAG_OWNER | 5,
+	}, to;
+	int before = failures;
+
+	memset(&to, 0xff, sizeof(to));
+	fmd_events_ack_addr(&from, &to);
+	CHECK(to.smctp_tag == 5, "acknowledged with tag %#x, not as a response "
+	      "with tag 5", to.smctp_tag);
+	CHECK(to.smctp_family == AF_MCTP && to.smctp_network == 3 &&
+	      to.smctp_addr.s_addr == 42 && to.smctp_type == 0x08,
+	      "acknowledged to network %u EID %u type %#x", to.smctp_network,
+	      to.smctp_addr.s_addr, to.smctp_type);
+
+	report("event notifications acknowledged as responses", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -2784,6 +2816,7 @@ int main(void)
 	test_dc_refresh_after_failed_read();
 	test_rescan_reads_new_logs();
 	test_notification_route();
+	test_notification_ack();
 	test_log_ring();
 	test_overcount_switch();
 	test_overcount_mld();
