@@ -271,14 +271,23 @@ static void check_mld(struct validation *v, struct fmd_mld *mld)
 
 /*
  * A Multi-Headed device has multiple heads. Each LD is mapped to at most one
- * head, and "a head in a Multi-Headed Device shall have at least one and no
+ * head, and "A head in a Multi-Headed Device shall have at least one and no
  * more than 16 LDs mapped" (Section 2.5).
+ *
+ * The specification sets no limit on the number of heads or on the size of
+ * the LD pool ("The LD Pool in an MH-MLD may support more than 16 LDs",
+ * Section 2.5.1). cxl-fmd keeps at most FMD_MAX_HEADS heads and
+ * FMD_MAX_LD_POOL pool LDs: those are its own limits. Of a device that has
+ * more, discovery keeps only part, and what depends on the rest is not
+ * checked.
  */
 static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 {
 	static const char rule[] = "Multi-Headed Devices, Section 2.5";
 	int per_head[FMD_MAX_HEADS] = { 0 };
 	bool have_head[FMD_MAX_HEADS] = { false };
+	bool all_heads = mhd->num_heads <= FMD_MAX_HEADS;
+	bool all_lds = mhd->total_lds <= FMD_MAX_LD_POOL;
 	struct fmd_component *child;
 	int heads = 0;
 
@@ -287,8 +296,9 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 
 		heads++;
 		if (head->head_id >= FMD_MAX_HEADS) {
-			invalid(v, rule, "%s: head %d: only %d heads are supported",
-				mhd->base.id, head->head_id, FMD_MAX_HEADS);
+			invalid(v, "cxl-fmd limit", "%s: head %d: cxl-fmd keeps "
+				"%d heads at most", mhd->base.id, head->head_id,
+				FMD_MAX_HEADS);
 			continue;
 		}
 		if (have_head[head->head_id])
@@ -300,7 +310,7 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 	if (heads < 2)
 		invalid(v, rule, "%s: %d head(s): a Multi-Headed device has more "
 			"than one", mhd->base.id, heads);
-	if (heads != mhd->num_heads)
+	if (all_heads && heads != mhd->num_heads)
 		invalid(v, rule, "%s: reports %d heads and has %d", mhd->base.id,
 			mhd->num_heads, heads);
 
@@ -318,6 +328,10 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 		}
 		per_head[ld->binding_point_id]++;
 	}
+
+	/* with part of the pool, a head may have LDs that were not kept */
+	if (!all_lds)
+		goto out;
 
 	for (int h = 0; h < FMD_MAX_HEADS; h++) {
 		if (have_head[h] && (per_head[h] < 1 || per_head[h] > 16))
@@ -345,6 +359,7 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 				head->head_id, lds);
 	}
 
+out:
 	check_dcd(v, &mhd->base);
 }
 

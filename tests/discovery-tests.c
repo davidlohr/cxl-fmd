@@ -1017,6 +1017,81 @@ static void test_mhd(bool overcount)
 }
 
 /*
+ * A Multi-Headed device with more heads, or a larger LD pool, than cxl-fmd
+ * keeps (FMD_MAX_HEADS, FMD_MAX_LD_POOL). The specification sets no such
+ * limit, so a device past them is not invalid: discovery keeps part of it,
+ * and the checks that would need the rest are not made.
+ *
+ * @heads: 9 heads, each with one LD; head 8 and its LD are not kept.
+ * Otherwise: 2 heads and 70 LDs, LD 0 on head 0 and LDs 64 to 69 on head
+ * 1; of the pool, LDs 0 to 63 are kept, so head 1 has none of its own.
+ */
+static void test_mhd_past_limits(bool heads)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 64] = { 0 };
+	uint8_t head_info[4 + 8 * 9] = { 0 };
+	int before = failures, nheads = heads ? 9 : 2, nlds = heads ? 9 : 70;
+	int kept_heads = heads ? 8 : 2, kept_lds = heads ? 9 : 64, invalid;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mhd *mhd;
+
+	answer_identify(ep, 0xf, 0x03);
+
+	probe[0] = nlds;			/* Number of LDs */
+	probe[1] = nheads;			/* Number of Heads */
+	probe[5] = 1;				/* LD Map Length */
+	answer(ep, 0x5500, probe, sizeof(probe));
+
+	info[0] = nlds;
+	info[1] = nheads;
+	info[5] = heads ? 9 : 64;		/* LD Map Length: 64 asked for */
+	for (int i = 0; i < 64; i++)
+		info[8 + i] = heads ? (i < 9 ? i + 1 : 0) : (i == 0 ? 1 : 0xff);
+	answer(ep, 0x5500, info, 8 + info[5]);
+
+	for (int i = 0; i < kept_lds; i++)
+		answer_memdev_identify(ep, 4, 4, 0);
+
+	head_info[0] = kept_heads;		/* Number of Heads: 8 asked for */
+	for (int h = 0; h < kept_heads; h++) {
+		head_info[4 + 9 * h] = h + 1;	/* head h: port h + 1 */
+		head_info[4 + 9 * h + 6] = 0x04;	/*   LTSSM State: L0 */
+	}
+	answer(ep, 0x5501, head_info, 4 + 9 * kept_heads);
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0xf);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	CHECK(mhd, "no MHD %s", id);
+	if (mhd) {
+		struct fmd_component *child;
+		int h = 0, l = 0;
+
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD)
+			h++;
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD)
+			l++;
+		CHECK(mhd->num_heads == nheads && mhd->total_lds == nlds,
+		      "reports %d heads, %d LDs", mhd->num_heads,
+		      mhd->total_lds);
+		CHECK(h == kept_heads && l == kept_lds, "%d heads, %d LDs kept",
+		      h, l);
+	}
+
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 0, "%d rule(s) broken by a device past cxl-fmd's "
+	      "limits", invalid);
+
+	fmd_ctx_free(ctx);
+	report(heads ? "multi-headed device with more heads than are kept" :
+		       "multi-headed device with more pool LDs than are kept",
+	       before);
+}
+
+/*
  * Message sizes, Section 8.2.10.1. A component takes requests of up to its
  * Maximum Supported Message Size (Identify) and limits its responses to its
  * Response Message Limit (0003h): 256 bytes unless it says otherwise. A list
@@ -3051,6 +3126,8 @@ int main(void)
 	test_mld_on_switch_and_alone();
 	test_mhd(false);
 	test_mhd(true);
+	test_mhd_past_limits(true);
+	test_mhd_past_limits(false);
 	test_not_ready();
 	test_validate_usp_id();
 

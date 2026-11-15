@@ -598,6 +598,13 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	fmd_info(ctx, "%s: MHD with %d heads, %d LDs in pool",
 		 mhd->base.id, mhd->num_heads, mhd->total_lds);
 
+	/* the specification sets no such limit: these are cxl-fmd's own */
+	if (mhd->num_heads > FMD_MAX_HEADS || mhd->total_lds > FMD_MAX_LD_POOL)
+		fmd_warn(ctx, "%s: only the first %d heads and %d pool LDs are "
+			 "kept, of %d and %d: the device is only partly managed",
+			 mhd->base.id, FMD_MAX_HEADS, FMD_MAX_LD_POOL,
+			 mhd->num_heads, mhd->total_lds);
+
 	/* Get Head Info (5501h) for all heads */
 	/* no more heads than are kept: 8 blocks fit any response */
 	head_req.start_head = 0;

@@ -1235,7 +1235,8 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 			json_array_foreach(ld_pool, ld_idx, jld) {
 				if (ld_idx >= FMD_MAX_LD_POOL) {
-					load_error("more than %d LDs in a pool", FMD_MAX_LD_POOL);
+					load_error("more than %d LDs in a pool, the most cxl-fmd keeps",
+						   FMD_MAX_LD_POOL);
 					break;
 				}
 
@@ -1257,7 +1258,8 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 			json_array_foreach(heads, head_idx, jhead) {
 				if (head_idx >= FMD_MAX_HEADS) {
-					load_error("more than %d heads", FMD_MAX_HEADS);
+					load_error("more than %d heads, the most cxl-fmd keeps",
+						   FMD_MAX_HEADS);
 					break;
 				}
 

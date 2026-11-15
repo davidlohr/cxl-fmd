@@ -123,7 +123,10 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
 #define FMD_MAX_INTERLEAVE 8    /* Max interleave sets per chunk */
 
 /*
- * Multi-Headed Device (MHD) limits
+ * Multi-Headed Device (MHD) limits. These are cxl-fmd's own: CXL r4.0 sets
+ * none on the number of heads or on the size of the LD pool, which "may
+ * support more than 16 LDs" (Section 2.5.1). Of a device with more, only
+ * these many are kept.
  */
 #define FMD_MAX_HEADS    8      /* Max heads per MHD */
 #define FMD_MAX_LD_POOL  64     /* Max LDs in MHD pool (can exceed 16) */
