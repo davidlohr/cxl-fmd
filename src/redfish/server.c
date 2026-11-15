@@ -995,6 +995,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == -2)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "Reset PPB is offered only on a downstream port");
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}

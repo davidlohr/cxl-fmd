@@ -694,8 +694,10 @@ static void test_port_resource(void)
 	int before = failures;
 	char sw_id[FMD_MAX_ID_LEN], port_id[FMD_MAX_ID_LEN + 8];
 	json_t *port, *cxl, *speeds;
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5006);
+	unsigned int sent;
+	int rc;
 
-	new_switch(ctx, 0x5006);
 	fmd_discover(ctx);
 	device_id(sw_id, sizeof(sw_id), 0x5006);
 
@@ -712,8 +714,19 @@ static void test_port_resource(void)
 		/* reserved unless the port is a DSP */
 		CHECK(!json_object_get(cxl, "ConnectedDeviceMode"),
 		      "a USP reports a Connected Device Mode");
+		/*
+		 * Physical Port Control "is used by the FM to control unbound
+		 * ports and MLD ports" (Section 7.6.7.1.3). cxl-fmd offers Reset
+		 * PPB only on a DSP: not on a USP, and it sends nothing there.
+		 */
+		CHECK(!json_object_get(port, "Actions"), "a USP offers Reset PPB");
 		json_decref(port);
 	}
+	sent = commands_sent(ep);
+	rc = fmd_redfish_action_reset_ppb(ctx, sw_id, port_id);
+	CHECK(rc == -2 && commands_sent(ep) == sent,
+	      "Reset PPB of a USP: %d, %u commands sent", rc,
+	      commands_sent(ep) - sent);
 
 	/* port 2: a DSP in L0, x16 trained to x8, 32 GT/s of 2.5 to 32 */
 	snprintf(port_id, sizeof(port_id), "%s_dsp2", sw_id);
@@ -740,8 +753,15 @@ static void test_port_resource(void)
 		      json_number_value(json_array_get(speeds, 4)) == 32,
 		      "%d capable speeds from %g", (int)json_array_size(speeds),
 		      json_number_value(json_array_get(speeds, 0)));
+		CHECK(json_object_get(json_object_get(port, "Actions"),
+				      "#Port.ResetPPB"), "a DSP offers no Reset PPB");
 		json_decref(port);
 	}
+	/* Physical Port Control (5102h), Port Opcode 02h: Reset PPB */
+	answer_rc(ep, 0x5102, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_action_reset_ppb(ctx, sw_id, port_id);
+	CHECK(rc == 0 && last_opcode(ep) == 0x5102,
+	      "Reset PPB of a DSP: %d, last command %04xh", rc, last_opcode(ep));
 
 	/*
 	 * 128 GT/s, Max and Current Link Speed encoding 7 as in PCIe 7.0

@@ -1630,14 +1630,23 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 	/*
 	 * DSP0288 Table 2: Physical Port Control (Opcode 5102h)
 	 * Port Opcode 02h: Reset PPB -> Port.ResetPPB action
+	 *
+	 * Physical Port Control "is used by the FM to control unbound ports
+	 * and MLD ports" (CXL r4.0 Section 7.6.7.1.3). Offering it only on a
+	 * DSP is cxl-fmd's choice: a USP is a host's link, and is bound to
+	 * vPPB 0 of its VCS. Whether a DSP is unbound or has an MLD is left to
+	 * the switch to check.
 	 */
-	char reset_ppb_uri[256];
-	snprintf(reset_ppb_uri, sizeof(reset_ppb_uri),
-		 "/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s/Actions/Port.ResetPPB",
-		 switch_id, port_id);
-	json_object_set_new(result, "Actions",
-		json_pack("{s:{s:s}}",
-			  "#Port.ResetPPB", "target", reset_ppb_uri));
+	if (port->state == FMD_PORT_DSP) {
+		char reset_ppb_uri[256];
+
+		snprintf(reset_ppb_uri, sizeof(reset_ppb_uri),
+			 "/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s/Actions/Port.ResetPPB",
+			 switch_id, port_id);
+		json_object_set_new(result, "Actions",
+			json_pack("{s:{s:s}}",
+				  "#Port.ResetPPB", "target", reset_ppb_uri));
+	}
 
 	return result;
 }
@@ -5275,7 +5284,7 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
  *
  * This action resets the PCI-to-PCI bridge (PPB) for the specified port.
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -2 if the port is not a DSP, -1 on another error
  */
 int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 				 const char *switch_id,
@@ -5298,6 +5307,10 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 		return -1;
 
 	struct fmd_port *port = fmd_to_port(port_comp);
+
+	/* offered only on a DSP (see fmd_redfish_port()), in mock mode too */
+	if (port->state != FMD_PORT_DSP)
+		return -2;
 
 	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
