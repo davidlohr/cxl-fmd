@@ -1724,8 +1724,11 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id);
 
 /*
  * Set LD allocation for an MLD via CCI Set LD Allocations (5402h)
- * For mock mode, updates local state only.
- * Returns 0 on success, negative on error.
+ * For mock mode, updates local state only. Range 2 of the LD is kept as
+ * the device reports it, and Range 1 takes the rest.
+ * Returns 0 on success, -EINVAL if @size_bytes is not a multiple of the
+ * Memory Granularity or is less than Range 2, other negative values on
+ * error.
  */
 int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 			      uint8_t ld_id, uint64_t size_bytes);
@@ -1733,8 +1736,7 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 /*
  * Set LD allocation for an MHD via LD Pool CCI Set LD Allocations (5402h)
  * Uses pool LD index (not head-local LD-ID).
- * For mock mode, updates local state only.
- * Returns 0 on success, negative on error.
+ * For mock mode, updates local state only. As fmd_mld_set_ld_allocation().
  */
 int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 			      uint8_t pool_ld_id, uint64_t size_bytes);

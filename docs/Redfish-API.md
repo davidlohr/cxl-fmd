@@ -649,7 +649,12 @@ Content-Type: application/json
 For MLD chunks, the response includes `Links.CXLLogicalDevices` referencing the target LD.
 
 **Hardware Behavior:**
-- **MLD**: Issues `Set LD Allocations (0x5402h)` to increase the LD's memory allocation
+- **MLD**: Issues `Set LD Allocations (0x5402h)` to increase the LD's memory allocation.
+  The LD's Range 2 is kept as `Get LD Allocations (0x5401h)` reads it just
+  before, and Range 1 takes the rest. The new size must be a multiple of
+  `MemoryChunkIncrementMiB` (the Memory Granularity, Table 7-48); one that
+  is not is refused with 400, as is one smaller than Range 2. The same
+  holds for an MHD's pool LDs.
 - **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
   the volatile capacity staged (or else active) plus the chunk, worked out
   and checked as in "Set Partition Info" above. Immediate is cleared: the

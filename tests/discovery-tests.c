@@ -384,6 +384,8 @@ static void test_mld_granularity(void)
 		      "granularity %d units of 256 MB",
 		      mld->memory_granularity);
 
+		/* the allocation as it is now, which Set LD Allocations keeps */
+		answer(ep, 0x5401, (uint8_t[4 + 16]){ 2, 1, 0, 1, 4 }, 4 + 16);
 		cxlmi_mock_set_response(ep, 0x54, 0x02, CXLMI_RET_SUCCESS,
 					(uint8_t[4 + 16]){ 1, 0, 0, 0, 8 },
 					4 + 16);
@@ -401,6 +403,73 @@ static void test_mld_granularity(void)
 
 	fmd_ctx_free(ctx);
 	report("MLD with 512 MB granularity", before);
+}
+
+/*
+ * Set LD Allocations (5402h) rewrites both ranges of an LD (Tables 7-49
+ * and 7-50), each a multiplier of the Memory Granularity. Range 2 stays as
+ * Get LD Allocations reads it, and the size must be a whole number of
+ * granules.
+ */
+static void test_ld_allocation_ranges(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0xd, 2, 1, 4);
+	int before = failures, rc;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mld *mld;
+	struct fmd_ld *ld;
+	uint8_t pl[64] = { 0 }, get[4 + 16] = { 2, 1, 0, 1 };
+	uint16_t opcode = 0;
+	unsigned int sent;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xd);
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	ld = fmd_topology_find_ld(&ctx->topology, id, 0);
+	CHECK(mld && ld, "no MLD or LD 0");
+	if (!mld || !ld)
+		goto out;
+
+	/* LD 0: Range 1 of 2 and Range 2 of 2 units of 512 MB */
+	put64(get + 4, 2);
+	put64(get + 12, 2);
+
+	/* to 4 GiB, 8 units: Range 1 becomes 6, Range 2 stays 2 */
+	answer(ep, 0x5401, get, sizeof(get));
+	{
+		uint8_t set_rsp[4 + 16] = { 1, 0 };
+
+		put64(set_rsp + 4, 6);
+		put64(set_rsp + 12, 2);
+		answer(ep, 0x5402, set_rsp, sizeof(set_rsp));
+	}
+	rc = fmd_mld_set_ld_allocation(ctx, mld, 0, 4ULL << 30);
+	last_payload(ep, &opcode, pl, sizeof(pl));
+	CHECK(rc == 0 && opcode == 0x5402, "set: %d, last command %04xh", rc,
+	      opcode);
+	CHECK(get64(pl + 4) == 6 && get64(pl + 12) == 2,
+	      "Range 1 %" PRIu64 ", Range 2 %" PRIu64, get64(pl + 4),
+	      get64(pl + 12));
+	CHECK(ld->memory_size == 4ULL << 30, "LD size after set %" PRIu64,
+	      ld->memory_size);
+
+	/* not a whole number of 512 MB, or less than Range 2: not sent */
+	answer(ep, 0x5401, get, sizeof(get));
+	sent = commands_sent(ep);
+	rc = fmd_mld_set_ld_allocation(ctx, mld, 0, (4ULL << 30) + (256 << 20));
+	CHECK(rc == -EINVAL && commands_sent(ep) == sent + 1 &&
+	      last_opcode(ep) == 0x5401, "4.25 GiB: %d, last command %04xh",
+	      rc, last_opcode(ep));
+	answer(ep, 0x5401, get, sizeof(get));
+	rc = fmd_mld_set_ld_allocation(ctx, mld, 0, 512 << 20);
+	CHECK(rc == -EINVAL && last_opcode(ep) == 0x5401,
+	      "below Range 2: %d, last command %04xh", rc, last_opcode(ep));
+	CHECK(ld->memory_size == 4ULL << 30, "LD size after refusals %" PRIu64,
+	      ld->memory_size);
+out:
+	fmd_ctx_free(ctx);
+	report("Set LD Allocations keeps Range 2", before);
 }
 
 /* one port information block of Get Physical Port State, Table 7-21 */
@@ -3387,6 +3456,7 @@ int main(void)
 	test_sld();
 	test_two_mlds();
 	test_mld_granularity();
+	test_ld_allocation_ranges();
 	test_switch();
 	test_port_resource();
 	test_switch_bind();

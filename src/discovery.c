@@ -2484,12 +2484,101 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 
 
 /*
+ * Set LD Allocations (5402h) of one LD, on @ep through @ti, for it to have
+ * @size_bytes in all.
+ *
+ * Each LD has two ranges, each "multiplied with Memory Granularity to
+ * calculate the memory allocation range in bytes" (Table 7-49), and the
+ * request rewrites both. Range 2 is kept as Get LD Allocations (5401h)
+ * reads it now, and Range 1 takes the rest: an LD's second range is not
+ * folded into its first. @size_bytes must be a multiple of the Memory
+ * Granularity, and at least Range 2.
+ *
+ * "The allocations provided in the response reflect the state of the LD
+ * allocations after the command is processed" (Section 7.6.7.4.3): the LD
+ * is sized from them.
+ *
+ * Returns 0, -EINVAL if the LD cannot be given @size_bytes, -EIO if a
+ * command failed or its response is not for that LD.
+ */
+static int set_ld_allocation(struct fmd_ctx *ctx, const char *name,
+			     struct cxlmi_endpoint *ep,
+			     struct cxlmi_tunnel_info *ti, struct fmd_ld *ld,
+			     uint8_t ld_id, uint64_t size_bytes)
+{
+	struct cxlmi_cmd_fmapi_get_ld_allocations_req get_req = {
+		.start_ld_id = ld_id,
+		.ld_allocation_list_limit = 1,
+	};
+	struct cxlmi_cmd_fmapi_get_ld_allocations_rsp *get_rsp;
+	struct cxlmi_cmd_fmapi_set_ld_allocations_req *req;
+	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp;
+	uint64_t granularity, range2, mult;
+	int rc;
+
+	get_rsp = calloc(1, sizeof(*get_rsp) +
+			 FMD_CCI_LIST_MAX * sizeof(get_rsp->ld_allocation_list[0]));
+	if (!get_rsp)
+		return -ENOMEM;
+	rc = cxlmi_cmd_fmapi_get_ld_allocations(ep, ti, &get_req, get_rsp);
+	if (rc || get_rsp->ld_allocation_list_len < 1 ||
+	    get_rsp->start_ld_id != ld_id || get_rsp->memory_granularity > 2) {
+		fmd_warn(ctx, "%s: cannot read LD %d allocation: %d", name,
+			 ld_id, rc);
+		free(get_rsp);
+		return -EIO;
+	}
+	/* Memory Granularity: 0h = 256 MB, 1h = 512 MB, 2h = 1 GB */
+	granularity = (uint64_t)CXL_CAPACITY_UNIT << get_rsp->memory_granularity;
+	range2 = get_rsp->ld_allocation_list[0].range_2_allocation_mult;
+	free(get_rsp);
+
+	mult = size_bytes / granularity;
+	if (size_bytes % granularity || mult < range2) {
+		fmd_warn(ctx, "%s: LD %d cannot have %" PRIu64 " MB: granularity %"
+			 PRIu64 " MB, Range 2 %" PRIu64 " MB", name, ld_id,
+			 size_bytes >> 20, granularity >> 20,
+			 (range2 * granularity) >> 20);
+		return -EINVAL;
+	}
+
+	req = calloc(1, sizeof(*req) + sizeof(req->ld_allocation_list[0]));
+	rsp = calloc(1, sizeof(*rsp) +
+		     FMD_CCI_LIST_MAX * sizeof(rsp->ld_allocation_list[0]));
+	if (!req || !rsp) {
+		free(req);
+		free(rsp);
+		return -ENOMEM;
+	}
+	req->number_ld = 1;
+	req->start_ld_id = ld_id;
+	req->ld_allocation_list[0].range_1_allocation_mult = mult - range2;
+	req->ld_allocation_list[0].range_2_allocation_mult = range2;
+
+	rc = cxlmi_cmd_fmapi_set_ld_allocations(ep, ti, req, rsp);
+	free(req);
+	if (rc != 0 || rsp->number_ld < 1 || rsp->start_ld_id != ld_id) {
+		fmd_warn(ctx, "%s: set LD %d allocation failed: %d", name,
+			 ld_id, rc);
+		free(rsp);
+		return -EIO;
+	}
+
+	ld->memory_size = (rsp->ld_allocation_list[0].range_1_allocation_mult +
+			   rsp->ld_allocation_list[0].range_2_allocation_mult) *
+			  granularity;
+	fmd_info(ctx, "%s: LD %d allocation set to %" PRIu64 " MB", name, ld_id,
+		 ld->memory_size >> 20);
+	free(rsp);
+	return 0;
+}
+
+/*
  * Set LD allocation for an MLD via CCI Set LD Allocations (5402h)
  *
  * For mock mode, updates local state only.
- * For hardware mode, issues the CCI command and updates local state on success.
- *
- * The allocation is converted from bytes to the device's memory granularity units.
+ * For hardware mode, see set_ld_allocation(): Range 2 is kept, and
+ * @size_bytes must be a multiple of the Memory Granularity.
  */
 int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 			      uint8_t ld_id, uint64_t size_bytes)
@@ -2498,9 +2587,6 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 	struct cxlmi_tunnel_info *ti;
 	struct fmd_ld *ld = NULL;
 	struct fmd_component *child;
-	uint64_t granularity_bytes;
-	uint64_t allocation_mult;
-	int rc;
 
 	if (!ctx || !mld)
 		return -1;
@@ -2521,13 +2607,6 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 		return -1;
 	}
 
-	/* Calculate allocation in granularity units (256MB * memory_granularity) */
-	granularity_bytes = (uint64_t)mld->memory_granularity * CXL_CAPACITY_UNIT;
-	if (granularity_bytes == 0)
-		granularity_bytes = CXL_CAPACITY_UNIT;  /* Default 256MB */
-
-	allocation_mult = size_bytes / granularity_bytes;
-
 	/* Mock mode: update local state only */
 	ep = mld->base.ep;
 	if (!ep) {
@@ -2543,45 +2622,7 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 		? CXLMI_NO_TUNNEL
 		: CXLMI_TUNNEL_SWITCH(mld->switch_port);
 
-	/* Build request - update single LD */
-	size_t req_size = sizeof(struct cxlmi_cmd_fmapi_set_ld_allocations_req) +
-			  sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
-	struct cxlmi_cmd_fmapi_set_ld_allocations_req *req = calloc(1, req_size);
-	if (!req)
-		return -1;
-
-	req->number_ld = 1;
-	req->start_ld_id = ld_id;
-	req->ld_allocation_list[0].range_1_allocation_mult = allocation_mult;
-	req->ld_allocation_list[0].range_2_allocation_mult = 0;  /* Single range */
-
-	/* Build response buffer */
-	size_t rsp_size = sizeof(struct cxlmi_cmd_fmapi_set_ld_allocations_rsp) +
-			  FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
-	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp = calloc(1, rsp_size);
-	if (!rsp) {
-		free(req);
-		return -1;
-	}
-
-	rc = cxlmi_cmd_fmapi_set_ld_allocations(ep, ti, req, rsp);
-	free(req);
-
-	if (rc != 0) {
-		fmd_warn(ctx, "%s: set LD %d allocation failed: %d",
-			 mld->base.id, ld_id, rc);
-		free(rsp);
-		return -1;
-	}
-
-	/* Update local state from response */
-	ld->memory_size = rsp->ld_allocation_list[0].range_1_allocation_mult * granularity_bytes;
-	fmd_info(ctx, "%s: LD %d allocation set to %lu MB",
-		 mld->base.id, ld_id,
-		 (unsigned long)(ld->memory_size / (1024 * 1024)));
-
-	free(rsp);
-	return 0;
+	return set_ld_allocation(ctx, mld->base.id, ep, ti, ld, ld_id, size_bytes);
 }
 
 
@@ -2600,9 +2641,6 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 	struct cxlmi_endpoint *ep;
 	struct fmd_ld *ld = NULL;
 	struct fmd_component *child;
-	uint64_t granularity_bytes;
-	uint64_t allocation_mult;
-	int rc;
 
 	if (!ctx || !mhd)
 		return -1;
@@ -2622,13 +2660,6 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		fmd_warn(ctx, "%s: pool LD %d not found", mhd->base.id, pool_ld_id);
 		return -1;
 	}
-
-	/* Calculate allocation in granularity units (256MB * memory_granularity) */
-	granularity_bytes = (uint64_t)mhd->memory_granularity * CXL_CAPACITY_UNIT;
-	if (granularity_bytes == 0)
-		granularity_bytes = CXL_CAPACITY_UNIT;  /* Default 256MB */
-
-	allocation_mult = size_bytes / granularity_bytes;
 
 	/* Mock mode: update local state only */
 	if (unlikely(fmd_is_mock(ctx))) {
@@ -2692,47 +2723,8 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 	 * The Tunnel Management Command with target_type=LD_POOL_CCI routes
 	 * the command to the device-wide LD Pool management interface.
 	 */
-
-	/* Build request - update single LD */
-	size_t req_size = sizeof(struct cxlmi_cmd_fmapi_set_ld_allocations_req) +
-			  sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
-	struct cxlmi_cmd_fmapi_set_ld_allocations_req *req = calloc(1, req_size);
-	if (!req)
-		return -1;
-
-	req->number_ld = 1;
-	req->start_ld_id = pool_ld_id;
-	req->ld_allocation_list[0].range_1_allocation_mult = allocation_mult;
-	req->ld_allocation_list[0].range_2_allocation_mult = 0;
-
-	/* Build response buffer */
-	size_t rsp_size = sizeof(struct cxlmi_cmd_fmapi_set_ld_allocations_rsp) +
-			  FMD_CCI_LIST_MAX * sizeof(struct cxlmi_cmd_fmapi_ld_allocations_list);
-	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp = calloc(1, rsp_size);
-	if (!rsp) {
-		free(req);
-		return -1;
-	}
-
-	/* Send command to LD Pool CCI (endpoint already bound to specific head) */
-	rc = cxlmi_cmd_fmapi_set_ld_allocations(ep, CXLMI_TUNNEL_MHD, req, rsp);
-	free(req);
-
-	if (rc != 0) {
-		fmd_warn(ctx, "%s: set pool LD %d allocation failed: %d",
-			 mhd->base.id, pool_ld_id, rc);
-		free(rsp);
-		return -1;
-	}
-
-	/* Update local state from response */
-	ld->memory_size = rsp->ld_allocation_list[0].range_1_allocation_mult * granularity_bytes;
-	fmd_info(ctx, "%s: pool LD %d allocation set to %lu MB",
-		 mhd->base.id, pool_ld_id,
-		 (unsigned long)(ld->memory_size / (1024 * 1024)));
-
-	free(rsp);
-	return 0;
+	return set_ld_allocation(ctx, mhd->base.id, ep, CXLMI_TUNNEL_MHD, ld,
+				 pool_ld_id, size_bytes);
 }
 
 
