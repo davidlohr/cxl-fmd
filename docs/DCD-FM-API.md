@@ -477,7 +477,7 @@ DCD. Redfish never exposes it; cxl-fmd derives it from the
 |--------------|---------|
 | SLD DCD | 0 |
 | MLD DCD | the LD-ID (`fmd_ld.ld_id`) |
-| MH-SLD / MH-MLD DCD | the pool LD-ID (`fmd_ld.ld_id`): the FM-API already identifies MH-device LDs by their index in the device-wide pool (Start LD ID and LD Map in 5500h), and 56xxh follows that numbering. The per-head LD-ID a host sees is not used |
+| MH-SLD / MH-MLD DCD | the pool LD-ID (`fmd_ld.ld_id`). This is cxl-fmd's interpretation: the specification says only that the Host ID is, "For an LD-FAM device, the LD-ID of the host interface" (Tables 7-66 and 8-229), and does not say which LD-ID numbering 56xxh uses on a Multi-Headed DCD. The LD-IDs at a head run "from 0 to n-1 relative to that head" (Section 2.5.1), so they are not unique on the device; the pool index is, and 5500h already names LDs by it (Start LD ID and LD Map). The per-head LD-ID a host sees is not used. An open question for CXL clarification |
 
 The 56xxh set is serviced by the FM-owned LD, so the host is always named by
 the Host ID in the payload, never by the tunnel. For switch-attached devices

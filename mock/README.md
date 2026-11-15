@@ -30,13 +30,19 @@ From the simplest to the largest. "Bound" is what the hosts already have;
 | `unit/unit-direct-*.json`, `unit/unit-switch-{sld,mld}.json` | One device each | One device type at a time |
 | `unit/unit-switch-mhsld.json` | One switch, two hosts: an MH-SLD with each head on a port of its own | A Multi-Headed device through a switch |
 
-## What the specification says a fabric is
+## What a fabric is
 
 The checker enforces these; they are also what to keep to when writing a new
-topology. Section and table numbers are CXL r4.0.
+topology. Section and table numbers are CXL r4.0. What is cxl-fmd's own model
+or reading, not the specification's, says so.
 
-- **Hosts and switches.** A host is on a VCS of one switch, through that VCS's
-  upstream port (Section 7.1). It is given only devices on that switch.
+- **Hosts and switches (cxl-fmd's model).** cxl-fmd models the hierarchy of
+  each VCS as a host: a VCS "Includes entities within the physical switch
+  belonging to a single VH" (glossary), a VH being "Everything from the CXL RP
+  down". So a host is on one VCS of one switch, through that VCS's upstream
+  port, and is given only devices on that switch. The specification does not
+  limit a machine to one VCS or one switch: a machine with several root
+  ports, on several VCSs or switches, appears as several hosts.
 - **SLD ports.** A port with an SLD is bound to only one VCS, as a whole
   (Section 7.2.3.1). "The Fabric Manager can bind any unused physical port to
   the unbound vPPB."
@@ -49,9 +55,11 @@ topology. Section and table numbers are CXL r4.0.
   head has 1 to 16 LDs; a head with one LD presents an SLD, with more an MLD
   (Section 2.5). The port a head is on sees what the head presents.
 - **Dynamic capacity.** The Host ID of an LD-FAM device is the LD-ID of the
-  host interface (Table 7-66). An extent lies in a region, aligned to its block
-  size; one extent can be held by several hosts only in a Sharable region
-  (Section 9.13.3.2).
+  host interface (Table 7-66). On a Multi-Headed device cxl-fmd takes it to be
+  the pool LD index; the specification does not say (see
+  [docs/DCD-FM-API.md](../docs/DCD-FM-API.md)). An extent lies in a region,
+  aligned to its block size; one extent can be held by several hosts only in a
+  Sharable region (Sections 7.6.7.6.5 and 9.13.3.2).
 
 ## Not represented
 

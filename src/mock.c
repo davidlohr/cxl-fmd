@@ -212,9 +212,14 @@ static int parse_uuid(const char *str, uint8_t uuid[16])
 
 /*
  * A record of the Dynamic Capacity Event Log (Table 8-229), as one kept:
- * an Add Capacity Response (04h) or Capacity Released (05h) of a DCD that
- * is not multi-headed, whose Host ID (32h) is the LD-ID of one of its LDs.
- * Returns 0 if it is, and loads it with the severity every one has.
+ * an Add Capacity Response (04h) or Capacity Released (05h) whose Host ID
+ * (32h) is the LD-ID of one of the device's LDs. Returns 0 if it is, and
+ * loads it with the severity every one has.
+ *
+ * A record of a Multi-Headed DCD is refused. That is a limit of cxl-fmd's
+ * mocks, not of the specification, which defines the record "for an LD-FAM
+ * DCD" (Section 8.2.10.2.1.6): which LD-ID its Host ID carries on such a
+ * device is unsettled (see docs/DCD-FM-API.md).
  */
 static int parse_dc_record(struct fmd_ctx *ctx, struct fmd_component *comp,
 			   size_t idx, json_t *item, struct cxlmi_event_record *rec)
@@ -2012,11 +2017,13 @@ void fmd_mock_free(struct fmd_mock_fabric *fabric)
 }
 
 /*
- * A device pulled out of a switch port, as a switch would have it (CXL r4.0
- * Sections 7.6.6.7 and 7.6.6.8): the port links down and reports no device
- * (Connected Device Type 00h). For an MLD, "the switch will automatically
- * unbind any existing LD bindings"; for an SLD on a bound port, "the FM can
- * be notified but is not involved", and the vPPB stays bound to the port.
+ * A device pulled out of a switch port: the port links down and reports no
+ * device (Connected Device Type 00h). For an MLD, "The switch will
+ * automatically unbind any existing LD bindings" (CXL r4.0 Section 7.6.6.8).
+ * For an SLD on a bound port, "the FM can be notified but is not involved"
+ * (Section 7.6.6.7), and neither section says what becomes of the binding.
+ * A vPPB bound to an SLD port "behaves the same as a PPB in a PCIe switch"
+ * (Section 7.2.3.1), so cxl-fmd assumes it stays bound, and so it stays.
  * Then cxl-fmd does what it does when a switch reports this: the same calls
  * as a port read again after a Physical Switch Event Record.
  */

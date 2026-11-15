@@ -446,7 +446,7 @@ Capacity Device. It mirrors the FM-API DCD Management responses; see
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `num_hosts` | integer | 1 (SLD), `ld_count` (MLD), `num_heads` (MHD) | Number of hosts the device serves |
+| `num_hosts` | integer | 1 (SLD), `ld_count` (MLD), the size of the LD pool (MHD) | Number of hosts the device serves |
 | `add_policies` | array | Free, Contiguous, Prescriptive | Supported add policies; `EnableSharedAccess` for shared regions |
 | `release_policies` | array | TagBased, Prescriptive | Supported release policies |
 | `max_extents` | integer | 256 | Extents supported per host (`TotalSupportedExtents`) |
@@ -472,7 +472,7 @@ Capacity Device. It mirrors the FM-API DCD Management responses; see
 | `hw_coherency` | boolean | false | Hardware-managed coherency |
 | `interconnect_dcm` | boolean | false | Interconnect-specific dynamic capacity management (CDAT DSMAS flag) |
 | `read_only` | boolean | false | Read-only region |
-| `hosts` | array | all hosts | Hosts that see this region. Host IDs are the LD-ID (MLD) or head (MHD) |
+| `hosts` | array | all hosts | Hosts that see this region. Host IDs are the LD-ID (MLD) or the pool LD index (MHD; cxl-fmd's interpretation, see [DCD-FM-API.md](DCD-FM-API.md)) |
 
 Each host listed gets its own view of the region under its
 `CXLLogicalDevice`, which is how FM-API 0x5601 reports them.
@@ -512,7 +512,7 @@ For switch-attached topologies, specify the parent switch:
 
 ## Host Configuration
 
-Hosts represent computing systems that can access CXL memory. For direct-attached devices, hosts connect directly to device heads. For switch-attached topologies, hosts connect via VCS upstream ports.
+Hosts represent computing systems that can access CXL memory. For direct-attached devices, hosts connect directly to device heads. For switch-attached topologies, hosts connect via VCS upstream ports. A switch-attached host names its switch, VCS and upstream port, which must be a VCS of that switch:
 
 ```json
 {
@@ -525,9 +525,23 @@ Hosts represent computing systems that can access CXL memory. For direct-attache
         {
             "id": "host1",
             "name": "Compute Node 1",
+            "direct_attached": false,
+            "switch": "switch_0",
             "vcs_id": 1,
-            "usp_port_id": 1,
-            "direct_attached": false
+            "usp_port_id": 1
+        }
+    ],
+    "switches": [
+        {
+            "id": "switch_0",
+            "ports": [
+                { "port_number": 0, "type": "upstream", "link_status": "up" },
+                { "port_number": 1, "type": "upstream", "link_status": "up" }
+            ],
+            "vcs": [
+                { "vcs_id": 0, "upstream_port_id": 0 },
+                { "vcs_id": 1, "upstream_port_id": 1 }
+            ]
         }
     ]
 }
@@ -547,7 +561,7 @@ Hosts represent computing systems that can access CXL memory. For direct-attache
 ### Automatic Host Creation
 
 - **Direct-attached**: If no hosts are defined and devices exist, a default "local" host is created representing the system running cxl-fmd.
-- **Switch-attached**: Hosts are automatically created for each VCS in the switch configuration.
+- **Switch-attached**: A host, `{switch_id}_host{vcs_id}`, is created for each enabled VCS in the switch configuration, whether or not one is listed in `hosts`; a switch-attached host listed there is another host on that VCS, as `host1` is in the example above.
 
 ## Switch Configuration
 
@@ -561,7 +575,6 @@ Switches define the fabric topology for switch-attached devices.
             "vendor_id": "0x8086",
             "device_id": "0x0e00",
             "serial_number": "0x5357495443483030",
-            "upstream_port": 0,
             "max_vcs": 4,
 
             "ports": [
@@ -588,10 +601,23 @@ Switches define the fabric topology for switch-attached devices.
                     "state": 1,
                     "upstream_port_id": 0,
                     "vppbs": [
-                        { "port_id": 1, "device_ref": "dev0", "binding_status": "bound" }
+                        { "vppb_id": 0, "binding_status": "bound_physical_port", "bound_port_id": 0 },
+                        { "vppb_id": 1, "binding_status": "bound_physical_port", "bound_port_id": 1 }
                     ]
                 }
             ]
+        }
+    ],
+
+    "devices": [
+        {
+            "id": "dev0",
+            "parent_switch": "switch_0",
+            "parent_port": 1,
+            "identify_memory_device": {
+                "total_capacity_mb": 16384,
+                "persistent_capacity_mb": 16384
+            }
         }
     ]
 }
@@ -717,11 +743,15 @@ time the daemon is sent `SIGUSR1`, the next one is pulled out:
 kill -USR1 $(pidof cxl-fmd)
 ```
 
-The mock switch does what CXL r4.0 Sections 7.6.6.7 and 7.6.6.8 say a switch
-does: the port links down and reports no device; for an MLD, "the switch will
-automatically unbind any existing LD bindings", and for an SLD on a bound
-port the vPPB stays bound. cxl-fmd then removes the device as it does when a
-switch reports it: see *When a Device Is Removed* in
+The mock switch does this: the port links down and reports no device. For
+an MLD, CXL r4.0 Section 7.6.6.8 says of a surprise removal "The switch will
+automatically unbind any existing LD bindings", and the mock does. For an SLD
+on a bound port, Sections 7.6.6.7 and 7.6.6.8 say only that the FM is not
+involved ("the FM can be notified but is not involved"), and neither says
+what becomes of the binding. A vPPB bound to an SLD port "behaves the same as
+a PPB in a PCIe switch" (Section 7.2.3.1), so cxl-fmd assumes that the vPPB
+stays bound, and the mock keeps it bound. cxl-fmd then removes the device as
+it does when a switch reports it: see *When a Device Is Removed* in
 [Redfish-API.md](Redfish-API.md).
 
 Each entry is an SLD or an MLD on a switch port, named once: only a switch
@@ -755,13 +785,18 @@ read from hardware are: see *Where cxl-fmd puts CXL event records* in
 | `timestamp_ns` | Nanoseconds since 1970; 0 or absent is no timestamp |
 | `ld_id` | For an MLD: the record is about this LD (LD-ID Valid Flag). Without it, a record is about every LD |
 
-A `dynamic_capacity` record is of a DCD that is not multi-headed, of kind
-`dynamic_capacity`, and one of the two the FM is given (Table 8-229): its
+A `dynamic_capacity` record is of kind `dynamic_capacity`, and one of the two
+the FM is given (Table 8-229): its
 `data` starts with the Dynamic Capacity Event Type, `04` (Add Capacity
 Response) or `05` (Capacity Released), then the Validity Flags, then the Host
 ID, two bytes little-endian, which must be the LD-ID of one of its LDs:
 `"04000100"` is an Add Capacity Response from host 1. It is kept in that LD's
 log. `ld_id` is not given: the Host ID names the LD.
+
+cxl-fmd mocks do not yet accept a `dynamic_capacity` record on a Multi-Headed
+DCD. The specification defines the record "for an LD-FAM DCD" (Section
+8.2.10.2.1.6) and does not exclude one, but which LD-ID its Host ID carries on
+a Multi-Headed device is unsettled (see [DCD-FM-API.md](DCD-FM-API.md)).
 
 The identify block of an SLD can give `info_event_log_size`,
 `warning_event_log_size`, `failure_event_log_size` and `fatal_event_log_size`.
@@ -1133,7 +1168,7 @@ A Multi-Headed Device (MHD) has multiple CXL upstream ports (heads), allowing mu
 
 #### Switch-Attached MHD
 
-MHD devices can be attached behind a CXL switch, with each head mapped to a different VCS:
+A head is a CXL port of the device (CXL r4.0 Section 2.5), so a Multi-Headed device behind a switch has each head on a port of its own: each head gives its `parent_switch` and `parent_port`, and the device gives neither. A head that presents an SLD is on a port whose `conn_dev_type` is `"sld"` and is bound as a whole, with `bound_physical_port`. `unit/unit-switch-mhsld.json` is the shipped example.
 
 ```json
 {
@@ -1142,7 +1177,8 @@ MHD devices can be attached behind a CXL switch, with each head mapped to a diff
         "ports": [
             { "port_number": 0, "type": "upstream", "link_status": "up" },
             { "port_number": 1, "type": "upstream", "link_status": "up" },
-            { "port_number": 2, "type": "downstream", "link_status": "up", "conn_dev_type": "mld" }
+            { "port_number": 2, "type": "downstream", "link_status": "up", "conn_dev_type": "sld" },
+            { "port_number": 3, "type": "downstream", "link_status": "up", "conn_dev_type": "sld" }
         ],
         "vcs": [
             {
@@ -1150,7 +1186,7 @@ MHD devices can be attached behind a CXL switch, with each head mapped to a diff
                 "upstream_port_id": 0,
                 "vppbs": [
                     { "vppb_id": 0, "binding_status": "bound_physical_port", "bound_port_id": 0 },
-                    { "vppb_id": 1, "binding_status": "bound_ld", "bound_port_id": 2, "bound_ld_id": 0 }
+                    { "vppb_id": 1, "binding_status": "bound_physical_port", "bound_port_id": 2 }
                 ]
             },
             {
@@ -1158,7 +1194,7 @@ MHD devices can be attached behind a CXL switch, with each head mapped to a diff
                 "upstream_port_id": 1,
                 "vppbs": [
                     { "vppb_id": 0, "binding_status": "bound_physical_port", "bound_port_id": 1 },
-                    { "vppb_id": 1, "binding_status": "bound_ld", "bound_port_id": 2, "bound_ld_id": 1 }
+                    { "vppb_id": 1, "binding_status": "bound_physical_port", "bound_port_id": 3 }
                 ]
             }
         ]
@@ -1166,12 +1202,12 @@ MHD devices can be attached behind a CXL switch, with each head mapped to a diff
     "devices": [{
         "id": "mhd_0",
         "type": "MHD",
-        "parent_switch": "switch_0",
-        "parent_port": 2,
         "num_heads": 2,
         "heads": [
-            { "head_id": 0, "presentation": "SLD", "lds": [0], "attached_host": "switch_0_host0" },
-            { "head_id": 1, "presentation": "SLD", "lds": [1], "attached_host": "switch_0_host1" }
+            { "head_id": 0, "presentation": "SLD", "lds": [0],
+              "parent_switch": "switch_0", "parent_port": 2 },
+            { "head_id": 1, "presentation": "SLD", "lds": [1],
+              "parent_switch": "switch_0", "parent_port": 3 }
         ],
         "ld_pool": [
             { "pool_index": 0, "memory_size_mb": 8192 },
@@ -1183,9 +1219,8 @@ MHD devices can be attached behind a CXL switch, with each head mapped to a diff
 
 Key points for switch-attached MHD:
 - Each VCS represents a host connection via its upstream port
-- vPPB bindings use `bound_ld` status to bind specific pool LDs to VCS
-- `attached_host` references auto-created VCS hosts (format: `{switch_id}_host{vcs_id}`)
-- Pool LDs are bound to VCS via vPPB, mapping heads to hosts through the switch
+- A head that presents an SLD is bound to a vPPB as a whole port: here head 0 (pool LD 0) to VCS 0 and head 1 (pool LD 1) to VCS 1
+- A head that presents an MLD would be bound by LD, and the LD-IDs at a head are "relative to that head" (Section 2.5.1), not pool LD indices. Such a head on a switch port is refused when the file is loaded; see [mock/README.md](../mock/README.md)
 
 ### Multi-Logical Device (MLD)
 
@@ -1288,14 +1323,14 @@ This example demonstrates:
 
 ## Validation
 
-The mock loader performs the following validation:
-
-1. **Required fields**: Each device must have an `id` field
-2. **Unique IDs**: Device and switch IDs must be unique within the topology
-3. **Capacity consistency**: `total_capacity_mb` should equal `volatile_capacity_mb + persistent_capacity_mb`
-4. **Parent references**: `parent_switch` must reference a defined switch ID
-
-Validation errors are logged and may cause the topology to fail loading.
+A topology is read strictly and checked against CXL r4.0, and refused if it
+is not valid: see [mock/README.md](../mock/README.md) and *Mock Topologies*
+in [testing.md](testing.md), and `cxl-fmd --mock FILE --check`. For example,
+capacities are multiples of 256 MB and "Total Capacity shall be greater than
+or equal to the sum of Volatile Only Capacity and Persistent Only Capacity"
+(Table 8-309); what is left over is partitionable capacity. Checks that are
+cxl-fmd's own, not the specification's, are labelled `cxl-fmd consistency` or
+`cxl-fmd limit` when they fail.
 
 ## Future Extensions
 
