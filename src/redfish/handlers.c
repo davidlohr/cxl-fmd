@@ -4709,8 +4709,8 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
  * CXL command: Scan Media (Opcode 4304h)
  *
  * Parameters:
- *   PhysicalAddress - Starting DPA as hex string "0x..."
- *   Length - Length in bytes
+ *   PhysicalAddress - Starting DPA as hex string "0x...", 64-byte aligned
+ *   Length - Length in bytes, a nonzero multiple of 64
  *   NoEventLog - If true, don't log events (optional, default false)
  *
  * Returns: 0 on success, -1 on error
@@ -4755,7 +4755,21 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 		json_decref(root);
 		return -1;
 	}
-	length = (uint64_t)json_integer_value(length_j);
+	/*
+	 * Length is "in bytes" (Memory_v1 ScanMedia), and Scan Media
+	 * Physical Address Length "shall be in units of 64 bytes"; Bits[5:0]
+	 * of Scan Media Physical Address are Reserved (CXL r4.0 Table 8-327).
+	 * A range that is not in whole 64-byte lines cannot be expressed: it
+	 * is refused rather than widened. An empty one is refused too, which
+	 * is cxl-fmd's choice: the specification does not say what a Length
+	 * of 0 does.
+	 */
+	if (json_integer_value(length_j) <= 0 ||
+	    (json_integer_value(length_j) & 0x3f) || (phys_addr & 0x3f)) {
+		json_decref(root);
+		return -1;
+	}
+	length = (uint64_t)json_integer_value(length_j) / 64;
 
 	/* Get optional NoEventLog parameter */
 	no_event_log_j = json_object_get(root, "NoEventLog");

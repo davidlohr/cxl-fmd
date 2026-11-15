@@ -127,6 +127,27 @@ static uint16_t last_opcode(struct cxlmi_endpoint *ep)
 	return set << 8 | cmd;
 }
 
+/* the last command sent to @ep and its payload; returns the payload size */
+static size_t last_payload(struct cxlmi_endpoint *ep, uint16_t *opcode,
+			   uint8_t *payload, size_t size)
+{
+	uint8_t set = 0, cmd = 0;
+
+	cxlmi_mock_get_last_command(ep, &set, &cmd, payload, &size);
+	if (opcode)
+		*opcode = set << 8 | cmd;
+	return size;
+}
+
+static uint64_t get64(const uint8_t *p)
+{
+	uint64_t v = 0;
+
+	for (int i = 7; i >= 0; i--)
+		v = v << 8 | p[i];
+	return v;
+}
+
 static unsigned int commands_sent(struct cxlmi_endpoint *ep)
 {
 	unsigned int sent = 0;
@@ -1396,6 +1417,85 @@ static void test_health_mapping(void)
 	CHECK(fmd_worse_media_status(0x00, 0x02) == 0x02, "worse of 00h and 02h");
 
 	report("health and media status", before);
+}
+
+/* a directly attached SLD of @total, @vol and @pers units of 256 MB */
+static struct fmd_sld *direct_sld(struct fmd_ctx *ctx,
+				  struct cxlmi_endpoint **epp, uint64_t serial,
+				  uint64_t total, uint64_t vol, uint64_t pers,
+				  uint64_t align)
+{
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char id[FMD_MAX_ID_LEN];
+	uint8_t pl[0x45] = { 0 };
+
+	answer_identify(ep, serial, 0x03);
+	/* Identify Memory Device (4000h), Table 8-309 */
+	memcpy(pl, "TEST-1.0", 8);
+	put64(pl + 0x10, total);		/* Total Capacity */
+	put64(pl + 0x18, vol);			/* Volatile Only Capacity */
+	put64(pl + 0x20, pers);			/* Persistent Only Capacity */
+	put64(pl + 0x28, align);		/* Partition Alignment */
+	answer(ep, 0x4000, pl, sizeof(pl));
+	fmd_discover(ctx);
+
+	*epp = ep;
+	device_id(id, sizeof(id), serial);
+	return fmd_topology_find_sld(&ctx->topology, id);
+}
+
+/*
+ * Scan Media (4304h), Table 8-327: "Scan Media Physical Address Length:
+ * The range of physical addresses to scan. This length shall be in units
+ * of 64 bytes", and Bits[5:0] of the address are Reserved. The Redfish
+ * Length is in bytes.
+ */
+static void test_scan_media(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_sld *sld = direct_sld(ctx, &ep, 0x1101, 64, 64, 0, 0);
+	int before = failures, rc;
+	uint8_t pl[64];
+	uint16_t opcode;
+	unsigned int sent;
+	char id[FMD_MAX_ID_LEN];
+	static const char *const bad[] = {
+		"{\"PhysicalAddress\": \"0x1000\", \"Length\": 100}",
+		"{\"PhysicalAddress\": \"0x1001\", \"Length\": 4096}",
+		"{\"PhysicalAddress\": \"0x1000\", \"Length\": 0}",
+		"{\"PhysicalAddress\": \"0x1000\", \"Length\": -64}",
+	};
+	const char *ok = "{\"PhysicalAddress\": \"0x1000\", \"Length\": 4096}";
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+	snprintf(id, sizeof(id), "%s", sld->base.id);
+
+	answer(ep, 0x4304, NULL, 0);
+	rc = fmd_redfish_action_scan_media(ctx, id, id, ok, strlen(ok));
+	CHECK(rc == 0, "Scan Media of 4096 bytes: %d", rc);
+	last_payload(ep, &opcode, pl, sizeof(pl));
+	CHECK(opcode == 0x4304, "last command %04xh", opcode);
+	CHECK(get64(pl) == 0x1000, "Scan Media Physical Address %" PRIx64,
+	      get64(pl));
+	CHECK(get64(pl + 8) == 4096 / 64,
+	      "Scan Media Physical Address Length %" PRIu64 " for 4096 bytes",
+	      get64(pl + 8));
+
+	/* not in whole 64-byte lines, or empty: refused, nothing sent */
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		sent = commands_sent(ep);
+		rc = fmd_redfish_action_scan_media(ctx, id, id, bad[i],
+						   strlen(bad[i]));
+		CHECK(rc != 0 && commands_sent(ep) == sent,
+		      "%s: %d, %u commands sent", bad[i], rc,
+		      commands_sent(ep) - sent);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("Scan Media length in 64-byte units", before);
 }
 
 /*
@@ -3117,6 +3217,7 @@ int main(void)
 	test_overcount_mld();
 	test_mld_ld_counts();
 	test_health_mapping();
+	test_scan_media();
 	test_dcd_info();
 	test_paging_ports();
 	test_paging_lds(false);
