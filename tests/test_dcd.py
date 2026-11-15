@@ -314,13 +314,23 @@ class TestDynamicCapacityAdd:
                 "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": tag})
             assert status == 400
 
-    def test_prescriptive_on_unshareable_region_409(self, api_client):
-        """Region 0 of the SLD is not shareable, so a second host can't join."""
-        # The SLD has a single host, so prescriptive re-add of an owned extent is EEXIST
+    def test_prescriptive_extent_already_held_400(self, api_client):
+        """Invalid Extent List: "any of the DPAs are already accessible to the same LD"."""
         status, _, _ = api_client.post(SLD_ADD, {
             "Policy": "Prescriptive",
             "ExtentList": [{"@odata.id": SLD + "/MemoryExtents/ext_400000000"}]})
+        assert status == 400
+
+    def test_prescriptive_extent_of_another_host_409(self, api_client):
+        """Capacity another host holds is shared with EnableSharedAccess, in the mock."""
+        add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
+        status, _, _ = api_client.post(add, {
+            "Policy": "Prescriptive",
+            "ExtentList": [{"@odata.id": MLD + "/MemoryExtents/ext_280000000"}]})
         assert status == 409
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_280000000")
+        assert data["Links"]["MemoryRegions"] == [
+            {"@odata.id": MLD + "/CXLLogicalDevices/1/MemoryRegions/0"}]
 
 
 # =============================================================================

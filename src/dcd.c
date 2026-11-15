@@ -595,13 +595,24 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 
 			if (!ext)
 				return -ENOENT;
+			/*
+			 * Invalid Extent List "When the Selection Policy is
+			 * set to Prescriptive and any of the DPAs are already
+			 * accessible to the same LD" (Section 7.6.7.6.5).
+			 */
 			if (ext->host_mask & bit)
-				return -EEXIST;
+				return -EINVAL;
+			/*
+			 * Capacity another host holds is shared with Enable
+			 * Shared Access and its tag, not named again here.
+			 * The specification does not say what a device does
+			 * with such a list: refusing it is the mock's choice.
+			 */
+			if (ext->host_mask)
+				return -EBUSY;
 			region = fmd_dc_find_region(dev, host_id, ext->region_id);
 			if (!region)
 				return -ENOENT;
-			if (ext->host_mask && !(region->flags & FMD_DC_REGION_SHAREABLE))
-				return -EBUSY;
 		}
 		for (int i = 0; i < ext_count; i++) {
 			extents[i]->host_mask |= bit;

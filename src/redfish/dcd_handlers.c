@@ -804,7 +804,7 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		*msg = "Host already has access to an extent in ExtentList";
 		return rc;
 	case -EBUSY:
-		*msg = "Extent is owned by another host and the region is not shareable";
+		*msg = "An extent in ExtentList is held by another host; share it with EnableSharedAccess";
 		return rc;
 	default:
 		*msg = "Initiate Dynamic Capacity Add failed";
