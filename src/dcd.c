@@ -1545,11 +1545,26 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 	    !(dcd->sanitize_cfg_mask & (1 << region->region_id)))
 		return -EINVAL;
 
-	/* The device rejects reconfiguration while capacity is allocated */
-	for (int h = 0; h < dcd->num_hosts; h++) {
-		struct fmd_dc_region *r = fmd_dc_find_region(dev, h, region->region_id);
-		if (r && fmd_dc_region_extent_count(dev, r) > 0)
-			return -EBUSY;
+	/*
+	 * The device rejects reconfiguration while capacity is allocated:
+	 * 5602h "shall fail with Unsupported" "When all capacity has been
+	 * released from the DC Region on all hosts, and one or more blocks
+	 * are allocated to the specified region" (Section 7.6.7.6.3). An
+	 * extent some host holds or is offered is allocated, and so is one an
+	 * FM reference keeps: that capacity "will remain allocated ... even
+	 * if all DCD Extents that reference it are removed" (Section
+	 * 7.6.7.6.7).
+	 */
+	{
+		struct fmd_component *child;
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			if (ext->region_id == region->region_id &&
+			    (ext->host_mask || ext->fm_referenced))
+				return -EBUSY;
+		}
 	}
 
 	if (likely(dev_is_hw(dev))) {

@@ -493,6 +493,18 @@ class TestSetDCRegionConfig:
             "Policy": "Free", "RegionNumber": 0, "Length": 512, "Tag": TAG_NEW})
         assert status == 200
 
+    def test_patch_rejected_while_fm_referenced(self, api_client):
+        """Capacity an FM reference keeps is still allocated (Section 7.6.7.6.7)."""
+        # DELETE releases an extent from every host that holds it
+        for ext in ("ext_200000000", "ext_280000000"):
+            assert api_client.delete(MLD + "/MemoryExtents/" + ext) == 204
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_200000000")
+        assert status == 200 and data["FMReferencedExtent"] is True
+        assert data["Links"]["MemoryRegions"] == []
+        status, _ = api_client.patch(MLD + "/CXLLogicalDevices/0/MemoryRegions/0",
+                                     {"BlockSizeMiB": 512})
+        assert status == 409
+
     def test_patch_unsupported_block_size_400(self, api_client):
         status, _ = api_client.patch(SLD_LD0 + "/MemoryRegions/1", {"BlockSizeMiB": 128})
         assert status == 400
