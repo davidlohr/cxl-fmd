@@ -1159,10 +1159,12 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
  * (cxl-fmd's choice). Allocations larger than the Memory Size, which the
  * device should not report, are taken to be what it has: the domain is
  * then as large as they are, with nothing left (cxl-fmd's choice).
+ * @floor is the least capacity of a device of no known Memory Size: the
+ * domain's, once it has one, so that what the LDs give back stays in it.
  * Returns 0, or -EOVERFLOW if the allocations do not add up in 64 bits.
  */
 static int ld_pool_sizes(struct fmd_ctx *ctx, struct fmd_component *dev,
-			 uint64_t *capacity, uint64_t *allocated)
+			 uint64_t floor, uint64_t *capacity, uint64_t *allocated)
 {
 	struct fmd_component *child;
 	uint64_t pool;
@@ -1185,7 +1187,7 @@ static int ld_pool_sizes(struct fmd_ctx *ctx, struct fmd_component *dev,
 		pool = fmd_to_mhd(dev)->pool_capacity;
 		valid = fmd_to_mhd(dev)->pool_capacity_valid;
 	}
-	*capacity = valid ? pool : *allocated;
+	*capacity = valid ? pool : *allocated > floor ? *allocated : floor;
 	if (*allocated > *capacity) {
 		fmd_warn(ctx, "%s: LDs have %" PRIu64 " MiB allocated, more than "
 			 "the Memory Size of %" PRIu64 " MiB: the domain is taken "
@@ -1209,7 +1211,7 @@ static int create_ld_memory_resources(struct fmd_ctx *ctx, struct fmd_component 
 	char id[128];
 	int rc, nchunks = 0;
 
-	if (ld_pool_sizes(ctx, dev, &capacity, &allocated))
+	if (ld_pool_sizes(ctx, dev, 0, &capacity, &allocated))
 		return 0;		/* no domain: nothing can be told of it */
 	if (capacity == 0)
 		return 0;
@@ -1277,3 +1279,170 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	return create_ld_memory_resources(ctx, &mhd->base);
 }
 
+/* the lowest free range of @domain, [*off, *off + *len); false if none */
+static bool first_free_range(struct fmd_mem_domain *domain, uint64_t *off,
+			     uint64_t *len)
+{
+	struct fmd_component *child;
+	uint64_t end;
+
+	*off = find_free_offset(domain, 1);
+	if (*off == FMD_CHUNK_OFFSET_AUTO)
+		return false;
+	end = domain->capacity;
+	fmd_for_each_child_type(&domain->base, child, FMD_COMPONENT_CHUNK) {
+		struct fmd_mem_chunk *c = fmd_to_chunk(child);
+
+		if (c->size && c->base_address > *off && c->base_address < end)
+			end = c->base_address;
+	}
+	*len = end - *off;
+	return true;
+}
+
+/* a chunk of @size bytes at @offset of @domain, for @ld of @dev */
+static int sync_add_chunk(struct fmd_ctx *ctx, struct fmd_component *dev,
+			  struct fmd_mem_domain *domain, const struct fmd_ld *ld,
+			  uint64_t offset, uint64_t size)
+{
+	struct fmd_mem_chunk *chunk;
+	char id[FMD_MAX_ID_LEN];
+
+	(void)snprintf(id, sizeof(id), "%.50s_ld%u_chunk", dev->id, ld->ld_id);
+	if (fmd_topology_find(&ctx->topology, id))
+		generate_chunk_id(&ctx->topology, domain, id, sizeof(id));
+	chunk = fmd_chunk_create(id);
+	if (!chunk)
+		return -ENOMEM;
+	chunk->base_address = offset;
+	chunk->size = size;
+	if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
+		strncpy(chunk->address_range_type, "Volatile",
+			sizeof(chunk->address_range_type) - 1);
+	chunk->backing_ld = ld->ld_id;
+	return add_resource(ctx, &chunk->base, &domain->base);
+}
+
+/*
+ * The chunks of @ld add up to its allocation: see fmd_ld_domain_sync().
+ * The chunks a domain has are newest first (tree_add_child()).
+ */
+static int sync_ld_chunks(struct fmd_ctx *ctx, struct fmd_component *dev,
+			  struct fmd_mem_domain *domain, const struct fmd_ld *ld)
+{
+	struct fmd_component *child, *next;
+	uint64_t have = 0, off, len;
+	int rc;
+
+	fmd_for_each_child_type(&domain->base, child, FMD_COMPONENT_CHUNK) {
+		struct fmd_mem_chunk *c = fmd_to_chunk(child);
+
+		if (c->backing_ld == ld->ld_id && __builtin_add_overflow(have, c->size, &have))
+			return -EOVERFLOW;
+	}
+
+	if (have > ld->memory_size) {
+		uint64_t lose = have - ld->memory_size;
+
+		fmd_info(ctx, "%s: LD %u has %" PRIu64 " MB less than its chunks: "
+			 "taken off them", dev->id, ld->ld_id, lose >> 20);
+		for (child = domain->base.first_child; child && lose; child = next) {
+			struct fmd_mem_chunk *c;
+
+			next = child->next_sibling;
+			if (child->type != FMD_COMPONENT_CHUNK)
+				continue;
+			c = fmd_to_chunk(child);
+			if (c->backing_ld != ld->ld_id)
+				continue;
+			if (c->size > lose) {
+				fmd_topology_wrlock(&ctx->topology);
+				c->size -= lose;
+				fmd_topology_wrunlock(&ctx->topology);
+				lose = 0;
+			} else {
+				lose -= c->size;
+				fmd_info(ctx, "%s: chunk %s goes", dev->id, c->base.id);
+				fmd_topology_remove(&ctx->topology, &c->base);
+			}
+		}
+		return 0;
+	}
+
+	if (have < ld->memory_size) {
+		uint64_t gain = ld->memory_size - have;
+
+		fmd_info(ctx, "%s: LD %u has %" PRIu64 " MB more than its chunks: "
+			 "a chunk of it", dev->id, ld->ld_id, gain >> 20);
+		off = find_free_offset(domain, gain);
+		if (off != FMD_CHUNK_OFFSET_AUTO)
+			return sync_add_chunk(ctx, dev, domain, ld, off, gain);
+		/* in pieces, as no free range is that large */
+		while (gain && first_free_range(domain, &off, &len)) {
+			if (len > gain)
+				len = gain;
+			rc = sync_add_chunk(ctx, dev, domain, ld, off, len);
+			if (rc)
+				return rc;
+			gain -= len;
+		}
+		if (gain) {
+			fmd_warn(ctx, "%s: no room in the domain for %" PRIu64
+				 " MB of LD %u", dev->id, gain >> 20, ld->ld_id);
+			return -ENOSPC;
+		}
+	}
+	return 0;
+}
+
+int fmd_ld_domain_sync(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct fmd_mem_domain *domain = NULL;
+	struct fmd_component *child;
+	uint64_t capacity, allocated;
+	int rc, err = 0;
+
+	if (!ctx || !dev || (dev->type != FMD_COMPONENT_MLD &&
+			     dev->type != FMD_COMPONENT_MHD))
+		return -EINVAL;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DOMAIN) {
+		domain = fmd_to_domain(child);
+		break;
+	}
+	if (!domain)
+		return create_ld_memory_resources(ctx, dev);
+
+	rc = ld_pool_sizes(ctx, dev, domain->capacity, &capacity, &allocated);
+	if (rc)
+		return rc;
+	if (capacity != domain->capacity)
+		fmd_info(ctx, "%s: domain of %" PRIu64 " MB, not %" PRIu64 " MB",
+			 dev->id, capacity >> 20, domain->capacity >> 20);
+	fmd_topology_wrlock(&ctx->topology);
+	domain->capacity = capacity;
+	fmd_topology_wrunlock(&ctx->topology);
+
+	/* what LDs lost first, so that what others gained has the room */
+	for (int pass = 0; pass < 2; pass++) {
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+			struct fmd_ld *ld = fmd_to_ld(child);
+			uint64_t have = 0;
+			struct fmd_component *c;
+
+			fmd_for_each_child_type(&domain->base, c, FMD_COMPONENT_CHUNK)
+				if (fmd_to_chunk(c)->backing_ld == ld->ld_id)
+					have += fmd_to_chunk(c)->size;
+			if ((pass == 0) != (have > ld->memory_size))
+				continue;
+			rc = sync_ld_chunks(ctx, dev, domain, ld);
+			if (rc && !err)
+				err = rc;
+		}
+	}
+
+	fmd_topology_wrlock(&ctx->topology);
+	domain->remaining = capacity - allocated;	/* allocated <= capacity */
+	fmd_topology_wrunlock(&ctx->topology);
+	return err;
+}

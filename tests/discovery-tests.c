@@ -469,6 +469,7 @@ static void test_ld_allocation_ranges(void)
 	      ld->memory_size);
 
 	/* not a whole number of 512 MB, or less than Range 2: not sent */
+	put64(get + 4, 6);			/* as the set left it */
 	answer(ep, 0x5401, get, sizeof(get));
 	sent = commands_sent(ep);
 	rc = fmd_mld_set_ld_allocation(ctx, mld, 0, (4ULL << 30) + (256 << 20));
@@ -7027,6 +7028,159 @@ static void test_pool_capacity(void)
 	report("a domain is the device's Memory Size, less what its LDs have", before);
 }
 
+/* the sum of the chunks of LD @ld of @domain, and how many there are */
+static uint64_t ld_chunks(struct fmd_mem_domain *domain, int ld, int *n)
+{
+	struct fmd_component *c;
+	uint64_t sum = 0;
+
+	*n = 0;
+	fmd_for_each_child_type(&domain->base, c, FMD_COMPONENT_CHUNK) {
+		if (fmd_to_chunk(c)->backing_ld == ld) {
+			sum += fmd_to_chunk(c)->size;
+			(*n)++;
+		}
+	}
+	return sum;
+}
+
+/*
+ * Get LD Allocations (5401h) for LDs 0 to @nr - 1, all in one response:
+ * LD i of Range 1 @units[i] of 256 MB.
+ */
+static void answer_lds(struct cxlmi_endpoint *ep, uint8_t nr, const uint64_t *units)
+{
+	uint8_t pl[4 + 16 * 16] = { nr, 0, 0, nr };
+
+	for (int i = 0; i < nr; i++)
+		put64(pl + 4 + 16 * i, units[i]);
+	answer(ep, 0x5401, pl, 4 + 16 * nr);
+}
+
+/*
+ * Allocations changed by others than cxl-fmd are read again (review F01):
+ * on a rescan, Get LD Info and Get LD Allocations for every MLD and MHD
+ * there was, and before a chunk POST or DELETE, Get LD Allocations for
+ * its LD. Nothing re-read them: the LDs and the domain kept what discovery
+ * found until a restart, and a POST asked Set LD Allocations for the LD's
+ * old size plus the chunk, which took from the LD what it had been given.
+ */
+static void test_ld_alloc_refresh(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	/* 2 LDs of 1 GiB, of 10 GiB */
+	struct cxlmi_endpoint *ep = new_mld_sized(ctx, 0xf61, 2, 0, 4, 10ULL << 30);
+	struct cxlmi_endpoint *mep = new_mhd_sized(ctx, 0xf62, 18ULL << 30);
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[512], c0[FMD_MAX_ID_LEN + 16];
+	struct fmd_mem_domain *domain, *mdomain;
+	struct fmd_ld *ld0, *ld1;
+	int before = failures, rc, n0, n1, chunks;
+	uint8_t pl[64];
+	uint16_t op;
+	json_t *resp = NULL;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf61);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	mdomain = dev_domain(ctx, 0xf62, &chunks);
+	CHECK(domain && ld0 && ld1 && mdomain, "no domain %s or LDs", dom);
+	if (!domain || !ld0 || !ld1 || !mdomain)
+		goto out;
+
+	/* a rescan the device does not answer: nothing changes */
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 0 && ld0->memory_size == 1ULL << 30 && ld1->memory_size == 1ULL << 30 &&
+	      domain->capacity == 10ULL << 30 && domain->remaining == 8ULL << 30,
+	      "rescan with no answers: %d, LD 0 %" PRIu64 " MiB, remaining %" PRIu64 " MiB",
+	      rc, ld0->memory_size >> 20, domain->remaining >> 20);
+
+	/* another FM gave LD 0 2 GiB, took LD 1's, and the device is 12 GiB */
+	answer_ld_info(ep, 12ULL << 30, 2);
+	answer_lds(ep, 2, (const uint64_t[]){ 8, 0 });
+	/* and the MHD's pool LD 3 went from 4 GiB to 1 GiB, of 20 GiB */
+	answer_ld_info(mep, 20ULL << 30, 4);
+	answer_lds(mep, 4, (const uint64_t[]){ 4, 8, 12, 4 });
+	rc = fmd_rescan(ctx);
+	CHECK(rc == 0 && ld0->memory_size == 2ULL << 30 && ld1->memory_size == 0,
+	      "rescan: %d, LD 0 %" PRIu64 " MiB, LD 1 %" PRIu64 " MiB", rc,
+	      ld0->memory_size >> 20, ld1->memory_size >> 20);
+	CHECK(domain->capacity == 12ULL << 30 && domain->remaining == 10ULL << 30,
+	      "domain after the rescan: %" PRIu64 " MiB, %" PRIu64 " MiB left",
+	      domain->capacity >> 20, domain->remaining >> 20);
+	CHECK(ld_chunks(domain, 0, &n0) == 2ULL << 30 && ld_chunks(domain, 1, &n1) == 0 &&
+	      n0 == 2 && n1 == 0, "chunks of LD 0: %d, of LD 1: %d", n0, n1);
+	snprintf(c0, sizeof(c0), "%s_ld1_chunk", id);
+	CHECK(!fmd_topology_find_chunk(&ctx->topology, c0), "%s is still there", c0);
+	CHECK(mdomain->capacity == 20ULL << 30 && mdomain->remaining == 13ULL << 30 &&
+	      ld_chunks(mdomain, 3, &n0) == 1ULL << 30,
+	      "MHD domain after the rescan: %" PRIu64 " MiB, %" PRIu64 " MiB left",
+	      mdomain->capacity >> 20, mdomain->remaining >> 20);
+
+	/*
+	 * LD 1 given 3 GiB by another FM since: a POST of 1 GiB on it asks
+	 * for 4 GiB (16 units), not 1 GiB, and the domain counts the 3 GiB.
+	 */
+	answer_get_ld(ep, 1, 12);
+	answer_set_ld(ep, 1, 16);
+	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": "
+		 "[{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld1\"}}]}",
+		 id, id);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == 0 && op == 0x5402 && pl[1] == 1 && get64(pl + 4) == 16 &&
+	      ld1->memory_size == 4ULL << 30,
+	      "POST on LD 1: %d, %04xh Range 1 %" PRIu64 ", LD 1 %" PRIu64 " MiB", rc, op,
+	      get64(pl + 4), ld1->memory_size >> 20);
+	CHECK(ld_chunks(domain, 1, &n1) == 4ULL << 30 && domain->remaining == 6ULL << 30,
+	      "LD 1's chunks %" PRIu64 " MiB, %" PRIu64 " MiB left",
+	      ld_chunks(domain, 1, &n1) >> 20, domain->remaining >> 20);
+	json_decref(resp);
+	resp = NULL;
+
+	/* LD 0 taken by another FM: its chunk is gone, and nothing is set */
+	snprintf(c0, sizeof(c0), "%s_ld0_chunk", id);
+	answer_get_ld(ep, 0, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, c0);
+	CHECK(rc == -1 && last_opcode(ep) == 0x5401 && ld0->memory_size == 0 &&
+	      ld_chunks(domain, 0, &n0) == 0 && domain->remaining == 8ULL << 30,
+	      "DELETE of %s once LD 0 has nothing: %d, last %04xh", c0, rc,
+	      last_opcode(ep));
+
+	/* and the read fails: refused, nothing set, nothing changed */
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && !resp && last_opcode(ep) == 0x5401 &&
+	      ld1->memory_size == 4ULL << 30 && domain->remaining == 8ULL << 30,
+	      "POST when Get LD Allocations fails: %d, last %04xh", rc, last_opcode(ep));
+	fmd_ctx_free(ctx);
+
+	/*
+	 * 3 LDs of 1 GiB, of 4 GiB, laid out LD 2, LD 1, LD 0: LD 1 loses
+	 * its 1 GiB and LD 0 gains 2 GiB, which no free range is as large
+	 * as: two chunks, in the 1 GiB LD 1 left and the 1 GiB at the end.
+	 */
+	ctx = new_ctx();
+	ep = new_mld_sized(ctx, 0xf63, 3, 0, 4, 4ULL << 30);
+	fmd_discover(ctx);
+	domain = dev_domain(ctx, 0xf63, &chunks);
+	CHECK(domain && chunks == 3, "no domain of 3 chunks");
+	if (!domain)
+		goto out;
+	answer_ld_info(ep, 4ULL << 30, 3);
+	answer_lds(ep, 3, (const uint64_t[]){ 12, 0, 4 });
+	fmd_rescan(ctx);
+	CHECK(ld_chunks(domain, 0, &n0) == 3ULL << 30 && n0 == 3 &&
+	      ld_chunks(domain, 1, &n1) == 0 && domain->remaining == 0,
+	      "LD 0 in %d chunks of %" PRIu64 " MiB, %" PRIu64 " MiB left", n0,
+	      ld_chunks(domain, 0, &n0) >> 20, domain->remaining >> 20);
+out:
+	fmd_ctx_free(ctx);
+	report("allocations others made are read again", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -7110,6 +7264,7 @@ int main(void)
 	test_mhd_chunk_delete();
 	test_mld_chunk_delete_partial();
 	test_pool_capacity();
+	test_ld_alloc_refresh();
 	test_force_unbind();
 	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();

@@ -672,6 +672,7 @@ struct fmd_ld {
 
 	/* From Get LD Allocations (5401h) */
 	uint64_t memory_size;
+	uint64_t alloc_range2;               /* Range 2 Allocation Multiplier */
 	uint64_t range_start;
 	uint64_t range_length;
 
@@ -1741,6 +1742,18 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld);
 int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd);
 
 /*
+ * Make the domain of MLD or Multi-Headed device @dev what its LDs and
+ * Memory Size now are: made if it has none and there is capacity, its
+ * capacity and what is left recomputed (see fmd_create_mld_memory_resources()),
+ * and the chunks of each LD made to add up to the LD's allocation. What an
+ * LD gained is a chunk of its own, {dev}_ld{N}_chunk if no component has
+ * that Id, placed first fit (in as many pieces as the free ranges it takes,
+ * if it fits in none); what it lost comes off its chunks, the newest
+ * first, and a chunk left with nothing goes. Returns 0 or an error.
+ */
+int fmd_ld_domain_sync(struct fmd_ctx *ctx, struct fmd_component *dev);
+
+/*
  * CCI Tunneling
  * Every component has a pointer to the endpoint it is reached through
  * (comp->ep), inherited from the component that was discovered on that
@@ -2036,6 +2049,41 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id);
  */
 int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 			      uint8_t ld_id, uint64_t size_bytes);
+
+/*
+ * Allocations of the LDs of an MLD or Multi-Headed device @dev made or
+ * changed by others than cxl-fmd: the specification has no notification
+ * of them, so they are read again. On hardware (in a mock each does
+ * nothing and returns 0):
+ *
+ * fmd_ld_alloc_refresh() sends Get LD Info (5400h) for the Memory Size,
+ * kept if it does not answer, and Get LD Allocations (5401h) for every LD,
+ * then fmd_ld_domain_sync(). From fmd_rescan().
+ *
+ * fmd_ld_alloc_refresh_ld() sends Get LD Allocations for @ld alone, then
+ * fmd_ld_domain_sync(): before a chunk of @ld is made or deleted.
+ *
+ * Each returns 0, -EOPNOTSUPP if no LD Pool CCI of a Multi-Headed device
+ * is known (nothing sent), or -EIO if the allocations could not be read,
+ * in which case nothing is changed.
+ */
+int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev);
+int fmd_ld_alloc_refresh_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
+			    struct fmd_ld *ld);
+
+/*
+ * Set LD Allocations (5402h) for @ld of @dev to have @size_bytes, of the
+ * Memory Granularity and Range 2 fmd_ld_alloc_refresh_ld() last read:
+ * Range 2 is kept and Range 1 takes the rest. @ld is sized from the
+ * response, which "reflect[s] the state of the LD allocations after the
+ * command is processed" (CXL r4.0 Section 7.6.7.4.3). The chunks are not
+ * changed. In a mock, @ld is given @size_bytes and nothing is sent.
+ * Returns 0, -EINVAL if @size_bytes is not a whole number of granules or
+ * is less than Range 2 (nothing sent), -EOPNOTSUPP if no LD Pool CCI is
+ * known, or -EIO if the command failed or its response is not for @ld.
+ */
+int fmd_ld_alloc_set(struct fmd_ctx *ctx, struct fmd_component *dev,
+		     struct fmd_ld *ld, uint64_t size_bytes);
 
 /*
  * The route to the LD Pool CCI of @mhd: *@ep, through *@ti. Returns 0, or

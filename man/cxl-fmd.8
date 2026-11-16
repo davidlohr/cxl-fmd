@@ -197,6 +197,15 @@ seconds the switches are read again in full and new endpoints are looked for,
 including any that was not ready before.
 A binding made elsewhere that the switch logged nothing for is seen then.
 .IP \(bu 2
+Every
+.B \-\-rescan
+seconds the memory size and LD allocations of each multi-logical and
+multi-headed device found before are read again, and its memory domain and
+chunks made what they say: an allocation made or changed elsewhere is seen
+then.
+The allocation of an LD is also read before each memory chunk of it is made
+or deleted.
+.IP \(bu 2
 The Dynamic Capacity event log of each dynamic capacity device is read, and
 the extents of the hosts it names are brought up to date.
 .PP

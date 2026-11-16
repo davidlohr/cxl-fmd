@@ -4392,22 +4392,20 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
  * choice: the specification does not say whether Set LD Allocations or
  * Set Partition Info may be used on an LD or an SLD that is bound). The
  * Connection that exposes @chunk is a vPPB binding, not Absent, whose
- * chunks (fmd_conn_for_each_chunk()) include it. A direct-attached
- * Connection is none: it has no binding to undo, cannot be deleted, and
- * would keep the device's memory from ever being changed. The exception
- * is a pool LD of a Multi-Headed device, which any Connection of its head
- * holds (see chunk_connected()).
+ * chunks (fmd_conn_for_each_chunk()) would include it: one of the device,
+ * of every chunk's LD for an SLD, or of the chunk's LD. The chunk need not
+ * be there yet: a POST is refused before anything is made or sent. A
+ * direct-attached Connection is none: it has no binding to undo, cannot
+ * be deleted, and would keep the device's memory from ever being changed.
+ * The exception is a pool LD of a Multi-Headed device, which any
+ * Connection of its head holds (see ld_connected()).
  */
 struct chunk_user {
-	const struct fmd_mem_chunk *chunk;
+	const struct fmd_component *dev;
+	const struct fmd_ld *ld;	/* none for an SLD, or a chunk of no LD */
 	const struct fmd_head *head;	/* of the chunk's pool LD, if any */
 	char id[FMD_CONN_ID_LEN];
 };
-
-static int chunk_is(const struct fmd_mem_chunk *chunk, void *arg)
-{
-	return chunk == ((struct chunk_user *)arg)->chunk;
-}
 
 static int chunk_user_conn(const struct fmd_conn_view *v, void *arg)
 {
@@ -4415,15 +4413,18 @@ static int chunk_user_conn(const struct fmd_conn_view *v, void *arg)
 
 	if (v->state == FMD_CONN_ABSENT)
 		return 0;
+	/* fmd_conn_for_each_chunk(): a head on a switch reaches no chunk */
 	if (!(u->head && v->head == u->head) &&
-	    (v->kind != FMD_CONN_SWITCH || fmd_conn_for_each_chunk(v, chunk_is, u) != 1))
+	    (v->kind != FMD_CONN_SWITCH || !v->target || v->device != u->dev ||
+	     v->target->type == FMD_COMPONENT_HEAD || (v->ld && v->ld != u->ld)))
 		return 0;
 	snprintf(u->id, sizeof(u->id), "%s", v->id);
 	return 1;
 }
 
 /*
- * Whether a Connection exposes @chunk, logged with its ID if one does.
+ * Whether a Connection exposes the chunks of @ld of @dev (NULL: of an SLD,
+ * or of no LD), logged as refusing @what if one does.
  *
  * A pool LD of a Multi-Headed device is exposed by any Connection of the
  * head the LD Map maps it to (Table 7-61), direct-attached ones included,
@@ -4433,25 +4434,33 @@ static int chunk_user_conn(const struct fmd_conn_view *v, void *arg)
  * pool LD of a head that has a host or a binding is taken to be in use
  * (cxl-fmd's choice).
  */
-static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chunk)
+static bool ld_connected(struct fmd_ctx *ctx, const struct fmd_component *dev,
+			 const struct fmd_ld *ld, const char *what)
 {
-	struct chunk_user u = { .chunk = chunk };
-	const struct fmd_component *dev;
+	struct chunk_user u = { .dev = dev, .ld = ld };
 	int rc;
 
 	fmd_topology_rdlock(&ctx->topology);
-	dev = chunk->base.parent ? chunk->base.parent->parent : NULL;
-	if (dev && dev->type == FMD_COMPONENT_MHD) {
-		const struct fmd_ld *ld = fmd_chunk_ld(dev, chunk);
-
-		u.head = ld ? fmd_ld_head(ld) : NULL;
-	}
+	if (dev->type == FMD_COMPONENT_MHD && ld)
+		u.head = fmd_ld_head(ld);
 	rc = fmd_conn_for_each(ctx, chunk_user_conn, &u);
 	fmd_topology_rdunlock(&ctx->topology);
 	if (rc == 1)
-		fmd_warn(ctx, "chunk %s is exposed by Connection %s: refused",
-			 chunk->base.id, u.id);
+		fmd_warn(ctx, "%s is exposed by Connection %s: refused", what, u.id);
 	return rc == 1;
+}
+
+/* Whether a Connection exposes @chunk: see ld_connected() */
+static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chunk)
+{
+	const struct fmd_component *dev = chunk->base.parent ?
+					  chunk->base.parent->parent : NULL;
+	char what[FMD_MAX_ID_LEN + 8];
+
+	if (!dev)
+		return false;
+	snprintf(what, sizeof(what), "chunk %s", chunk->base.id);
+	return ld_connected(ctx, dev, fmd_chunk_ld(dev, chunk), what);
 }
 
 /*
@@ -4755,6 +4764,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	struct fmd_component *chassis;
 	struct fmd_mem_domain *domain = NULL;
 	struct fmd_mem_chunk *chunk;
+	struct fmd_ld *ld = NULL;	/* the LD an MLD's or MHD's chunk grows */
 	struct chunk_plan plan;
 	json_t *root;
 	json_error_t error;
@@ -4785,6 +4795,43 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	json_decref(root);
 	if (rc)
 		return rc;
+	if (chassis->type != FMD_COMPONENT_SLD)
+		ld = (struct fmd_ld *)fmd_chunk_ld(chassis, &(struct fmd_mem_chunk){
+							  .backing_ld = plan.ld });
+
+	/*
+	 * A chunk of an LD a vPPB has bound changes the LD's allocation
+	 * (5402h), and a Volatile one of a bound SLD its partition (4101h):
+	 * refused while the binding stands, as a DELETE is. Checked on a
+	 * mock too, so that it answers as a device would, and before
+	 * anything is sent.
+	 */
+	if ((chassis->type != FMD_COMPONENT_SLD || !strcmp(plan.type, "Volatile")) &&
+	    ld_connected(ctx, chassis, ld, "a new chunk"))
+		return -7;
+
+	/*
+	 * The LD's allocation as it is now, which others than cxl-fmd may
+	 * have changed (fmd_ld_alloc_refresh_ld()): the domain is made what
+	 * it says before the chunk is checked against what is left, and its
+	 * Range 2 is what Set LD Allocations keeps.
+	 */
+	if (ld) {
+		uint64_t total, gran;
+
+		rc = fmd_ld_alloc_refresh_ld(ctx, chassis, ld);
+		if (rc == -EOPNOTSUPP)
+			return -13;	/* no route to the LD Pool CCI: nothing sent */
+		if (rc)
+			return -5;
+		gran = (uint64_t)(chassis->type == FMD_COMPONENT_MLD ?
+				  fmd_to_mld(chassis)->memory_granularity :
+				  fmd_to_mhd(chassis)->memory_granularity) * CXL_CAPACITY_UNIT;
+		/* 0 if not known, as in parse_chunk_plan() */
+		if (__builtin_add_overflow(ld->memory_size, plan.size, &total) ||
+		    (gran && total % gran))
+			return -6;
+	}
 
 	/*
 	 * A chunk given an offset lies within its domain: AddressRangeOffsetMiB
@@ -4808,18 +4855,6 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		return -4;
 
 	/*
-	 * A chunk of an LD a vPPB has bound changes the LD's allocation
-	 * (5402h), and a Volatile one of a bound SLD its partition (4101h):
-	 * refused while the binding stands, as a DELETE is. Checked on a
-	 * mock too, so that it answers as a device would.
-	 */
-	if ((chassis->type != FMD_COMPONENT_SLD ||
-	     !strcmp(plan.type, "Volatile")) && chunk_connected(ctx, chunk)) {
-		fmd_chunk_remove(&ctx->topology, chunk);
-		return -7;
-	}
-
-	/*
 	 * Issue CCI command for hardware mode.
 	 * For MLD: resize LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
@@ -4829,13 +4864,12 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * partition is not changed.
 	 */
 	{
-		struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(chassis, chunk);
-
 		rc = 0;
-		if (chassis->type == FMD_COMPONENT_MLD) {
-			/* the LD grows by the chunk (checked in parse_chunk_plan()) */
-			rc = fmd_mld_set_ld_allocation(ctx, fmd_to_mld(chassis), ld->ld_id,
-						       ld->memory_size + chunk->size);
+		if (chassis->type == FMD_COMPONENT_MLD ||
+		    chassis->type == FMD_COMPONENT_MHD) {
+			/* the LD grows by the chunk (checked above) */
+			rc = fmd_ld_alloc_set(ctx, chassis, ld,
+					      ld->memory_size + chunk->size);
 		} else if (chassis->type == FMD_COMPONENT_SLD) {
 			/*
 			 * Only volatile chunks change the partition: the total
@@ -4853,10 +4887,6 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				else
 					rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
 			}
-		} else if (chassis->type == FMD_COMPONENT_MHD) {
-			/* a pool index: MHD uses pool-wide LD indices */
-			rc = fmd_mhd_set_ld_allocation(ctx, fmd_to_mhd(chassis), ld->ld_id,
-						       ld->memory_size + chunk->size);
 		}
 
 		if (rc < 0) {
@@ -4901,10 +4931,10 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * built from the chunk's backing_ld.
 	 */
 	{
-		const struct fmd_ld *ld = fmd_chunk_ld(chassis, chunk);
+		const struct fmd_ld *cl = fmd_chunk_ld(chassis, chunk);
 
-		if (ld && !ld_memory_uri(uri, sizeof(uri), chassis, ld) &&
-		    !ld_device_uri(ld_uri, sizeof(ld_uri), chassis, ld)) {
+		if (cl && !ld_memory_uri(uri, sizeof(uri), chassis, cl) &&
+		    !ld_device_uri(ld_uri, sizeof(ld_uri), chassis, cl)) {
 			json_object_set_new(*response, "InterleaveSets",
 				json_pack("[{s:{s:s}, s:i, s:i, s:I}]",
 					  "Memory", "@odata.id", uri,
@@ -4949,12 +4979,7 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
 			 chunk->base.id);
 		return -7;
 	}
-	if (dev->type == FMD_COMPONENT_MLD)
-		rc = fmd_mld_set_ld_allocation(ctx, fmd_to_mld(dev), ld->ld_id,
-					       before - chunk->size);
-	else
-		rc = fmd_mhd_set_ld_allocation(ctx, fmd_to_mhd(dev), ld->ld_id,
-					       before - chunk->size);
+	rc = fmd_ld_alloc_set(ctx, dev, ld, before - chunk->size);
 	if (rc == -EOPNOTSUPP && dev->type == FMD_COMPONENT_MHD)
 		return -6;		/* no LD Pool CCI known: nothing sent */
 	if (rc == -EINVAL || rc == -EOPNOTSUPP)
@@ -5033,6 +5058,24 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 
 		if (domain_parent->type == FMD_COMPONENT_MLD ||
 		    domain_parent->type == FMD_COMPONENT_MHD) {
+			struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(domain_parent, chunk);
+
+			/*
+			 * The LD's allocation as it is now, as for a POST: the
+			 * chunk is what is left of it once the domain is made
+			 * what the LD has (fmd_ld_domain_sync()), and gone if
+			 * nothing is.
+			 */
+			if (ld) {
+				rc = fmd_ld_alloc_refresh_ld(ctx, domain_parent, ld);
+				if (rc == -EOPNOTSUPP)
+					return -6;	/* nothing sent */
+				if (rc)
+					return -3;
+				chunk = fmd_topology_find_chunk(&ctx->topology, chunk_id);
+				if (!chunk)
+					return -1;
+			}
 			rc = chunk_give_back(ctx, domain_parent, chunk);
 			if (rc)
 				return rc;

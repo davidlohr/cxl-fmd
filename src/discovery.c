@@ -1926,13 +1926,37 @@ int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	return sw->base.ep ? discover_switch(ctx, sw) : 0;
 }
 
+/*
+ * The IDs of the MLDs and Multi-Headed devices there are, in *@ids (to be
+ * freed); returns how many, or -1 if there is no memory for them.
+ */
+static int ld_devices(struct fmd_ctx *ctx, char (**ids)[FMD_MAX_ID_LEN])
+{
+	struct fmd_component *comp;
+	int n = 0, max = 0;
+
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MLD)
+		max++;
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MHD)
+		max++;
+	*ids = calloc(max ? max : 1, sizeof(**ids));
+	if (!*ids)
+		return -1;
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MLD)
+		snprintf((*ids)[n++], FMD_MAX_ID_LEN, "%s", comp->id);
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MHD)
+		snprintf((*ids)[n++], FMD_MAX_ID_LEN, "%s", comp->id);
+	return n;
+}
+
 int fmd_rescan(struct fmd_ctx *ctx)
 {
 	struct fmd_component *comp;
 	struct fmd_switch **switches;
+	char (*lds)[FMD_MAX_ID_LEN] = NULL;
 	struct fmd_fabric *root;
 	unsigned int added, removed;
-	int n = 0;
+	int n = 0, nlds;
 
 	if (!ctx || !ctx->cxlmi)
 		return -1;
@@ -1945,7 +1969,10 @@ int fmd_rescan(struct fmd_ctx *ctx)
 	/* the switches there are now: new ones are discovered whole below */
 	switches = calloc(root->switch_count ? root->switch_count : 1,
 			  sizeof(*switches));
-	if (!switches) {
+	/* the MLDs and MHDs there are now: new ones are read whole below */
+	nlds = ld_devices(ctx, &lds);
+	if (!switches || nlds < 0) {
+		free(switches);
 		pthread_rwlock_unlock(&ctx->fabric_lock);
 		return -1;
 	}
@@ -1960,6 +1987,19 @@ int fmd_rescan(struct fmd_ctx *ctx)
 
 	scan_endpoints(ctx);
 	discover_new_endpoints(ctx);
+
+	/*
+	 * Allocations others made, or changed: no notification says so
+	 * (cxl-fmd's reading: the specification defines none for them).
+	 */
+	for (int i = 0; i < nlds; i++) {
+		struct fmd_component *dev = fmd_topology_find(&ctx->topology, lds[i]);
+
+		if (dev && (dev->type == FMD_COMPONENT_MLD ||
+			    dev->type == FMD_COMPONENT_MHD))
+			fmd_ld_alloc_refresh(ctx, dev);
+	}
+	free(lds);
 
 	added = ctx->topology.added - added;
 	removed = ctx->topology.removed - removed;
@@ -2677,61 +2717,246 @@ uint32_t fmd_get_security_state(struct fmd_component *comp, int ld_id)
 
 
 /*
- * Set LD Allocations (5402h) of one LD, on @ep through @ti, for it to have
- * @size_bytes in all.
- *
- * Each LD has two ranges, each "multiplied with Memory Granularity to
- * calculate the memory allocation range in bytes" (Table 7-49), and the
- * request rewrites both. Range 2 is kept as Get LD Allocations (5401h)
- * reads it now, and Range 1 takes the rest: an LD's second range is not
- * folded into its first. @size_bytes must be a multiple of the Memory
- * Granularity, and at least Range 2.
- *
- * "The allocations provided in the response reflect the state of the LD
- * allocations after the command is processed" (Section 7.6.7.4.3): the LD
- * is sized from them.
- *
- * Returns 0, -EINVAL if the LD cannot be given @size_bytes, -EIO if a
- * command failed or its response is not for that LD.
+ * The route Get and Set LD Allocations of MLD or Multi-Headed device @dev
+ * go on: *@ep through *@ti. An MLD's own CCI, through its switch port if it
+ * is on one; a Multi-Headed device's LD Pool CCI (fmd_mhd_pool_route()).
+ * Returns 0, -ENODEV for a mock, whose LDs are changed with nothing sent,
+ * or -EOPNOTSUPP if no LD Pool CCI of the Multi-Headed device is known.
  */
-static int set_ld_allocation(struct fmd_ctx *ctx, const char *name,
-			     struct cxlmi_endpoint *ep,
-			     struct cxlmi_tunnel_info *ti, struct fmd_ld *ld,
-			     uint8_t ld_id, uint64_t size_bytes)
+static int ld_alloc_route(struct fmd_ctx *ctx, struct fmd_component *dev,
+			  struct cxlmi_endpoint **ep, struct cxlmi_tunnel_info **ti,
+			  struct cxlmi_tunnel_info *buf)
 {
-	struct cxlmi_cmd_fmapi_get_ld_allocations_req get_req = {
-		.start_ld_id = ld_id,
-		.ld_allocation_list_limit = 1,
-	};
-	struct cxlmi_cmd_fmapi_get_ld_allocations_rsp *get_rsp;
-	struct cxlmi_cmd_fmapi_set_ld_allocations_req *req;
-	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp;
-	uint64_t granularity, range2, mult;
+	if (dev->type == FMD_COMPONENT_MLD) {
+		struct fmd_mld *mld = fmd_to_mld(dev);
+
+		if (!mld->base.ep)
+			return -ENODEV;
+		*ep = mld->base.ep;
+		*ti = CXLMI_NO_TUNNEL;
+		if (mld->switch_port >= 0) {
+			/* CXLMI_TUNNEL_SWITCH() is a compound literal of this block */
+			*buf = *CXLMI_TUNNEL_SWITCH(mld->switch_port);
+			*ti = buf;
+		}
+		return 0;
+	}
+	if (unlikely(fmd_is_mock(ctx)))
+		return -ENODEV;
+	return fmd_mhd_pool_route(fmd_to_mhd(dev), ep, ti);
+}
+
+/* The Memory Granularity of @dev in bytes, as last read; 0 if not read */
+static uint64_t ld_alloc_granularity(const struct fmd_component *dev)
+{
+	uint8_t units = dev->type == FMD_COMPONENT_MLD ?
+			fmd_to_mld((struct fmd_component *)dev)->memory_granularity :
+			fmd_to_mhd((struct fmd_component *)dev)->memory_granularity;
+
+	return (uint64_t)units * CXL_CAPACITY_UNIT;
+}
+
+static void ld_alloc_set_granularity(struct fmd_component *dev, uint8_t code)
+{
+	/* Memory Granularity: 0h = 256 MB, 1h = 512 MB, 2h = 1 GB */
+	if (dev->type == FMD_COMPONENT_MLD)
+		fmd_to_mld(dev)->memory_granularity = 1 << code;
+	else
+		fmd_to_mhd(dev)->memory_granularity = 1 << code;
+}
+
+/*
+ * Get LD Allocations (5401h) for LDs @start to @start + @count - 1 of @dev,
+ * on @ep through @ti, as many at a time as fit a response: the size of
+ * each in @bytes, its Range 2 Allocation Multiplier in @range2, and the
+ * Memory Granularity code in *@code. Each multiplier "is multiplied with
+ * Memory Granularity to calculate the memory allocation range in bytes"
+ * (CXL r4.0 Table 7-49).
+ *
+ * Returns the number of LDs read, from @start on, which the device may
+ * answer fewer of than asked (it returns min(limit, LDs enabled)), or -EIO
+ * if not even the first could be: a failed command, a response for other
+ * LDs than asked, a reserved granularity, a change of granularity between
+ * pages, or a size past 64 bits.
+ */
+static int get_ld_allocations(struct fmd_ctx *ctx, struct fmd_component *dev,
+			      struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
+			      uint8_t start, unsigned int count, uint64_t *bytes,
+			      uint64_t *range2, uint8_t *code)
+{
+	struct cxlmi_cmd_fmapi_get_ld_allocations_req req;
+	struct cxlmi_cmd_fmapi_get_ld_allocations_rsp *rsp;
+	unsigned int got = 0;
 	int rc;
 
-	get_rsp = calloc(1, sizeof(*get_rsp) +
-			 FMD_CCI_LIST_MAX * sizeof(get_rsp->ld_allocation_list[0]));
-	if (!get_rsp)
+	rsp = calloc(1, sizeof(*rsp) +
+		     FMD_CCI_LIST_MAX * sizeof(rsp->ld_allocation_list[0]));
+	if (!rsp)
 		return -ENOMEM;
-	rc = cxlmi_cmd_fmapi_get_ld_allocations(ep, ti, &get_req, get_rsp);
-	if (rc || get_rsp->ld_allocation_list_len < 1 ||
-	    get_rsp->start_ld_id != ld_id || get_rsp->memory_granularity > 2) {
-		fmd_warn(ctx, "%s: cannot read LD %d allocation: %d", name,
-			 ld_id, rc);
-		free(get_rsp);
-		return -EIO;
-	}
-	/* Memory Granularity: 0h = 256 MB, 1h = 512 MB, 2h = 1 GB */
-	granularity = (uint64_t)CXL_CAPACITY_UNIT << get_rsp->memory_granularity;
-	range2 = get_rsp->ld_allocation_list[0].range_2_allocation_mult;
-	free(get_rsp);
 
-	mult = size_bytes / granularity;
-	if (size_bytes % granularity || mult < range2) {
-		fmd_warn(ctx, "%s: LD %d cannot have %" PRIu64 " MB: granularity %"
-			 PRIu64 " MB, Range 2 %" PRIu64 " MB", name, ld_id,
-			 size_bytes >> 20, granularity >> 20,
-			 (range2 * granularity) >> 20);
+	while (got < count) {
+		unsigned int want = fmd_cci_list_fit(dev, 4, 16, count - got);
+
+		req.start_ld_id = start + got;
+		req.ld_allocation_list_limit = want;
+		memset(rsp, 0, sizeof(*rsp) +
+		       FMD_CCI_LIST_MAX * sizeof(rsp->ld_allocation_list[0]));
+		rc = cxlmi_cmd_fmapi_get_ld_allocations(ep, ti, &req, rsp);
+		if (rc || rsp->start_ld_id != req.start_ld_id ||
+		    rsp->memory_granularity > 2 ||
+		    (got && rsp->memory_granularity != *code)) {
+			fmd_warn(ctx, "%s: cannot read the allocation of LD %u: %d",
+				 dev->id, req.start_ld_id, rc);
+			break;
+		}
+		*code = rsp->memory_granularity;
+		FMD_CCI_LIST_CLAMP(rsp->ld_allocation_list_len, want);
+		if (rsp->ld_allocation_list_len == 0)
+			break;
+		for (int i = 0; i < rsp->ld_allocation_list_len; i++) {
+			struct cxlmi_cmd_fmapi_ld_allocations_list *a =
+				&rsp->ld_allocation_list[i];
+			uint64_t units;
+
+			if (__builtin_add_overflow(a->range_1_allocation_mult,
+						   a->range_2_allocation_mult, &units) ||
+			    __builtin_mul_overflow(units, (uint64_t)CXL_CAPACITY_UNIT << *code,
+						   &bytes[got])) {
+				fmd_warn(ctx, "%s: LD %u allocation does not fit in 64 bits",
+					 dev->id, start + got);
+				goto out;
+			}
+			range2[got++] = a->range_2_allocation_mult;
+		}
+	}
+out:
+	free(rsp);
+	return got ? (int)got : -EIO;
+}
+
+/* the LD of @dev whose LD-ID (pool index of a Multi-Headed device) is @id */
+static struct fmd_ld *dev_ld(struct fmd_component *dev, unsigned int id)
+{
+	struct fmd_component *child;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
+		if (fmd_to_ld(child)->ld_id == id)
+			return fmd_to_ld(child);
+	return NULL;
+}
+
+int fmd_ld_alloc_refresh_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
+			    struct fmd_ld *ld)
+{
+	struct cxlmi_tunnel_info *ti, ti_buf;
+	struct cxlmi_endpoint *ep;
+	uint64_t bytes, range2;
+	uint8_t code = 0;
+	int rc;
+
+	rc = ld_alloc_route(ctx, dev, &ep, &ti, &ti_buf);
+	if (rc == -ENODEV)
+		return 0;		/* a mock's LDs are what it says */
+	if (rc)
+		return rc;
+	rc = get_ld_allocations(ctx, dev, ep, ti, ld->ld_id, 1, &bytes, &range2, &code);
+	if (rc < 0)
+		return rc;
+
+	ld_alloc_set_granularity(dev, code);
+	ld->alloc_range2 = range2;
+	if (ld->memory_size != bytes)
+		fmd_info(ctx, "%s: LD %u has %" PRIu64 " MB allocated, not %" PRIu64
+			 " MB", dev->id, ld->ld_id, bytes >> 20, ld->memory_size >> 20);
+	ld->memory_size = bytes;
+	return fmd_ld_domain_sync(ctx, dev);
+}
+
+int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct cxlmi_cmd_fmapi_get_ld_info_rsp ld_info = { 0 };
+	uint64_t bytes[FMD_MAX_LD_POOL], range2[FMD_MAX_LD_POOL];
+	struct cxlmi_tunnel_info *ti, ti_buf;
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *child;
+	unsigned int count = 0;
+	uint8_t code = 0;
+	int rc, got;
+
+	rc = ld_alloc_route(ctx, dev, &ep, &ti, &ti_buf);
+	if (rc == -ENODEV)
+		return 0;
+	if (rc)
+		return rc;
+
+	/* Memory Size, as discovery reads it: kept if it cannot be read */
+	if (!cxlmi_cmd_fmapi_get_ld_info(ep, ti, &ld_info) && ld_info.memory_size) {
+		if (dev->type == FMD_COMPONENT_MLD) {
+			fmd_to_mld(dev)->pool_capacity = ld_info.memory_size;
+			fmd_to_mld(dev)->pool_capacity_valid = true;
+		} else {
+			fmd_to_mhd(dev)->pool_capacity = ld_info.memory_size;
+			fmd_to_mhd(dev)->pool_capacity_valid = true;
+		}
+	}
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
+		if (fmd_to_ld(child)->ld_id >= count)
+			count = fmd_to_ld(child)->ld_id + 1;
+	if (!count)
+		return 0;
+	if (count > FMD_MAX_LD_POOL)
+		count = FMD_MAX_LD_POOL;
+
+	got = get_ld_allocations(ctx, dev, ep, ti, 0, count, bytes, range2, &code);
+	if (got < 0)
+		return got;	/* nothing changed */
+
+	ld_alloc_set_granularity(dev, code);
+	for (int i = 0; i < got; i++) {
+		struct fmd_ld *ld = dev_ld(dev, i);
+
+		if (!ld)
+			continue;
+		if (ld->memory_size != bytes[i])
+			fmd_info(ctx, "%s: LD %d has %" PRIu64 " MB allocated, not %"
+				 PRIu64 " MB", dev->id, i, bytes[i] >> 20,
+				 ld->memory_size >> 20);
+		ld->memory_size = bytes[i];
+		ld->alloc_range2 = range2[i];
+	}
+	return fmd_ld_domain_sync(ctx, dev);
+}
+
+int fmd_ld_alloc_set(struct fmd_ctx *ctx, struct fmd_component *dev,
+		     struct fmd_ld *ld, uint64_t size_bytes)
+{
+	struct cxlmi_cmd_fmapi_set_ld_allocations_req *req;
+	struct cxlmi_cmd_fmapi_set_ld_allocations_rsp *rsp;
+	struct cxlmi_tunnel_info *ti, ti_buf;
+	struct cxlmi_endpoint *ep;
+	uint64_t granularity, mult;
+	int rc;
+
+	rc = ld_alloc_route(ctx, dev, &ep, &ti, &ti_buf);
+	if (rc == -ENODEV) {
+		fmd_info(ctx, "%s: mock set LD %u allocation to %" PRIu64 " MB",
+			 dev->id, ld->ld_id, size_bytes >> 20);
+		ld->memory_size = size_bytes;
+		return 0;
+	}
+	if (rc) {
+		fmd_warn(ctx, "%s: no LD Pool CCI known: pool LD %u not changed",
+			 dev->id, ld->ld_id);
+		return rc;
+	}
+
+	granularity = ld_alloc_granularity(dev);
+	mult = granularity ? size_bytes / granularity : 0;
+	if (!granularity || size_bytes % granularity || mult < ld->alloc_range2) {
+		fmd_warn(ctx, "%s: LD %u cannot have %" PRIu64 " MB: granularity %"
+			 PRIu64 " MB, Range 2 %" PRIu64 " units", dev->id, ld->ld_id,
+			 size_bytes >> 20, granularity >> 20, ld->alloc_range2);
 		return -EINVAL;
 	}
 
@@ -2744,78 +2969,78 @@ static int set_ld_allocation(struct fmd_ctx *ctx, const char *name,
 		return -ENOMEM;
 	}
 	req->number_ld = 1;
-	req->start_ld_id = ld_id;
-	req->ld_allocation_list[0].range_1_allocation_mult = mult - range2;
-	req->ld_allocation_list[0].range_2_allocation_mult = range2;
+	req->start_ld_id = ld->ld_id;
+	req->ld_allocation_list[0].range_1_allocation_mult = mult - ld->alloc_range2;
+	req->ld_allocation_list[0].range_2_allocation_mult = ld->alloc_range2;
 
 	rc = cxlmi_cmd_fmapi_set_ld_allocations(ep, ti, req, rsp);
 	free(req);
-	if (rc != 0 || rsp->number_ld < 1 || rsp->start_ld_id != ld_id) {
-		fmd_warn(ctx, "%s: set LD %d allocation failed: %d", name,
-			 ld_id, rc);
+	if (rc != 0 || rsp->number_ld < 1 || rsp->start_ld_id != ld->ld_id) {
+		fmd_warn(ctx, "%s: set LD %u allocation failed: %d", dev->id,
+			 ld->ld_id, rc);
 		free(rsp);
 		return -EIO;
 	}
 
-	ld->memory_size = (rsp->ld_allocation_list[0].range_1_allocation_mult +
-			   rsp->ld_allocation_list[0].range_2_allocation_mult) *
-			  granularity;
-	fmd_info(ctx, "%s: LD %d allocation set to %" PRIu64 " MB", name, ld_id,
-		 ld->memory_size >> 20);
+	if (__builtin_add_overflow(rsp->ld_allocation_list[0].range_1_allocation_mult,
+				   rsp->ld_allocation_list[0].range_2_allocation_mult, &mult) ||
+	    __builtin_mul_overflow(mult, granularity, &mult)) {
+		fmd_warn(ctx, "%s: set LD %u allocation: a response past 64 bits",
+			 dev->id, ld->ld_id);
+		free(rsp);
+		return -EIO;
+	}
+	ld->memory_size = mult;
+	ld->alloc_range2 = rsp->ld_allocation_list[0].range_2_allocation_mult;
+	fmd_info(ctx, "%s: LD %u allocation set to %" PRIu64 " MB", dev->id,
+		 ld->ld_id, ld->memory_size >> 20);
 	free(rsp);
 	return 0;
+}
+
+/*
+ * Get LD Allocations for the LD, then Set LD Allocations: see
+ * fmd_ld_alloc_refresh_ld() and fmd_ld_alloc_set().
+ */
+static int read_and_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_component *dev,
+				      uint8_t ld_id, uint64_t size_bytes)
+{
+	struct fmd_ld *ld = dev_ld(dev, ld_id);
+	int rc;
+
+	if (!ld) {
+		fmd_warn(ctx, "%s: LD %d not found", dev->id, ld_id);
+		return -1;
+	}
+	if (dev->type == FMD_COMPONENT_MHD && likely(!fmd_is_mock(ctx))) {
+		struct cxlmi_endpoint *ep;
+		struct cxlmi_tunnel_info *ti;
+
+		if (fmd_mhd_pool_route(fmd_to_mhd(dev), &ep, &ti)) {
+			fmd_warn(ctx, "%s: no LD Pool CCI known: pool LD %d not changed",
+				 dev->id, ld_id);
+			return -EOPNOTSUPP;
+		}
+	}
+	rc = fmd_ld_alloc_refresh_ld(ctx, dev, ld);
+	if (rc)
+		return rc;
+	return fmd_ld_alloc_set(ctx, dev, ld, size_bytes);
 }
 
 /*
  * Set LD allocation for an MLD via CCI Set LD Allocations (5402h)
  *
  * For mock mode, updates local state only.
- * For hardware mode, see set_ld_allocation(): Range 2 is kept, and
- * @size_bytes must be a multiple of the Memory Granularity.
+ * For hardware mode, Get LD Allocations first, for its Range 2 and the
+ * Memory Granularity: see fmd_ld_alloc_set().
  */
 int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 			      uint8_t ld_id, uint64_t size_bytes)
 {
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	struct fmd_ld *ld = NULL;
-	struct fmd_component *child;
-
 	if (!ctx || !mld)
 		return -1;
-
-	/* Find the target LD */
-	fmd_for_each_child(&mld->base, child) {
-		if (child->type == FMD_COMPONENT_LD) {
-			struct fmd_ld *candidate = fmd_to_ld(child);
-			if (candidate->ld_id == ld_id) {
-				ld = candidate;
-				break;
-			}
-		}
-	}
-
-	if (!ld) {
-		fmd_warn(ctx, "%s: LD %d not found", mld->base.id, ld_id);
-		return -1;
-	}
-
-	/* Mock mode: update local state only */
-	ep = mld->base.ep;
-	if (!ep) {
-		fmd_info(ctx, "%s: mock set LD %d allocation to %lu MB",
-			 mld->base.id, ld_id,
-			 (unsigned long)(size_bytes / (1024 * 1024)));
-		ld->memory_size = size_bytes;
-		return 0;
-	}
-
-	/* Hardware mode: issue CCI command */
-	ti = (mld->switch_port < 0)
-		? CXLMI_NO_TUNNEL
-		: CXLMI_TUNNEL_SWITCH(mld->switch_port);
-
-	return set_ld_allocation(ctx, mld->base.id, ep, ti, ld, ld_id, size_bytes);
+	return read_and_set_ld_allocation(ctx, &mld->base, ld_id, size_bytes);
 }
 
 
@@ -2852,46 +3077,9 @@ int fmd_mhd_pool_route(const struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
 int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 			      uint8_t pool_ld_id, uint64_t size_bytes)
 {
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info *ti;
-	struct fmd_ld *ld = NULL;
-	struct fmd_component *child;
-
 	if (!ctx || !mhd)
 		return -1;
-
-	/* Find the target LD in the pool */
-	fmd_for_each_child(&mhd->base, child) {
-		if (child->type == FMD_COMPONENT_LD) {
-			struct fmd_ld *candidate = fmd_to_ld(child);
-			if (candidate->ld_id == pool_ld_id) {
-				ld = candidate;
-				break;
-			}
-		}
-	}
-
-	if (!ld) {
-		fmd_warn(ctx, "%s: pool LD %d not found", mhd->base.id, pool_ld_id);
-		return -1;
-	}
-
-	/* Mock mode: update local state only */
-	if (unlikely(fmd_is_mock(ctx))) {
-		fmd_info(ctx, "%s: mock set pool LD %d allocation to %lu MB",
-			 mhd->base.id, pool_ld_id,
-			 (unsigned long)(size_bytes / (1024 * 1024)));
-		ld->memory_size = size_bytes;
-		return 0;
-	}
-
-	if (fmd_mhd_pool_route(mhd, &ep, &ti)) {
-		fmd_warn(ctx, "%s: no LD Pool CCI known: pool LD %d not changed",
-			 mhd->base.id, pool_ld_id);
-		return -EOPNOTSUPP;
-	}
-	return set_ld_allocation(ctx, mhd->base.id, ep, ti, ld, pool_ld_id,
-				 size_bytes);
+	return read_and_set_ld_allocation(ctx, &mhd->base, pool_ld_id, size_bytes);
 }
 
 
