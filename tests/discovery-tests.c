@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <sys/socket.h>
 #include <linux/mctp.h>
@@ -4665,6 +4666,114 @@ static void test_validate_usp_id(void)
 	report("USP ID of a Downstream ES VCS and of a disabled VCS", before);
 }
 
+/* fmd_topology_validate(), with what it logs at warning level and above in @buf */
+static int validate_logged(struct fmd_ctx *ctx, char *buf, size_t len)
+{
+	enum fmd_log_level level = ctx->log_level;
+	FILE *tmp = tmpfile();
+	int saved, invalid;
+	size_t n;
+
+	if (!tmp) {
+		printf("FAIL  cannot make a temporary file\n");
+		exit(1);
+	}
+	fflush(stderr);
+	saved = dup(STDERR_FILENO);
+	dup2(fileno(tmp), STDERR_FILENO);
+	ctx->log_level = FMD_LOG_WARN;
+	invalid = fmd_topology_validate(ctx);
+	ctx->log_level = level;
+	fflush(stderr);
+	dup2(saved, STDERR_FILENO);
+	close(saved);
+	rewind(tmp);
+	n = fread(buf, 1, len - 1, tmp);
+	buf[n] = '\0';
+	fclose(tmp);
+	return invalid;
+}
+
+/*
+ * The validator's rules on bindings a real switch may report, which the mock
+ * loader cannot load: a vPPB bound to an LD of a head of a Multi-Headed
+ * device that presents an MLD is valid, and warned of: "The MH-MLD maps the
+ * LD-IDs received at a head to the device-wide LD index in the MH-MLD's LD
+ * pool" (CXL r4.0 Section 2.5.1) by no rule the FM is told, so its
+ * Connection is unresolved. vPPB 0 of an enabled VCS bound to anything but
+ * its USP is refused (vPPB Ordering, Section 7.1.4, as cxl-fmd reads it).
+ */
+static void test_validate_bindings(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct fmd_switch *sw = fmd_switch_create("sw_vb");
+	struct fmd_port *p4;
+	struct fmd_mhd *mhd;
+	struct fmd_head *h0, *h1;
+	struct fmd_ld *ld;
+	char id[FMD_MAX_ID_LEN], log[8192];
+	int before = failures, invalid;
+
+	fmd_topology_add(&ctx->topology, &sw->base, NULL);
+	add_port(ctx, sw, 0, FMD_PORT_USP);
+	p4 = add_port(ctx, sw, 4, FMD_PORT_DSP);
+	p4->conn_dev_type = FMD_CONN_MLD;
+	p4->supported_ld_count = 1;
+
+	mhd = fmd_mhd_create("mhd_vb");
+	mhd->num_heads = 2;
+	mhd->total_lds = 3;
+	fmd_topology_add(&ctx->topology, &mhd->base, NULL);
+	h0 = fmd_head_create("mhd_vb_head0", 0);
+	h0->presentation = FMD_HEAD_MLD;
+	h0->port = p4;
+	p4->head = h0;
+	h1 = fmd_head_create("mhd_vb_head1", 1);
+	h1->presentation = FMD_HEAD_SLD;
+	snprintf(h1->attached_host_id, sizeof(h1->attached_host_id), "elsewhere");
+	fmd_topology_add(&ctx->topology, &h0->base, &mhd->base);
+	fmd_topology_add(&ctx->topology, &h1->base, &mhd->base);
+	for (int i = 0; i < 3; i++) {
+		snprintf(id, sizeof(id), "mhd_vb_ld%d", i);
+		ld = fmd_ld_create(id, i);
+		ld->binding_point_id = i < 2 ? 0 : 1;
+		fmd_topology_add(&ctx->topology, &ld->base, &mhd->base);
+	}
+
+	sw->num_vcs = 1;
+	sw->vcs[0].vcs_id = 0;
+	sw->vcs[0].state = 0x01;
+	sw->vcs[0].upstream_port_id = 0;
+	sw->vcs[0].num_vppbs = 2;
+	sw->vcs[0].vppbs[0] = (struct fmd_vppb){ .vppb_id = 0,
+		.binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 0, .bound_ld_id = 0xff };
+	sw->vcs[0].vppbs[1] = (struct fmd_vppb){ .vppb_id = 1,
+		.binding_status = FMD_VPPB_BOUND_LD,
+		.bound_port_id = 4, .bound_ld_id = 1 };
+
+	invalid = validate_logged(ctx, log, sizeof(log));
+	CHECK(invalid == 0 && strstr(log, "doubtful topology: sw_vb: vPPB 1 of VCS 0 "
+				     "is bound to LD 1 of head 0 of mhd_vb, which "
+				     "presents an MLD"),
+	      "an LD of a head that presents an MLD: %d rule(s) broken\n%s",
+	      invalid, log);
+
+	/* vPPB 0 is the USP vPPB: bound to the LD instead, it is refused */
+	sw->vcs[0].vppbs[0] = sw->vcs[0].vppbs[1];
+	sw->vcs[0].vppbs[0].vppb_id = 0;
+	sw->vcs[0].vppbs[1] = (struct fmd_vppb){ .vppb_id = 1,
+		.binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 0, .bound_ld_id = 0xff };
+	invalid = validate_logged(ctx, log, sizeof(log));
+	CHECK(invalid == 1 && strstr(log, "vPPB 0 of VCS 0, the USP vPPB, is bound "
+				     "to port 4 by LD, not to its USP 0"),
+	      "vPPB 0 bound to an LD: %d rule(s) broken\n%s", invalid, log);
+
+	fmd_ctx_free(ctx);
+	report("validator rules on a head that presents an MLD and on vPPB 0", before);
+}
+
 /*
  * Bound LD ID: "Valid only when vPPB[Start vPPB] Binding Status is 03h;
  * otherwise, the value is FFh" (Table 7-34). A switch that puts something
@@ -6199,6 +6308,7 @@ int main(void)
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
 	test_force_unbind();
+	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();
 	test_conn_view_skips_vppb0_disabled_nonmemory_pid();
 	test_conn_id_roundtrip_underscored_switch();

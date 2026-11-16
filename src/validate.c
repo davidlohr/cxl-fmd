@@ -488,6 +488,16 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 			invalid(v, rule, "%s: two heads with ID %d", mhd->base.id,
 				head->head_id);
 		have_head[head->head_id] = true;
+
+		/*
+		 * No command maps a head's Port Number (Table 7-64) to a
+		 * switch port or to a host, so a head that is on neither, as
+		 * cxl-fmd knows it, can have no Connection (cxl-fmd limit).
+		 */
+		if (!head->port && !head->attached_host_id[0])
+			doubtful(v, "cxl-fmd limit", "%s: head %d is on no switch "
+				 "port and no host cxl-fmd knows: it has no "
+				 "Connection", mhd->base.id, head->head_id);
 	}
 
 	if (heads < 2)
@@ -705,6 +715,31 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 			    vppb->binding_status != FMD_VPPB_BOUND_LD)
 				continue;
 
+			/*
+			 * "vPPBs within a VCS are ordered in the following
+			 * sequence: the USP vPPB, then the DSP vPPBs" (Section
+			 * 7.1.4): vPPB 0 is the USP's. That a bound vPPB 0 is
+			 * bound to the VCS's own USP, as a whole, is cxl-fmd's
+			 * reading of it. The USP ID is "Valid only when the VCS
+			 * is enabled" (Table 7-34).
+			 */
+			if (vppb->vppb_id == 0 && enabled &&
+			    (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT ||
+			     vppb->bound_port_id != vcs->upstream_port_id))
+				invalid(v, "vPPB Ordering, Section 7.1.4, as cxl-fmd "
+					"reads it", "%s: vPPB 0 of VCS %d, the USP vPPB, "
+					"is bound to port %d%s, not to its USP %d",
+					sw->base.id, vcs->vcs_id, vppb->bound_port_id,
+					vppb->binding_status == FMD_VPPB_BOUND_LD ?
+					" by LD" : "", vcs->upstream_port_id);
+
+			/* a binding that gives no Connection (cxl-fmd's choice) */
+			if (!enabled && vppb->vppb_id != 0)
+				doubtful(v, "cxl-fmd: Connections are of enabled VCSs",
+					 "%s: vPPB %d of VCS %d is bound, and the VCS "
+					 "is not enabled: it gives no Connection",
+					 sw->base.id, vppb->vppb_id, vcs->vcs_id);
+
 			port = switch_port(sw, vppb->bound_port_id);
 			if (!port) {
 				invalid(v, vcs_rule, "%s: vPPB %d of VCS %d is bound to "
@@ -759,6 +794,23 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 						"bound to LD %d of %s, which has no such LD",
 						sw->base.id, vppb->vppb_id, vcs->vcs_id,
 						vppb->bound_ld_id, dev->id);
+				/*
+				 * "The MH-MLD maps the LD-IDs received at a head
+				 * to the device-wide LD index in the MH-MLD's LD
+				 * pool" (Section 2.5.1), by no rule the FM is
+				 * told: the binding reaches no pool LD cxl-fmd
+				 * can name, and its Connection is unresolved.
+				 */
+				else if (port->head &&
+					 port->head->presentation == FMD_HEAD_MLD)
+					doubtful(v, "Section 2.5.1", "%s: vPPB %d of VCS "
+						 "%d is bound to LD %d of head %d of %s, "
+						 "which presents an MLD: which pool LD "
+						 "that is, is not known", sw->base.id,
+						 vppb->vppb_id, vcs->vcs_id,
+						 vppb->bound_ld_id, port->head->head_id,
+						 port->head->base.parent ?
+						 port->head->base.parent->id : "?");
 			}
 
 			/* the same port, or the same LD, bound a second time */

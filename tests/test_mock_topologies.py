@@ -98,6 +98,17 @@ def bound_to_another_vcs_usp(t):
     set_spare_vppb(t, vppb(4, "bound_physical_port", port=0))
 
 
+def port_bound_twice_in_one_vcs(t):
+    set_spare_vppb(t, vppb(4, "bound_physical_port", port=4))
+
+
+# vPPB 0 is "the USP vPPB" (Section 7.1.4): VCS 1's vPPB 0 and vPPB 1 swapped
+def usp_vppb_bound_to_a_dsp(t):
+    vppbs = t["switches"][0]["vcs"][1]["vppbs"]
+    vppbs[0] = vppb(0, "bound_physical_port", port=4)
+    vppbs[1] = vppb(1, "bound_physical_port", port=1)
+
+
 def usp_is_not_upstream(t):
     t["switches"][0]["vcs"][1]["upstream_port_id"] = 2
 
@@ -375,6 +386,10 @@ def host_base_not_256mb(t):
 BROKEN = [
     # (base topology, what to break, part of the message that names the rule)
     ("multi-host-vcs.json", port_bound_twice, "is bound to vPPB"),
+    ("multi-host-vcs.json", port_bound_twice_in_one_vcs,
+     "port 4 is bound to vPPB 1 of VCS 1 and to vPPB 4 of VCS 1"),
+    ("multi-host-vcs.json", usp_vppb_bound_to_a_dsp,
+     "vPPB 0 of VCS 1, the USP vPPB, is bound to port 4, not to its USP 1"),
     ("multi-host-vcs.json", ld_bound_twice, "(same LD) is bound to vPPB"),
     ("multi-host-vcs.json", mld_port_bound_whole, "it is bound by LD"),
     ("multi-host-vcs.json", ld_of_a_port_without_mld, "which has no MLD"),
@@ -555,7 +570,26 @@ def shared_sequence_of_two_lengths(t):
     perhost(t)["extents"][1]["per_host"][1]["len_mb"] = 256
 
 
+# multi-host-vcs.json: VCS 1 disabled, its bindings kept: no Connection
+def bound_vppb_of_a_disabled_vcs(t):
+    t["switches"][0]["vcs"][1]["state"] = 0
+
+
+# A vPPB bound to an LD of a head that presents an MLD is warned of too, but
+# the mock loader does not load such a head on a switch port: discovery-tests
+# test_validate_bindings checks it.
+
+
+# unit/unit-direct-mhsld.json: a head on no host and no switch port
+def head_on_no_port_and_no_host(t):
+    t["devices"][0]["heads"][1].pop("attached_host")
+
+
 DOUBTFUL = [
+    ("multi-host-vcs.json", bound_vppb_of_a_disabled_vcs,
+     "vPPB 1 of VCS 1 is bound, and the VCS is not enabled: it gives no Connection"),
+    ("unit/unit-direct-mhsld.json", head_on_no_port_and_no_host,
+     "mhsld_0: head 1 is on no switch port and no host cxl-fmd knows"),
     ("dcd-shared-perhost.json", sharable_extent_without_a_tag,
      "in Sharable region 2 has no tag"),
     ("dcd-shared-perhost.json", shared_sequence_of_two_lengths,

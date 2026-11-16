@@ -159,7 +159,13 @@ stand between a file and the daemon:
   regions and extents that are not aligned, extents of one host that
   overlap, a Shared Extent Sequence out of place, a tag two hosts hold
   through a region that is not Sharable, two devices with one serial
-  number.
+  number, vPPB 0 of an enabled VCS (the USP vPPB, Section 7.1.4, as
+  cxl-fmd reads it) bound to anything but its USP. Some are only doubtful:
+  logged as a warning, and the topology is still valid. Among them, those
+  that give a binding no Connection, or an unresolved one: a vPPB bound in
+  a VCS that is not enabled, a vPPB bound to an LD of a head that presents
+  an MLD (which pool LD that is, is not known, Section 2.5.1), and a head of
+  a Multi-Headed device on no switch port and no host cxl-fmd knows.
 
 A topology that fails either is refused: the daemon exits instead of serving
 it. To check one without serving it:
