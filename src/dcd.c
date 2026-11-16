@@ -11,10 +11,10 @@
  *   - struct fmd_dcd_info  : device-wide capabilities (5600h)
  *   - struct fmd_dc_region : one host's view of a region (5601h), child of
  *                            the SLD (host 0) or of the LD the host sees
- *   - struct fmd_dc_extent : device-wide extent keyed by DPA (5603h),
- *                            child of the Type 3 device, with a bit per host
- *                            that has been offered it and a bit per host
- *                            whose acceptance is still pending (5608h)
+ *   - struct fmd_dc_extent : one host's extent (5603h), keyed by Host ID
+ *                            and that host's DPA, child of the Type 3
+ *                            device; capacity hosts share is one extent per
+ *                            host with the same Tag
  */
 
 #include <stdio.h>
@@ -39,6 +39,8 @@
 #define EVENT_FLAG_MORE		(1 << 1)
 #define DC_EVENT_MAX_PAGES	16
 #define DC_EVENT_MAX_DEVS	64
+/* Hosts the event drain and the pending state can name, a 64-bit mask */
+#define DC_MASK_HOSTS		64
 
 static const uint8_t dc_event_uuid[0x10] = {
 	0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
@@ -210,7 +212,8 @@ struct fmd_dc_region *fmd_dc_find_region(struct fmd_component *dev, int host_id,
 	return NULL;
 }
 
-struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, uint64_t dpa)
+struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, int host_id,
+					 uint64_t dpa)
 {
 	struct fmd_component *child;
 
@@ -219,24 +222,37 @@ struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, uint64_t dpa
 
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-		if (ext->start_dpa == dpa)
+		if (ext->host_id == host_id && ext->start_dpa == dpa)
 			return ext;
 	}
 	return NULL;
 }
 
-int fmd_dc_region_extent_count(struct fmd_component *dev, struct fmd_dc_region *region)
+unsigned int fmd_dc_host_extent_count(struct fmd_component *dev, int host_id,
+				      uint8_t region_id)
 {
 	struct fmd_component *child;
-	uint64_t bit = fmd_dc_host_bit(region->host_id);
-	int count = 0;
+	unsigned int count = 0;
 
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-		if (ext->region_id == region->region_id && (ext->host_mask & bit))
+		if (ext->host_id == host_id && ext->region_id == region_id)
 			count++;
 	}
 	return count;
+}
+
+void fmd_dcd_info_free(struct fmd_dcd_info *dcd)
+{
+	struct fmd_dc_mock_hold *h, *next;
+
+	if (!dcd)
+		return;
+	for (h = dcd->mock_orphans; h; h = next) {
+		next = h->next;
+		free(h);
+	}
+	free(dcd);
 }
 
 /*
@@ -320,9 +336,11 @@ int fmd_dc_tag_from_str(const char *str, uint8_t tag[FMD_DC_TAG_LEN])
  * ============================================================================
  */
 
-static void extent_id(struct fmd_component *dev, uint64_t dpa, char *buf, size_t len)
+/* "<dev>_h<host>_e<dpa>": at most 32 + 2 + 5 + 2 + 16 characters */
+static void extent_id(struct fmd_component *dev, int host_id, uint64_t dpa,
+		      char *buf, size_t len)
 {
-	snprintf(buf, len, "%.40s_ext_%" PRIx64, dev->id, dpa);
+	snprintf(buf, len, "%.32s_h%u_e%" PRIx64, dev->id, (unsigned int)host_id, dpa);
 }
 
 static void region_id_str(struct fmd_component *owner, uint8_t region_id,
@@ -331,7 +349,12 @@ static void region_id_str(struct fmd_component *owner, uint8_t region_id,
 	snprintf(buf, len, "%.50s_dcr%u", owner->id, region_id);
 }
 
-/* Region containing a DPA, from the host's point of view */
+/*
+ * Region containing a DPA, from the host's point of view. "All extents for
+ * this region shall describe a memory range >= the Region Base and < the
+ * Region Base + Region Decode Length" (Table 8-347): the decode length, not
+ * the Region Length, bounds it.
+ */
 static struct fmd_dc_region *region_for_dpa(struct fmd_component *dev, int host_id,
 					    uint64_t dpa)
 {
@@ -343,7 +366,7 @@ static struct fmd_dc_region *region_for_dpa(struct fmd_component *dev, int host_
 
 	fmd_for_each_child_type(owner, child, FMD_COMPONENT_DC_REGION) {
 		struct fmd_dc_region *r = fmd_to_dc_region(child);
-		if (dpa >= r->base_dpa && dpa < r->base_dpa + r->region_len)
+		if (dpa >= r->base_dpa && dpa - r->base_dpa < r->decode_len)
 			return r;
 	}
 	return NULL;
@@ -368,18 +391,21 @@ struct fmd_dc_region *fmd_dc_region_add(struct fmd_ctx *ctx, struct fmd_componen
 }
 
 struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_component *dev,
-					uint64_t dpa, uint64_t len,
+					int host_id, uint64_t dpa, uint64_t len,
 					const uint8_t tag[FMD_DC_TAG_LEN],
 					uint16_t shared_seq, uint8_t region_id)
 {
 	struct fmd_dc_extent *ext;
 	char id[FMD_MAX_ID_LEN];
 
-	extent_id(dev, dpa, id, sizeof(id));
+	if (host_id < 0 || host_id > 0xFFFF)
+		return NULL;
+	extent_id(dev, host_id, dpa, id, sizeof(id));
 	ext = fmd_dc_extent_create(id);
 	if (!ext)
 		return NULL;
 
+	ext->host_id = (uint16_t)host_id;
 	ext->start_dpa = dpa;
 	ext->len = len;
 	if (tag)
@@ -394,14 +420,108 @@ struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_componen
 	return ext;
 }
 
-/* Drop a host from an extent; free the extent when nobody holds it */
-static void extent_drop_host(struct fmd_ctx *ctx, struct fmd_dc_extent *ext, int host_id)
-{
-	ext->host_mask &= ~fmd_dc_host_bit(host_id);
-	ext->pending_mask &= ~fmd_dc_host_bit(host_id);
+/*
+ * ============================================================================
+ * Mock implementation
+ * ============================================================================
+ *
+ * The mock keeps one record per host extent, as a device's 5603h lists
+ * them. Capacity two hosts share is one record on each, with the same Tag
+ * and the same offset into the region ("phys", the mock's own notion of
+ * where the capacity is). Capacity an FM reference keeps after every host
+ * released it is a struct fmd_dc_mock_hold, not an extent.
+ */
 
-	if (ext->host_mask == 0 && !ext->fm_referenced)
-		fmd_topology_remove(&ctx->topology, &ext->base);
+/* Flags of a region, through any host that sees it */
+static uint8_t region_flags_any(struct fmd_component *dev, uint8_t region_id)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	for (int h = 0; dcd && h < dcd->num_hosts; h++) {
+		struct fmd_dc_region *r = fmd_dc_find_region(dev, h, region_id);
+
+		if (r)
+			return r->flags;
+	}
+	return 0;
+}
+
+/* Flags of the region an extent is in, as its own host sees it */
+static uint8_t extent_region_flags(struct fmd_component *dev, struct fmd_dc_extent *ext)
+{
+	struct fmd_dc_region *r = fmd_dc_find_region(dev, ext->host_id, ext->region_id);
+
+	return r ? r->flags : 0;
+}
+
+/* Offset of an extent from the base of its host's region (mock) */
+static uint64_t extent_phys(struct fmd_component *dev, struct fmd_dc_extent *ext)
+{
+	struct fmd_dc_region *r = fmd_dc_find_region(dev, ext->host_id, ext->region_id);
+
+	return r ? ext->start_dpa - r->base_dpa : ext->start_dpa;
+}
+
+/* Another host's record of the same tagged capacity (mock) */
+static bool extent_shared(struct fmd_component *dev, struct fmd_dc_extent *ext)
+{
+	struct fmd_component *child;
+	uint64_t phys = extent_phys(dev, ext);
+
+	if (dc_tag_is_zero(ext->tag))
+		return false;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *o = fmd_to_dc_extent(child);
+
+		if (o != ext && o->host_id != ext->host_id &&
+		    o->region_id == ext->region_id &&
+		    !memcmp(o->tag, ext->tag, FMD_DC_TAG_LEN) &&
+		    extent_phys(dev, o) == phys)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Remove a host's extent. Capacity of an FM-referenced tag "will remain
+ * allocated ... even if all DCD Extents that reference it are removed"
+ * (Section 7.6.7.6.7): when no other host holds it, the mock keeps it.
+ */
+static void mock_extent_remove(struct fmd_ctx *ctx, struct fmd_component *dev,
+			       struct fmd_dc_extent *ext)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	if (ext->fm_referenced && dcd && !extent_shared(dev, ext)) {
+		struct fmd_dc_mock_hold *hold = calloc(1, sizeof(*hold));
+
+		if (hold) {
+			memcpy(hold->tag, ext->tag, FMD_DC_TAG_LEN);
+			hold->region_id = ext->region_id;
+			hold->phys = extent_phys(dev, ext);
+			hold->len = ext->len;
+			hold->next = dcd->mock_orphans;
+			dcd->mock_orphans = hold;
+		}
+	}
+	fmd_topology_remove(&ctx->topology, &ext->base);
+}
+
+/* Drop the mock's FM-held capacity of a tag */
+static void mock_orphans_drop(struct fmd_dcd_info *dcd, const uint8_t *tag)
+{
+	struct fmd_dc_mock_hold **pp = &dcd->mock_orphans;
+
+	while (*pp) {
+		struct fmd_dc_mock_hold *h = *pp;
+
+		if (!memcmp(h->tag, tag, FMD_DC_TAG_LEN)) {
+			*pp = h->next;
+			free(h);
+		} else {
+			pp = &h->next;
+		}
+	}
 }
 
 /*
@@ -418,6 +538,7 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_component *child;
+	struct fmd_dc_mock_hold *hold;
 	const uint8_t **tags;
 	size_t n_ext = 0;
 
@@ -425,6 +546,8 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 		return;
 
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT)
+		n_ext++;
+	for (hold = dcd->mock_orphans; hold; hold = hold->next)
 		n_ext++;
 	tags = calloc(n_ext ? n_ext : 1, sizeof(*tags));
 	if (!tags)
@@ -434,7 +557,6 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 		struct fmd_component *owner = fmd_dc_host_component(dev, h);
 		uint32_t *ext_avail, *tag_avail, ext_sup, tag_sup;
 		uint32_t extents = 0, n_tags = 0;
-		uint64_t bit = fmd_dc_host_bit(h);
 
 		if (!owner)
 			continue;
@@ -452,23 +574,44 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 			tag_sup = dcd->tags_supported;
 		}
 
-		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		child = dev->first_child;
+		hold = dcd->mock_orphans;
+		for (;;) {
+			const uint8_t *tag;
 			uint32_t t;
 
-			if (!(ext->host_mask & bit) &&
-			    !(ext->host_mask == 0 && ext->fm_referenced &&
-			      fmd_dc_find_region(dev, h, ext->region_id)))
-				continue;
+			if (child) {
+				struct fmd_dc_extent *ext;
+
+				if (child->type != FMD_COMPONENT_DC_EXTENT) {
+					child = child->next_sibling;
+					continue;
+				}
+				ext = fmd_to_dc_extent(child);
+				child = child->next_sibling;
+				if (ext->host_id != h)
+					continue;
+				tag = ext->tag;
+			} else if (hold) {
+				struct fmd_dc_mock_hold *o = hold;
+
+				hold = hold->next;
+				if (!fmd_dc_find_region(dev, h, o->region_id))
+					continue;
+				tag = o->tag;
+			} else {
+				break;
+			}
+
 			extents++;
-			if (dc_tag_is_zero(ext->tag))
+			if (dc_tag_is_zero(tag))
 				continue;
 			for (t = 0; t < n_tags; t++) {
-				if (!memcmp(tags[t], ext->tag, FMD_DC_TAG_LEN))
+				if (!memcmp(tags[t], tag, FMD_DC_TAG_LEN))
 					break;
 			}
 			if (t == n_tags)
-				tags[n_tags++] = ext->tag;
+				tags[n_tags++] = tag;
 		}
 
 		*ext_avail = extents < ext_sup ? ext_sup - extents : 0;
@@ -477,12 +620,6 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 
 	free(tags);
 }
-
-/*
- * ============================================================================
- * Mock implementation
- * ============================================================================
- */
 
 struct dpa_range {
 	uint64_t start;
@@ -498,16 +635,26 @@ static int cmp_range(const void *a, const void *b)
 	return ra->start > rb->start;
 }
 
-/* Sorted list of DPA ranges occupied by extents of a region (any host) */
-static int collect_region_ranges(struct fmd_component *dev, uint8_t region_id,
+/*
+ * Sorted list of the ranges of @region (one host's view of it) that are
+ * taken: by any host's extent, or held by an FM reference. Each is placed
+ * at its offset from the region base, in the DPA space of @region's host.
+ */
+static int collect_region_ranges(struct fmd_component *dev, struct fmd_dc_region *region,
 				 struct dpa_range **out)
 {
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_component *child;
+	struct fmd_dc_mock_hold *hold;
 	struct dpa_range *ranges;
 	int count = 0;
 
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-		if (fmd_to_dc_extent(child)->region_id == region_id)
+		if (fmd_to_dc_extent(child)->region_id == region->region_id)
+			count++;
+	}
+	for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+		if (hold->region_id == region->region_id)
 			count++;
 	}
 
@@ -518,9 +665,17 @@ static int collect_region_ranges(struct fmd_component *dev, uint8_t region_id,
 	count = 0;
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-		if (ext->region_id == region_id) {
-			ranges[count].start = ext->start_dpa;
-			ranges[count].end = ext->start_dpa + ext->len;
+
+		if (ext->region_id == region->region_id) {
+			ranges[count].start = region->base_dpa + extent_phys(dev, ext);
+			ranges[count].end = ranges[count].start + ext->len;
+			count++;
+		}
+	}
+	for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+		if (hold->region_id == region->region_id) {
+			ranges[count].start = region->base_dpa + hold->phys;
+			ranges[count].end = ranges[count].start + hold->len;
 			count++;
 		}
 	}
@@ -547,7 +702,7 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 	unsigned int seq = 0;
 	int rc = 0;
 
-	n_used = collect_region_ranges(dev, region->region_id, &used);
+	n_used = collect_region_ranges(dev, region, &used);
 	if (n_used < 0)
 		return -ENOMEM;
 
@@ -593,8 +748,8 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 	 * regions, this field shall be 0. For extents describing shareable
 	 * regions this field shall be within the range of 0 to n-1 where n
 	 * is the number of extents, with each value appearing only once"
-	 * (Table 8-230). The pieces of a Sharable add are numbered on from
-	 * the extents the tag already has.
+	 * (Table 8-230). The table is one host's Extent List: the pieces of
+	 * a Sharable add are numbered on from the host's extents with the tag.
 	 */
 	if (region->flags & FMD_DC_REGION_SHAREABLE) {
 		struct fmd_component *child;
@@ -602,7 +757,8 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
 
-			if (memcmp(e->tag, tag, FMD_DC_TAG_LEN) == 0 &&
+			if (e->host_id == host_id &&
+			    memcmp(e->tag, tag, FMD_DC_TAG_LEN) == 0 &&
 			    (unsigned int)e->shared_seq + 1 > seq)
 				seq = e->shared_seq + 1;
 		}
@@ -610,7 +766,7 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 
 	for (int i = 0; i < n_pieces; i++) {
 		bool shared = region->flags & FMD_DC_REGION_SHAREABLE;
-		struct fmd_dc_extent *ext = fmd_dc_extent_add(ctx, dev, pieces[i].start,
+		struct fmd_dc_extent *ext = fmd_dc_extent_add(ctx, dev, host_id, pieces[i].start,
 							      pieces[i].end - pieces[i].start,
 							      tag, shared ? seq + i : 0,
 							      region->region_id);
@@ -619,7 +775,6 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 			goto out;
 		}
 		/* The mock host accepts immediately, so nothing is left pending */
-		ext->host_mask = fmd_dc_host_bit(host_id);
 
 		fmd_info(ctx, "%s: mock DC add host %d region %u dpa 0x%" PRIx64
 			 " len %" PRIu64 " MB", dev->id, host_id, region->region_id,
@@ -632,16 +787,73 @@ out:
 	return rc;
 }
 
-static uint8_t extent_region_flags(struct fmd_component *dev, struct fmd_dc_extent *ext);
+/*
+ * Enable Shared Access: give @host_id, in @region, the capacity the tag
+ * names. It is copied from the holder with the lowest Host ID, each piece
+ * at the same offset into @host_id's view of the region, or from what an
+ * FM reference keeps when no host holds it.
+ */
+static int mock_share(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+		      struct fmd_dc_region *region, const uint8_t tag[FMD_DC_TAG_LEN])
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	struct fmd_component *child;
+	struct fmd_dc_mock_hold *hold;
+	int src = -1;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+		if (ext->region_id == region->region_id &&
+		    !memcmp(ext->tag, tag, FMD_DC_TAG_LEN) &&
+		    (src < 0 || ext->host_id < src))
+			src = ext->host_id;
+	}
+
+	if (src >= 0) {
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child), *copy;
+
+			if (ext->host_id != src || ext->region_id != region->region_id ||
+			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN))
+				continue;
+			copy = fmd_dc_extent_add(ctx, dev, host_id,
+						 region->base_dpa + extent_phys(dev, ext),
+						 ext->len, tag, ext->shared_seq,
+						 region->region_id);
+			if (!copy)
+				return -ENOMEM;
+			copy->fm_referenced = ext->fm_referenced;
+		}
+		return 0;
+	}
+
+	for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+		struct fmd_dc_extent *copy;
+
+		if (hold->region_id != region->region_id ||
+		    memcmp(hold->tag, tag, FMD_DC_TAG_LEN))
+			continue;
+		copy = fmd_dc_extent_add(ctx, dev, host_id, region->base_dpa + hold->phys,
+					 hold->len, tag, 0, region->region_id);
+		if (!copy)
+			return -ENOMEM;
+		copy->fm_referenced = true;
+	}
+	/* a host holds it now */
+	mock_orphans_drop(dcd, tag);
+	return 0;
+}
 
 static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		       uint8_t policy, uint8_t region_id, uint64_t length,
 		       const uint8_t tag[FMD_DC_TAG_LEN],
 		       struct fmd_dc_extent **extents, int ext_count)
 {
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_dc_region *region;
 	struct fmd_component *child;
-	uint64_t bit = fmd_dc_host_bit(host_id);
+	struct fmd_dc_mock_hold *hold;
 	int matched = 0;
 
 	switch (policy) {
@@ -669,24 +881,17 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 			 * set to Prescriptive and any of the DPAs are already
 			 * accessible to the same LD" (Section 7.6.7.6.5).
 			 */
-			if (ext->host_mask & bit)
+			if (ext->host_id == host_id)
 				return -EINVAL;
-			/*
-			 * Capacity another host holds is shared with Enable
-			 * Shared Access and its tag, not named again here.
-			 * The specification does not say what a device does
-			 * with such a list: refusing it is the mock's choice.
-			 */
-			if (ext->host_mask)
-				return -EBUSY;
-			region = fmd_dc_find_region(dev, host_id, ext->region_id);
-			if (!region)
-				return -ENOENT;
 		}
-		for (int i = 0; i < ext_count; i++) {
-			extents[i]->host_mask |= bit;
-		}
-		return 0;
+		/*
+		 * Every extent is some host's, in that host's DPA space:
+		 * capacity another host holds is shared with Enable Shared
+		 * Access and its tag, not named again here. The specification
+		 * does not say what a device does with such a list: refusing
+		 * it is the mock's choice.
+		 */
+		return -EBUSY;
 
 	case FMD_DC_POLICY_SHARED_ACCESS:
 		/*
@@ -707,22 +912,19 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 			if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
 			if (!(extent_region_flags(dev, ext) & FMD_DC_REGION_SHAREABLE) ||
-			    (ext->host_mask & bit))
+			    ext->host_id == host_id)
 				return -EINVAL;
 			if (ext->region_id == region_id)
 				matched++;
 		}
+		for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+			if (!memcmp(hold->tag, tag, FMD_DC_TAG_LEN) &&
+			    hold->region_id == region_id)
+				matched++;
+		}
 		if (!matched)
 			return -ENOENT;
-		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-
-			if (ext->region_id != region_id ||
-			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
-				continue;
-			ext->host_mask |= bit;
-		}
-		return 0;
+		return mock_share(ctx, dev, host_id, region, tag);
 
 	default:
 		return -EINVAL;
@@ -735,7 +937,6 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			   struct fmd_dc_extent **extents, int ext_count)
 {
 	struct fmd_component *child, *next;
-	uint64_t bit = fmd_dc_host_bit(host_id);
 	uint64_t remaining = length, held = 0;
 
 	switch (policy) {
@@ -752,7 +953,7 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 
-			if ((ext->host_mask & bit) &&
+			if (ext->host_id == host_id &&
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) == 0)
 				held += ext->len;
 		}
@@ -768,18 +969,18 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			if (child->type != FMD_COMPONENT_DC_EXTENT)
 				continue;
 			ext = fmd_to_dc_extent(child);
-			if (!(ext->host_mask & bit) ||
+			if (ext->host_id != host_id ||
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
 
-			if (remaining < ext->len && ext->host_mask == bit) {
+			if (remaining < ext->len && !extent_shared(dev, ext)) {
 				ext->len -= remaining;
 				remaining = 0;
 				continue;
 			}
 			remaining = (ext->len >= remaining) ? 0 : remaining - ext->len;
 
-			extent_drop_host(ctx, ext, host_id);
+			mock_extent_remove(ctx, dev, ext);
 		}
 		return 0;
 
@@ -787,11 +988,11 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 		if (ext_count <= 0 || !extents)
 			return -EINVAL;
 		for (int i = 0; i < ext_count; i++) {
-			if (!extents[i] || !(extents[i]->host_mask & bit))
+			if (!extents[i] || extents[i]->host_id != host_id)
 				return -ENOENT;
 		}
 		for (int i = 0; i < ext_count; i++) {
-			extent_drop_host(ctx, extents[i], host_id);
+			mock_extent_remove(ctx, dev, extents[i]);
 		}
 		return 0;
 
@@ -801,34 +1002,20 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 }
 
 /*
- * Flags of the region an extent is in. Every host's view of a region has
- * the same flags; an extent no host holds any more (FM-referenced) is
- * found through any host that sees its region.
- */
-static uint8_t extent_region_flags(struct fmd_component *dev, struct fmd_dc_extent *ext)
-{
-	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
-
-	for (int h = 0; dcd && h < dcd->num_hosts; h++) {
-		struct fmd_dc_region *r = fmd_dc_find_region(dev, h, ext->region_id);
-
-		if (r)
-			return r->flags;
-	}
-	return 0;
-}
-
-/*
  * 5606h and 5607h "shall return Invalid Input if the Tag in the payload
  * does not match an existing sharable tag" (Sections 7.6.7.6.7 and
- * 7.6.7.6.8): the tag must be on an extent in a Sharable region.
+ * 7.6.7.6.8): the tag must be on an extent in a Sharable region, or be
+ * capacity an FM reference keeps.
  */
 static int mock_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 			     const uint8_t tag[FMD_DC_TAG_LEN], bool add)
 {
-	struct fmd_component *child, *next;
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	struct fmd_component *child;
+	struct fmd_dc_mock_hold *hold;
 	bool sharable = false;
 
+	(void)ctx;
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 
@@ -836,23 +1023,23 @@ static int mock_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		    (extent_region_flags(dev, ext) & FMD_DC_REGION_SHAREABLE))
 			sharable = true;
 	}
+	for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+		if (!memcmp(hold->tag, tag, FMD_DC_TAG_LEN) &&
+		    (region_flags_any(dev, hold->region_id) & FMD_DC_REGION_SHAREABLE))
+			sharable = true;
+	}
 	if (!sharable)
 		return -EINVAL;
 
-	for (child = dev->first_child; child; child = next) {
-		struct fmd_dc_extent *ext;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 
-		next = child->next_sibling;
-		if (child->type != FMD_COMPONENT_DC_EXTENT)
-			continue;
-		ext = fmd_to_dc_extent(child);
-		if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
-			continue;
-
-		ext->fm_referenced = add;
-		if (!add && ext->host_mask == 0)
-			fmd_topology_remove(&ctx->topology, &ext->base);
+		if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) == 0)
+			ext->fm_referenced = add;
 	}
+	/* the reference was what kept it */
+	if (!add)
+		mock_orphans_drop(dcd, tag);
 
 	return 0;
 }
@@ -1086,10 +1273,12 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 }
 
 /*
- * Bring the host's extents in line with 5603h: new DPAs are added, extents
- * the device no longer lists for the host are dropped, and the rest are
- * updated in place so their identity, pending state and FM reference
- * survive the refresh.
+ * Bring the host's extents in line with 5603h, the "Extent list for the
+ * specified host" (Table 7-71): new DPAs are added, the host's extents the
+ * device no longer lists are dropped, and the rest are updated in place so
+ * their identity, pending state and FM reference survive the refresh. The
+ * extents of other hosts are not touched: "The DPA ranges exposed by the
+ * device to each host are independent of one another" (Section 9.13.3).
  */
 static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 			      struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
@@ -1098,7 +1287,6 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 	struct cxlmi_cmd_fmapi_get_dc_region_ext_list_req req;
 	struct cxlmi_cmd_fmapi_get_dc_region_ext_list_rsp *rsp;
 	struct fmd_component *child, *next;
-	uint64_t bit = fmd_dc_host_bit(host_id);
 	uint64_t *seen = NULL;
 	uint32_t n_seen = 0, cap_seen = 0;
 	uint32_t start = 0, generation = 0;
@@ -1153,15 +1341,19 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 		for (uint32_t i = 0; i < rsp->extents_returned; i++) {
 			uint64_t dpa = rsp->extents[i].start_dpa;
-			struct fmd_dc_extent *ext = fmd_dc_find_extent(dev, dpa);
+			struct fmd_dc_extent *ext = fmd_dc_find_extent(dev, host_id, dpa);
+			struct fmd_dc_region *region = region_for_dpa(dev, host_id, dpa);
+			uint8_t rid = region ? region->region_id : FMD_DC_REGION_NONE;
 
+			if (!region)
+				fmd_warn(ctx, "%s: host %d extent at %#" PRIx64
+					 " is in none of its regions", dev->id,
+					 host_id, dpa);
 			if (!ext) {
-				struct fmd_dc_region *region = region_for_dpa(dev, host_id, dpa);
-
-				ext = fmd_dc_extent_add(ctx, dev, dpa, rsp->extents[i].len,
+				ext = fmd_dc_extent_add(ctx, dev, host_id, dpa,
+							rsp->extents[i].len,
 							rsp->extents[i].tag,
-							rsp->extents[i].shared_seq,
-							region ? region->region_id : 0);
+							rsp->extents[i].shared_seq, rid);
 				if (!ext) {
 					rc = -ENOMEM;
 					goto out;
@@ -1170,8 +1362,9 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 				ext->len = rsp->extents[i].len;
 				memcpy(ext->tag, rsp->extents[i].tag, FMD_DC_TAG_LEN);
 				ext->shared_seq = rsp->extents[i].shared_seq;
+				/* the regions were read again just before */
+				ext->region_id = rid;
 			}
-			ext->host_mask |= bit;
 			seen[n_seen++] = dpa;
 		}
 
@@ -1180,7 +1373,7 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 			break;
 	}
 
-	/* Drop the host from extents the device no longer lists for it */
+	/* Drop the host's extents the device no longer lists for it */
 	for (child = dev->first_child; child; child = next) {
 		struct fmd_dc_extent *ext;
 		uint32_t i;
@@ -1189,12 +1382,12 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 		if (child->type != FMD_COMPONENT_DC_EXTENT)
 			continue;
 		ext = fmd_to_dc_extent(child);
-		if (!(ext->host_mask & bit))
+		if (ext->host_id != host_id)
 			continue;
 		for (i = 0; i < n_seen && seen[i] != ext->start_dpa; i++)
 			;
 		if (i == n_seen)
-			extent_drop_host(ctx, ext, host_id);
+			fmd_topology_remove(&ctx->topology, &ext->base);
 	}
 
 out:
@@ -1219,7 +1412,7 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 		ext->fm_referenced = false;
-		ext->pending_mask = 0;
+		ext->pending = false;
 	}
 
 	for (;;) {
@@ -1251,21 +1444,18 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 		FMD_CCI_LIST_CLAMP(rsp->num_tags_returned, DC_TAG_LIST_PAGE);
 
 		for (uint32_t i = 0; i < rsp->num_tags_returned; i++) {
-			uint64_t pending = 0;
-
-			if (rsp->validity_bitmap & 0x02) {
-				for (int h = 0; h < FMD_MAX_DC_HOSTS; h++) {
-					if (rsp->tags_list[i].pending_ref_bitmap[h / 8] & (1 << (h % 8)))
-						pending |= fmd_dc_host_bit(h);
-				}
-			}
+			const uint8_t *pend = rsp->tags_list[i].pending_ref_bitmap;
 
 			fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 				struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+				unsigned int h = ext->host_id;
+
 				if (memcmp(ext->tag, rsp->tags_list[i].tag, FMD_DC_TAG_LEN))
 					continue;
 				ext->fm_referenced = rsp->tags_list[i].flags & 0x01;
-				ext->pending_mask = pending & ext->host_mask;
+				ext->pending = (rsp->validity_bitmap & 0x02) &&
+					       h < DC_MASK_HOSTS &&
+					       (pend[h / 8] & (1 << (h % 8)));
 			}
 		}
 
@@ -1283,7 +1473,7 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 {
 	struct cxlmi_tunnel_info tbuf, *ti;
 	struct cxlmi_endpoint *ep;
-	int hosts[FMD_MAX_DC_HOSTS];
+	int hosts[FMD_DC_MAX_HOST_ID + 1];
 	int n, rc = 0;
 
 	if (unlikely(!dev_is_hw(dev)) || !fmd_memdev_dcd(dev))
@@ -1296,7 +1486,7 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 		hosts[0] = host_id;
 		n = 1;
 	} else {
-		n = dc_hosts(dev, hosts, FMD_MAX_DC_HOSTS);
+		n = dc_hosts(dev, hosts, FMD_DC_MAX_HOST_ID + 1);
 	}
 
 	for (int i = 0; i < n; i++) {
@@ -1401,7 +1591,7 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_cmd_clear_event_records_req *clr;
 	struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
 	struct cxlmi_endpoint *ep = dev->ep;
-	uint64_t hosts = 0;
+	uint64_t hosts = 0;		/* bit h: host h, for h < DC_MASK_HOSTS */
 	bool overflow = false;
 	uint16_t overflow_count = 0;
 	uint64_t first_ns = 0, last_ns = 0;
@@ -1454,8 +1644,9 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			fmd_dc_record_keep(dev, rec);
 			if (memcmp(rec->uuid, dc_event_uuid, sizeof(dc_event_uuid)))
 				continue;
-			if (type == DC_EVENT_ADD_RESPONSE || type == DC_EVENT_RELEASED)
-				hosts |= fmd_dc_host_bit(host);
+			if ((type == DC_EVENT_ADD_RESPONSE || type == DC_EVENT_RELEASED) &&
+			    host < DC_MASK_HOSTS)
+				hosts |= 1ULL << host;
 		}
 
 		clr->event_log = DC_EVENT_LOG;
@@ -1476,8 +1667,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 		goto out;
 	}
 
-	for (int h = 0; h < FMD_MAX_DC_HOSTS && !rc; h++) {
-		if (hosts & fmd_dc_host_bit(h))
+	for (int h = 0; h < DC_MASK_HOSTS && !rc; h++) {
+		if (hosts & (1ULL << h))
 			rc = dcd_refresh_locked(ctx, dev, h);
 	}
 	if (!rc)
@@ -1563,19 +1754,22 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 	 * 5602h "shall fail with Unsupported" "When all capacity has been
 	 * released from the DC Region on all hosts, and one or more blocks
 	 * are allocated to the specified region" (Section 7.6.7.6.3). An
-	 * extent some host holds or is offered is allocated, and so is one an
+	 * extent any host holds or is offered is allocated, and so is one an
 	 * FM reference keeps: that capacity "will remain allocated ... even
 	 * if all DCD Extents that reference it are removed" (Section
-	 * 7.6.7.6.7).
+	 * 7.6.7.6.7). The mock knows where that is; on hardware an FM
+	 * reference no host holds names no region, and the device decides.
 	 */
 	{
 		struct fmd_component *child;
+		struct fmd_dc_mock_hold *hold;
 
 		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-
-			if (ext->region_id == region->region_id &&
-			    (ext->host_mask || ext->fm_referenced))
+			if (fmd_to_dc_extent(child)->region_id == region->region_id)
+				return -EBUSY;
+		}
+		for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+			if (hold->region_id == region->region_id)
 				return -EBUSY;
 		}
 	}
@@ -1612,7 +1806,7 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	uint16_t cap_bit = fmd_dc_policy_cap_bit(false, policy);
 
-	if (!dcd || host_id < 0 || host_id >= FMD_MAX_DC_HOSTS)
+	if (!dcd || host_id < 0)
 		return -ENOENT;
 	/*
 	 * The policies a device supports are Bits[2:0] of Supported Add
@@ -1718,7 +1912,7 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	uint16_t cap_bit = fmd_dc_policy_cap_bit(true, policy);
 
-	if (!dcd || host_id < 0 || host_id >= FMD_MAX_DC_HOSTS)
+	if (!dcd || host_id < 0)
 		return -ENOENT;
 	if (!cap_bit || !(dcd->release_policies & cap_bit))
 		return -EINVAL;
@@ -1738,6 +1932,15 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 				if (extents[i] && extents[i] == extents[j])
 					return -EINVAL;
 			}
+		}
+		/*
+		 * The Extent List is in the DPA space of the host released
+		 * from: an extent of another host is not the host's, even at
+		 * the same DPA (Section 9.13.3).
+		 */
+		for (int i = 0; i < ext_count; i++) {
+			if (extents[i] && extents[i]->host_id != host_id)
+				return -ENOENT;
 		}
 	}
 

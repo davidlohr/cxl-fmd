@@ -1061,13 +1061,13 @@ void fmd_component_free(struct fmd_component *comp)
 	/* Devices own their DCD capability block */
 	switch (comp->type) {
 	case FMD_COMPONENT_SLD:
-		free(fmd_to_sld(comp)->dcd);
+		fmd_dcd_info_free(fmd_to_sld(comp)->dcd);
 		break;
 	case FMD_COMPONENT_MLD:
-		free(fmd_to_mld(comp)->dcd);
+		fmd_dcd_info_free(fmd_to_mld(comp)->dcd);
 		break;
 	case FMD_COMPONENT_MHD:
-		free(fmd_to_mhd(comp)->dcd);
+		fmd_dcd_info_free(fmd_to_mhd(comp)->dcd);
 		break;
 	default:
 		break;

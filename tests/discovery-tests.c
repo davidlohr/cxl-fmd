@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2007,8 +2008,8 @@ static struct fmd_component *hw_dcd(struct fmd_ctx *ctx, struct cxlmi_endpoint *
 	device_id(id, sizeof(id), serial);
 	dev = fmd_topology_find(&ctx->topology, id);
 	CHECK(dev && fmd_memdev_dcd(dev) && fmd_dc_find_region(dev, 0, 0) &&
-	      fmd_dc_find_extent(dev, 1ULL << 30), "no DCD %s with its region and extent", id);
-	if (!dev || !fmd_dc_find_region(dev, 0, 0) || !fmd_dc_find_extent(dev, 1ULL << 30))
+	      fmd_dc_find_extent(dev, 0, 1ULL << 30), "no DCD %s with its region and extent", id);
+	if (!dev || !fmd_dc_find_region(dev, 0, 0) || !fmd_dc_find_extent(dev, 0, 1ULL << 30))
 		return NULL;
 	return dev;
 }
@@ -2055,7 +2056,7 @@ static void test_dc_return_codes(void)
 			dc_tag, NULL, 0);
 	CHECK(rc == -EIO, "5604h not carried: %d", rc);
 
-	ext = fmd_dc_find_extent(dev, 1ULL << 30);
+	ext = fmd_dc_find_extent(dev, 0, 1ULL << 30);
 	answer_rc(ep, 0x5605, CXLMI_RET_PADDR);
 	rc = fmd_dc_release(ctx, dev, 0, FMD_DC_REL_POLICY_PRESCRIPTIVE, false,
 			    false, 0, dc_tag, &ext, 1);
@@ -2121,7 +2122,7 @@ static void test_dc_reserved_fields(void)
 
 	if (!dev)
 		goto out;
-	ext = fmd_dc_find_extent(dev, 1ULL << 30);
+	ext = fmd_dc_find_extent(dev, 0, 1ULL << 30);
 
 	answer_rc(ep, 0x5604, CXLMI_RET_INPUT);
 	fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_PRESCRIPTIVE, 3, 1ULL << 28,
@@ -2160,6 +2161,346 @@ static void test_dc_reserved_fields(void)
 out:
 	fmd_ctx_free(ctx);
 	report("reserved fields of a DCD request", before);
+}
+
+/*
+ * A DCD MLD of @nr LDs, each LD a host (Host ID = LD-ID, Table 7-67), with
+ * two DC regions: region 0 unavailable ("Report 0 if the region is
+ * unavailable", Table 8-347) and region 1 in 256 MB blocks. Discovery is
+ * left without answers to 5601h, so each host is then refreshed on its own,
+ * with the answers its test queues: the order discovery walks the LDs in
+ * does not matter.
+ */
+static struct fmd_component *hw_dcd_mld(struct fmd_ctx *ctx, struct cxlmi_endpoint **epp,
+					 uint64_t serial, uint8_t nr)
+{
+	struct cxlmi_endpoint *ep = new_mld(ctx, serial, nr, 0, 4);
+	uint8_t info[0x54] = { 0 };
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_component *dev;
+
+	info[0x00] = nr;			/* Number of Hosts */
+	info[0x01] = 2;				/* Number of Supported DC Regions */
+	put16(info + 0x04, 0x07);		/* Free, Contiguous, Prescriptive */
+	put16(info + 0x08, 0x03);		/* Tag-based, Prescriptive */
+	put64(info + 0x0c, 8);			/* Total Dynamic Capacity: 2 GiB */
+	put64(info + 0x14, 1ULL << 28);		/* Region 0: 256 MB blocks */
+	put64(info + 0x1c, 1ULL << 28);		/* Region 1: 256 MB blocks */
+	answer(ep, 0x5600, info, sizeof(info));
+	fmd_discover(ctx);
+	cxlmi_mock_clear_responses(ep);
+
+	device_id(id, sizeof(id), serial);
+	dev = fmd_topology_find(&ctx->topology, id);
+	CHECK(dev && fmd_memdev_dcd(dev), "no DCD MLD %s", id);
+	*epp = ep;
+	return dev && fmd_memdev_dcd(dev) ? dev : NULL;
+}
+
+/*
+ * Get Host DC Region Configuration (5601h, Tables 7-67 and 7-68): region 0
+ * with no length, region 1 at @base, @decode_units of 256 MB decoded,
+ * @len long, in 256 MB blocks, with Attributes1 @flags.
+ */
+static void answer_dc_regions(struct cxlmi_endpoint *ep, uint64_t base,
+			      uint64_t decode_units, uint64_t len, uint8_t flags)
+{
+	uint8_t pl[0x04 + 2 * 0x28 + 0x10] = { 0 };
+	uint8_t *r1 = pl + 0x04 + 0x28, *tail = pl + 0x04 + 2 * 0x28;
+
+	pl[0x02] = 2;				/* Number of Available Regions */
+	pl[0x03] = 2;				/* Number of Regions Returned */
+	put64(r1 + 0x00, base);			/* Region Base */
+	put64(r1 + 0x08, decode_units);		/* Region Decode Length */
+	put64(r1 + 0x10, len);			/* Region Length */
+	put64(r1 + 0x18, 1ULL << 28);		/* Region Block Size */
+	r1[0x20] = flags;			/* Attributes1 */
+	put16(tail + 0x00, 64);			/* Number of Extents Supported */
+	put16(tail + 0x04, 63);			/* Number of Extents Available */
+	put16(tail + 0x08, 16);			/* Number of Tags Supported */
+	put16(tail + 0x0c, 15);			/* Number of Tags Available */
+	answer(ep, 0x5601, pl, sizeof(pl));
+}
+
+struct dc_ext {
+	uint64_t dpa, len;
+	const uint8_t *tag;
+	uint16_t seq;
+};
+
+/*
+ * One page of Get DC Region Extent Lists (5603h, Tables 7-71 and 8-230):
+ * @n extents from Starting Extent Index @start of @total, generation @gen.
+ */
+static void answer_dc_extents(struct cxlmi_endpoint *ep, uint32_t gen, uint32_t start,
+			      uint32_t total, const struct dc_ext *e, int n)
+{
+	uint8_t pl[0x18 + 4 * 0x28] = { 0 };
+
+	put16(pl + 0x00, 0);			/* Host ID */
+	pl[0x04] = start;			/* Starting Extent Index */
+	pl[0x08] = n;				/* Returned Extent Count */
+	pl[0x0c] = total;			/* Total Extent Count */
+	put64(pl + 0x10, gen);			/* Extent List Generation Number */
+	for (int i = 0; i < n; i++) {
+		uint8_t *x = pl + 0x18 + i * 0x28;
+
+		put64(x + 0x00, e[i].dpa);	/* Starting DPA */
+		put64(x + 0x08, e[i].len);	/* Length */
+		if (e[i].tag)
+			memcpy(x + 0x10, e[i].tag, 16);
+		put16(x + 0x20, e[i].seq);	/* Shared Extent Sequence */
+	}
+	answer(ep, 0x5603, pl, 0x18 + n * 0x28);
+}
+
+/* refresh one host: its regions, its extents, and no 5608h */
+static int dc_refresh_host(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+			   struct fmd_component *dev, int host, uint64_t base,
+			   uint64_t decode_units, uint8_t flags,
+			   const struct dc_ext *e, int n)
+{
+	answer_dc_regions(ep, base, decode_units, 1ULL << 30, flags);
+	answer_dc_extents(ep, 1, 0, n, e, n);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	return fmd_dcd_refresh(ctx, dev, host);
+}
+
+static const uint8_t dc_tag_b[16] = {
+	0x6f, 0x1a, 0x2c, 0x3e, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x0b,
+};
+static const uint8_t dc_tag_c[16] = {
+	0x6f, 0x1a, 0x2c, 0x3e, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x0c,
+};
+
+#define DC_EXT_FIELDS(e) ((char *)(e) + offsetof(struct fmd_dc_extent, host_id))
+#define DC_EXT_FIELDS_LEN (sizeof(struct fmd_dc_extent) - offsetof(struct fmd_dc_extent, host_id))
+
+/*
+ * 5603h returns the "Extent list for the specified host" (Table 7-71), and
+ * "The DPA ranges exposed by the device to each host are independent of
+ * one another" (Section 9.13.3): host 0 and host 1 can both list DPA 1 GiB,
+ * with different tags. They are two extents, each its own, and refreshing
+ * one host leaves the other's as it was.
+ */
+static void test_dc_same_dpa_two_hosts(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd3, 2);
+	struct fmd_dc_extent *e0, *e1, saved;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+
+	rc = dc_refresh_host(ctx, ep, dev, 0, 1ULL << 30, 4, 0,
+			     &(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag, 0 }, 1);
+	CHECK(rc == 0, "refresh of host 0: %d", rc);
+	rc = dc_refresh_host(ctx, ep, dev, 1, 1ULL << 30, 4, 0,
+			     &(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag_b, 0 }, 1);
+	CHECK(rc == 0, "refresh of host 1: %d", rc);
+
+	e0 = fmd_dc_find_extent(dev, 0, 1ULL << 30);
+	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
+	CHECK(e0 && e1 && e0 != e1, "the same DPA on two hosts is not two extents");
+	if (!e0 || !e1 || e0 == e1)
+		goto out;
+	CHECK(!memcmp(e0->tag, dc_tag, 16) && !memcmp(e1->tag, dc_tag_b, 16),
+	      "an extent has the other host's tag");
+	CHECK(e0->region_id == 1 && e1->region_id == 1,
+	      "regions %u and %u, not 1", e0->region_id, e1->region_id);
+	CHECK(strcmp(e0->base.id, e1->base.id) &&
+	      fmd_topology_find(&ctx->topology, e0->base.id) == &e0->base &&
+	      fmd_topology_find(&ctx->topology, e1->base.id) == &e1->base,
+	      "the two extents collide: %s, %s", e0->base.id, e1->base.id);
+
+	/* host 1 again, with another tag: host 0's extent stays as it was */
+	memcpy(DC_EXT_FIELDS(&saved), DC_EXT_FIELDS(e0), DC_EXT_FIELDS_LEN);
+	rc = dc_refresh_host(ctx, ep, dev, 1, 1ULL << 30, 4, 0,
+			     &(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag_c, 0 }, 1);
+	CHECK(rc == 0, "refresh of host 1: %d", rc);
+	CHECK(fmd_dc_find_extent(dev, 0, 1ULL << 30) == e0 &&
+	      !memcmp(DC_EXT_FIELDS(&saved), DC_EXT_FIELDS(e0), DC_EXT_FIELDS_LEN),
+	      "a refresh of host 1 changed host 0's extent");
+	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
+	CHECK(e1 && !memcmp(e1->tag, dc_tag_c, 16), "host 1's extent was not updated");
+
+	/* host 1 lists nothing: its extent goes, host 0's stays */
+	rc = dc_refresh_host(ctx, ep, dev, 1, 1ULL << 30, 4, 0, NULL, 0);
+	CHECK(rc == 0 && !fmd_dc_find_extent(dev, 1, 1ULL << 30) &&
+	      fmd_dc_find_extent(dev, 0, 1ULL << 30) == e0,
+	      "host 1's empty list did not remove its extent alone");
+out:
+	fmd_ctx_free(ctx);
+	report("the same DPA on two hosts", before);
+}
+
+/*
+ * A host's extent is in a region of that host: "The DCD controls which DPA
+ * range it assigns to each region for each host" (Section 9.13.3). Region 1
+ * is at 1 GiB for host 0 and at 2 GiB for host 1; an extent of each at its
+ * own base is in region 1. Host 1 listing DPA 1 GiB, which is in no region
+ * of its own, is in no region, and the topology is not valid.
+ */
+static void test_dc_region_per_host(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd4, 2);
+	struct fmd_dc_extent *e0, *e1;
+	int before = failures, invalid;
+
+	if (!dev)
+		goto out;
+
+	dc_refresh_host(ctx, ep, dev, 0, 1ULL << 30, 4, 0,
+			&(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag, 0 }, 1);
+	dc_refresh_host(ctx, ep, dev, 1, 2ULL << 30, 4, 0,
+			&(struct dc_ext){ 2ULL << 30, 1ULL << 28, dc_tag_b, 0 }, 1);
+	e0 = fmd_dc_find_extent(dev, 0, 1ULL << 30);
+	e1 = fmd_dc_find_extent(dev, 1, 2ULL << 30);
+	CHECK(e0 && e0->region_id == 1 && e1 && e1->region_id == 1,
+	      "extents at each host's base are not in its region 1");
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 0, "%d violations with each extent in its region", invalid);
+
+	dc_refresh_host(ctx, ep, dev, 1, 2ULL << 30, 4, 0,
+			&(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag_b, 0 }, 1);
+	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
+	CHECK(e1 && e1->region_id == FMD_DC_REGION_NONE,
+	      "host 1's extent at host 0's base is in region %d",
+	      e1 ? e1->region_id : -1);
+	CHECK(fmd_dc_find_extent(dev, 0, 1ULL << 30) == e0 && e0->region_id == 1,
+	      "host 0's extent changed");
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid > 0, "an extent in no region of its host is valid");
+out:
+	fmd_ctx_free(ctx);
+	report("a host's extents in its own regions", before);
+}
+
+/*
+ * "All extents for this region shall describe a memory range >= the Region
+ * Base and < the Region Base + Region Decode Length" (Table 8-347): an
+ * extent past Region Length, within the decode length, is in the region.
+ * One past the decode length is in none.
+ */
+static void test_dc_extent_in_decode_tail(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd5, 2);
+	struct dc_ext e[2] = {
+		{ (1ULL << 30) + (5ULL << 28), 1ULL << 28, dc_tag, 0 },	/* 2.25 GiB */
+		{ 3ULL << 30, 1ULL << 28, dc_tag, 0 },			/* past it */
+	};
+	struct fmd_dc_extent *ext;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	/* 1 GiB long, 2 GiB (8 x 256 MB) decoded */
+	dc_refresh_host(ctx, ep, dev, 0, 1ULL << 30, 8, 0, e, 2);
+	ext = fmd_dc_find_extent(dev, 0, e[0].dpa);
+	CHECK(ext && ext->region_id == 1, "an extent past Region Length is in region %d",
+	      ext ? ext->region_id : -1);
+	ext = fmd_dc_find_extent(dev, 0, e[1].dpa);
+	CHECK(ext && ext->region_id == FMD_DC_REGION_NONE,
+	      "an extent past the decode length is in region %d",
+	      ext ? ext->region_id : -1);
+out:
+	fmd_ctx_free(ctx);
+	report("an extent in a region's decode length", before);
+}
+
+/*
+ * A Prescriptive Initiate Dynamic Capacity Release (5605h, Table 7-73) names
+ * extents of the host released from, in its DPA space. Host 0 and host 1
+ * share tag dc_tag at different DPAs: releasing host 1's sends host 1's
+ * Starting DPA, Length, Tag and Shared Extent Sequence; host 0's extent is
+ * not host 1's to release, and nothing is sent.
+ */
+static void test_dc_prescriptive_release_payload(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd6, 2);
+	struct fmd_dc_extent *e0, *e1;
+	uint8_t pl[256];
+	unsigned int sent;
+	uint16_t op;
+	size_t n;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+
+	dc_refresh_host(ctx, ep, dev, 0, 1ULL << 30, 4, 0x08,
+			&(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag, 0 }, 1);
+	dc_refresh_host(ctx, ep, dev, 1, 2ULL << 30, 4, 0x08,
+			(struct dc_ext[2]){ { 2ULL << 30, 1ULL << 28, dc_tag_b, 0 },
+					    { (2ULL << 30) + (1ULL << 29), 1ULL << 28, dc_tag, 0 } }, 2);
+	e0 = fmd_dc_find_extent(dev, 0, 1ULL << 30);
+	e1 = fmd_dc_find_extent(dev, 1, (2ULL << 30) + (1ULL << 29));
+	CHECK(e0 && e1, "no extents of tag dc_tag on hosts 0 and 1");
+	if (!e0 || !e1)
+		goto out;
+
+	answer_rc(ep, 0x5605, CXLMI_RET_INPUT);
+	rc = fmd_dc_release(ctx, dev, 1, FMD_DC_REL_POLICY_PRESCRIPTIVE, false, false,
+			    0, NULL, &e1, 1);
+	n = last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == -EINVAL && op == 0x5605 && n >= 0x48 && pl[0] == 1 && pl[1] == 0 &&
+	      pl[0x1c] == 1 &&
+	      get64(pl + 0x20) == (2ULL << 30) + (1ULL << 29) &&
+	      get64(pl + 0x28) == 1ULL << 28 &&
+	      !memcmp(pl + 0x30, dc_tag, 16) && pl[0x40] == 0 && pl[0x41] == 0,
+	      "5605h for host 1: %d, %04xh, host %u, DPA %#" PRIx64, rc, op,
+	      pl[0] | pl[1] << 8, get64(pl + 0x20));
+
+	sent = commands_sent(ep);
+	rc = fmd_dc_release(ctx, dev, 1, FMD_DC_REL_POLICY_PRESCRIPTIVE, false, false,
+			    0, NULL, &e0, 1);
+	CHECK(rc == -ENOENT && commands_sent(ep) == sent,
+	      "host 0's extent released from host 1: %d, %u commands", rc,
+	      commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a Prescriptive release names its host's extents", before);
+}
+
+/*
+ * Set DC Region Configuration (5602h) "shall fail with Unsupported" "When
+ * all capacity has been released from the DC Region on all hosts, and one or
+ * more blocks are allocated to the specified region" (Section 7.6.7.6.3).
+ * Host 1 alone has an extent in region 1: reconfiguring it, through host
+ * 0's view, is refused without asking the device.
+ */
+static void test_dc_set_region_busy_any_host(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd7, 2);
+	unsigned int sent;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+
+	dc_refresh_host(ctx, ep, dev, 0, 1ULL << 30, 4, 0, NULL, 0);
+	dc_refresh_host(ctx, ep, dev, 1, 1ULL << 30, 4, 0,
+			&(struct dc_ext){ 1ULL << 30, 1ULL << 28, dc_tag, 0 }, 1);
+	sent = commands_sent(ep);
+	rc = fmd_dc_set_region_config(ctx, dev, fmd_dc_find_region(dev, 0, 1),
+				      1ULL << 28, false);
+	CHECK(rc == -EBUSY && commands_sent(ep) == sent,
+	      "region 1 with host 1's extent in it: %d, %u commands sent", rc,
+	      commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a region in use by any host", before);
 }
 
 /*
@@ -3875,6 +4216,11 @@ int main(void)
 	test_dcd_info();
 	test_dc_return_codes();
 	test_dc_reserved_fields();
+	test_dc_same_dpa_two_hosts();
+	test_dc_region_per_host();
+	test_dc_extent_in_decode_tail();
+	test_dc_prescriptive_release_payload();
+	test_dc_set_region_busy_any_host();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);

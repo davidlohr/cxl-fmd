@@ -136,7 +136,9 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  */
 #define FMD_MAX_DC_REGIONS 8      /* DC regions per host */
 #define FMD_DC_TAG_LEN     16     /* Extent tag is a 16-byte UUID */
-#define FMD_MAX_DC_HOSTS   64     /* Hosts tracked per extent (bitmask) */
+#define FMD_DC_LD_BITMAP_BYTES 32  /* LD 0..255 in the 5608h bitmaps (Table 7-78) */
+#define FMD_DC_MAX_HOST_ID 255    /* highest Host ID those bitmaps can name */
+#define FMD_DC_REGION_NONE 0xFF   /* extent lies in no region of its host */
 
 /*
  * Hash table size for component lookup
@@ -905,6 +907,9 @@ struct fmd_dcd_info {
 	uint32_t extents_available;
 	uint32_t tags_supported;
 	uint32_t tags_available;
+
+	/* Mock only: FM-referenced capacity no host holds */
+	struct fmd_dc_mock_hold *mock_orphans;
 };
 
 /*
@@ -928,25 +933,41 @@ struct fmd_dc_region {
 };
 
 /*
- * DC Extent - a block of dynamic capacity allocated to one or more hosts
+ * DC Extent - one host's extent
  *
- * From FM-API Get DC Region Extent Lists (5603h), decorated with
- * Dynamic Capacity List Tags (5608h). Keyed by DPA, device-wide.
- * Child of the fmd_sld/fmd_mld/fmd_mhd.
- * Redfish: PCIeDevices/{dev}/MemoryExtents/{ext}
+ * One entry of the Extent List that Get DC Region Extent Lists (5603h)
+ * returns "for the specified host" (Table 7-71), keyed by Host ID and
+ * Starting DPA. "The DPA ranges exposed by the device to each host are
+ * independent of one another" (Section 9.13.3), so the same DPA on two
+ * hosts is two extents, and capacity two hosts share is one extent per
+ * host with the same Tag. Child of the fmd_sld/fmd_mld/fmd_mhd.
+ * Redfish: PCIeDevices/{dev}/MemoryExtents/ext_<ld>_<dpa>
  */
 struct fmd_dc_extent {
 	struct fmd_component base;
 
-	uint64_t start_dpa;
+	uint16_t host_id;                   /* Host ID (LD-ID) whose list has it */
+	uint64_t start_dpa;                 /* in this host's DPA space */
 	uint64_t len;
-	uint8_t  tag[FMD_DC_TAG_LEN];
+	uint8_t  tag[FMD_DC_TAG_LEN];       /* all zero: no tag (cxl-fmd's choice) */
 	uint16_t shared_seq;
-	uint8_t  region_id;
-
-	uint64_t host_mask;                 /* bit h: host h has (or was offered) it */
-	uint64_t pending_mask;              /* bit h: host h has not accepted yet */
+	uint8_t  region_id;                 /* this host's region, or FMD_DC_REGION_NONE */
+	bool     pending;                   /* added, the host has not responded */
 	bool     fm_referenced;             /* FM holds a reference on the tag */
+};
+
+/*
+ * Mock only: capacity an FM reference keeps allocated that no host holds
+ * any more (Section 7.6.7.6.7). It is not an extent of any host's list,
+ * so it is no MemoryExtent; it counts against the region it is in.
+ * @phys is the offset from the region base.
+ */
+struct fmd_dc_mock_hold {
+	uint8_t  tag[FMD_DC_TAG_LEN];
+	uint8_t  region_id;
+	uint64_t phys;
+	uint64_t len;
+	struct fmd_dc_mock_hold *next;
 };
 
 
@@ -1806,14 +1827,6 @@ struct fmd_dcd_info *fmd_memdev_dcd(struct fmd_component *dev);
  */
 int fmd_dc_host_id(struct fmd_component *dev, int ld_idx);
 
-/* Bit for @host_id in fmd_dc_extent host/pending masks; 0 when out of range */
-static inline uint64_t fmd_dc_host_bit(int host_id)
-{
-	if (host_id < 0 || host_id >= FMD_MAX_DC_HOSTS)
-		return 0;
-	return 1ULL << host_id;
-}
-
 /* floor(log2(v)); 0 for v <= 1 */
 static inline int fmd_ilog2_u64(uint64_t v)
 {
@@ -1835,11 +1848,14 @@ const char *fmd_dc_policy_name(bool release, int value);	/* NULL past the end */
 uint16_t fmd_dc_policy_cap_bit(bool release, int value);	/* 5600h bit, 0 if invalid */
 int fmd_dc_policy_from_str(bool release, const char *name);	/* -1 if unknown */
 
-/* Create and attach a host's view of a region / a device-wide extent */
+/* Free a device's fmd_dcd_info and what hangs off it */
+void fmd_dcd_info_free(struct fmd_dcd_info *dcd);
+
+/* Create and attach a host's view of a region / one host's extent */
 struct fmd_dc_region *fmd_dc_region_add(struct fmd_ctx *ctx, struct fmd_component *owner,
 					uint8_t region_id, uint16_t host_id);
 struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_component *dev,
-					uint64_t dpa, uint64_t len,
+					int host_id, uint64_t dpa, uint64_t len,
 					const uint8_t tag[FMD_DC_TAG_LEN],
 					uint16_t shared_seq, uint8_t region_id);
 
@@ -1856,11 +1872,13 @@ struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_
 struct fmd_dc_region *fmd_dc_find_region(struct fmd_component *dev, int host_id,
 					 uint8_t region_id);
 
-/* Find the extent that starts at a DPA */
-struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, uint64_t dpa);
+/* Find the extent of a host that starts at a DPA of that host */
+struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, int host_id,
+					 uint64_t dpa);
 
-/* Count extents visible to a host in a region */
-int fmd_dc_region_extent_count(struct fmd_component *dev, struct fmd_dc_region *region);
+/* Count a host's extents in one of its regions */
+unsigned int fmd_dc_host_extent_count(struct fmd_component *dev, int host_id,
+				      uint8_t region_id);
 
 /* Hardware discovery: 5600h, then 5601h/5603h per host and 5608h */
 int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev);

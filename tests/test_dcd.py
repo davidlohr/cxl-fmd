@@ -14,6 +14,8 @@ docs/DCD-FM-API.md against mock/dcd-device.json:
 - PCIeDevice.CXLReferenceDCMemory               (DC Add/Remove Reference 5606h/5607h)
 """
 
+import re
+
 import pytest
 
 SLD = "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0"
@@ -109,7 +111,7 @@ class TestDCDDiscovery:
         assert data["ExtentsCount"] == 1
         ext = data["MemoryExtents"][0]
         assert ext["Pending"] is False
-        assert ext["ExtentLink"]["@odata.id"] == SLD + "/MemoryExtents/ext_400000000"
+        assert ext["ExtentLink"]["@odata.id"] == SLD + "/MemoryExtents/ext_0_400000000"
 
     def test_region_flags(self, api_client):
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions/1")
@@ -125,7 +127,7 @@ class TestDCDDiscovery:
         assert status == 404
 
     def test_memory_extent(self, api_client):
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert status == 200
         assert data["@odata.type"] == "#MemoryExtent.v1_0_0.MemoryExtent"
         assert data["ExtentOffsetMiB"] == 16384
@@ -140,29 +142,50 @@ class TestDCDDiscovery:
         assert status == 404
         status, _ = api_client.get(SLD + "/MemoryExtents/bogus")
         assert status == 404
+        status, _ = api_client.get(SLD + "/MemoryExtents/ext_0_1")
+        assert status == 404
 
-    def test_shared_extent_links_every_host_region(self, api_client):
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_200000000")
-        assert status == 200
-        assert data["Tag"] == TAG_SHARED
-        assert data["FMReferencedExtent"] is True
-        regions = {r["@odata.id"] for r in data["Links"]["MemoryRegions"]}
-        assert regions == {MLD + "/CXLLogicalDevices/0/MemoryRegions/0",
-                           MLD + "/CXLLogicalDevices/1/MemoryRegions/0"}
+    def test_extent_ids_carry_ld(self, api_client):
+        """5603h lists extents per host: an Id is ext_<ld>_<hex DPA>."""
+        for device in (SLD, MLD):
+            for ext in extent_ids(api_client, device):
+                assert re.fullmatch(r"ext_[0-9]+_[0-9a-f]+", ext), ext
+        # the DPA alone names no extent: two hosts can both have it
+        status, _ = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        assert status == 404
+        status, _ = api_client.get(MLD + "/MemoryExtents/ext_200000000")
+        assert status == 404
+
+    def test_shared_capacity_is_one_extent_per_host(self, api_client):
+        """Shared capacity is an extent in each host's list, with the same Tag."""
+        seen = {}
+        for ld in (0, 1):
+            status, data = api_client.get(MLD + f"/MemoryExtents/ext_{ld}_200000000")
+            assert status == 200
+            assert data["Tag"] == TAG_SHARED
+            assert data["FMReferencedExtent"] is True
+            assert data["Links"]["MemoryRegions"] == [
+                {"@odata.id": MLD + f"/CXLLogicalDevices/{ld}/MemoryRegions/0"}]
+            seen[ld] = (data["SequenceNumber"], data["ExtentSizeMiB"])
+        assert seen[0] == seen[1]
 
     def test_pending_extent_flagged_in_region(self, api_client):
         status, data = api_client.get(MLD + "/CXLLogicalDevices/1/MemoryRegions/0")
         assert status == 200
         pending = {e["ExtentLink"]["@odata.id"]: e["Pending"] for e in data["MemoryExtents"]}
-        assert pending[MLD + "/MemoryExtents/ext_280000000"] is True
-        assert pending[MLD + "/MemoryExtents/ext_200000000"] is False
+        assert pending[MLD + "/MemoryExtents/ext_1_280000000"] is True
+        assert pending[MLD + "/MemoryExtents/ext_1_200000000"] is False
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_1_280000000")
+        assert data["Status"]["State"] == "Starting"
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_1_200000000")
+        assert data["Status"]["State"] == "Enabled"
 
     def test_mld_host_views_are_per_ld(self, api_client):
-        """Host 0 does not see the extent that was only offered to host 1."""
+        """A region lists its own host's extents only."""
         status, data = api_client.get(MLD + "/CXLLogicalDevices/0/MemoryRegions/0")
         assert status == 200
         links = [e["ExtentLink"]["@odata.id"] for e in data["MemoryExtents"]]
-        assert MLD + "/MemoryExtents/ext_280000000" not in links
+        assert links == [MLD + "/MemoryExtents/ext_0_200000000"]
 
 
 # =============================================================================
@@ -180,9 +203,9 @@ class TestDynamicCapacityAdd:
         ids = extent_ids(api_client)
         assert len(ids) == 2
         # First free block after the seed extent: 16384 + 4096 MiB = 0x500000000
-        assert "ext_500000000" in ids
+        assert "ext_0_500000000" in ids
 
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_500000000")
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_0_500000000")
         assert status == 200
         assert data["ExtentSizeMiB"] == 1024
         assert data["Tag"] == TAG_NEW
@@ -201,7 +224,7 @@ class TestDynamicCapacityAdd:
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions/1")
         assert data["ExtentsCount"] == 1
         # Region 1 starts at 49152 MiB = 0xC00000000
-        assert data["MemoryExtents"][0]["ExtentLink"]["@odata.id"].endswith("/ext_c00000000")
+        assert data["MemoryExtents"][0]["ExtentLink"]["@odata.id"].endswith("/ext_0_c00000000")
 
     def test_add_free_spans_gaps(self, api_client):
         """Free policy may be satisfied from several gaps; Contiguous may not."""
@@ -210,7 +233,7 @@ class TestDynamicCapacityAdd:
             status, _, _ = api_client.post(SLD_ADD, {
                 "Policy": "Contiguous", "RegionNumber": 1, "Length": 256, "Tag": TAG_NEW})
             assert status == 200
-        assert api_client.delete(SLD + "/MemoryExtents/ext_c10000000") == 204
+        assert api_client.delete(SLD + "/MemoryExtents/ext_0_c10000000") == 204
 
         # Fill the rest of the region so only the hole and a 256 MiB tail are free
         status, _, _ = api_client.post(SLD_ADD, {
@@ -226,8 +249,8 @@ class TestDynamicCapacityAdd:
         assert status == 200
 
         ids = extent_ids(api_client)
-        assert "ext_c10000000" in ids            # the hole
-        assert "ext_ff0000000" in ids            # the 256 MiB tail
+        assert "ext_0_c10000000" in ids            # the hole
+        assert "ext_0_ff0000000" in ids            # the 256 MiB tail
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions/1")
         assert data["ExtentsCount"] == 5
 
@@ -301,14 +324,20 @@ class TestDynamicCapacityAdd:
         assert status == 404
 
     def test_shared_access_adds_host(self, api_client):
-        """EnableSharedAccess gives host 0 the extents host 1 already has."""
+        """EnableSharedAccess gives host 0 an extent of its own with host 1's tag."""
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
         status, _, _ = api_client.post(add, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_PENDING})
         assert status == 200
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_280000000")
-        regions = {r["@odata.id"] for r in data["Links"]["MemoryRegions"]}
-        assert MLD + "/CXLLogicalDevices/0/MemoryRegions/0" in regions
+        status, src = api_client.get(MLD + "/MemoryExtents/ext_1_280000000")
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_0_280000000")
+        assert status == 200
+        assert data["Tag"] == TAG_PENDING
+        assert data["SequenceNumber"] == src["SequenceNumber"]
+        assert data["Links"]["MemoryRegions"] == [
+            {"@odata.id": MLD + "/CXLLogicalDevices/0/MemoryRegions/0"}]
+        assert src["Links"]["MemoryRegions"] == [
+            {"@odata.id": MLD + "/CXLLogicalDevices/1/MemoryRegions/0"}]
 
     def test_shared_access_not_advertised(self, api_client):
         """Bit[3] of the add policies "Must be 0" (Table 7-65): never listed, still served."""
@@ -330,7 +359,7 @@ class TestDynamicCapacityAdd:
         status, _, _ = api_client.post(add, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_UNSHARED})
         assert status == 400
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_600000000")
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_0_600000000")
         assert data["Links"]["MemoryRegions"] == [
             {"@odata.id": MLD + "/CXLLogicalDevices/0/MemoryRegions/1"}]
 
@@ -345,7 +374,7 @@ class TestDynamicCapacityAdd:
         """Invalid Extent List: "any of the DPAs are already accessible to the same LD"."""
         status, _, _ = api_client.post(SLD_ADD, {
             "Policy": "Prescriptive",
-            "ExtentList": [{"@odata.id": SLD + "/MemoryExtents/ext_400000000"}]})
+            "ExtentList": [{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}]})
         assert status == 400
 
     def test_prescriptive_extent_of_another_host_409(self, api_client):
@@ -353,9 +382,9 @@ class TestDynamicCapacityAdd:
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
         status, _, _ = api_client.post(add, {
             "Policy": "Prescriptive",
-            "ExtentList": [{"@odata.id": MLD + "/MemoryExtents/ext_280000000"}]})
+            "ExtentList": [{"@odata.id": MLD + "/MemoryExtents/ext_1_280000000"}]})
         assert status == 409
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_280000000")
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_1_280000000")
         assert data["Links"]["MemoryRegions"] == [
             {"@odata.id": MLD + "/CXLLogicalDevices/1/MemoryRegions/0"}]
 
@@ -380,30 +409,30 @@ class TestDynamicCapacityRelease:
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=1024))
         assert status == 200
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert status == 200
         assert data["ExtentSizeMiB"] == 4096 - 1024
 
     def test_release_prescriptive(self, api_client):
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
             "Prescriptive",
-            ExtentList=[{"@odata.id": SLD + "/MemoryExtents/ext_400000000"}]))
+            ExtentList=[{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}]))
         assert status == 200
         assert extent_ids(api_client) == []
 
     def test_release_prescriptive_same_extent_twice_400(self, api_client):
         """Listing an extent twice is refused, and releases nothing."""
-        link = {"@odata.id": SLD + "/MemoryExtents/ext_400000000"}
+        link = {"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
             "Prescriptive", ExtentList=[link, link]))
         assert status == 400
         # the daemon is still there, and so is the extent
-        assert extent_ids(api_client) == ["ext_400000000"]
+        assert extent_ids(api_client) == ["ext_0_400000000"]
 
     def test_delete_extent(self, api_client):
-        status = api_client.delete(SLD + "/MemoryExtents/ext_400000000")
+        status = api_client.delete(SLD + "/MemoryExtents/ext_0_400000000")
         assert status == 204
-        status, _ = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        status, _ = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert status == 404
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions/0")
         assert data["ExtentsCount"] == 0
@@ -422,14 +451,14 @@ class TestDynamicCapacityRelease:
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=0))
         assert status == 400
-        assert extent_ids(api_client) == ["ext_400000000"]
+        assert extent_ids(api_client) == ["ext_0_400000000"]
 
     def test_release_tag_based_more_than_held_409(self, api_client):
         """More than the host holds with the tag is Resources Exhausted."""
         status, _, _ = api_client.post(SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=4096 + 256))
         assert status == 409
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert data["ExtentSizeMiB"] == 4096
 
     def test_release_requires_booleans(self, api_client):
@@ -451,20 +480,32 @@ class TestDynamicCapacityRelease:
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
         status, _, _ = api_client.post(rel, release_body(
             "Prescriptive",
-            ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_200000000"}]))
+            ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_0_200000000"}]))
         assert status == 200
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_200000000")
+        status, _ = api_client.get(MLD + "/MemoryExtents/ext_0_200000000")
+        assert status == 404
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_1_200000000")
         assert status == 200
         assert data["Links"]["MemoryRegions"] == [
             {"@odata.id": MLD + "/CXLLogicalDevices/1/MemoryRegions/0"}]
+
+    def test_release_of_another_hosts_extent(self, api_client):
+        """Host 0's list is host 0's: host 1's extent at the same DPA is not in it."""
+        rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
+        status, _, _ = api_client.post(rel, release_body(
+            "Prescriptive",
+            ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_1_200000000"}]))
+        assert status == 404
+        assert "ext_1_200000000" in extent_ids(api_client, MLD)
+        assert "ext_0_200000000" in extent_ids(api_client, MLD)
 
     def test_add_then_delete_round_trip(self, api_client):
         status, _, _ = api_client.post(SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
         assert status == 200
-        assert "ext_500000000" in extent_ids(api_client)
-        assert api_client.delete(SLD + "/MemoryExtents/ext_500000000") == 204
-        assert extent_ids(api_client) == ["ext_400000000"]
+        assert "ext_0_500000000" in extent_ids(api_client)
+        assert api_client.delete(SLD + "/MemoryExtents/ext_0_500000000") == 204
+        assert extent_ids(api_client) == ["ext_0_400000000"]
 
 
 # =============================================================================
@@ -479,7 +520,7 @@ class TestSetDCRegionConfig:
         assert status == 409
 
     def test_patch_after_release(self, api_client):
-        assert api_client.delete(SLD + "/MemoryExtents/ext_400000000") == 204
+        assert api_client.delete(SLD + "/MemoryExtents/ext_0_400000000") == 204
         status, _ = api_client.patch(SLD_LD0 + "/MemoryRegions/0",
                                      {"BlockSizeMiB": 512, "SanitizeOnRelease": False})
         assert status == 200
@@ -497,12 +538,11 @@ class TestSetDCRegionConfig:
 
     def test_patch_rejected_while_fm_referenced(self, api_client):
         """Capacity an FM reference keeps is still allocated (Section 7.6.7.6.7)."""
-        # DELETE releases an extent from every host that holds it
-        for ext in ("ext_200000000", "ext_280000000"):
+        # DELETE releases an extent from its own host
+        for ext in ("ext_0_200000000", "ext_1_200000000", "ext_1_280000000"):
             assert api_client.delete(MLD + "/MemoryExtents/" + ext) == 204
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_200000000")
-        assert status == 200 and data["FMReferencedExtent"] is True
-        assert data["Links"]["MemoryRegions"] == []
+        # no host's list has it, so no extent is left
+        assert extent_ids(api_client, MLD) == ["ext_0_600000000"]
         status, _ = api_client.patch(MLD + "/CXLLogicalDevices/0/MemoryRegions/0",
                                      {"BlockSizeMiB": 512})
         assert status == 409
@@ -532,29 +572,30 @@ class TestSetDCRegionConfig:
 class TestCXLReferenceDCMemory:
 
     def test_reference_keeps_released_capacity(self, api_client):
-        rel = MLD + "/MemoryExtents/ext_280000000"
+        rel = MLD + "/MemoryExtents/ext_1_280000000"
         status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": True})
         assert status == 200
         status, data = api_client.get(rel)
         assert data["FMReferencedExtent"] is True
 
-        # Host releases it: extent survives with no region links
+        # Host releases it: no host's list has it, so it is no extent
         assert api_client.delete(rel) == 204
         status, data = api_client.get(rel)
-        assert status == 200
-        assert data["Links"]["MemoryRegions"] == []
-        # and is still tracked, FM-referenced (Section 9.13.3.3)
+        assert status == 404
+        for ext in extent_ids(api_client, MLD):
+            assert api_client.get(MLD + "/MemoryExtents/" + ext)[1]["Tag"] != TAG_PENDING
+        # but it is still tracked, FM-referenced (Section 9.13.3.3)
         status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
         assert data["AvailableExtents"] == 254
         assert data["AvailableTags"] == 62
 
-        # A second DELETE has nothing to release from a host
-        assert api_client.delete(rel) == 409
+        # A second DELETE has nothing to release
+        assert api_client.delete(rel) == 404
 
         # Dropping the FM reference frees it
         status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": False})
         assert status == 200
-        assert "ext_280000000" not in extent_ids(api_client, MLD)
+        assert "ext_1_280000000" not in extent_ids(api_client, MLD)
         status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
         assert data["AvailableExtents"] == 255
         assert data["AvailableTags"] == 63
@@ -569,7 +610,7 @@ class TestCXLReferenceDCMemory:
         """The SLD's tag is in a region that is not Sharable."""
         status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED, "FMReference": True})
         assert status == 400
-        status, data = api_client.get(SLD + "/MemoryExtents/ext_400000000")
+        status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert data["FMReferencedExtent"] is False
 
     def test_reference_empty_tag_400(self, api_client):

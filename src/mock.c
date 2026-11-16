@@ -968,26 +968,44 @@ static uint16_t parse_policies(json_t *arr, bool release, uint16_t def)
 	return mask;
 }
 
-/* "hosts": [..] or "host_id": N into a host bitmask; default is @def_mask */
-static uint64_t parse_host_mask(json_t *obj, uint64_t def_mask)
+/*
+ * "hosts": [..] or "host_id": N into @set, one byte per Host ID below
+ * @num_hosts; with neither, the hosts below @def_count. A Host ID past
+ * @num_hosts is a load error.
+ */
+static void parse_host_set(const char *what, json_t *obj, int num_hosts,
+			   int def_count, bool set[FMD_DC_MAX_HOST_ID + 1])
 {
 	json_t *jhosts = json_object_get(obj, "hosts");
 	json_t *jhost = json_object_get(obj, "host_id");
-	uint64_t mask = 0;
 	size_t idx;
 	json_t *v;
 
+	memset(set, 0, (FMD_DC_MAX_HOST_ID + 1) * sizeof(set[0]));
 	if (jhosts && json_is_array(jhosts)) {
 		json_array_foreach(jhosts, idx, v) {
-			if (json_is_integer(v))
-				mask |= fmd_dc_host_bit((int)json_integer_value(v));
-		}
-		return mask;
-	}
-	if (jhost && json_is_integer(jhost) && fmd_dc_host_bit((int)json_integer_value(jhost)))
-		return fmd_dc_host_bit((int)json_integer_value(jhost));
+			json_int_t h = json_is_integer(v) ? json_integer_value(v) : -1;
 
-	return def_mask;
+			if (h < 0 || h >= num_hosts)
+				load_error("%s: host %" JSON_INTEGER_FORMAT " is not one "
+					   "of the %d hosts", what, h, num_hosts);
+			else
+				set[h] = true;
+		}
+		return;
+	}
+	if (jhost) {
+		json_int_t h = json_is_integer(jhost) ? json_integer_value(jhost) : -1;
+
+		if (h < 0 || h >= num_hosts)
+			load_error("%s: host %" JSON_INTEGER_FORMAT " is not one of "
+				   "the %d hosts", what, h, num_hosts);
+		else
+			set[h] = true;
+		return;
+	}
+	for (int h = 0; h < def_count && h < num_hosts; h++)
+		set[h] = true;
 }
 
 static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *dev)
@@ -997,8 +1015,10 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 	struct fmd_component *child;
 	uint64_t region_base[FMD_MAX_DC_REGIONS] = {0};
 	uint64_t region_len[FMD_MAX_DC_REGIONS] = {0};
-	uint64_t all_hosts;
+	bool hosts[FMD_DC_MAX_HOST_ID + 1];
+	char what[FMD_MAX_ID_LEN + 64];
 	uint32_t max_extents, max_tags;
+	int64_t num_hosts;
 	int default_hosts;
 	int n_regions = 0, n_extents = 0;
 	json_t *arr, *item;
@@ -1027,11 +1047,13 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 		return -1;
 
 	/* Get DCD Info (5600h) */
-	dcd->num_hosts = (uint8_t)json_int_or(jdcd, "num_hosts", default_hosts);
-	if (dcd->num_hosts > FMD_MAX_DC_HOSTS) {
-		load_error("%s: dcd: more than %d hosts", dev->id, FMD_MAX_DC_HOSTS);
-		dcd->num_hosts = FMD_MAX_DC_HOSTS;
+	/* Number of Hosts is one byte (Table 7-65) */
+	num_hosts = json_int_or(jdcd, "num_hosts", default_hosts);
+	if (num_hosts < 0 || num_hosts > FMD_DC_MAX_HOST_ID) {
+		load_error("%s: dcd: more than %d hosts", dev->id, FMD_DC_MAX_HOST_ID);
+		num_hosts = FMD_DC_MAX_HOST_ID;
 	}
+	dcd->num_hosts = (uint8_t)num_hosts;
 	dcd->add_policies = parse_policies(json_object_get(jdcd, "add_policies"), false,
 					   FMD_DC_ADD_FREE | FMD_DC_ADD_CONTIGUOUS |
 					   FMD_DC_ADD_PRESCRIPTIVE);
@@ -1041,7 +1063,6 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 	max_tags = (uint32_t)json_int_or(jdcd, "max_tags", 64);
 	dcd->extents_supported = dcd->extents_available = max_extents;
 	dcd->tags_supported = dcd->tags_available = max_tags;
-	all_hosts = (dcd->num_hosts >= 64) ? ~0ULL : (1ULL << dcd->num_hosts) - 1;
 
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
 		struct fmd_ld *ld = fmd_to_ld(child);
@@ -1061,7 +1082,6 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			bool sanitize = json_is_true(json_object_get(item, "sanitize_on_release"));
 			json_t *jcfg = json_object_get(item, "sanitize_configurable");
 			json_t *jbs = json_object_get(item, "supported_block_sizes_mb");
-			uint64_t hosts;
 			uint8_t flags = 0;
 
 			if (rid < 0 || rid >= FMD_MAX_DC_REGIONS ||
@@ -1119,12 +1139,13 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			}
 			dcd->blk_sz_mask[rid] |= 1ULL << (20 + fmd_ilog2_u64(bs_mb));
 
-			hosts = parse_host_mask(item, all_hosts);
+			snprintf(what, sizeof(what), "%s: dcd region %d", dev->id, rid);
+			parse_host_set(what, item, dcd->num_hosts, dcd->num_hosts, hosts);
 			for (int h = 0; h < dcd->num_hosts; h++) {
 				struct fmd_component *owner;
 				struct fmd_dc_region *r;
 
-				if (!(hosts & fmd_dc_host_bit(h)))
+				if (!hosts[h])
 					continue;
 				owner = fmd_dc_host_component(dev, h);
 				if (!owner) {
@@ -1167,17 +1188,22 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 		break;
 	}
 
-	/* Extents: Get DC Region Extent Lists (5603h) + DC List Tags (5608h) */
+	/*
+	 * Extents: Get DC Region Extent Lists (5603h) + DC List Tags (5608h).
+	 * An entry of the file names its hosts: it is one extent of each, at
+	 * the same DPA. With no host at all, it is capacity an FM reference
+	 * keeps that no host holds.
+	 */
 	arr = json_object_get(jdcd, "extents");
 	if (arr && json_is_array(arr)) {
 		json_array_foreach(arr, idx, item) {
 			uint64_t dpa = json_uint_or(item, "start_mb", 0) * FMD_MIB;
 			uint64_t len = json_uint_or(item, "len_mb", 0) * FMD_MIB;
 			const char *tag_str = json_str_or(item, "tag", "");
-			uint64_t hosts = parse_host_mask(item, 1ULL);
+			bool pending = json_is_true(json_object_get(item, "pending"));
+			bool fm_ref = json_is_true(json_object_get(item, "fm_referenced"));
 			uint8_t tag[FMD_DC_TAG_LEN];
-			struct fmd_dc_extent *ext;
-			int rid = -1;
+			int rid = -1, n_hosts = 0;
 
 			for (int r = 0; r < FMD_MAX_DC_REGIONS; r++) {
 				if (region_len[r] && dpa >= region_base[r] &&
@@ -1195,16 +1221,44 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			if (fmd_dc_tag_from_str(tag_str, tag) < 0)
 				load_error("%s: dcd extent at %" PRIu64 " MB: invalid tag '%s'",
 					   dev->id, (uint64_t)(dpa / FMD_MIB), tag_str);
-			ext = fmd_dc_extent_add(ctx, dev, dpa, len, tag,
-						(uint16_t)json_int_or(item, "shared_seq", 0),
-						(uint8_t)rid);
-			if (!ext)
-				continue;
-			ext->host_mask = hosts & all_hosts;
-			ext->pending_mask = json_is_true(json_object_get(item, "pending")) ?
-				ext->host_mask : 0;
-			ext->fm_referenced = json_is_true(json_object_get(item, "fm_referenced"));
-			n_extents++;
+
+			snprintf(what, sizeof(what), "%s: dcd extent at %" PRIu64 " MB",
+				 dev->id, (uint64_t)(dpa / FMD_MIB));
+			parse_host_set(what, item, dcd->num_hosts, 1, hosts);
+			for (int h = 0; h < dcd->num_hosts; h++) {
+				struct fmd_dc_extent *ext;
+
+				if (!hosts[h])
+					continue;
+				n_hosts++;
+				ext = fmd_dc_extent_add(ctx, dev, h, dpa, len, tag,
+							(uint16_t)json_int_or(item, "shared_seq", 0),
+							(uint8_t)rid);
+				if (!ext)
+					continue;
+				ext->pending = pending;
+				ext->fm_referenced = fm_ref;
+				n_extents++;
+			}
+
+			if (!n_hosts) {
+				struct fmd_dc_mock_hold *hold;
+
+				if (!fm_ref) {
+					load_error("%s: no host holds it, and it is not "
+						   "fm_referenced", what);
+					continue;
+				}
+				hold = calloc(1, sizeof(*hold));
+				if (!hold)
+					continue;
+				memcpy(hold->tag, tag, FMD_DC_TAG_LEN);
+				hold->region_id = (uint8_t)rid;
+				hold->phys = dpa - region_base[rid];
+				hold->len = len;
+				hold->next = dcd->mock_orphans;
+				dcd->mock_orphans = hold;
+			}
 		}
 	}
 	/* Number of Available Extents and Tags, Section 9.13.3.3 */

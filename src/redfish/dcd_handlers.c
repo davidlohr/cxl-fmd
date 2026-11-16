@@ -13,6 +13,11 @@
  *   CXLLogicalDevice.DynamicCapacityAdd action           -> Initiate DC Add (5604h)
  *   CXLLogicalDevice.DynamicCapacityRelease action       -> Initiate DC Release (5605h)
  *   DELETE PCIeDevice/MemoryExtents/{ext}                -> Initiate DC Release, Prescriptive
+ *
+ * A MemoryExtent is one host's extent: 5603h lists extents per host, in
+ * that host's DPA space, so its Id names the CXLLogicalDevice as well as
+ * the DPA. That one resource per host and per extent is cxl-fmd's mapping:
+ * DSP0288 maps no Dynamic Capacity command.
  */
 
 #include "handlers_internal.h"
@@ -39,27 +44,63 @@ static struct fmd_component *find_dcd_device(struct fmd_ctx *ctx,
 	return comp;
 }
 
-/* Redfish Id of an extent: ext_<hex DPA> */
-static void extent_rf_id(struct fmd_dc_extent *ext, char *buf, size_t len)
+/* CXLLogicalDevice index that owns a host's regions (for building links) */
+static int host_ld_index(struct fmd_component *dev, int host_id)
 {
-	snprintf(buf, len, "ext_%" PRIx64, ext->start_dpa);
+	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
+
+	if (!owner)
+		return -1;
+	if (owner->type == FMD_COMPONENT_LD)
+		return fmd_to_ld(owner)->ld_id;
+	return 0;
+}
+
+/*
+ * Redfish Id of an extent: ext_<ld>_<hex DPA>, <ld> the CXLLogicalDevice
+ * whose host's extent it is (cxl-fmd's choice of Id). The DPA alone, which
+ * was the Id once, names an extent of every host that has that DPA.
+ */
+static void extent_rf_id(struct fmd_component *dev, struct fmd_dc_extent *ext,
+			 char *buf, size_t len)
+{
+	int ld = host_ld_index(dev, ext->host_id);
+
+	snprintf(buf, len, "ext_%d_%" PRIx64, ld < 0 ? ext->host_id : ld,
+		 ext->start_dpa);
 }
 
 static struct fmd_dc_extent *find_extent_by_rf_id(struct fmd_component *dev,
 						  const char *ext_id)
 {
+	const char *p;
 	char *end;
+	unsigned long ld;
 	uint64_t dpa;
+	int host_id;
 
-	if (!ext_id || strncmp(ext_id, "ext_", 4) != 0 || ext_id[4] == '\0')
+	if (!ext_id || strncmp(ext_id, "ext_", 4) != 0)
+		return NULL;
+	p = ext_id + 4;
+	if (*p < '0' || *p > '9')
 		return NULL;
 
 	errno = 0;
-	dpa = strtoull(ext_id + 4, &end, 16);
+	ld = strtoul(p, &end, 10);
+	if (errno || *end != '_' || ld > 0xFFFF)
+		return NULL;
+	p = end + 1;
+	if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+	      (*p >= 'A' && *p <= 'F')))
+		return NULL;
+	dpa = strtoull(p, &end, 16);
 	if (errno || *end != '\0')
 		return NULL;
 
-	return fmd_dc_find_extent(dev, dpa);
+	host_id = fmd_dc_host_id(dev, (int)ld);
+	if (host_id < 0)
+		return NULL;
+	return fmd_dc_find_extent(dev, host_id, dpa);
 }
 
 /* Resolve a MemoryExtent @odata.id link to the extent under this device */
@@ -76,18 +117,6 @@ static struct fmd_dc_extent *find_extent_by_link(struct fmd_component *dev,
 	return find_extent_by_rf_id(dev, p + strlen("/MemoryExtents/"));
 }
 
-/* CXLLogicalDevice index that owns a host's regions (for building links) */
-static int host_ld_index(struct fmd_component *dev, int host_id)
-{
-	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
-
-	if (!owner)
-		return -1;
-	if (owner->type == FMD_COMPONENT_LD)
-		return fmd_to_ld(owner)->ld_id;
-	return 0;
-}
-
 static void region_uri(const char *chassis_id, const char *dev_id, int ld_idx,
 		       uint8_t region_id, char *buf, size_t len)
 {
@@ -97,11 +126,12 @@ static void region_uri(const char *chassis_id, const char *dev_id, int ld_idx,
 }
 
 static void extent_uri(const char *chassis_id, const char *dev_id,
-		       struct fmd_dc_extent *ext, char *buf, size_t len)
+		       struct fmd_component *dev, struct fmd_dc_extent *ext,
+		       char *buf, size_t len)
 {
 	char id[32];
 
-	extent_rf_id(ext, id, sizeof(id));
+	extent_rf_id(dev, ext, id, sizeof(id));
 	snprintf(buf, len, "/redfish/v1/Chassis/%s/PCIeDevices/%s/MemoryExtents/%s",
 		 chassis_id, dev_id, id);
 }
@@ -322,7 +352,7 @@ static json_t *dc_memory_extents_locked(struct fmd_ctx *ctx, const char *chassis
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		char id[32];
 
-		extent_rf_id(fmd_to_dc_extent(child), id, sizeof(id));
+		extent_rf_id(dev, fmd_to_dc_extent(child), id, sizeof(id));
 		rf_collection_add(&coll, "/redfish/v1/Chassis/%s/PCIeDevices/%s/MemoryExtents/%s",
 				  chassis_id, dev_id, id);
 	}
@@ -335,15 +365,14 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 				       const char *dev_id, const char *ext_id)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
-	struct fmd_dcd_info *dcd;
 	struct fmd_dc_extent *ext;
 	char uri[512];
 	char tag_str[40];
 	json_t *result, *regions;
+	int ld_idx;
 
 	if (!dev)
 		return NULL;
-	dcd = fmd_memdev_dcd(dev);
 
 	fmd_topology_rdlock(&ctx->topology);
 	ext = find_extent_by_rf_id(dev, ext_id);
@@ -352,7 +381,7 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 		return NULL;
 	}
 
-	extent_uri(chassis_id, dev_id, ext, uri, sizeof(uri));
+	extent_uri(chassis_id, dev_id, dev, ext, uri, sizeof(uri));
 	fmd_dc_tag_to_str(ext->tag, tag_str, sizeof(tag_str));
 
 	result = json_pack(
@@ -366,19 +395,18 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 		"Tag", tag_str,
 		"SequenceNumber", (json_int_t)ext->shared_seq,
 		"FMReferencedExtent", ext->fm_referenced ? 1 : 0,
-		"Status", rf_status(ext->pending_mask ? "Starting" : "Enabled", "OK"));
+		"Status", rf_status(ext->pending ? "Starting" : "Enabled",
+				    ext->region_id == FMD_DC_REGION_NONE ? "Warning" : "OK"));
 
-	/* Links/MemoryRegions: every host's region this extent is exposed through */
+	/*
+	 * Links/MemoryRegions: the region of the host whose extent it is,
+	 * none when the extent is in no region the host reported.
+	 */
 	regions = json_array();
-	for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
-		int ld_idx;
+	ld_idx = host_ld_index(dev, ext->host_id);
+	if (ld_idx >= 0 && ext->region_id != FMD_DC_REGION_NONE) {
 		char ruri[512];
 
-		if (!(ext->host_mask & fmd_dc_host_bit(h)))
-			continue;
-		ld_idx = host_ld_index(dev, h);
-		if (ld_idx < 0)
-			continue;
 		region_uri(chassis_id, dev_id, ld_idx, ext->region_id, ruri, sizeof(ruri));
 		json_array_append_new(regions, rf_link("%s", ruri));
 	}
@@ -389,24 +417,23 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 }
 
 /*
- * DELETE on an extent releases it from every host that holds it
- * (Initiate DC Release, Prescriptive, one extent per host).
+ * DELETE on an extent releases it from the host whose extent it is
+ * (Initiate DC Release, Prescriptive, that one extent).
  */
 static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_id,
 					  const char *dev_id, const char *ext_id,
 					  const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
-	struct fmd_dcd_info *dcd;
+	struct fmd_dc_region *region;
 	struct fmd_dc_extent *ext;
-	uint64_t dpa, mask;
-	bool sanitize = false;
+	bool sanitize;
+	int rc;
 
 	if (!dev) {
 		*msg = "Device is not a dynamic capacity device";
 		return -ENOENT;
 	}
-	dcd = fmd_memdev_dcd(dev);
 
 	ext = find_extent_by_rf_id(dev, ext_id);
 	if (!ext) {
@@ -414,39 +441,16 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		return -ENOENT;
 	}
 
-	if (ext->host_mask == 0) {
-		*msg = "Extent is held only by the Fabric Manager reference; use CXLReferenceDCMemory";
-		return -EBUSY;
+	region = fmd_dc_find_region(dev, ext->host_id, ext->region_id);
+	sanitize = region ? region->sanitize_on_release : false;
+
+	rc = fmd_dc_release(ctx, dev, ext->host_id, FMD_DC_REL_POLICY_PRESCRIPTIVE,
+			    false, sanitize, 0, ext->tag, &ext, 1);
+	if (rc) {
+		*msg = rc == -EAGAIN ? DC_RETRY_MSG :
+		       "Dynamic capacity release failed";
+		return rc;
 	}
-
-	dpa = ext->start_dpa;
-	mask = ext->host_mask;
-
-	for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
-		struct fmd_dc_region *region;
-		struct fmd_dc_extent *cur;
-		int rc;
-
-		if (!(mask & fmd_dc_host_bit(h)))
-			continue;
-
-		/* The extent may already be gone if a previous host freed it */
-		cur = fmd_dc_find_extent(dev, dpa);
-		if (!cur)
-			break;
-
-		region = fmd_dc_find_region(dev, h, cur->region_id);
-		sanitize = region ? region->sanitize_on_release : false;
-
-		rc = fmd_dc_release(ctx, dev, h, FMD_DC_REL_POLICY_PRESCRIPTIVE,
-				    false, sanitize, 0, cur->tag, &cur, 1);
-		if (rc) {
-			*msg = rc == -EAGAIN ? DC_RETRY_MSG :
-			       "Dynamic capacity release failed";
-			return rc;
-		}
-	}
-
 	return 0;
 }
 
@@ -536,19 +540,18 @@ static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_
 		 chassis_id, dev_id, ld_id, region_id);
 	snprintf(name, sizeof(name), "DC Region %d", rnum);
 
-	/* Extents visible to this host, as links (inline fields are deprecated) */
+	/* This host's extents in the region, as links (inline fields are deprecated) */
 	extents = json_array();
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 		char euri[512];
 
-		if (ext->region_id != region->region_id ||
-		    !(ext->host_mask & fmd_dc_host_bit(host_id)))
+		if (ext->region_id != region->region_id || ext->host_id != host_id)
 			continue;
 
-		extent_uri(chassis_id, dev_id, ext, euri, sizeof(euri));
+		extent_uri(chassis_id, dev_id, dev, ext, euri, sizeof(euri));
 		json_array_append_new(extents, json_pack("{s:b, s:{s:s}}",
-			"Pending", (ext->pending_mask & fmd_dc_host_bit(host_id)) ? 1 : 0,
+			"Pending", ext->pending ? 1 : 0,
 			"ExtentLink", "@odata.id", euri));
 		count++;
 	}

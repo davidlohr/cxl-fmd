@@ -111,6 +111,14 @@ static void check_capacity(struct validation *v, const char *id, uint64_t total,
  * Table 7-68 refers) and the extent of Table 8-230 (to which Table 7-71
  * refers).
  */
+/* An all-zero Tag, which cxl-fmd takes for no tag */
+static bool tag_is_zero(const uint8_t *tag)
+{
+	static const uint8_t zero[FMD_DC_TAG_LEN];
+
+	return memcmp(tag, zero, FMD_DC_TAG_LEN) == 0;
+}
+
 static void check_dcd(struct validation *v, struct fmd_component *dev)
 {
 	static const char rule[] = "DC Region Configuration, Table 8-347";
@@ -120,7 +128,7 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 	if (!dcd)
 		return;
 
-	for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
+	for (int h = 0; h < dcd->num_hosts; h++) {
 		for (int r = 0; r < FMD_MAX_DC_REGIONS; r++) {
 			struct fmd_dc_region *reg = fmd_dc_find_region(dev, h, r);
 
@@ -147,26 +155,33 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 		}
 	}
 
+	/*
+	 * Each extent is one entry of the Extent List of its host (Table
+	 * 7-71), in that host's DPA space: "The DPA ranges exposed by the
+	 * device to each host are independent of one another" (Section
+	 * 9.13.3). Its region, and every rule below, is that host's.
+	 */
 	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		struct fmd_dc_region *reg;
+		int h = ext->host_id;
 
 		/* "The Length shall be > 0." */
 		if (ext->len == 0)
 			invalid(v, "Dynamic Capacity Extent, Table 8-230", "%s: extent at %#" PRIx64
-				" has no length", dev->id, ext->start_dpa);
+				" of host %d has no length", dev->id, ext->start_dpa, h);
 
-		for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
-			struct fmd_dc_region *reg;
-
-			if (!(ext->host_mask & fmd_dc_host_bit(h)))
-				continue;
-			reg = fmd_dc_find_region(dev, h, ext->region_id);
-			if (!reg) {
+		reg = ext->region_id == FMD_DC_REGION_NONE ? NULL :
+		      fmd_dc_find_region(dev, h, ext->region_id);
+		if (!reg) {
+			if (ext->region_id == FMD_DC_REGION_NONE)
+				invalid(v, rule, "%s: extent at %#" PRIx64 " is in no "
+					"region of host %d", dev->id, ext->start_dpa, h);
+			else
 				invalid(v, rule, "%s: extent at %#" PRIx64 " is in region %d, "
 					"which host %d does not have", dev->id,
 					ext->start_dpa, ext->region_id, h);
-				continue;
-			}
+		} else {
 			if (ext->start_dpa < reg->base_dpa ||
 			    ext->start_dpa + ext->len > reg->base_dpa + reg->decode_len)
 				invalid(v, rule, "%s: extent %#" PRIx64 "+%#" PRIx64
@@ -185,30 +200,30 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 		 * through a Sharable region: Initiate Dynamic Capacity Add with
 		 * Enable Shared Access "shall also fail with Invalid Input"
 		 * "When the tagged capacity is already mapped to any Host ID
-		 * via a non-Sharable region" (Section 7.6.7.6.5).
+		 * via a non-Sharable region" (Section 7.6.7.6.5). Capacity is
+		 * known across hosts by its tag alone.
 		 */
-		if (ext->host_mask & (ext->host_mask - 1)) {
-			for (int h = 0; h < dcd->num_hosts && h < FMD_MAX_DC_HOSTS; h++) {
-				struct fmd_dc_region *reg;
+		if (reg && !(reg->flags & FMD_DC_REGION_SHAREABLE) && !tag_is_zero(ext->tag)) {
+			fmd_for_each_child_type(dev, other, FMD_COMPONENT_DC_EXTENT) {
+				struct fmd_dc_extent *o = fmd_to_dc_extent(other);
 
-				if (!(ext->host_mask & fmd_dc_host_bit(h)))
+				if (o->host_id == ext->host_id ||
+				    memcmp(o->tag, ext->tag, FMD_DC_TAG_LEN))
 					continue;
-				reg = fmd_dc_find_region(dev, h, ext->region_id);
-				if (reg && !(reg->flags & FMD_DC_REGION_SHAREABLE)) {
-					invalid(v, "Initiate Dynamic Capacity Add, "
-						"Section 7.6.7.6.5", "%s: extent at %#"
-						PRIx64 " is held by more than one host "
-						"and region %d is not Sharable",
-						dev->id, ext->start_dpa, ext->region_id);
-					break;
-				}
+				invalid(v, "Initiate Dynamic Capacity Add, "
+					"Section 7.6.7.6.5", "%s: the tag of the extent at %#"
+					PRIx64 " of host %d is held by host %d too, and "
+					"region %d is not Sharable", dev->id, ext->start_dpa,
+					h, o->host_id, ext->region_id);
+				break;
 			}
 		}
 
 		/*
-		 * One DPA range is one extent. An Extent List with "Overlapping
-		 * DPA ranges for multiple extents" is malformed (Sections
-		 * 8.2.10.9.9.3 and 8.2.10.9.9.4).
+		 * One DPA range of a host is one extent. An Extent List with
+		 * "Overlapping DPA ranges for multiple extents" is malformed
+		 * (Sections 8.2.10.9.9.3 and 8.2.10.9.9.4). Two hosts' lists
+		 * are two lists.
 		 */
 		for (other = child->next_sibling; other; other = other->next_sibling) {
 			struct fmd_dc_extent *o;
@@ -216,11 +231,14 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 			if (other->type != FMD_COMPONENT_DC_EXTENT)
 				continue;
 			o = fmd_to_dc_extent(other);
+			if (o->host_id != ext->host_id)
+				continue;
 			if (ext->start_dpa < o->start_dpa + o->len &&
 			    o->start_dpa < ext->start_dpa + ext->len)
 				invalid(v, "malformed Extent List, Sections 8.2.10.9.9.3 "
 					"and 8.2.10.9.9.4", "%s: extents at %#" PRIx64 " and %#" PRIx64
-					" overlap", dev->id, ext->start_dpa, o->start_dpa);
+					" of host %d overlap", dev->id, ext->start_dpa,
+					o->start_dpa, h);
 		}
 	}
 }
