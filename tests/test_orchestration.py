@@ -202,3 +202,60 @@ class TestSwitchDCD:
         now = bound(bindings(api_client, "switch_0"))
         assert now[("0", "1")] == ("BoundLD", 2, 0)
         assert now[("1", "1")] == ("BoundLD", 2, 1)
+
+
+def test_restart_ids_stable(cxl_fmd_executable, tmp_path):
+    """A Connection's ID is computed from the binding: the switch, VCS,
+    vPPB, port and LD. A daemon started again on the switch as the bind left
+    it serves the same Connection with the same ID, though it did not make
+    it, and the same MemoryDomain of the host."""
+    import json
+    import subprocess
+    import tempfile
+
+    from conftest import PROJECT_ROOT, _find_free_port, _wait_for_service
+    from conftest import RedfishClient
+
+    def run(path):
+        port = _find_free_port()
+        log = tempfile.TemporaryFile()
+        proc = subprocess.Popen([str(cxl_fmd_executable), "--mock", str(path),
+                                 "--port", str(port)],
+                                stdout=log, stderr=subprocess.STDOUT)
+        assert _wait_for_service(f"http://localhost:{port}/redfish/v1")
+        return proc, RedfishClient(f"http://localhost:{port}")
+
+    def stop(proc):
+        proc.terminate()
+        assert proc.wait(timeout=10) == 0
+
+    source = PROJECT_ROOT / "mock" / "fm-boots-first.json"
+    proc, client = run(source)
+    try:
+        status, first = connect(client, "switch_0_host1", "mld_0", 1)
+        assert status == 201
+        table = bindings(client, "switch_0")
+        domains = client.get("/redfish/v1/Systems/switch_0_host1/MemoryDomains")[1]["Members"]
+    finally:
+        stop(proc)
+
+    # the topology with the binding in it, as the switch now has it
+    topology = json.loads(source.read_text())
+    for vcs in topology["switches"][0]["vcs"]:
+        for vppb in vcs["vppbs"]:
+            status, port, ld = table[(str(vcs["vcs_id"]), str(vppb["vppb_id"]))]
+            if status == "BoundLD":
+                vppb.update(binding_status="bound_ld", bound_port_id=port, bound_ld_id=ld)
+    path = tmp_path / "after-bind.json"
+    path.write_text(json.dumps(topology))
+
+    proc, client = run(path)
+    try:
+        status, again = client.get(first["@odata.id"])
+        assert status == 200
+        assert again["Id"] == first["Id"] == "switch_0_vcs1_vppb1_p4_ld1"
+        assert again["Links"] == first["Links"]
+        assert client.get(CONNECTIONS)[1]["Members"] == [{"@odata.id": first["@odata.id"]}]
+        assert client.get("/redfish/v1/Systems/switch_0_host1/MemoryDomains")[1]["Members"] == domains
+    finally:
+        stop(proc)

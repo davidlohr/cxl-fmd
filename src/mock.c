@@ -2606,7 +2606,7 @@ int fmd_mock_unplug_next(struct fmd_ctx *ctx)
 	port->current_link_speed = 0;
 
 	fmd_switch_port_device_removed(ctx, sw, port, dev);
-	fmd_switch_settle_connections(ctx, sw);
+	fmd_binding_marks_prune(ctx, sw->base.id);
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 	return 0;
@@ -2665,10 +2665,15 @@ int fmd_mock_external_next(struct fmd_ctx *ctx)
 		 e->bind ? "bound" : "unbound",
 		 e->emit_event ? "" : ", with no event record");
 
+	/*
+	 * The table is the mock switch's, and what a Connection is computed
+	 * from: with or without a record, it is seen at once. What the record
+	 * changes is that a task following the vPPB ends.
+	 */
+	fmd_binding_marks_prune(ctx, sw->base.id);
 	if (e->emit_event) {
 		fmd_mock_binding_record(sw, 0, e->vcs_id, vppb);
-		if (!fmd_task_binding_changed(ctx, sw, e->vcs_id, e->vppb_id, false))
-			fmd_switch_settle_connections(ctx, sw);
+		fmd_task_binding_changed(ctx, sw, e->vcs_id, e->vppb_id, false);
 	}
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);

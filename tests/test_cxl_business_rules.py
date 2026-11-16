@@ -239,8 +239,8 @@ class TestMultiVCSRules:
         assert mld and all("AddressRangeOffsetMiB" not in c for c in mld)
 
     def test_every_connection_listed_can_be_read(self, api_client):
-        """The collection lists one connection per device on a switch, as
-        well as those asked for: each of them can be read."""
+        """The collection lists one Connection per binding of a vPPB to a
+        memory device, whoever made it: each of them can be read."""
         status, data = api_client.get("/redfish/v1/Fabrics/CXL/Connections")
         assert status == 200 and data["Members"]
         for member in data["Members"]:
@@ -263,21 +263,43 @@ class TestMultiVCSRules:
         assert self._bindings(api_client) == before
 
     def test_port_bound_to_the_hosts_vcs_is_not_bound_again(self, api_client):
-        """dev0 is already bound to host0's VCS: connecting them binds no
-        second vPPB to the port, and removing the connection unbinds none."""
+        """dev0 is already bound to host0's VCS: asking for it again binds
+        no second vPPB to the port, and is answered with the Connection
+        that is there (200)."""
         before = self._bindings(api_client)
         status, data = self._connect(api_client, 0, "dev0")
-        assert status == 201
-        assert self._bindings(api_client) == before
-        assert api_client.delete(data["@odata.id"]) == 204
+        assert status == 200
         assert self._bindings(api_client) == before
 
     def test_ld_bound_to_the_hosts_vcs_is_not_bound_again(self, api_client):
         """Likewise for LD 3 of mld0, already bound to host1's VCS."""
         before = self._bindings(api_client)
         status, data = self._connect(api_client, 1, "mld0", 3)
-        assert status == 201
+        assert status == 200
+        assert data["Links"]["TargetEndpoints"] == [
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld0_ld3"}]
         assert self._bindings(api_client) == before
+
+    def test_delete_discovered_unbinds(self, api_client):
+        """dev0 was bound to host0's VCS before cxl-fmd started. Its
+        Connection is deleted like any other: the vPPB is unbound (Unbind
+        vPPB, Simulate Managed Hot-Remove), and the Connection and the
+        host's MemoryDomain are gone."""
+        status, data = self._connect(api_client, 0, "dev0")
+        assert status == 200
+        uri = data["@odata.id"]
+        host = data["Links"]["InitiatorEndpoints"][0]["@odata.id"].rsplit("/", 1)[1]
+        domain = f"/redfish/v1/Systems/{host}/MemoryDomains/{data['Id']}"
+        assert api_client.get(domain)[0] == 200
+        before = self._bindings(api_client)
+
+        assert api_client.delete(uri) == 204
+        assert api_client.get(uri)[0] == 404
+        assert api_client.get(domain)[0] == 404
+        after = self._bindings(api_client)
+        changed = {k for k in before if before[k] != after[k]}
+        assert len(changed) == 1
+        assert after[changed.pop()] == "Unbound"
 
 
 # =============================================================================

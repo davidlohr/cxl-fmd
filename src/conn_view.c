@@ -8,7 +8,10 @@
  * disagree with the switch. See struct fmd_conn_view in cxl-fmd.h for
  * what the caller holds while it uses what is computed here.
  *
- * Direct-attached Connections, which have no vPPB, are not computed yet.
+ * A direct-attached Connection has no vPPB: there is no VCS, nor any
+ * bind, on a link from a host's root port to a device (Section 7.6.7.2,
+ * "the FM ... binds and unbinds vPPBs in a switch"). That the link is the
+ * Connection is cxl-fmd's choice; see for_each_direct().
  */
 #include <errno.h>
 #include <stdio.h>
@@ -548,6 +551,94 @@ static int build_view(const struct fmd_ctx *ctx, const struct fmd_switch *sw,
 	return 0;
 }
 
+/*
+ * The only direct-attached host, NULL if there is none or more than one.
+ * A device that is on no switch has one link, to one root port, and
+ * nothing cxl-fmd reads says which host's that is; with one host to choose
+ * from, it is that one (cxl-fmd's choice).
+ */
+static const struct fmd_host *sole_direct_host(const struct fmd_ctx *ctx)
+{
+	const struct fmd_host *found = NULL;
+	struct fmd_component *comp;
+
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_HOST) {
+		if (!fmd_to_host(comp)->direct_attached)
+			continue;
+		if (found)
+			return NULL;
+		found = fmd_to_host(comp);
+	}
+	return found;
+}
+
+static void build_direct(const struct fmd_host *host, const struct fmd_component *dev,
+			 const struct fmd_head *head, struct fmd_conn_view *v)
+{
+	memset(v, 0, sizeof(*v));
+	v->kind = FMD_CONN_DIRECT;
+	v->host = host;
+	v->device = dev;
+	v->head = head;
+	v->target = head ? &head->base : dev;
+	v->state = FMD_CONN_ENABLED;
+	if (head)
+		snprintf(v->id, sizeof(v->id), "%s_direct_%s_h%u", host->base.id,
+			 dev->id, head->head_id);
+	else
+		snprintf(v->id, sizeof(v->id), "%s_direct_%s", host->base.id, dev->id);
+}
+
+/*
+ * The direct-attached Connections, cxl-fmd's choice, each always Enabled:
+ *
+ *  - the only direct-attached host (sole_direct_host()) with each SLD and
+ *    MLD that is on no switch port. Of an MLD, all of its LDs: what an MLD
+ *    on a root port gives its host, the specification does not say;
+ *  - each head of a Multi-Headed device that is on no switch port, and
+ *    whose host is known (attached_host_id, which only a mock topology
+ *    sets: no command maps a head to a host), with the pool LDs the LD Map
+ *    maps to that head (Table 7-61).
+ */
+static int for_each_direct(const struct fmd_ctx *ctx, fmd_conn_cb cb, void *arg)
+{
+	const struct fmd_host *sole = sole_direct_host(ctx);
+	struct fmd_component *comp, *child;
+	struct fmd_conn_view v;
+	int rc;
+
+	for (int t = 0; sole && t < 2; t++) {
+		fmd_for_each_type(&ctx->topology, comp,
+				  t ? FMD_COMPONENT_MLD : FMD_COMPONENT_SLD) {
+			if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT)
+				continue;
+			build_direct(sole, comp, NULL, &v);
+			rc = cb(&v, arg);
+			if (rc)
+				return rc;
+		}
+	}
+
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MHD) {
+		fmd_for_each_child_type(comp, child, FMD_COMPONENT_HEAD) {
+			const struct fmd_head *head = fmd_to_head(child);
+			const struct fmd_host *host;
+
+			if (head->port || !head->attached_host_id[0])
+				continue;
+			host = fmd_topology_find_host((struct fmd_topology *)&ctx->topology,
+						      head->attached_host_id);
+			if (!host || !host->direct_attached)
+				continue;
+			build_direct(host, comp, head, &v);
+			rc = cb(&v, arg);
+			if (rc)
+				return rc;
+		}
+	}
+	return 0;
+}
+
 int fmd_conn_for_each(const struct fmd_ctx *ctx, fmd_conn_cb cb, void *arg)
 {
 	struct fmd_component *comp;
@@ -572,7 +663,22 @@ int fmd_conn_for_each(const struct fmd_ctx *ctx, fmd_conn_cb cb, void *arg)
 			}
 		}
 	}
-	return 0;
+	return for_each_direct(ctx, cb, arg);
+}
+
+struct direct_find {
+	const char *id;
+	struct fmd_conn_view *v;
+};
+
+static int direct_match(const struct fmd_conn_view *v, void *arg)
+{
+	struct direct_find *f = arg;
+
+	if (strcmp(v->id, f->id))
+		return 0;
+	*f->v = *v;
+	return 1;
 }
 
 int fmd_conn_lookup(const struct fmd_ctx *ctx, const char *id,
@@ -583,8 +689,12 @@ int fmd_conn_lookup(const struct fmd_ctx *ctx, const char *id,
 
 	if (!ctx || !id || !v)
 		return -EINVAL;
-	if (fmd_conn_id_parse(id, &key))
-		return -ENOENT;
+	if (fmd_conn_id_parse(id, &key)) {
+		struct direct_find f = { .id = id, .v = v };
+
+		/* not a vPPB's: a direct-attached one, by its ID */
+		return for_each_direct(ctx, direct_match, &f) == 1 ? 0 : -ENOENT;
+	}
 	sw = find_switch(ctx, key.switch_id);
 	if (!sw)
 		return -ENOENT;
@@ -641,8 +751,13 @@ int fmd_conn_for_each_chunk(const struct fmd_conn_view *v,
 		return -EINVAL;
 	if (!v->target || !v->device)
 		return 0;
-	if (v->target->type != FMD_COMPONENT_SLD && v->target->type != FMD_COMPONENT_LD)
-		return 0;	/* a head: which pool LDs it reaches is not known */
+	/*
+	 * A head of a switch-attached device: which pool LDs its LD-IDs are
+	 * is not known. One on a host's link has the pool LDs the LD Map
+	 * maps to it. A direct-attached MLD has all of its LDs.
+	 */
+	if (v->target->type == FMD_COMPONENT_HEAD && v->kind != FMD_CONN_DIRECT)
+		return 0;
 
 	dev = v->device;
 	fmd_for_each_child_type(dev, dom, FMD_COMPONENT_DOMAIN) {
@@ -651,6 +766,12 @@ int fmd_conn_for_each_chunk(const struct fmd_conn_view *v,
 
 			if (v->ld && fmd_chunk_ld(dev, chunk) != v->ld)
 				continue;
+			if (v->target->type == FMD_COMPONENT_HEAD) {
+				const struct fmd_ld *ld = fmd_chunk_ld(dev, chunk);
+
+				if (!ld || ld->binding_point_id != v->head->head_id)
+					continue;
+			}
 			rc = cb(chunk, arg);
 			if (rc)
 				return rc;

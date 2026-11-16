@@ -22,6 +22,8 @@
 static json_t *build_sld_semantics_array(struct fmd_sld *sld);
 static json_t *build_mld_semantics_array(struct fmd_mld *mld);
 static json_t *build_mhd_semantics_array(struct fmd_mhd *mhd);
+static void append_conn_targets(json_t *arr, const struct fmd_conn_view *v);
+static void append_conn_lds(json_t *arr, const struct fmd_conn_view *v);
 static int memory_endpoint_setup(struct fmd_ctx *ctx, const char *chassis_id,
 				 const char *mem_id, struct cxlmi_endpoint **ep_out,
 				 struct cxlmi_tunnel_info *ti_buf,
@@ -182,87 +184,105 @@ json_t *fmd_redfish_system(struct fmd_ctx *ctx, const char *system_id)
 }
 
 /*
- * System MemoryDomains Collection - /redfish/v1/Systems/{systemId}/MemoryDomains
+ * A host's MemoryDomains are its Connections that are Enabled, one each,
+ * with the Connection's ID: what the binding makes reachable. A
+ * Connection being made or removed, Absent, or whose target is not known
+ * (Enabled with Health Warning) gives none: no memory is reachable through
+ * it, or none can be named. Which ones give one is cxl-fmd's choice. It is
+ * not what the host has mapped: the FM does not see that.
  *
- * Returns memory domains visible to this host via active Connections.
- * Each connection to a device creates a virtual domain from the host's view.
+ * Each of these takes the topology read lock; the caller holds fabric_lock.
+ */
+static bool host_domain(const struct fmd_conn_view *v, const char *system_id)
+{
+	return v->state == FMD_CONN_ENABLED && v->host &&
+	       !strcmp(v->host->base.id, system_id);
+}
+
+struct domain_walk {
+	const char *system_id;
+	json_t *members;
+};
+
+static int domain_member(const struct fmd_conn_view *v, void *arg)
+{
+	struct domain_walk *w = arg;
+
+	if (host_domain(v, w->system_id))
+		json_array_append_new(w->members,
+			rf_link("/redfish/v1/Systems/%s/MemoryDomains/%s",
+				w->system_id, v->id));
+	return 0;
+}
+
+/*
+ * System MemoryDomains Collection - /redfish/v1/Systems/{systemId}/MemoryDomains
  */
 json_t *fmd_redfish_system_memory_domains(struct fmd_ctx *ctx, const char *system_id)
 {
-	struct fmd_host *host;
-	struct fmd_connection *conn;
-	json_t *members;
-	int count = 0;
+	struct domain_walk w = { .system_id = system_id };
 	char odata_id[128];
 
-	host = fmd_topology_find_host(&ctx->topology, system_id);
-	if (!host)
+	if (!fmd_topology_find_host(&ctx->topology, system_id))
 		return NULL;
 
 	snprintf(odata_id, sizeof(odata_id),
 		 "/redfish/v1/Systems/%s/MemoryDomains", system_id);
 
-	members = json_array();
-
-	/*
-	 * Find all connections for this host. One whose device has been
-	 * removed, and that stands while its vPPB is bound, gives the host no
-	 * memory: its chunk went with the device.
-	 */
-	for (conn = ctx->connections; conn; conn = conn->next) {
-		if (strcmp(conn->initiator_id, system_id) == 0 &&
-		    fmd_topology_find_chunk(&ctx->topology, conn->chunk_id)) {
-			json_array_append_new(members,
-				rf_link("/redfish/v1/Systems/%s/MemoryDomains/%s",
-					system_id, conn->id));
-			count++;
-		}
-	}
+	w.members = json_array();
+	fmd_topology_rdlock(&ctx->topology);
+	fmd_conn_for_each(ctx, domain_member, &w);
+	fmd_topology_rdunlock(&ctx->topology);
 
 	return json_pack(
 		"{"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
-		"  s:i,"
+		"  s:I,"
 		"  s:o"
 		"}",
 		"@odata.id", odata_id,
 		"@odata.type", "#MemoryDomainCollection.MemoryDomainCollection",
 		"Name", "Host Memory Domains",
-		"Members@odata.count", count,
-		"Members", members
+		"Members@odata.count", (json_int_t)json_array_size(w.members),
+		"Members", w.members
 	);
+}
+
+/* The Connection @domain_id, if it is a MemoryDomain of host @system_id */
+static int host_domain_view(struct fmd_ctx *ctx, const char *system_id,
+			    const char *domain_id, struct fmd_conn_view *v)
+{
+	if (!fmd_topology_find_host(&ctx->topology, system_id))
+		return -ENOENT;
+	if (fmd_conn_lookup(ctx, domain_id, v) || !host_domain(v, system_id))
+		return -ENOENT;
+	return 0;
+}
+
+static int sum_chunk(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	*(uint64_t *)arg += chunk->size;
+	return 0;
 }
 
 /*
  * System MemoryDomain - /redfish/v1/Systems/{systemId}/MemoryDomains/{domainId}
- *
- * Returns a memory domain visible to the host (derived from a Connection).
  */
 json_t *fmd_redfish_system_memory_domain(struct fmd_ctx *ctx,
 					 const char *system_id,
 					 const char *domain_id)
 {
-	struct fmd_host *host;
-	struct fmd_connection *conn;
-	struct fmd_mem_chunk *chunk;
-	char odata_id[128];
-	char chunks_id[128];
+	struct fmd_conn_view v;
+	char odata_id[256];
+	char chunks_id[256];
+	uint64_t size = 0;
+	json_t *result = NULL, *lds;
 
-	host = fmd_topology_find_host(&ctx->topology, system_id);
-	if (!host)
-		return NULL;
-
-	/* domain_id is the connection ID */
-	conn = fmd_connection_find(ctx, domain_id);
-	if (!conn || strcmp(conn->initiator_id, system_id) != 0)
-		return NULL;
-
-	/* Find the connected chunk to get size info */
-	chunk = fmd_topology_find_chunk(&ctx->topology, conn->chunk_id);
-	if (!chunk)
-		return NULL;
+	fmd_topology_rdlock(&ctx->topology);
+	if (host_domain_view(ctx, system_id, domain_id, &v))
+		goto out;
 
 	snprintf(odata_id, sizeof(odata_id),
 		 "/redfish/v1/Systems/%s/MemoryDomains/%s", system_id, domain_id);
@@ -270,68 +290,107 @@ json_t *fmd_redfish_system_memory_domain(struct fmd_ctx *ctx,
 		 "/redfish/v1/Systems/%s/MemoryDomains/%s/MemoryChunks",
 		 system_id, domain_id);
 
-	return json_pack(
+	/* its chunks; an LD that has none is its own size (cxl-fmd's choice) */
+	fmd_conn_for_each_chunk(&v, sum_chunk, &size);
+	if (!size && v.ld)
+		size = v.ld->memory_size;
+
+	lds = json_array();
+	append_conn_lds(lds, &v);
+
+	result = json_pack(
 		"{"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
 		"  s:I,"
-		"  s:{s:s}"
+		"  s:{s:s},"
+		"  s:{s:o}"
 		"}",
 		"@odata.id", odata_id,
 		"@odata.type", "#MemoryDomain.v1_5_1.MemoryDomain",
 		"Id", domain_id,
-		"Name", conn->target_id,
-		"MemorySizeMiB", (int64_t)(chunk->size / (1024 * 1024)),
-		"MemoryChunks", "@odata.id", chunks_id
+		"Name", v.target ? v.target->id : domain_id,
+		"MemorySizeMiB", (json_int_t)(size / (1024 * 1024)),
+		"MemoryChunks", "@odata.id", chunks_id,
+		"Links", "CXLLogicalDevices", lds
 	);
+out:
+	fmd_topology_rdunlock(&ctx->topology);
+	return result;
+}
+
+struct host_chunks {
+	const char *base;
+	json_t *members;
+};
+
+static int host_chunk_member(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	struct host_chunks *h = arg;
+
+	json_array_append_new(h->members, rf_link("%s/%s", h->base, chunk->base.id));
+	return 0;
 }
 
 /*
  * System MemoryChunks Collection - /redfish/v1/Systems/{systemId}/MemoryDomains/{domainId}/MemoryChunks
+ *
+ * One member per chunk the Connection makes reachable.
  */
 json_t *fmd_redfish_system_memory_chunks(struct fmd_ctx *ctx,
 					 const char *system_id,
 					 const char *domain_id)
 {
-	struct fmd_host *host;
-	struct fmd_connection *conn;
-	json_t *members;
-	char odata_id[128];
+	struct host_chunks h;
+	struct fmd_conn_view v;
+	char odata_id[256];
+	json_t *result = NULL;
 
-	host = fmd_topology_find_host(&ctx->topology, system_id);
-	if (!host)
-		return NULL;
-
-	conn = fmd_connection_find(ctx, domain_id);
-	if (!conn || strcmp(conn->initiator_id, system_id) != 0)
-		return NULL;
+	fmd_topology_rdlock(&ctx->topology);
+	if (host_domain_view(ctx, system_id, domain_id, &v))
+		goto out;
 
 	snprintf(odata_id, sizeof(odata_id),
 		 "/redfish/v1/Systems/%s/MemoryDomains/%s/MemoryChunks",
 		 system_id, domain_id);
+	h.base = odata_id;
+	h.members = json_array();
+	fmd_conn_for_each_chunk(&v, host_chunk_member, &h);
 
-	/* Single chunk from the connection */
-	members = json_array();
-	json_array_append_new(members,
-		rf_link("/redfish/v1/Systems/%s/MemoryDomains/%s/MemoryChunks/%s",
-			system_id, domain_id, conn->chunk_id));
-
-	return json_pack(
+	result = json_pack(
 		"{"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
-		"  s:i,"
+		"  s:I,"
 		"  s:o"
 		"}",
 		"@odata.id", odata_id,
 		"@odata.type", "#MemoryChunksCollection.MemoryChunksCollection",
 		"Name", "Host Memory Chunks",
-		"Members@odata.count", 1,
-		"Members", members
+		"Members@odata.count", (json_int_t)json_array_size(h.members),
+		"Members", h.members
 	);
+out:
+	fmd_topology_rdunlock(&ctx->topology);
+	return result;
+}
+
+struct chunk_find {
+	const char *id;
+	const struct fmd_mem_chunk *found;
+};
+
+static int chunk_match(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	struct chunk_find *f = arg;
+
+	if (strcmp(chunk->base.id, f->id))
+		return 0;
+	f->found = chunk;
+	return 1;
 }
 
 /*
@@ -342,51 +401,54 @@ json_t *fmd_redfish_system_memory_chunk(struct fmd_ctx *ctx,
 					const char *domain_id,
 					const char *chunk_id)
 {
-	struct fmd_host *host;
-	struct fmd_connection *conn;
-	struct fmd_mem_chunk *chunk;
-	char odata_id[192];
+	struct chunk_find f = { .id = chunk_id };
+	struct fmd_conn_view v;
+	char odata_id[384];
+	json_t *result = NULL, *targets;
 
-	host = fmd_topology_find_host(&ctx->topology, system_id);
-	if (!host)
-		return NULL;
-
-	conn = fmd_connection_find(ctx, domain_id);
-	if (!conn || strcmp(conn->initiator_id, system_id) != 0)
-		return NULL;
-
-	/* Verify chunk matches */
-	if (strcmp(conn->chunk_id, chunk_id) != 0)
-		return NULL;
-
-	chunk = fmd_topology_find_chunk(&ctx->topology, chunk_id);
-	if (!chunk)
-		return NULL;
+	fmd_topology_rdlock(&ctx->topology);
+	if (host_domain_view(ctx, system_id, domain_id, &v))
+		goto out;
+	fmd_conn_for_each_chunk(&v, chunk_match, &f);
+	if (!f.found)
+		goto out;
 
 	snprintf(odata_id, sizeof(odata_id),
 		 "/redfish/v1/Systems/%s/MemoryDomains/%s/MemoryChunks/%s",
 		 system_id, domain_id, chunk_id);
 
+	targets = json_array();
+	append_conn_targets(targets, &v);
+
 	/*
 	 * How the host may use it is the Connection's: AccessCapabilities of
-	 * its MemoryChunkInfo. MemoryChunks has no property for it.
+	 * its MemoryChunkInfo. MemoryChunks has no property for it. Remote:
+	 * "created using remote media accessible through a fabric"
+	 * (MemoryChunks_v1), as the host sees it.
 	 */
-	return json_pack(
+	result = json_pack(
 		"{"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
 		"  s:s,"
 		"  s:I,"
-		"  s:s"
+		"  s:s,"
+		"  s:s,"
+		"  s:{s:o}"
 		"}",
 		"@odata.id", odata_id,
 		"@odata.type", "#MemoryChunks.v1_6_1.MemoryChunks",
 		"Id", chunk_id,
 		"Name", chunk_id,
-		"MemoryChunkSizeMiB", (int64_t)(chunk->size / (1024 * 1024)),
-		"AddressRangeType", chunk->address_range_type
+		"MemoryChunkSizeMiB", (json_int_t)(f.found->size / (1024 * 1024)),
+		"AddressRangeType", f.found->address_range_type,
+		"MediaLocation", "Remote",
+		"Links", "Endpoints", targets
 	);
+out:
+	fmd_topology_rdunlock(&ctx->topology);
+	return result;
 }
 
 /*
@@ -520,11 +582,16 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 			json_pack("[{s:s, s:s}]",
 				  "MessageId", ok ? "Base.1.0.Success" : "Base.1.0.GeneralError",
 				  "Message", task->message));
-		if (ok && task->kind == FMD_TASK_BIND)
-			json_object_set_new(result, "Links",
-				json_pack("{s:[{s:s}]}", "CreatedResources",
-					  "@odata.id", conn_uri));
 	}
+
+	/*
+	 * A bind makes its Connection as soon as it starts, Starting until it
+	 * is over (cxl-fmd's choice); one that failed made nothing.
+	 */
+	if (task->kind == FMD_TASK_BIND && task->state != FMD_TASK_EXCEPTION)
+		json_object_set_new(result, "Links",
+			json_pack("{s:[{s:s}]}", "CreatedResources",
+				  "@odata.id", conn_uri));
 
 	return result;
 }
@@ -794,6 +861,211 @@ static void append_port_endpoints(json_t *arr, struct fmd_port *port)
 	}
 }
 
+/* The pool LDs of a Multi-Headed device mapped to @head, in LD-ID order */
+static void append_head_lds(json_t *arr, const struct fmd_head *head, bool endpoints)
+{
+	struct fmd_component *by_id[256] = { NULL };
+	struct fmd_component *child, *mhd = head->base.parent;
+
+	if (!mhd)
+		return;
+	fmd_for_each_child_type(mhd, child, FMD_COMPONENT_LD) {
+		if (fmd_to_ld(child)->binding_point_id == head->head_id)
+			by_id[fmd_to_ld(child)->ld_id] = child;
+	}
+	for (size_t i = 0; i < 256; i++) {
+		if (!by_id[i])
+			continue;
+		if (endpoints)
+			append_endpoint_once(arr, by_id[i]->id);
+		else
+			json_array_append_new(arr,
+				rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%zu",
+					mhd->id, mhd->id, i));
+	}
+}
+
+/*
+ * The TargetEndpoints of a Connection: the Endpoint of what the binding
+ * reaches (an SLD, an LD, or a head that presents an MLD); for a
+ * direct-attached MLD each of its LDs, and for a direct-attached head the
+ * pool LDs mapped to it. None while Absent. Topology read lock held.
+ */
+static void append_conn_targets(json_t *arr, const struct fmd_conn_view *v)
+{
+	const struct fmd_component *t = v->target;
+
+	if (!t || v->state == FMD_CONN_ABSENT)
+		return;
+	if (v->kind == FMD_CONN_DIRECT) {
+		if (t->type == FMD_COMPONENT_HEAD)
+			append_head_lds(arr, v->head, true);
+		else
+			append_device_endpoints(arr, (struct fmd_component *)t);
+		return;
+	}
+	if (is_target_endpoint(t))
+		append_endpoint_once(arr, t->id);
+}
+
+/* The CXLLogicalDevices a Connection reaches, as for its targets */
+static void append_conn_lds(json_t *arr, const struct fmd_conn_view *v)
+{
+	const struct fmd_component *t = v->target, *child;
+
+	if (!t || v->state == FMD_CONN_ABSENT)
+		return;
+	if (t->type == FMD_COMPONENT_SLD) {
+		json_array_append_new(arr,
+			rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/0",
+				t->id, t->id));
+	} else if (t->type == FMD_COMPONENT_LD && t->parent) {
+		json_array_append_new(arr,
+			rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%u",
+				t->parent->id, t->parent->id, fmd_to_ld((struct fmd_component *)t)->ld_id));
+	} else if (t->type == FMD_COMPONENT_MLD && v->kind == FMD_CONN_DIRECT) {
+		fmd_for_each_child_type(t, child, FMD_COMPONENT_LD)
+			json_array_append_new(arr,
+				rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%u",
+					t->id, t->id, fmd_to_ld((struct fmd_component *)child)->ld_id));
+	} else if (t->type == FMD_COMPONENT_HEAD && v->kind == FMD_CONN_DIRECT) {
+		append_head_lds(arr, v->head, false);
+	}
+}
+
+static int chunk_info(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	const struct fmd_component *dom = chunk->base.parent;
+
+	if (!dom || !dom->parent)
+		return 0;
+	/*
+	 * Read and Write: Bind vPPB has no field for how a host may use what
+	 * is bound (Table 7-35). Optimized is cxl-fmd's choice.
+	 */
+	json_array_append_new(arg, json_pack("{s:{s:s}, s:[s, s], s:s}",
+		"MemoryChunk", "@odata.id",
+			rf_uri(0, "/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s",
+			       dom->parent->id, dom->id, chunk->base.id),
+		"AccessCapabilities", "Read", "Write",
+		"AccessState", "Optimized"));
+	return 0;
+}
+
+/*
+ * A Connection, from the view. Its Status is cxl-fmd's choice of meaning
+ * for the standard states:
+ *  - Starting: a bind of it is under way;
+ *  - Updating: an unbind of it is under way;
+ *  - Enabled, OK: bound, and what it reaches is known;
+ *  - Absent: bound, and no device is on the port. "This function or device
+ *    is not currently present or detected" (Resource_v1); it has no target
+ *    nor memory to link to;
+ *  - Enabled, Warning: bound, and what it reaches is not known.
+ * Topology read lock held.
+ */
+static json_t *conn_json(const struct fmd_conn_view *v)
+{
+	json_t *targets = json_array(), *chunks = json_array(), *links, *result;
+	const char *state = "Enabled", *health = "OK";
+
+	switch (v->state) {
+	case FMD_CONN_STARTING:
+		state = "Starting";
+		break;
+	case FMD_CONN_UPDATING:
+		state = "Updating";
+		break;
+	case FMD_CONN_ABSENT:
+		state = "Absent";
+		break;
+	case FMD_CONN_UNRESOLVED:
+		health = "Warning";
+		break;
+	case FMD_CONN_ENABLED:
+		break;
+	}
+
+	append_conn_targets(targets, v);
+	if (v->state != FMD_CONN_ABSENT)
+		fmd_conn_for_each_chunk(v, chunk_info, chunks);
+
+	links = json_pack("{s:[{s:s}]}", "InitiatorEndpoints", "@odata.id",
+			  rf_uri(0, "/redfish/v1/Fabrics/CXL/Endpoints/%s", v->host->base.id));
+	if (json_array_size(targets))
+		json_object_set_new(links, "TargetEndpoints", targets);
+	else
+		json_decref(targets);
+
+	result = json_pack("{s:s, s:s, s:s, s:s, s:s, s:o, s:o}",
+		"@odata.id", rf_uri(0, "/redfish/v1/Fabrics/CXL/Connections/%s", v->id),
+		"@odata.type", "#Connection.v1_4_0.Connection",
+		"Id", v->id,
+		"Name", v->kind == FMD_CONN_DIRECT ? "CXL Direct-Attached Connection" :
+						     "CXL vPPB Binding",
+		"ConnectionType", "Memory",
+		"Status", rf_status(state, health),
+		"Links", links);
+	if (json_array_size(chunks))
+		json_object_set_new(result, "MemoryChunkInfo", chunks);
+	else
+		json_decref(chunks);
+	return result;
+}
+
+/* Links.Connections of an Endpoint: each Connection it is an end of */
+struct endpoint_conns {
+	const char *id;
+	bool host;
+	json_t *links;
+};
+
+static int endpoint_conn(const struct fmd_conn_view *v, void *arg)
+{
+	struct endpoint_conns *e = arg;
+	char uri[256];
+	bool member = false;
+
+	if (e->host) {
+		member = !strcmp(v->host->base.id, e->id);
+	} else {
+		json_t *targets = json_array(), *t;
+		size_t i;
+
+		append_conn_targets(targets, v);
+		snprintf(uri, sizeof(uri), "/redfish/v1/Fabrics/CXL/Endpoints/%s", e->id);
+		json_array_foreach(targets, i, t) {
+			if (!strcmp(json_string_value(json_object_get(t, "@odata.id")), uri))
+				member = true;
+		}
+		json_decref(targets);
+	}
+	if (member)
+		json_array_append_new(e->links,
+			rf_link("/redfish/v1/Fabrics/CXL/Connections/%s", v->id));
+	return 0;
+}
+
+/* Set Links.Connections of Endpoint @id, if it has any. Topology read lock held */
+static void set_endpoint_connections(struct fmd_ctx *ctx, json_t *result,
+				     const char *id, bool host)
+{
+	struct endpoint_conns e = { .id = id, .host = host, .links = json_array() };
+	json_t *links;
+
+	fmd_conn_for_each(ctx, endpoint_conn, &e);
+	if (!json_array_size(e.links)) {
+		json_decref(e.links);
+		return;
+	}
+	links = json_object_get(result, "Links");
+	if (!links) {
+		links = json_object();
+		json_object_set_new(result, "Links", links);
+	}
+	json_object_set_new(links, "Connections", e.links);
+}
+
 /*
  * Endpoints Collection - /redfish/v1/Fabrics/{fabric_id}/Endpoints
  *
@@ -918,6 +1190,9 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 			}
 		}
 host_done:
+		fmd_topology_rdlock(&ctx->topology);
+		set_endpoint_connections(ctx, result, endpoint_id, true);
+		fmd_topology_rdunlock(&ctx->topology);
 		return result;
 	}
 
@@ -1059,6 +1334,8 @@ host_done:
 
 		json_object_set_new(result, "Links", links);
 	}
+	if (result)
+		set_endpoint_connections(ctx, result, endpoint_id, false);
 
 	fmd_topology_rdunlock(&ctx->topology);
 
@@ -1068,14 +1345,21 @@ host_done:
 /*
  * Connections Collection - /redfish/v1/Fabrics/{fabric_id}/Connections
  *
- * Per OCP CMS Figure 7, Connections represent bindings between endpoints.
- * Each switch-attached device has a connection to its parent port.
+ * Each vPPB binding of a host's VCS to a memory device, whoever made it,
+ * and each direct-attached host and device: see fmd_conn_for_each(). None
+ * is stored. A device that no host is bound to has none: a Connection
+ * "represents the connection information" between initiators and targets
+ * (Connection_v1).
  */
+static int conn_member(const struct fmd_conn_view *v, void *arg)
+{
+	rf_collection_add(arg, "/redfish/v1/Fabrics/CXL/Connections/%s", v->id);
+	return 0;
+}
+
 json_t *fmd_redfish_connections_collection(struct fmd_ctx *ctx, const char *fabric_id)
 {
 	struct rf_collection coll;
-	struct fmd_component *comp;
-	struct fmd_connection *conn;
 
 	if (strcmp(fabric_id, "CXL") != 0)
 		return NULL;
@@ -1086,26 +1370,8 @@ json_t *fmd_redfish_connections_collection(struct fmd_ctx *ctx, const char *fabr
 			   "Connection Collection");
 
 	fmd_topology_rdlock(&ctx->topology);
-
-	/* Switch-attached devices get implicit connections */
-	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SLD) {
-		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT)
-			rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Connections/%s", comp->id);
-	}
-	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MLD) {
-		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT)
-			rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Connections/%s", comp->id);
-	}
-	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MHD) {
-		if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT)
-			rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Connections/%s", comp->id);
-	}
-
+	fmd_conn_for_each(ctx, conn_member, &coll);
 	fmd_topology_rdunlock(&ctx->topology);
-
-	/* Dynamic connections (host-to-device bindings) */
-	for (conn = ctx->connections; conn; conn = conn->next)
-		rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Connections/%s", conn->id);
 
 	return rf_collection_finish(&coll);
 }
@@ -1113,172 +1379,24 @@ json_t *fmd_redfish_connections_collection(struct fmd_ctx *ctx, const char *fabr
 /*
  * Connection - /redfish/v1/Fabrics/{fabric_id}/Connections/{connection_id}
  *
- * Per OCP CMS Figure 7, a Connection binds a device endpoint to the fabric.
- * For switch-attached devices, this represents the binding to the switch port.
- * For dynamic connections (POST-created), this represents host-to-device binding.
+ * Computed when it is asked for, from the VCS tables as last read and the
+ * binds and unbinds under way: an ID whose vPPB no longer holds what the
+ * ID names is not found. GET sends no command, so it is as old as the
+ * last time the switch was read (cxl-fmd's choice).
  */
 json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			       const char *connection_id)
 {
+	struct fmd_conn_view v;
+	json_t *result = NULL;
+
 	if (strcmp(fabric_id, "CXL") != 0)
 		return NULL;
 
-	/* First check for dynamic connection */
-	struct fmd_connection *conn = fmd_connection_find(ctx, connection_id);
-	if (conn) {
-		char uri[256];
-		char init_uri[256];
-		char chunk_uri[256];
-		json_t *access_caps;
-
-		snprintf(uri, sizeof(uri),
-			 "/redfish/v1/Fabrics/CXL/Connections/%s", conn->id);
-		snprintf(init_uri, sizeof(init_uri),
-			 "/redfish/v1/Fabrics/CXL/Endpoints/%s", conn->initiator_id);
-
-		/* Find chunk to get its full path */
-		struct fmd_mem_chunk *chunk = fmd_topology_find_chunk(&ctx->topology, conn->chunk_id);
-		struct fmd_component *target = fmd_topology_find(&ctx->topology, conn->target_id);
-		json_t *targets = json_array();
-
-		/*
-		 * The target Endpoint: the SLD, or for an MLD or a Multi-Headed
-		 * device the LD of the chunk, which its interleave set names;
-		 * failing that, each LD of the device.
-		 */
-		if (target) {
-			struct fmd_component *ld = NULL;
-
-			if (target->type != FMD_COMPONENT_SLD && chunk &&
-			    chunk->interleave_set_count > 0)
-				ld = fmd_topology_find(&ctx->topology,
-						       chunk->interleave_sets[0].memory_id);
-			fmd_topology_rdlock(&ctx->topology);
-			if (ld && ld->type == FMD_COMPONENT_LD && ld->parent == target)
-				append_endpoint_once(targets, ld->id);
-			else if (fmd_is_memdev(target))
-				append_device_endpoints(targets, target);
-			fmd_topology_rdunlock(&ctx->topology);
-		}
-		if (chunk && chunk->base.parent && chunk->base.parent->parent) {
-			snprintf(chunk_uri, sizeof(chunk_uri),
-				 "/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s",
-				 chunk->base.parent->parent->id,
-				 chunk->base.parent->id,
-				 chunk->base.id);
-		} else {
-			snprintf(chunk_uri, sizeof(chunk_uri),
-				 "/redfish/v1/Fabrics/CXL/MemoryChunks/%s", conn->chunk_id);
-		}
-
-		/* Build access capabilities array */
-		access_caps = json_array();
-		if (conn->access_caps & FMD_ACCESS_READ)
-			json_array_append_new(access_caps, json_string("Read"));
-		if (conn->access_caps & FMD_ACCESS_WRITE)
-			json_array_append_new(access_caps, json_string("Write"));
-
-		json_t *result = json_pack(
-			"{"
-			"  s:s,"   /* @odata.id */
-			"  s:s,"   /* @odata.type */
-			"  s:s,"   /* Id */
-			"  s:s,"   /* Name */
-			"  s:s,"   /* ConnectionType */
-			"  s:o,"   /* Status */
-			"  s:{"    /* Links */
-			"    s:[{s:s}],"  /* InitiatorEndpoints */
-			"    s:o"   /* TargetEndpoints */
-			"  },"
-			"  s:[{s:{s:s}, s:o}]"  /* MemoryChunkInfo */
-			"}",
-			"@odata.id", uri,
-			"@odata.type", "#Connection.v1_4_0.Connection",
-			"Id", conn->id,
-			"Name", "CXL Memory Connection",
-			"ConnectionType", "Memory",
-			"Status", rf_status(conn->pending == FMD_CONN_BINDING ? "Starting" :
-				    conn->pending == FMD_CONN_UNBINDING ? "Updating" :
-				    "Enabled", "OK"),
-			"Links",
-				"InitiatorEndpoints", "@odata.id", init_uri,
-				"TargetEndpoints", targets,
-			"MemoryChunkInfo",
-				"MemoryChunk", "@odata.id", chunk_uri,
-				"AccessCapabilities", access_caps
-		);
-
-		/*
-		 * Its device has been removed from the switch port, and the
-		 * vPPB is still bound to the port: Absent, "This function or
-		 * device is not currently present or detected" (Resource_v1).
-		 * Deleting it unbinds the vPPB; the device and its memory are
-		 * not there to link to.
-		 */
-		if (result && !target) {
-			json_object_set_new(result, "Status", rf_status("Absent", "OK"));
-			json_object_del(json_object_get(result, "Links"),
-					"TargetEndpoints");
-			json_object_del(result, "MemoryChunkInfo");
-		}
-		return result;
-	}
-
-	/* Connection ID matches the device ID (implicit switch-attached) */
-	struct fmd_component *comp = fmd_topology_find(&ctx->topology, connection_id);
-	if (!comp || !fmd_is_memdev(comp))
-		return NULL;
-
-	/* Only switch-attached devices have connections */
-	if (!comp->parent || comp->parent->type != FMD_COMPONENT_PORT)
-		return NULL;
-
-	struct fmd_component *sw = comp->parent->parent;
-	if (!sw || sw->type != FMD_COMPONENT_SWITCH)
-		return NULL;
-
-	char uri[256];
-	json_t *targets = json_array();
-
-	snprintf(uri, sizeof(uri),
-		 "/redfish/v1/Fabrics/CXL/Connections/%s", connection_id);
-
-	/* the SLD, or each LD of the MLD */
 	fmd_topology_rdlock(&ctx->topology);
-	append_device_endpoints(targets, comp);
+	if (!fmd_conn_lookup(ctx, connection_id, &v))
+		result = conn_json(&v);
 	fmd_topology_rdunlock(&ctx->topology);
-
-	const char *name = (comp->type == FMD_COMPONENT_SLD) ?
-		"CXL SLD Connection" : "CXL MLD Connection";
-
-	/*
-	 * Build Connection with:
-	 * - ConnectionType: Memory (CXL memory device)
-	 * - Links.TargetEndpoints: the device's target endpoints
-	 * - MemoryChunkInfo could be added for detailed memory access info
-	 */
-	json_t *result = json_pack(
-		"{"
-		"  s:s,"   /* @odata.id */
-		"  s:s,"   /* @odata.type */
-		"  s:s,"   /* Id */
-		"  s:s,"   /* Name */
-		"  s:s,"   /* ConnectionType */
-		"  s:o,"   /* Status */
-		"  s:{"    /* Links */
-		"    s:o"  /* TargetEndpoints */
-		"  }"
-		"}",
-		"@odata.id", uri,
-		"@odata.type", "#Connection.v1_4_0.Connection",
-		"Id", connection_id,
-		"Name", name,
-		"ConnectionType", "Memory",
-		"Status", rf_status("Enabled", "OK"),
-		"Links",
-			"TargetEndpoints", targets
-	);
-
 	return result;
 }
 
@@ -5606,602 +5724,575 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
 	return 0;
 }
 
-static uint16_t extract_ld_id_from_chunk(struct fmd_mem_chunk *chunk);
-
 /*
- * The switch port that the target of a connection is reached through, NULL
- * if it is not on a switch. An SLD or an MLD is on a port. A Multi-Headed
- * device has a port per head (CXL r4.0 Section 2.5): the one that matters
- * is that of the head the chunk's LD is mapped to.
+ * ============================================================================
+ * Connections: POST binds, DELETE unbinds
+ * ============================================================================
+ *
+ * DSP0288 maps no CXL command to a Connection. That a POST of one binds a
+ * vPPB (Bind vPPB, 5201h) and a DELETE unbinds it (Unbind vPPB, 5202h)
+ * follows the OCP CMS Memory Fabric Orchestration white paper, which is
+ * informative, and is cxl-fmd's choice.
+ *
+ * Both run with fabric_lock held exclusively (server.c), the command sent
+ * included: reading the VCSs of the switch, deciding on what they say,
+ * choosing a vPPB and recording the bind under way (struct fmd_binding_op)
+ * are one step, and the op is on ctx->binding_ops before 5201h is sent.
+ * Another request for the same target finds it, and one for another
+ * target cannot choose the same vPPB.
  */
-static struct fmd_port *connection_port(struct fmd_ctx *ctx,
-					struct fmd_component *target,
-					struct fmd_mem_chunk *chunk)
+
+/* The last segment of the @odata.id of link object @link, NULL if none */
+static const char *link_id(json_t *link)
 {
-	struct fmd_component *child;
-	struct fmd_ld *ld = NULL;
-	uint16_t ld_id;
+	const char *uri = json_string_value(json_object_get(link, "@odata.id"));
+	const char *slash;
 
-	if (target->type != FMD_COMPONENT_MHD)
-		return (target->parent && target->parent->type == FMD_COMPONENT_PORT) ?
-		       fmd_to_port(target->parent) : NULL;
-
-	if (!chunk)
+	if (!uri || !uri[0])
 		return NULL;
-	ld_id = extract_ld_id_from_chunk(chunk);
-	if (ld_id != 0xFFFF)
-		ld = fmd_topology_find_ld(&ctx->topology, target->id, ld_id);
-	if (!ld || ld->binding_point_id == 0xFF)
-		return NULL;	/* mapped to no head */
-
-	fmd_for_each_child_type(target, child, FMD_COMPONENT_HEAD) {
-		if (fmd_to_head(child)->head_id == ld->binding_point_id)
-			return fmd_to_head(child)->port;
-	}
-	return NULL;
+	slash = strrchr(uri, '/');
+	return slash ? slash + 1 : uri;
 }
 
-/*
- * Helper: Find an unbound vPPB in a VCS
- * Returns vPPB ID (1+, skipping USP at 0) or -1 if none available
- */
-static int find_available_vppb(struct fmd_vcs *vcs)
+#define POST_MAX_CHUNKS 64
+
+struct post_request {
+	char initiator[FMD_MAX_ID_LEN];
+	char target[FMD_MAX_ID_LEN];
+	char chunks[POST_MAX_CHUNKS][FMD_MAX_ID_LEN];
+	int nchunks;
+	bool bad_access;	/* AccessCapabilities other than Read and Write */
+};
+
+/* The one link of array @arr, NULL unless it has exactly one */
+static const char *only_link(json_t *arr)
 {
-	/* Skip vPPB 0 which is the USP */
-	for (int i = 0; i < vcs->num_vppbs; i++) {
-		if (vcs->vppbs[i].vppb_id != 0 &&
-		    vcs->vppbs[i].binding_status == FMD_VPPB_UNBOUND)
-			return vcs->vppbs[i].vppb_id;
-	}
-	return -1;
+	if (!json_is_array(arr) || json_array_size(arr) != 1)
+		return NULL;
+	return link_id(json_array_get(arr, 0));
 }
 
-/*
- * Helper: Extract LD ID from chunk's interleave set memory reference
- * Returns LD ID or 0xFFFF if not found (for SLD)
- */
-static uint16_t extract_ld_id_from_chunk(struct fmd_mem_chunk *chunk)
+static int parse_post(const char *body, size_t body_size, struct post_request *req)
 {
-	if (chunk->interleave_set_count > 0 &&
-	    chunk->interleave_sets[0].memory_id[0] != '\0') {
-		/*
-		 * memory_id format: "{device}_ld{N}" for MLD
-		 * Extract the LD number from the suffix
-		 */
-		const char *ld_str = strstr(chunk->interleave_sets[0].memory_id, "_ld");
-		if (ld_str) {
-			int ld_id = safe_parse_int(ld_str + 3);
-			if (ld_id >= 0)
-				return (uint16_t)ld_id;
+	json_t *root, *links, *info, *entry;
+	json_error_t error;
+	const char *id;
+	size_t i;
+	int rc = -2;
+
+	memset(req, 0, sizeof(*req));
+	root = json_loadb(body, body_size, 0, &error);
+	if (!root)
+		return -2;
+	links = json_object_get(root, "Links");
+	if (!json_is_object(links))
+		goto out;
+
+	/* one initiator, the host, and one target */
+	id = only_link(json_object_get(links, "InitiatorEndpoints"));
+	if (!id || strlen(id) >= sizeof(req->initiator))
+		goto out;
+	strcpy(req->initiator, id);
+	id = only_link(json_object_get(links, "TargetEndpoints"));
+	if (!id || strlen(id) >= sizeof(req->target))
+		goto out;
+	strcpy(req->target, id);
+
+	info = json_object_get(root, "MemoryChunkInfo");
+	if (info && !json_is_array(info))
+		goto out;
+	json_array_foreach(info, i, entry) {
+		json_t *access = json_object_get(entry, "AccessCapabilities");
+
+		id = link_id(json_object_get(entry, "MemoryChunk"));
+		if (!id || strlen(id) >= FMD_MAX_ID_LEN || req->nchunks == POST_MAX_CHUNKS)
+			goto out;
+		strcpy(req->chunks[req->nchunks++], id);
+
+		/* a binding gives the whole of what it reaches, to read and write */
+		if (access) {
+			unsigned int caps = 0;
+			size_t j;
+			json_t *cap;
+
+			if (!json_is_array(access))
+				goto out;
+			json_array_foreach(access, j, cap) {
+				const char *c = json_string_value(cap);
+
+				if (c && !strcmp(c, "Read"))
+					caps |= FMD_ACCESS_READ;
+				else if (c && !strcmp(c, "Write"))
+					caps |= FMD_ACCESS_WRITE;
+				else
+					req->bad_access = true;
+			}
+			if (caps != (FMD_ACCESS_READ | FMD_ACCESS_WRITE))
+				req->bad_access = true;
 		}
 	}
-	return 0xFFFF;  /* SLD or no interleave info */
+	rc = 0;
+out:
+	json_decref(root);
+	return rc;
+}
+
+/* The Connection @id, answered as existing (200) */
+static int post_existing(struct fmd_ctx *ctx, const char *id, json_t **response)
+{
+	*response = fmd_redfish_connection(ctx, "CXL", id);
+	return *response ? FMD_CONN_EXISTS : -6;
+}
+
+/*
+ * Bind port @port_id, LD @ld_id (FMD_LD_NONE for the whole port) of @sw to
+ * a vPPB of @host's VCS: see fmd_redfish_post_connection().
+ */
+static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
+		     struct fmd_switch *sw, uint8_t port_id, uint16_t ld_id,
+		     json_t **response)
+{
+	struct fmd_vcs *vcs, *user_vcs = NULL;
+	struct fmd_binding_op *op;
+	struct fmd_conn_view v;
+	struct fmd_bind_key key;
+	struct fmd_task *task;
+	char id[FMD_CONN_ID_LEN];
+	int vppb_id = -1, rc;
+
+	/*
+	 * What the switch has now, every VCS of it: another FM, or a request
+	 * through another CCI, may have bound or unbound since it was read.
+	 */
+	fmd_vcs_refresh(ctx, sw);
+
+	/*
+	 * The host's VCS has it already, or is being given it: the same
+	 * Connection, not another (cxl-fmd's choice; the specification
+	 * does not say whether a second bind of a target is an error).
+	 */
+	fmd_topology_rdlock(&ctx->topology);
+	rc = fmd_conn_find_target(ctx, sw, host->vcs_id, port_id, ld_id, &v);
+	if (!rc) {
+		enum fmd_conn_state state = v.state;
+		int task_id = v.op ? atoi(v.op->task_id) : 0;
+
+		snprintf(id, sizeof(id), "%s", v.id);
+		fmd_topology_rdunlock(&ctx->topology);
+
+		if (state == FMD_CONN_UPDATING)
+			return -16;
+		if (state == FMD_CONN_STARTING) {
+			task = fmd_task_find(ctx, task_id);
+			if (!task)
+				return -11;
+			*response = fmd_redfish_task(ctx, task->id);
+			return FMD_OP_STARTED;
+		}
+		return post_existing(ctx, id, response);
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+
+	vcs = fmd_switch_find_vcs(sw, host->vcs_id);
+	if (!vcs) {
+		fmd_err(ctx, "%s: host %s has no VCS %d", sw->base.id,
+			host->base.id, host->vcs_id);
+		return -7;
+	}
+
+	/*
+	 * An SLD port "is bound to only one VCS", and "The Fabric Manager can
+	 * bind any unused physical port to the unbound vPPB" (CXL r4.0
+	 * Section 7.2.3.1); "LDs within an MLD component can be bound to a
+	 * host or unbound" (Section 7.3.4). That an LD, too, is bound to one
+	 * vPPB only is cxl-fmd's reading of that model. A port bound whole
+	 * while an LD of it is asked for, or the reverse, is in use as well.
+	 */
+	if (fmd_switch_bind_target_user(sw, port_id, ld_id, &user_vcs)) {
+		fmd_warn(ctx, "%s: port %d%s is bound to a vPPB of VCS %d, not "
+			 "for host %s", sw->base.id, port_id,
+			 ld_id != FMD_LD_NONE ? " (LD)" : "", user_vcs->vcs_id,
+			 host->base.id);
+		return -9;
+	}
+	/* or is being bound, or unbound, for another */
+	for (op = ctx->binding_ops; op; op = op->next) {
+		if (strcmp(op->key.switch_id, sw->base.id) || op->key.port_id != port_id)
+			continue;
+		if (op->key.ld_id == ld_id || op->key.ld_id == FMD_LD_NONE ||
+		    ld_id == FMD_LD_NONE)
+			return -9;
+	}
+
+	/* the lowest downstream vPPB that is unbound and has nothing under way */
+	for (int i = 0; i < vcs->num_vppbs; i++) {
+		const struct fmd_vppb *p = &vcs->vppbs[i];
+
+		if (p->vppb_id == 0 || p->binding_status != FMD_VPPB_UNBOUND ||
+		    fmd_binding_op_find(ctx, sw->base.id, vcs->vcs_id, p->vppb_id))
+			continue;
+		if (vppb_id < 0 || p->vppb_id < vppb_id)
+			vppb_id = p->vppb_id;
+	}
+	if (vppb_id < 0) {
+		fmd_warn(ctx, "%s: no unbound vPPB in VCS %d", sw->base.id, vcs->vcs_id);
+		return -12;
+	}
+
+	memset(&key, 0, sizeof(key));
+	snprintf(key.switch_id, sizeof(key.switch_id), "%s", sw->base.id);
+	key.vcs_id = vcs->vcs_id;
+	key.vppb_id = (uint8_t)vppb_id;
+	key.port_id = port_id;
+	key.ld_id = ld_id;
+	if (fmd_conn_id_format(&key, id, sizeof(id)))
+		return -6;
+
+	/* recorded before the switch is asked */
+	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL);
+	if (!op)
+		return -6;
+
+	rc = fmd_vppb_bind(ctx, sw, key.vcs_id, key.vppb_id, port_id, ld_id);
+	if (rc == FMD_OP_STARTED) {
+		/* answered with the task; the Connection is Starting meanwhile */
+		task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+		if (!task) {
+			fmd_vcs_refresh(ctx, sw);
+			return -6;
+		}
+		*response = fmd_redfish_task(ctx, task->id);
+		return FMD_OP_STARTED;
+	}
+	fmd_binding_op_remove(ctx, op);
+
+	if (rc == 0) {
+		fmd_binding_mark_add(ctx, &key);
+		fmd_info(ctx, "Connection %s: bound vPPB %d of VCS %d to port %d for %s",
+			 id, key.vppb_id, key.vcs_id, port_id, host->base.id);
+		*response = fmd_redfish_connection(ctx, "CXL", id);
+		return *response ? 0 : -6;
+	}
+
+	fmd_err(ctx, "Connection %s: vPPB bind failed: %d", id, rc);
+	switch (rc) {
+	case -EBUSY:		/* the port or LD is bound to a vPPB */
+		return -9;
+	case -EAGAIN:		/* Busy, or Retry Required twice */
+	case -EALREADY:		/* the vPPB chosen is no longer unbound */
+		return -11;
+	case -EINVAL:		/* an LD-ID the port does not have */
+		return -13;
+	case -EOPNOTSUPP:	/* Unsupported */
+		return -17;
+	case -EPROTO:		/* Invalid Input */
+		return -18;
+	default:
+		return -7;
+	}
+}
+
+struct direct_find {
+	const struct fmd_host *host;
+	const struct fmd_component *dev;
+	const struct fmd_head *head;
+	char id[FMD_CONN_ID_LEN];
+};
+
+static int direct_match(const struct fmd_conn_view *v, void *arg)
+{
+	struct direct_find *f = arg;
+
+	if (v->kind != FMD_CONN_DIRECT || v->host != f->host ||
+	    v->device != f->dev || v->head != f->head)
+		return 0;
+	snprintf(f->id, sizeof(f->id), "%s", v->id);
+	return 1;
 }
 
 /*
  * POST /redfish/v1/Fabrics/{fabricId}/Connections
  *
- * Creates a connection binding CXL memory to a host system.
- * For switch-attached hosts, this also performs vPPB binding.
+ * Give a host a memory target: bind it to a vPPB of the host's VCS. The
+ * body names one initiator, the host's Endpoint, and one target:
+ *  - an SLD's or an LD's Endpoint, with or without MemoryChunkInfo, which
+ *    then names chunks of that target;
+ *  - accepted for compatibility: the ID of an MLD or of a Multi-Headed
+ *    device, which have no Endpoint of their own, with MemoryChunkInfo
+ *    whose chunks are all on one LD, which is the target.
+ * AccessCapabilities, if given, are Read and Write: a binding exposes the
+ * whole of what it reaches, and Bind vPPB has no field for access (Table
+ * 7-35).
+ *
+ * Idempotent: if the host's VCS has the target already, the answer is that
+ * Connection (200), whoever made the binding; if it is being bound, the
+ * task that follows the bind (202); if it is being unbound, 409.
+ *
+ * A direct-attached host and device have their Connection already, which
+ * is answered with 200; a pair that has none cannot be given one (400).
  *
  * Returns:
- *   0 on success (response contains created Connection)
+ *   0 bound: *response is the Connection (201)
+ *   FMD_OP_STARTED: the switch binds in the background, or was already:
+ *     *response is the Task (202)
+ *   FMD_CONN_EXISTS: *response is the Connection there already (200)
  *  -1 fabric not found
  *  -2 invalid request body
  *  -3 host/initiator not found
- *  -4 target device not found
+ *  -4 target not found
  *  -5 memory chunk not found
- *  -6 connection allocation failed
- *  -7 vPPB bind failed (the switch refused it, or another error)
- *  -8 cross-head access denied (MHD: host cannot access this LD)
- *  -9 the port or LD is bound to a vPPB of another host's VCS
- * -10 the host and the device are not on the same switch
+ *  -6 out of memory, or no task could be made
+ *  -7 the bind failed
+ *  -8 the direct-attached host is not attached to that device or head
+ *  -9 the target, or part of it, is bound or being bound for another vPPB
+ * -10 the host and the device are not on the same switch, or one is
+ *     direct-attached and the other is not
  * -11 the switch is Busy, answered Retry Required twice, or the vPPB
  *     chosen was bound by the time it was asked: try again
  * -12 the host's VCS has no unbound vPPB
- * -13 the chunk names no LD of the MLD, or one its port does not have
- * -14 the target is a head that presents an MLD
- * -15 the target is an LD, and the chunk is not on it
- * FMD_OP_STARTED: the switch binds in the background; *response is the Task
+ * -13 a chunk names no LD of the MLD, or one its port does not have
+ * -14 the target is, or is reached through, a head that presents an MLD
+ * -15 a chunk is not on the target
+ * -16 the host's Connection to the target is being unbound
+ * -17 the switch answered Unsupported
+ * -18 the switch answered Invalid Input
+ * -19 the chunks of an MLD or a Multi-Headed device are on several LDs
+ * -20 AccessCapabilities other than Read and Write
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
 				json_t **response)
 {
-	json_t *root;
-	json_error_t error;
-	char initiator_id[FMD_MAX_ID_LEN] = {0};
-	char target_id[FMD_MAX_ID_LEN] = {0};
-	char chunk_id[FMD_MAX_ID_LEN] = {0};
-	uint8_t access_caps = FMD_ACCESS_READ | FMD_ACCESS_WRITE;
+	struct post_request req;
+	struct fmd_component *comp, *dev;
+	const struct fmd_ld *ld = NULL;
+	struct fmd_head *head = NULL;
+	struct fmd_port *port = NULL;
+	struct fmd_host *host;
+	bool ld_named;
+	int rc;
 
+	*response = NULL;
 	if (strcmp(fabric_id, "CXL") != 0)
 		return -1;
 
-	root = json_loadb(body, body_size, 0, &error);
-	if (!root)
-		return -2;
+	rc = parse_post(body, body_size, &req);
+	if (rc)
+		return rc;
+	if (req.bad_access)
+		return -20;
 
-	/* Extract InitiatorEndpoints */
-	json_t *links = json_object_get(root, "Links");
-	if (!links) {
-		json_decref(root);
-		return -2;
-	}
-
-	json_t *init_eps = json_object_get(links, "InitiatorEndpoints");
-	if (init_eps && json_is_array(init_eps) && json_array_size(init_eps) > 0) {
-		json_t *first = json_array_get(init_eps, 0);
-		json_t *odata = json_object_get(first, "@odata.id");
-		if (odata && json_is_string(odata)) {
-			const char *path = json_string_value(odata);
-			const char *last_slash = strrchr(path, '/');
-			if (last_slash)
-				snprintf(initiator_id, sizeof(initiator_id), "%s", last_slash + 1);
-		}
-	}
-
-	/* Extract TargetEndpoints */
-	json_t *target_eps = json_object_get(links, "TargetEndpoints");
-	if (target_eps && json_is_array(target_eps) && json_array_size(target_eps) > 0) {
-		json_t *first = json_array_get(target_eps, 0);
-		json_t *odata = json_object_get(first, "@odata.id");
-		if (odata && json_is_string(odata)) {
-			const char *path = json_string_value(odata);
-			const char *last_slash = strrchr(path, '/');
-			if (last_slash)
-				snprintf(target_id, sizeof(target_id), "%s", last_slash + 1);
-		}
-	}
-
-	/* Extract MemoryChunkInfo */
-	json_t *chunk_info = json_object_get(root, "MemoryChunkInfo");
-	if (chunk_info && json_is_array(chunk_info) && json_array_size(chunk_info) > 0) {
-		json_t *first = json_array_get(chunk_info, 0);
-
-		json_t *chunk_obj = json_object_get(first, "MemoryChunk");
-		if (chunk_obj) {
-			json_t *odata = json_object_get(chunk_obj, "@odata.id");
-			if (odata && json_is_string(odata)) {
-				const char *path = json_string_value(odata);
-				const char *last_slash = strrchr(path, '/');
-				if (last_slash)
-					snprintf(chunk_id, sizeof(chunk_id), "%s", last_slash + 1);
-			}
-		}
-
-		/* Parse AccessCapabilities if present */
-		json_t *access = json_object_get(first, "AccessCapabilities");
-		if (access && json_is_array(access)) {
-			access_caps = 0;
-			size_t i;
-			json_t *val;
-			json_array_foreach(access, i, val) {
-				if (json_is_string(val)) {
-					const char *cap = json_string_value(val);
-					if (strcmp(cap, "Read") == 0)
-						access_caps |= FMD_ACCESS_READ;
-					else if (strcmp(cap, "Write") == 0)
-						access_caps |= FMD_ACCESS_WRITE;
-				}
-			}
-		}
-	}
-
-	json_decref(root);
-
-	if (initiator_id[0] == '\0' || target_id[0] == '\0' || chunk_id[0] == '\0')
-		return -2;
-
-	/* Validate initiator (host) exists */
-	struct fmd_host *host = fmd_topology_find_host(&ctx->topology, initiator_id);
+	host = fmd_topology_find_host(&ctx->topology, req.initiator);
 	if (!host)
 		return -3;
 
-	/*
-	 * Validate target exists. It is a target Endpoint: an SLD, or an LD
-	 * of an MLD or of a Multi-Headed device, whose device is the target,
-	 * and the chunk has to be on that LD. The ID of an MLD or of a
-	 * Multi-Headed device, which have no Endpoint of their own, is still
-	 * taken, with the LD the chunk is on, for compatibility.
-	 */
-	struct fmd_component *target = fmd_topology_find(&ctx->topology, target_id);
-	struct fmd_component *target_ld = NULL;
+	comp = fmd_topology_find(&ctx->topology, req.target);
+	if (!comp)
+		return -4;
 
 	/*
 	 * A head that presents an MLD: its LDs are bound by an LD-ID
 	 * relative to the head, which the device maps to a pool LD by no
 	 * rule the FM is told (CXL r4.0 Section 2.5.1).
 	 */
-	if (target && target->type == FMD_COMPONENT_HEAD)
+	if (comp->type == FMD_COMPONENT_HEAD)
 		return -14;
-	if (target && target->type == FMD_COMPONENT_LD) {
-		target_ld = target;
-		target = target->parent;
-		snprintf(target_id, sizeof(target_id), "%s", target ? target->id : "");
-	}
-	if (!target || !fmd_is_memdev(target))
+	if (comp->type == FMD_COMPONENT_LD && comp->parent &&
+	    (comp->parent->type == FMD_COMPONENT_MLD ||
+	     comp->parent->type == FMD_COMPONENT_MHD)) {
+		ld = fmd_to_ld(comp);
+		dev = comp->parent;
+	} else if (fmd_is_memdev(comp)) {
+		dev = comp;
+	} else {
 		return -4;
-
-	/* Validate chunk exists */
-	struct fmd_mem_chunk *chunk = fmd_topology_find_chunk(&ctx->topology, chunk_id);
-	if (!chunk)
-		return -5;
-
-	if (target_ld && (chunk->interleave_set_count == 0 ||
-			  strcmp(chunk->interleave_sets[0].memory_id, target_ld->id))) {
-		fmd_warn(ctx, "Connection rejected: chunk %s is not on %s",
-			 chunk_id, target_ld->id);
-		return -15;
 	}
+	ld_named = ld != NULL;
 
-	/*
-	 * For MHD (multi-headed devices), validate cross-head access:
-	 * Host can only access pool LDs assigned to its head. When that
-	 * head is on a switch port, the host is whichever VCS the port is
-	 * bound to, which is decided below.
-	 */
-	if (target->type == FMD_COMPONENT_MHD &&
-	    !connection_port(ctx, target, chunk)) {
-		struct fmd_mhd *mhd = fmd_to_mhd(target);
-		struct fmd_head *head = fmd_mhd_find_host_head(mhd, initiator_id);
+	/* each chunk named is the target's; an MLD's are on one LD */
+	for (int i = 0; i < req.nchunks; i++) {
+		struct fmd_mem_chunk *chunk = fmd_topology_find_chunk(&ctx->topology,
+								      req.chunks[i]);
+		const struct fmd_ld *cld;
 
-		if (!head) {
-			fmd_warn(ctx, "Connection rejected: host %s not attached to any head of %s",
-				 initiator_id, target_id);
-			return -8;
+		if (!chunk)
+			return -5;
+		if (!chunk->base.parent || chunk->base.parent->parent != dev) {
+			fmd_warn(ctx, "Connection rejected: chunk %s is not %s's",
+				 req.chunks[i], dev->id);
+			return -15;
 		}
-
-		uint16_t ld_id = extract_ld_id_from_chunk(chunk);
-		if (ld_id != 0xFFFF) {
-			struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology,
-								target_id, ld_id);
-			if (ld && !fmd_mhd_ld_accessible_from_head(ld, head)) {
-				fmd_warn(ctx, "Connection rejected: host %s (head %d) "
-					 "cannot access pool LD %d (head %d)",
-					 initiator_id, head->head_id,
-					 ld_id, ld->binding_point_id);
-				return -8;
-			}
+		if (dev->type == FMD_COMPONENT_SLD)
+			continue;
+		cld = fmd_chunk_ld(dev, chunk);
+		if (!cld) {
+			fmd_warn(ctx, "Connection rejected: chunk %s names no LD of %s",
+				 req.chunks[i], dev->id);
+			return -13;
 		}
+		if (ld && cld != ld)
+			return ld_named ? -15 : -19;
+		ld = cld;
 	}
-
-	/*
-	 * An LD of an MLD on a switch port is bound by its LD-ID (Table
-	 * 7-35), which is taken from the chunk: a chunk that names no LD
-	 * cannot be bound.
-	 */
-	if (!host->direct_attached && target->type == FMD_COMPONENT_MLD &&
-	    connection_port(ctx, target, chunk) &&
-	    extract_ld_id_from_chunk(chunk) == 0xFFFF) {
-		fmd_warn(ctx, "Connection rejected: chunk %s names no LD of %s",
-			 chunk_id, target_id);
+	/* an MLD or Multi-Headed device is bound per LD: one has to be named */
+	if (dev->type != FMD_COMPONENT_SLD && !ld)
 		return -13;
+
+	if (dev->type == FMD_COMPONENT_MHD) {
+		head = fmd_ld_head(ld);
+		port = head ? head->port : NULL;
+	} else if (dev->parent && dev->parent->type == FMD_COMPONENT_PORT) {
+		port = fmd_to_port(dev->parent);
 	}
 
-	/* Create the connection */
-	struct fmd_connection *conn = fmd_connection_create(ctx, initiator_id,
-							    target_id, chunk_id,
-							    access_caps);
-	if (!conn)
-		return -6;
-
-	/*
-	 * For switch-attached hosts, perform vPPB binding.
-	 * This binds the device's port (and LD for MLD) to a vPPB in the host's VCS.
-	 */
-	if (!host->direct_attached) {
-		struct fmd_switch *sw = NULL;
-		struct fmd_port *port = NULL;
-		uint8_t port_id = 0;
-		uint16_t ld_id = 0xFFFF;
-		int vppb_id;
-		int rc;
-
-		/*
-		 * Find the switch and port for the target device: the port
-		 * the device is on, or for a Multi-Headed device the port of
-		 * the head that the chunk's LD is mapped to.
-		 */
-		port = connection_port(ctx, target, chunk);
-		if (port) {
-			port_id = port->port_number;
-
-			if (port->base.parent &&
-			    port->base.parent->type == FMD_COMPONENT_SWITCH) {
-				sw = fmd_to_switch(port->base.parent);
-			}
-		}
-
-		if (!sw) {
-			fmd_warn(ctx, "Connection %s: host is switch-attached but "
-				 "device %s has no switch parent",
-				 conn->id, target_id);
-			/* Continue without binding - may be direct-attached device */
-			goto done;
-		}
+	if (port && port->base.parent &&
+	    port->base.parent->type == FMD_COMPONENT_SWITCH) {
+		struct fmd_switch *sw = fmd_to_switch(port->base.parent);
 
 		/*
 		 * A host reaches devices through the switch its root port is
-		 * on: its VCS is a VCS of that switch. The device's switch
-		 * has a VCS with the same ID, which is another host's.
+		 * on: its VCS is a VCS of that switch.
 		 */
-		if (strcmp(host->switch_id, sw->base.id) != 0) {
-			fmd_warn(ctx, "Connection %s: host %s is on switch %s, "
-				 "device %s on switch %s", conn->id, initiator_id,
-				 host->switch_id[0] ? host->switch_id : "(none)",
-				 target_id, sw->base.id);
-			fmd_connection_remove(ctx, conn);
+		if (host->direct_attached || strcmp(host->switch_id, sw->base.id)) {
+			fmd_warn(ctx, "Connection rejected: host %s is not on %s",
+				 host->base.id, sw->base.id);
 			return -10;
 		}
-
-		/* decide on what the switch has now */
-		fmd_vcs_refresh(ctx, sw);
-
-		/* The host's VCS, by its VCS ID */
-		struct fmd_vcs *vcs = fmd_switch_find_vcs(sw, host->vcs_id);
-		struct fmd_vcs *user_vcs = NULL;
-		struct fmd_vppb *user;
-
-		if (!vcs) {
-			fmd_err(ctx, "Connection %s: host VCS %d invalid for switch %s",
-				conn->id, host->vcs_id, sw->base.id);
-			fmd_connection_remove(ctx, conn);
-			return -7;
-		}
-
 		/*
-		 * For an MLD, the LD-ID from the chunk's interleave set. The
-		 * port of a head of a Multi-Headed device is bound as a whole,
-		 * with LD ID FFFFh: that is cxl-fmd's assumption, that the
-		 * head presents an SLD. A head may present an MLD instead, and
-		 * then its LDs are bound by an LD-ID "from 0 to n-1 relative
-		 * to that head" (Section 2.5.1); no command cxl-fmd sends maps
-		 * a pool LD to it, and fmd_vppb_bind() refuses FFFFh on an MLD
-		 * port.
+		 * The port of a head is bound whole when the head presents an
+		 * SLD, the one pool LD mapped to it: "A head with one LD
+		 * mapped shall present itself as an SLD" (Section 2.5).
 		 */
-		if (target->type == FMD_COMPONENT_MLD)
-			ld_id = extract_ld_id_from_chunk(chunk);
+		if (head && (head->presentation == FMD_HEAD_MLD ||
+			     fmd_head_whole_ld(head) != ld))
+			return -14;
 
-		/*
-		 * An SLD port "is bound to only one VCS", and "The Fabric
-		 * Manager can bind any unused physical port to the unbound
-		 * vPPB" (CXL r4.0 Section 7.2.3.1); "LDs within an MLD
-		 * component can be bound to a host or unbound" (Section
-		 * 7.3.4). That an LD, too, is bound to one vPPB only is
-		 * cxl-fmd's reading of that model. If the host's own VCS has it already there is
-		 * nothing to bind, and nothing for the connection to unbind
-		 * when it goes. If another VCS has it, it is not this host's
-		 * to have.
-		 */
-		user = fmd_switch_bind_target_user(sw, port_id, ld_id, &user_vcs);
-		if (user && user_vcs != vcs) {
-			fmd_warn(ctx, "Connection %s: port %d%s is bound to VCS %d, "
-				 "not to VCS %d of host %s",
-				 conn->id, port_id, ld_id != 0xFFFF ? " (LD)" : "",
-				 user_vcs->vcs_id, vcs->vcs_id, initiator_id);
-			fmd_connection_remove(ctx, conn);
-			return -9;
-		}
-		if (user) {
-			conn->vcs_id = vcs->vcs_id;
-			conn->vppb_id = user->vppb_id;
-			conn->bound = false;
-			fmd_info(ctx, "Connection %s: port %d%s is already bound "
-				 "to vPPB %d in VCS %d",
-				 conn->id, port_id, ld_id != 0xFFFF ? " (LD)" : "",
-				 user->vppb_id, vcs->vcs_id);
-			goto done;
-		}
-
-		/* Find an available vPPB in the host's VCS */
-		vppb_id = find_available_vppb(vcs);
-		if (vppb_id < 0) {
-			fmd_warn(ctx, "Connection %s: no unbound vPPB in VCS %d",
-				 conn->id, host->vcs_id);
-			fmd_connection_remove(ctx, conn);
-			return -12;
-		}
-
-		/* Perform the vPPB bind */
-		rc = fmd_vppb_bind(ctx, sw, host->vcs_id, (uint8_t)vppb_id,
-				   port_id, ld_id);
-		if (rc < 0) {
-			fmd_err(ctx, "Connection %s: vPPB bind failed: %d",
-				conn->id, rc);
-			fmd_connection_remove(ctx, conn);
-			switch (rc) {
-			case -EBUSY:	/* the port or LD is bound to a vPPB */
-				return -9;
-			case -EAGAIN:	/* Busy, or Retry Required twice */
-			case -EALREADY:	/* the vPPB chosen is no longer unbound */
-				return -11;
-			case -EINVAL:	/* an LD-ID the port does not have */
-				return -13;
-			default:
-				return -7;
-			}
-		}
-
-		/* Record binding info in connection */
-		conn->vcs_id = host->vcs_id;
-		conn->vppb_id = (uint8_t)vppb_id;
-
-		/*
-		 * The switch has started and not finished: the connection is
-		 * not made until it has. The request is answered with the
-		 * task that follows the bind.
-		 */
-		if (rc == FMD_OP_STARTED) {
-			struct fmd_task *task;
-
-			conn->bound = false;
-			conn->pending = FMD_CONN_BINDING;
-			task = fmd_task_start(ctx, FMD_TASK_BIND, sw, conn->vcs_id,
-					      conn->vppb_id, conn->id);
-			if (!task) {
-				fmd_connection_remove(ctx, conn);
-				return -6;
-			}
-			*response = fmd_redfish_task(ctx, task->id);
-			return FMD_OP_STARTED;
-		}
-
-		conn->bound = true;
-
-		fmd_info(ctx, "Connection %s: bound vPPB %d in VCS %d to port %d%s",
-			 conn->id, vppb_id, host->vcs_id, port_id,
-			 ld_id != 0xFFFF ? " (MLD)" : "");
+		/* LD ID: "Must be FFFFh for other EP types" (Table 7-35) */
+		return post_bind(ctx, host, sw, port->port_number,
+				 dev->type == FMD_COMPONENT_MLD ? ld->ld_id : FMD_LD_NONE,
+				 response);
 	}
 
-	/*
-	 * For direct-attached MHD, validate that the host's head can access
-	 * the chunk's pool LD. The host connects to a specific head, and
-	 * only LDs mapped to that head are accessible.
-	 */
-	if (host->direct_attached && target->type == FMD_COMPONENT_MHD) {
-		struct fmd_mhd *mhd = fmd_to_mhd(target);
-		struct fmd_head *head = fmd_mhd_find_host_head(mhd, initiator_id);
-		uint16_t pool_ld_id = extract_ld_id_from_chunk(chunk);
+	/* direct-attached: the pair has a Connection, or cannot have one */
+	{
+		struct direct_find f = { .host = host, .dev = dev,
+					 .head = dev->type == FMD_COMPONENT_MHD ? head : NULL };
 
-		if (!head) {
-			fmd_err(ctx, "Connection %s: host %s not attached to any head of MHD %s",
-				conn->id, initiator_id, target_id);
-			fmd_connection_remove(ctx, conn);
+		if (!host->direct_attached || (port && !head))
+			return -10;
+		if (dev->type == FMD_COMPONENT_MHD && !head)
+			return -8;
+		fmd_topology_rdlock(&ctx->topology);
+		rc = fmd_conn_for_each(ctx, direct_match, &f);
+		fmd_topology_rdunlock(&ctx->topology);
+		if (rc != 1) {
+			fmd_warn(ctx, "Connection rejected: host %s is not attached to %s",
+				 host->base.id, head ? head->base.id : dev->id);
 			return -8;
 		}
-
-		if (pool_ld_id != 0xFFFF) {
-			/* Find the pool LD and validate accessibility */
-			struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology,
-								target_id, pool_ld_id);
-			if (!ld) {
-				fmd_err(ctx, "Connection %s: pool LD %d not found in MHD %s",
-					conn->id, pool_ld_id, target_id);
-				fmd_connection_remove(ctx, conn);
-				return -8;
-			}
-
-			if (!fmd_mhd_ld_accessible_from_head(ld, head)) {
-				fmd_err(ctx, "Connection %s: pool LD %d not accessible from "
-					"head %d (host %s)",
-					conn->id, pool_ld_id, head->head_id, initiator_id);
-				fmd_connection_remove(ctx, conn);
-				return -8;
-			}
-
-			fmd_info(ctx, "Connection %s: MHD pool LD %d accessible via head %d "
-				 "(visible as LD %d)",
-				 conn->id, pool_ld_id, head->head_id, ld->visible_ld_id);
-		}
+		return post_existing(ctx, f.id, response);
 	}
-
-done:
-	fmd_info(ctx, "Created connection %s: %s -> %s (chunk: %s)",
-		 conn->id, initiator_id, target_id, chunk_id);
-
-	*response = fmd_redfish_connection(ctx, fabric_id, conn->id);
-	return 0;
 }
-
 
 /*
  * DELETE /redfish/v1/Fabrics/{fabricId}/Connections/{connectionId}
  *
- * Removes a connection and unbinds the vPPB if bound.
+ * Unbind the vPPB, whoever bound it, the Connection Absent included, with
+ * Unbind Option 1h, Simulate Managed Hot-Remove (Table 7-36). Option 0h,
+ * waiting for the link to go down, is never sent: how it applies to an LD
+ * the specification does not say. The switch is read first: an ID whose
+ * vPPB now holds something else is not found, and nothing is unbound.
  *
  * Returns:
- *   0 on success
- *  -1 connection not found
- *  -2 vPPB unbind failed
+ *   0 unbound (204)
+ *   FMD_OP_STARTED: the switch unbinds in the background; *response is the Task
+ *  -1 not found, or no longer what the vPPB holds
+ *  -2 the unbind failed
+ *  -3 a bind or unbind of it is under way, or the switch is busy: try again
+ *  -4 a direct-attached Connection: there is nothing to unbind
+ *  -5 the switch answered Unsupported
+ *  -6 the switch answered Invalid Input
  */
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				  const char *connection_id, json_t **response)
 {
-	*response = NULL;
+	struct fmd_binding_op *op;
+	struct fmd_conn_view v;
+	struct fmd_bind_key key;
+	struct fmd_switch *sw;
+	struct fmd_task *task;
+	enum fmd_conn_kind kind;
+	bool busy;
+	int rc;
 
+	*response = NULL;
 	if (strcmp(fabric_id, "CXL") != 0)
 		return -1;
 
-	struct fmd_connection *conn = fmd_connection_find(ctx, connection_id);
-	if (!conn)
-		return -1;
-
-	/* the switch is still working on it: wait for that to end */
-	if (conn->pending != FMD_CONN_SETTLED)
-		return -3;
-
-	fmd_info(ctx, "Deleting connection %s: %s -> %s",
-		 conn->id, conn->initiator_id, conn->target_id);
-
-	/*
-	 * If the connection has an active vPPB binding, unbind it first.
-	 * We need to find the switch to issue the unbind command.
-	 */
-	if (conn->bound) {
-		struct fmd_host *host = fmd_topology_find_host(&ctx->topology,
-							       conn->initiator_id);
-		struct fmd_component *target = fmd_topology_find(&ctx->topology,
-								 conn->target_id);
-		struct fmd_switch *sw = NULL;
-
-		struct fmd_port *port = (host && target) ?
-			connection_port(ctx, target,
-				fmd_topology_find_chunk(&ctx->topology, conn->chunk_id)) : NULL;
-
-		if (port && port->base.parent &&
-		    port->base.parent->type == FMD_COMPONENT_SWITCH)
-			sw = fmd_to_switch(port->base.parent);
-
-		/*
-		 * Its device has been removed, and the vPPB is still bound
-		 * to the port it was on: the host's switch is where to
-		 * unbind it.
-		 */
-		if (!target && host && host->switch_id[0])
-			sw = fmd_topology_find_switch(&ctx->topology, host->switch_id);
-
-		if (sw) {
-			int rc;
-
-			fmd_info(ctx, "Connection %s: unbinding vPPB %d in VCS %d",
-				 conn->id, conn->vppb_id, conn->vcs_id);
-
-			rc = fmd_vppb_unbind(ctx, sw, conn->vcs_id,
-					     conn->vppb_id,
-					     FMD_UNBIND_MANAGED_HOT_REMOVE);
-			if (rc == -EAGAIN)
-				return -3;
-			if (rc < 0 && rc != -ENOENT) {
-				fmd_err(ctx, "Connection %s: vPPB unbind failed: %d",
-					conn->id, rc);
-				return -2;
-			}
-
-			/*
-			 * Started and not finished: the connection
-			 * stands until the vPPB is unbound.
-			 */
-			if (rc == FMD_OP_STARTED) {
-				struct fmd_task *task;
-
-				conn->pending = FMD_CONN_UNBINDING;
-				task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw,
-						      conn->vcs_id, conn->vppb_id,
-						      conn->id);
-				if (!task) {
-					/* nothing follows it: not pending */
-					fmd_task_untracked(ctx, sw, FMD_TASK_UNBIND,
-							   conn->vcs_id,
-							   conn->vppb_id,
-							   connection_id);
-					return -2;
-				}
-				*response = fmd_redfish_task(ctx, task->id);
-				return FMD_OP_STARTED;
-			}
-		}
+	/* what the switch has now */
+	if (!fmd_conn_id_parse(connection_id, &key)) {
+		sw = fmd_topology_find_switch(&ctx->topology, key.switch_id);
+		if (sw)
+			fmd_vcs_refresh(ctx, sw);
 	}
 
-	return fmd_connection_remove(ctx, conn);
+	fmd_topology_rdlock(&ctx->topology);
+	rc = fmd_conn_lookup(ctx, connection_id, &v);
+	if (!rc) {
+		kind = v.kind;
+		key = v.key;
+		busy = v.op != NULL;
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+	if (rc)
+		return -1;
+
+	/* a host's link to a device: no vPPB to unbind (cxl-fmd's choice) */
+	if (kind == FMD_CONN_DIRECT)
+		return -4;
+	/* the switch is still working on it: wait for that to end */
+	if (busy)
+		return -3;
+
+	sw = fmd_topology_find_switch(&ctx->topology, key.switch_id);
+	if (!sw)
+		return -1;
+
+	fmd_info(ctx, "Connection %s: unbinding vPPB %d of VCS %d", connection_id,
+		 key.vppb_id, key.vcs_id);
+	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND,
+				FMD_UNBIND_MANAGED_HOT_REMOVE, NULL);
+	if (!op)
+		return -2;
+
+	rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
+			     FMD_UNBIND_MANAGED_HOT_REMOVE);
+	if (rc == FMD_OP_STARTED) {
+		/* it stands, Updating, until the vPPB is unbound */
+		task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key,
+				      FMD_UNBIND_MANAGED_HOT_REMOVE);
+		if (!task) {
+			fmd_vcs_refresh(ctx, sw);
+			return -2;
+		}
+		*response = fmd_redfish_task(ctx, task->id);
+		return FMD_OP_STARTED;
+	}
+	fmd_binding_op_remove(ctx, op);
+
+	switch (rc) {
+	case 0:
+		return 0;
+	case -EAGAIN:
+		return -3;
+	case -ENOENT:		/* unbound by the time it was asked */
+		return -1;
+	case -EOPNOTSUPP:
+		return -5;
+	case -EPROTO:
+		return -6;
+	default:
+		fmd_err(ctx, "Connection %s: vPPB unbind failed: %d", connection_id, rc);
+		return -2;
+	}
 }

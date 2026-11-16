@@ -2870,6 +2870,31 @@ out:
  * 8-217) then says whether it is in progress (Bit[0]), how far it is
  * (Bits[7:1]) and, when it is complete, its return code.
  */
+static struct fmd_bind_key bind_key(const char *sw, uint8_t vcs, uint8_t vppb,
+				    uint8_t port, uint16_t ld);
+
+/* The state of Connection @id, -1 if there is none */
+static int conn_state(struct fmd_ctx *ctx, const char *id)
+{
+	struct fmd_conn_view v;
+	int state = -1;
+
+	fmd_topology_rdlock(&ctx->topology);
+	if (!fmd_conn_lookup(ctx, id, &v))
+		state = v.state;
+	fmd_topology_rdunlock(&ctx->topology);
+	return state;
+}
+
+static int ops_count(struct fmd_ctx *ctx)
+{
+	int n = 0;
+
+	for (struct fmd_binding_op *op = ctx->binding_ops; op; op = op->next)
+		n++;
+	return n;
+}
+
 static void answer_bg_status(struct cxlmi_endpoint *ep, bool running,
 			     uint8_t percent, uint16_t opcode, uint16_t rc)
 {
@@ -2883,14 +2908,14 @@ static void answer_bg_status(struct cxlmi_endpoint *ep, bool running,
 
 static void test_bind_task(bool succeeds)
 {
-	static const uint8_t ld1[3] = { 0x03, 5, 1 };
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_switch(ctx, succeeds ? 0x5007 : 0x5008);
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
 	int before = failures, rc;
-	struct fmd_connection *conn;
+	char id[FMD_MAX_ID_LEN], cid[FMD_CONN_ID_LEN];
+	struct fmd_bind_key key;
 	struct fmd_switch *sw;
 	struct fmd_task *task;
-	char id[FMD_MAX_ID_LEN];
 
 	fmd_discover(ctx);
 	device_id(id, sizeof(id), succeeds ? 0x5007 : 0x5008);
@@ -2904,15 +2929,14 @@ static void test_bind_task(bool succeeds)
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
 
-	conn = fmd_connection_create(ctx, "host", "device", "chunk", 0);
-	CHECK(conn, "no connection");
-	if (!conn)
-		goto out;
-	conn->pending = FMD_CONN_BINDING;
-	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 1, conn->id);
+	key = bind_key(id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, cid, sizeof(cid));
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
 	CHECK(task && task->state == FMD_TASK_RUNNING, "no running task");
 	if (!task)
 		goto out;
+	CHECK(!strcmp(task->connection_id, cid), "task for %s, not %s",
+	      task->connection_id, cid);
 
 	/* in progress, 40% */
 	answer_bg_status(ep, true, 40, 0x5201, 0);
@@ -2921,8 +2945,10 @@ static void test_bind_task(bool succeeds)
 	      last_opcode(ep));
 	CHECK(task->state == FMD_TASK_RUNNING && task->percent == 40,
 	      "state %d at %d%%", task->state, task->percent);
-	CHECK(fmd_connection_find(ctx, conn->id) && !conn->bound,
-	      "the connection is made before the bind is over");
+	/* the vPPB reads unbound: the op says what it is becoming */
+	CHECK(conn_state(ctx, cid) == FMD_CONN_STARTING && ops_count(ctx) == 1,
+	      "Connection %s while it is bound: state %d, %d ops", cid,
+	      conn_state(ctx, cid), ops_count(ctx));
 
 	/* a switch that does not answer once is asked again */
 	fmd_tasks_poll(ctx);
@@ -2937,17 +2963,20 @@ static void test_bind_task(bool succeeds)
 		CHECK(task->state == FMD_TASK_COMPLETED && task->percent == 100,
 		      "state %d at %d%%: %s", task->state, task->percent,
 		      task->message);
-		conn = fmd_connection_find(ctx, task->connection_id);
-		CHECK(conn && conn->bound && conn->pending == FMD_CONN_SETTLED,
-		      "the connection is not made after the bind");
+		CHECK(conn_state(ctx, cid) >= 0 && conn_state(ctx, cid) != FMD_CONN_STARTING &&
+		      !ops_count(ctx) && fmd_binding_mark_find(ctx, &key),
+		      "after the bind: state %d, %d ops", conn_state(ctx, cid),
+		      ops_count(ctx));
 	} else {
 		/* complete, with the return code of a failure */
 		answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_INTERNAL);
 		fmd_tasks_poll(ctx);
 		CHECK(task->state == FMD_TASK_EXCEPTION, "state %d: %s",
 		      task->state, task->message);
-		CHECK(!fmd_connection_find(ctx, task->connection_id),
-		      "a connection is left by a bind that failed");
+		CHECK(conn_state(ctx, cid) < 0 && !ops_count(ctx) &&
+		      !fmd_binding_mark_find(ctx, &key),
+		      "a bind that failed leaves Connection state %d, %d ops",
+		      conn_state(ctx, cid), ops_count(ctx));
 	}
 
 	/* over: the switch is not asked again */
@@ -3172,8 +3201,8 @@ static void test_switch_events(void)
 	uint8_t ports[4 + 16] = { 0 }, pl[8] = { 0 }, set = 0, cmd = 0;
 	size_t size = sizeof(pl);
 	int before = failures, nports, rc;
-	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16];
-	struct fmd_connection *conn;
+	char sw_id[FMD_MAX_ID_LEN], id[FMD_MAX_ID_LEN + 16], cid[FMD_CONN_ID_LEN];
+	struct fmd_bind_key key;
 	struct fmd_switch *sw;
 	struct fmd_task *task;
 	struct fmd_port *port;
@@ -3244,12 +3273,12 @@ static void test_switch_events(void)
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
-	conn = fmd_connection_create(ctx, "host", "device", "chunk", 0);
-	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 1, conn->id) : NULL;
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, cid, sizeof(cid));
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
-	conn->pending = FMD_CONN_BINDING;
 
 	answer_event(ep, virtual_switch_event, 0x12,
 		     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
@@ -3258,8 +3287,10 @@ static void test_switch_events(void)
 	fmd_switch_events_poll(ctx);
 	CHECK(task->state == FMD_TASK_COMPLETED, "task state %d: %s",
 	      task->state, task->message);
-	CHECK(conn->bound && conn->pending == FMD_CONN_SETTLED,
-	      "the connection is not made by the binding change");
+	CHECK(conn_state(ctx, cid) >= 0 && conn_state(ctx, cid) != FMD_CONN_STARTING &&
+	      !ops_count(ctx) && fmd_binding_mark_find(ctx, &key),
+	      "the connection is not made by the binding change: state %d, %d ops",
+	      conn_state(ctx, cid), ops_count(ctx));
 	/* both records are kept: the switch no longer has them */
 	CHECK(sw->base.log && sw->base.log->count == 2,
 	      "%d records kept of the switch", sw->base.log ? sw->base.log->count : 0);
@@ -3271,11 +3302,10 @@ static void test_switch_events(void)
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_unbind(ctx, sw, 2, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
 	CHECK(rc == FMD_OP_STARTED, "unbind: %d", rc);
-	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, 2, 1, conn->id);
+	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
-	conn->pending = FMD_CONN_UNBINDING;
 
 	answer_no_events(ep, false);
 	answer_event(ep, virtual_switch_event, 0x13,
@@ -3286,9 +3316,10 @@ static void test_switch_events(void)
 	/* the record has no return code, and Background Operation Status none */
 	CHECK(!strcmp(task->message, "Unbind vPPB failed: the switch logged it "
 		      "as failed"), "task message: %s", task->message);
-	CHECK(fmd_connection_find(ctx, task->connection_id) &&
-	      conn->pending == FMD_CONN_SETTLED,
-	      "the connection does not stand after an unbind that failed");
+	CHECK(conn_state(ctx, cid) >= 0 && conn_state(ctx, cid) != FMD_CONN_UPDATING &&
+	      !ops_count(ctx),
+	      "the connection does not stand after an unbind that failed: %d",
+	      conn_state(ctx, cid));
 
 	/*
 	 * Another that fails, and Background Operation Status (Table 8-217)
@@ -3297,11 +3328,10 @@ static void test_switch_events(void)
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_unbind(ctx, sw, 2, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
 	CHECK(rc == FMD_OP_STARTED, "unbind: %d", rc);
-	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, 2, 1, conn->id);
+	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
-	conn->pending = FMD_CONN_UNBINDING;
 
 	answer_no_events(ep, false);
 	answer_event(ep, virtual_switch_event, 0x14,
@@ -3653,21 +3683,6 @@ static struct fmd_host *vcs_host(struct fmd_ctx *ctx, const char *sw_id, int vcs
 	return NULL;
 }
 
-static struct fmd_connection *bound_connection(struct fmd_ctx *ctx,
-					       struct fmd_host *host,
-					       const char *target, uint8_t vppb)
-{
-	struct fmd_connection *conn = fmd_connection_create(ctx, host->base.id,
-							    target, "chunk", 0);
-
-	if (conn) {
-		conn->vcs_id = host->vcs_id;
-		conn->vppb_id = vppb;
-		conn->bound = true;
-	}
-	return conn;
-}
-
 /* a switch event for @port, which then reads as @type */
 static void port_event(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		       uint16_t handle, uint8_t port, uint8_t type, uint8_t ltssm,
@@ -3712,10 +3727,10 @@ static void test_device_removal(void)
 	struct cxlmi_endpoint *ep = new_switch(ctx, 0x500f);
 	struct fmd_fabric *root = ctx->topology.root;
 	char sw_id[FMD_MAX_ID_LEN], mld_id[FMD_MAX_ID_LEN + 16];
-	char sld_id[FMD_MAX_ID_LEN + 16], a_id[FMD_MAX_ID_LEN], b_id[FMD_MAX_ID_LEN];
-	char c_id[FMD_MAX_ID_LEN], state[32];
+	char sld_id[FMD_MAX_ID_LEN + 16], a_id[FMD_CONN_ID_LEN], b_id[FMD_CONN_ID_LEN];
+	char c_id[FMD_CONN_ID_LEN], state[32];
 	int before = failures, devices, lds, domains, chunks, rc;
-	struct fmd_connection *conn;
+	struct fmd_bind_key key;
 	struct fmd_component *dev;
 	struct fmd_host *host;
 	struct fmd_switch *sw;
@@ -3749,21 +3764,20 @@ static void test_device_removal(void)
 	vcs = fmd_switch_find_vcs(sw, 2);
 	vppb = vcs ? fmd_vcs_find_vppb(vcs, 1) : NULL;
 	CHECK(vppb && vppb->ld, "the vPPB does not point at LD 1");
-	conn = bound_connection(ctx, host, mld_id, 1);
-	CHECK(conn, "no connection");
-	if (!conn)
-		goto out;
-	snprintf(a_id, sizeof(a_id), "%s", conn->id);
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, a_id, sizeof(a_id));
+	CHECK(conn_state(ctx, a_id) == FMD_CONN_ENABLED, "Connection %s: %d",
+	      a_id, conn_state(ctx, a_id));
 
-	/* and one the switch is still binding, with its task */
-	conn = bound_connection(ctx, host, mld_id, 2);
-	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 2, conn->id) : NULL;
+	/* and LD 0, which the switch is still binding to vPPB 2, with its task */
+	key = bind_key(sw_id, 2, 2, 5, 0);
+	fmd_conn_id_format(&key, b_id, sizeof(b_id));
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
-	snprintf(b_id, sizeof(b_id), "%s", conn->id);
-	conn->bound = false;
-	conn->pending = FMD_CONN_BINDING;
+	CHECK(conn_state(ctx, b_id) == FMD_CONN_STARTING, "Connection %s: %d",
+	      b_id, conn_state(ctx, b_id));
 
 	devices = root->device_count;
 	lds = root->ld_count;
@@ -3807,24 +3821,24 @@ static void test_device_removal(void)
 	 * The one being made is its task's to settle.
 	 */
 	port_event(ctx, ep, 0x32, 5, 0x00, 0x00, unbound);
-	CHECK(!fmd_connection_find(ctx, a_id),
+	CHECK(conn_state(ctx, a_id) < 0,
 	      "a connection whose vPPB the switch unbound is still there");
-	CHECK(fmd_connection_find(ctx, b_id) && task->state == FMD_TASK_RUNNING,
+	CHECK(conn_state(ctx, b_id) == FMD_CONN_STARTING &&
+	      task->state == FMD_TASK_RUNNING,
 	      "a connection being bound was not left to its task");
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, unbound, unbound);
 	fmd_task_binding_changed(ctx, sw, 2, 2, true);
-	CHECK(task->state == FMD_TASK_EXCEPTION && !fmd_connection_find(ctx, b_id),
-	      "task %d: %s", task->state, task->message);
+	CHECK(task->state == FMD_TASK_EXCEPTION && conn_state(ctx, b_id) < 0 &&
+	      !ops_count(ctx), "task %d: %s", task->state, task->message);
 
 	/* an SLD is plugged into port 4, and bound to vPPB 1 of VCS 2 */
 	port_event(ctx, ep, 0x33, 4, 0x04, 0x04, port4);
 	CHECK(fmd_topology_find_sld(&ctx->topology, sld_id), "no SLD on port 4");
-	conn = bound_connection(ctx, host, sld_id, 1);
-	CHECK(conn, "no connection");
-	if (!conn)
-		goto out;
-	snprintf(c_id, sizeof(c_id), "%s", conn->id);
+	key = bind_key(sw_id, 2, 1, 4, FMD_LD_NONE);
+	fmd_conn_id_format(&key, c_id, sizeof(c_id));
+	CHECK(conn_state(ctx, c_id) == FMD_CONN_ENABLED, "Connection %s: %d",
+	      c_id, conn_state(ctx, c_id));
 
 	/*
 	 * Its link goes down with the device still detected, a surprise Link
@@ -3859,13 +3873,14 @@ static void test_device_removal(void)
 	json_decref(resp);
 	/* started: what only the answer to 5202h says */
 	CHECK(rc == FMD_OP_STARTED, "delete: %d", rc);
-	conn = fmd_connection_find(ctx, c_id);
-	CHECK(conn && conn->pending == FMD_CONN_UNBINDING,
-	      "the connection does not stand while it is unbound");
+	CHECK(conn_state(ctx, c_id) == FMD_CONN_UPDATING,
+	      "the connection does not stand while it is unbound: %d",
+	      conn_state(ctx, c_id));
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, unbound, unbound);
 	fmd_task_binding_changed(ctx, sw, 2, 1, false);
-	CHECK(!fmd_connection_find(ctx, c_id), "the connection is still there");
+	CHECK(conn_state(ctx, c_id) < 0 && !ops_count(ctx),
+	      "the connection is still there");
 
 	/* plugged back in: found again */
 	port_event(ctx, ep, 0x36, 4, 0x04, 0x04, unbound);
@@ -4901,16 +4916,16 @@ out:
 
 /*
  * A task that is lost: its switch is gone, or does not answer Background
- * Operation Status five times. Its connection is no longer pending, and is
- * what the vPPB is: a DELETE is not refused as busy any more.
+ * Operation Status five times. Its op is freed, and its Connection is what
+ * the vPPB is: a DELETE answered 503 while it ran is accepted again.
  */
-static void test_lost_task_clears_pending(void)
+static void test_lost_task_frees_op(void)
 {
 	static const uint8_t ld1[3] = { 0x03, 5, 1 };
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5105);
-	char id[FMD_MAX_ID_LEN], conn_id[FMD_MAX_ID_LEN];
-	struct fmd_connection *conn;
+	char id[FMD_MAX_ID_LEN], conn_id[FMD_CONN_ID_LEN];
+	struct fmd_bind_key key;
 	struct fmd_switch *sw;
 	struct fmd_task *task;
 	struct fmd_host *host;
@@ -4933,15 +4948,12 @@ static void test_lost_task_clears_pending(void)
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
-	conn = fmd_connection_create(ctx, host->base.id, "gone_device", "chunk", 0);
-	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 1, conn->id) : NULL;
+	key = bind_key(id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, conn_id, sizeof(conn_id));
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
-	conn->vcs_id = 2;
-	conn->vppb_id = 1;
-	conn->pending = FMD_CONN_BINDING;
-	snprintf(conn_id, sizeof(conn_id), "%s", conn->id);
 
 	rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
 	CHECK(rc == -3, "DELETE while binding: %d", rc);
@@ -4953,10 +4965,10 @@ static void test_lost_task_clears_pending(void)
 	fmd_tasks_poll(ctx);
 	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d: %s",
 	      task->state, task->message);
-	conn = fmd_connection_find(ctx, conn_id);
-	CHECK(conn && conn->pending == FMD_CONN_SETTLED && conn->bound,
-	      "the connection of a bound vPPB, after its task is lost: %s",
-	      conn ? (conn->pending ? "pending" : "not bound") : "gone");
+	CHECK(!ops_count(ctx) && conn_state(ctx, conn_id) >= 0 &&
+	      conn_state(ctx, conn_id) != FMD_CONN_STARTING,
+	      "the Connection of a bound vPPB after its task is lost: %d, %d ops",
+	      conn_state(ctx, conn_id), ops_count(ctx));
 
 	/*
 	 * It is deleted, and the vPPB the switch bound is unbound: the one
@@ -4969,7 +4981,7 @@ static void test_lost_task_clears_pending(void)
 		answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
 		rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
 		cxlmi_mock_get_stats(ep, NULL, &taken);
-		CHECK(rc == 0 && taken - then == 1,
+		CHECK(rc == 0 && taken - then == 1 && !ops_count(ctx),
 		      "DELETE after the task was lost: %d, %u responses taken",
 		      rc, taken - then);
 	}
@@ -4980,61 +4992,60 @@ static void test_lost_task_clears_pending(void)
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 2, 4, 0xffff);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
-	conn = fmd_connection_create(ctx, host->base.id, "gone_device", "chunk", 0);
-	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 2, conn->id) : NULL;
+	key = bind_key(id, 2, 2, 4, FMD_LD_NONE);
+	fmd_conn_id_format(&key, conn_id, sizeof(conn_id));
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
-	conn->pending = FMD_CONN_BINDING;
-	snprintf(conn_id, sizeof(conn_id), "%s", conn->id);
+	CHECK(conn_state(ctx, conn_id) == FMD_CONN_STARTING, "%s: %d", conn_id,
+	      conn_state(ctx, conn_id));
 	snprintf(task->switch_id, sizeof(task->switch_id), "no_such_switch");
 	fmd_tasks_poll(ctx);
 	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d", task->state);
-	CHECK(!fmd_connection_find(ctx, conn_id),
-	      "a connection is left pending by a task whose switch is gone");
+	CHECK(conn_state(ctx, conn_id) < 0 && !ops_count(ctx),
+	      "a Connection is left Starting by a task whose switch is gone");
 
 	/*
 	 * An unbind lost the same way, of a vPPB the switch then reads as
-	 * unbound: the connection is gone. One still bound stands.
+	 * unbound: the Connection is gone. One still bound stands, and
+	 * DELETE is accepted again.
 	 */
+	key = bind_key(id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, conn_id, sizeof(conn_id));
 	for (int unbinds = 0; unbinds < 2; unbinds++) {
 		bool done = unbinds == 0;
 
-		conn = fmd_connection_create(ctx, host->base.id, "gone_device",
-					     "chunk", 0);
-		task = conn ? fmd_task_start(ctx, FMD_TASK_UNBIND, sw, 2, 1,
-					     conn->id) : NULL;
+		task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
 		CHECK(task, "no task");
 		if (!task)
 			goto out;
-		conn->vcs_id = 2;
-		conn->vppb_id = 1;
-		conn->bound = true;
-		conn->pending = FMD_CONN_UNBINDING;
-		snprintf(conn_id, sizeof(conn_id), "%s", conn->id);
 		for (int i = 0; i < 4; i++)
 			fmd_tasks_poll(ctx);
 		answer_vcs(ep, 0, 0, port2, unbound);
 		answer_vcs(ep, 2, 1, done ? unbound : ld1, unbound);
 		fmd_tasks_poll(ctx);
-		CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d",
-		      task->state);
-		conn = fmd_connection_find(ctx, conn_id);
+		CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx),
+		      "task state %d, %d ops", task->state, ops_count(ctx));
 		if (done) {
-			CHECK(!conn, "a connection stands after its vPPB was unbound");
+			CHECK(conn_state(ctx, conn_id) < 0,
+			      "a Connection stands after its vPPB was unbound");
 		} else {
-			CHECK(conn && conn->pending == FMD_CONN_SETTLED,
-			      "a connection stays pending after its unbind was lost");
+			CHECK(conn_state(ctx, conn_id) >= 0 &&
+			      conn_state(ctx, conn_id) != FMD_CONN_UPDATING,
+			      "a Connection stays Updating after its unbind was lost: %d",
+			      conn_state(ctx, conn_id));
 			answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
 			rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
-			CHECK(rc != -3, "DELETE after the unbind was lost: %d", rc);
+			CHECK(rc == 0, "DELETE after the unbind was lost: %d", rc);
 			json_decref(resp);
 			resp = NULL;
 		}
 	}
+
 out:
 	fmd_ctx_free(ctx);
-	report("a lost task leaves no connection pending", before);
+	report("a lost task frees its op", before);
 }
 
 /*
@@ -5676,8 +5687,182 @@ static void test_conn_view_unresolved_mh_mld(void)
 	      fmd_head_whole_ld(h1) == lds[2] && !fmd_head_whole_ld(h0),
 	      "heads and LDs");
 
+	/* served: Enabled, Health Warning, its target the head's Endpoint */
+	{
+		json_t *c = fmd_redfish_connection(ctx, "CXL", "sw_mh_vcs0_vppb1_p4_ld1");
+		json_t *st = json_object_get(c, "Status");
+		json_t *t = json_object_get(json_object_get(c, "Links"), "TargetEndpoints");
+
+		CHECK(c && !strcmp(json_string_value(json_object_get(st, "State")), "Enabled") &&
+		      !strcmp(json_string_value(json_object_get(st, "Health")), "Warning") &&
+		      json_array_size(t) == 1 &&
+		      strstr(json_string_value(json_object_get(json_array_get(t, 0),
+							       "@odata.id")), "/mhd_head0") &&
+		      !json_object_get(c, "MemoryChunkInfo"),
+		      "the unresolved Connection as served");
+		json_decref(c);
+	}
+
+	/*
+	 * POST to a head that presents an MLD, as its Endpoint, as a pool LD
+	 * mapped to it, or as the device with a chunk of one: 400, and
+	 * nothing is bound. The head that presents an SLD has its Connection.
+	 */
+	{
+		static const char *const bodies[] = {
+			"mhd_head0\"}]}}",
+			"mhd_ld0\"}]}}",
+			"mhd\"}]}, \"MemoryChunkInfo\": [{\"MemoryChunk\": "
+				"{\"@odata.id\": \"/x/mhd_ld1_chunk\"}}]}",
+		};
+		char body[512];
+		json_t *resp = NULL;
+
+		for (size_t i = 0; i < 3; i++) {
+			snprintf(body, sizeof(body),
+				 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
+				 "\"/e/sw_mh_host0\"}], \"TargetEndpoints\": [{\"@odata.id\": "
+				 "\"/e/%s", bodies[i]);
+			rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+			CHECK(rc == -14 && !resp, "POST %zu to a head that presents an MLD: %d",
+			      i, rc);
+			json_decref(resp);
+			resp = NULL;
+		}
+		CHECK(sw->vcs[0].vppbs[4].binding_status == FMD_VPPB_UNBOUND &&
+		      !ctx->binding_ops, "something was bound for an MLD-presenting head");
+
+		snprintf(body, sizeof(body),
+			 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
+			 "\"/e/sw_mh_host0\"}], \"TargetEndpoints\": [{\"@odata.id\": "
+			 "\"/e/mhd_ld2\"}]}}");
+		rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+		CHECK(rc == FMD_CONN_EXISTS &&
+		      !strcmp(json_string_value(json_object_get(resp, "Id")),
+			      "sw_mh_vcs0_vppb2_p5"),
+		      "POST of the SLD-presenting head's pool LD: %d", rc);
+		json_decref(resp);
+	}
+
 	fmd_ctx_free(ctx);
 	report("a binding to a head that presents an MLD is Unresolved", before);
+}
+
+/*
+ * POST and DELETE of Connections on a switch reached through a CCI. A bind
+ * the switch carries out in the background is recorded before 5201h is
+ * sent: a second POST of the same target is answered with its task and
+ * sends no 5201h, and one of another target does not choose its vPPB,
+ * which reads 00h meanwhile. Unsupported is 501. DELETE unbinds with
+ * Unbind Option 1h, Simulate Managed Hot-Remove (Table 7-36).
+ */
+static void test_post_delete_on_a_switch(void)
+{
+	static const uint8_t ld0[3] = { 0x03, 5, 0 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5106);
+	char sw_id[FMD_MAX_ID_LEN], body[512], cid[FMD_CONN_ID_LEN];
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	json_t *resp = NULL;
+	uint8_t pl[16];
+	uint16_t op;
+	int before = failures, rc, task_id;
+
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5106);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	host = sw ? vcs_host(ctx, sw_id, 2) : NULL;
+	CHECK(sw && host, "no switch or host of VCS 2");
+	if (!sw || !host)
+		goto out;
+
+#define POST_LD(n) snprintf(body, sizeof(body), \
+	"{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/e/%s\"}], " \
+	"\"TargetEndpoints\": [{\"@odata.id\": \"/e/%.32s_port5_dev_ld%d\"}]}}", \
+	host->base.id, sw_id, n)
+
+	/* LD 0: the switch binds it in the background, to vPPB 1 */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	POST_LD(0);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == FMD_OP_STARTED && resp, "POST of LD 0: %d", rc);
+	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
+	json_decref(resp);
+	resp = NULL;
+	CHECK(ops_count(ctx) == 1 && ctx->binding_ops->key.vppb_id == 1 &&
+	      ctx->binding_ops->kind == FMD_BIND_OP_BIND,
+	      "%d ops after the POST", ops_count(ctx));
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld0", sw_id);
+	CHECK(conn_state(ctx, cid) == FMD_CONN_STARTING, "%s: %d", cid,
+	      conn_state(ctx, cid));
+
+	/* again: the same task, and no 5201h, which nothing would answer */
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == FMD_OP_STARTED && resp &&
+	      atoi(json_string_value(json_object_get(resp, "Id"))) == task_id &&
+	      last_opcode(ep) != 0x5201 && ops_count(ctx) == 1,
+	      "POST of LD 0 again: %d, last %04xh", rc, last_opcode(ep));
+	json_decref(resp);
+	resp = NULL;
+
+	/*
+	 * LD 1, while vPPB 1 still reads unbound: vPPB 2 is chosen. The
+	 * switch answers Unsupported: 501, and nothing is left of it.
+	 */
+	answer_rc(ep, 0x5201, CXLMI_RET_UNSUPPORTED);
+	POST_LD(1);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == -17 && op == 0x5201 && pl[0] == 2 && pl[1] == 2 && pl[2] == 5 &&
+	      pl[4] == 1 && pl[5] == 0,
+	      "POST of LD 1: %d, %04xh to VCS %d vPPB %d port %d LD %d", rc, op,
+	      pl[0], pl[1], pl[2], pl[4] | pl[5] << 8);
+	CHECK(ops_count(ctx) == 1, "%d ops after a bind refused", ops_count(ctx));
+
+	/* the one being bound cannot be deleted yet */
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == -3, "DELETE while binding: %d", rc);
+
+	/* the bind is over */
+	task = fmd_task_find(ctx, task_id);
+	answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
+	fmd_tasks_poll(ctx);
+	CHECK(task && task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      conn_state(ctx, cid) == FMD_CONN_ENABLED,
+	      "after the bind: task %d, Connection %d", task ? (int)task->state : -1,
+	      conn_state(ctx, cid));
+
+	/* and again: 200, that Connection */
+	POST_LD(0);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == FMD_CONN_EXISTS && last_opcode(ep) != 0x5201,
+	      "POST of a bound LD: %d", rc);
+	json_decref(resp);
+	resp = NULL;
+
+	/* DELETE: Unbind vPPB with option 1h, which the switch fails */
+	answer_rc(ep, 0x5202, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == -2 && op == 0x5202 && pl[0] == 2 && pl[1] == 1 && pl[2] == 0x01,
+	      "DELETE: %d, %04xh VCS %d vPPB %d option %d", rc, op, pl[0], pl[1], pl[2]);
+	answer_rc(ep, 0x5202, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == -5 && !ops_count(ctx) && conn_state(ctx, cid) == FMD_CONN_ENABLED,
+	      "DELETE answered Unsupported: %d", rc);
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == 0 && !ops_count(ctx), "DELETE: %d", rc);
+#undef POST_LD
+out:
+	fmd_ctx_free(ctx);
+	report("POST and DELETE of Connections on a switch", before);
 }
 
 /* the build renames main() so that the daemon's own can be linked in */
@@ -5753,7 +5938,8 @@ int main(void)
 	test_bound_pid_decode();
 	test_disabled_vcs_has_no_host();
 	test_untracked_binding_change_refreshes();
-	test_lost_task_clears_pending();
+	test_lost_task_frees_op();
+	test_post_delete_on_a_switch();
 	test_conn_view_prebound_sld_ld();
 	test_conn_view_skips_vppb0_disabled_nonmemory_pid();
 	test_conn_id_roundtrip_underscored_switch();

@@ -36,6 +36,7 @@ from test_tasks import post_connection, wait_for
 ROOT = Path(__file__).resolve().parent.parent
 BASE = json.loads((ROOT / "mock" / "background-bind.json").read_text())
 SWITCH = "switch_0"
+CONNECTIONS = "/redfish/v1/Fabrics/CXL/Connections"
 SWITCH_LOG = f"/redfish/v1/Chassis/{SWITCH}/LogServices/EventLog/Entries"
 
 
@@ -120,6 +121,10 @@ def test_bind_that_fails_in_the_background(daemon, time_ms):
         assert bound(bindings(client, SWITCH)) == {}
         assert len(warnings(client)) == attempt
         assert warnings(client)[-1]["Message"] == "vPPB 1 of VCS 0: binding change"
+        # nothing was made: no Connection, and the task created none
+        assert "Links" not in task
+        status, conns = client.get(CONNECTIONS)
+        assert conns["Members"] == []
 
 
 def test_unbind_that_fails_in_the_background(daemon):
@@ -146,10 +151,11 @@ def test_unbind_that_fails_in_the_background(daemon):
     assert len(warnings(client)) == 1
 
 
-@pytest.mark.parametrize("result,http", [("busy", 503), ("unsupported", 500)])
+@pytest.mark.parametrize("result,http", [("busy", 503), ("unsupported", 501)])
 def test_bind_refused_at_once(daemon, result, http):
     """Busy and Unsupported come at once, as from a switch: no task, and the
-    vPPB is never Busy."""
+    vPPB is never Busy. Bind vPPB is optional (Table 7-31): a switch that
+    does not support it is answered 501 (cxl-fmd's choice)."""
     _, client = daemon(results(bind=result))
     chunk = chunk_of(client, "sld_0")
     response = post_connection(client.base_url, "switch_0_host0", "sld_0", chunk)
@@ -159,8 +165,9 @@ def test_bind_refused_at_once(daemon, result, http):
     assert warnings(client) == []
 
 
-@pytest.mark.parametrize("result,http", [("busy", 503), ("unsupported", 500)])
+@pytest.mark.parametrize("result,http", [("busy", 503), ("unsupported", 501)])
 def test_unbind_refused_at_once(daemon, result, http):
+    """The Connection stays, Enabled, and no task is left."""
     _, client = daemon(results(unbind=result, time_ms=0))
     chunk = chunk_of(client, "sld_0")
     response = post_connection(client.base_url, "switch_0_host0", "sld_0", chunk)
@@ -168,6 +175,10 @@ def test_unbind_refused_at_once(daemon, result, http):
     uri = response.json()["@odata.id"]
     assert requests.delete(client.base_url + uri, timeout=30).status_code == http
     assert list(bound(bindings(client, SWITCH)).values()) == [("BoundPhysicalPort", 2, None)]
+    status, conn = client.get(uri)
+    assert status == 200 and conn["Status"]["State"] == "Enabled"
+    # and it can be asked again
+    assert requests.delete(client.base_url + uri, timeout=30).status_code == http
 
 
 def external(t):
@@ -213,6 +224,65 @@ def test_external_binds_and_unbinds(daemon):
     send(proc, client, ("1", "2"), ("Unbound", None, None))
     assert informational(client) == records
     assert list(bound(bindings(client, SWITCH)).values()) == [("BoundLD", 4, 1)]
+
+
+def connections(client):
+    status, data = client.get(CONNECTIONS)
+    assert status == 200
+    return sorted(m["@odata.id"].rsplit("/", 1)[1] for m in data["Members"])
+
+
+def test_external_binds_are_connections(daemon):
+    """A binding made outside cxl-fmd is a Connection of the VCS's host, and
+    goes when it is unbound, with or without an event. The mock switch's
+    table is what cxl-fmd reads, so one made with no event is seen at once
+    too: the case where only --rescan would see it is not one the mock
+    can make."""
+    proc, client = daemon(external)
+    assert connections(client) == []
+
+    send(proc, client, ("1", "2"), ("BoundPhysicalPort", 3, None))
+    assert connections(client) == ["switch_0_vcs1_vppb2_p3"]
+    status, conn = client.get(CONNECTIONS + "/switch_0_vcs1_vppb2_p3")
+    assert conn["Links"]["InitiatorEndpoints"] == [
+        {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host1"}]
+    assert conn["Links"]["TargetEndpoints"] == [
+        {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/sld_1"}]
+    status, domains = client.get("/redfish/v1/Systems/switch_0_host1/MemoryDomains")
+    assert domains["Members"] == [
+        {"@odata.id": "/redfish/v1/Systems/switch_0_host1/MemoryDomains/switch_0_vcs1_vppb2_p3"}]
+
+    send(proc, client, ("1", "3"), ("BoundLD", 4, 1))
+    assert connections(client) == ["switch_0_vcs1_vppb2_p3", "switch_0_vcs1_vppb3_p4_ld1"]
+
+    send(proc, client, ("1", "2"), ("Unbound", None, None))
+    assert connections(client) == ["switch_0_vcs1_vppb3_p4_ld1"]
+    assert client.get(CONNECTIONS + "/switch_0_vcs1_vppb2_p3")[0] == 404
+
+
+def rebind(t):
+    t["external"] = [
+        {"switch": SWITCH, "vcs": 0, "vppb": 1, "action": "bind", "port": 2},
+        {"switch": SWITCH, "vcs": 0, "vppb": 1, "action": "unbind"},
+        {"switch": SWITCH, "vcs": 0, "vppb": 1, "action": "bind", "port": 3},
+    ]
+
+
+def test_stale_delete_404(daemon):
+    """A Connection's ID names its vPPB and what the vPPB holds. Once the
+    vPPB holds something else, the ID is not found, and a DELETE of it
+    unbinds nothing."""
+    proc, client = daemon(rebind)
+    send(proc, client, ("0", "1"), ("BoundPhysicalPort", 2, None))
+    old = CONNECTIONS + "/switch_0_vcs0_vppb1_p2"
+    assert client.get(old)[0] == 200
+
+    send(proc, client, ("0", "1"), ("Unbound", None, None))
+    send(proc, client, ("0", "1"), ("BoundPhysicalPort", 3, None))
+    assert client.get(old)[0] == 404
+    assert requests.delete(client.base_url + old, timeout=30).status_code == 404
+    assert bindings(client, SWITCH)[("0", "1")] == ("BoundPhysicalPort", 3, None)
+    assert connections(client) == ["switch_0_vcs0_vppb1_p3"]
 
 
 @pytest.mark.parametrize("entry,message", [

@@ -191,6 +191,7 @@ def cxl_fmd_daemon(cxl_fmd_executable, request):
         "port": port,
         "url": f"http://localhost:{port}",
         "mock_topology": str(mock_path),
+        "output": output,
     }
 
     # Cleanup. A daemon that died during the test, or that does not shut

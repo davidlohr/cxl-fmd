@@ -63,30 +63,98 @@ def together(jobs):
 @pytest.mark.mock_topology("mock/fm-boots-first.json")
 class TestRaceForOneDevice:
 
-    def test_one_host_gets_the_sld(self, api_client):
+    def test_one_host_gets_the_sld(self, cxl_fmd_daemon, api_client):
         """Two hosts ask for the same SLD, eight times each, all at once. An
-        SLD port is bound to one VCS: one host has it, the other is refused
-        every time, and one vPPB is bound."""
+        SLD port is bound to one VCS: one host has it, with one Bind vPPB,
+        and its other seven requests are answered with that Connection; the
+        other host is refused every time."""
         base = api_client.base_url
         chunk = chunk_of(api_client, "sld_0")
 
         def ask(host):
-            return lambda: (host, requests.post(
-                base + CONNECTIONS, json=body(base, host, "sld_0", chunk),
-                timeout=30).status_code)
+            def job():
+                r = requests.post(base + CONNECTIONS, json=body(base, host, "sld_0", chunk),
+                                  timeout=30)
+                return host, r.status_code, r.headers.get("Location")
+            return job
 
         hosts = ["switch_0_host0", "switch_0_host1"]
         results = together([ask(hosts[i % 2]) for i in range(CLIENTS)])
 
-        won = {host for host, status in results if status == 201}
+        won = {host for host, status, _ in results if status in (200, 201)}
         assert len(won) == 1, results
         winner = won.pop()
-        for host, status in results:
-            assert status == (201 if host == winner else 409), results
+        mine = [(status, where) for host, status, where in results if host == winner]
+        assert sorted(status for status, _ in mine) == [200] * 7 + [201], results
+        assert len({where for _, where in mine}) == 1
+        for host, status, _ in results:
+            if host != winner:
+                assert status == 409, results
 
         now = bound(bindings(api_client, "switch_0"))
         assert list(now.values()) == [("BoundPhysicalPort", 2, None)]
         assert next(iter(now))[0] == ("0" if winner == hosts[0] else "1")
+        assert cxl_fmd_daemon["output"]().count("mock bind vPPB") == 1
+
+    def test_eight_posts_of_one_target(self, cxl_fmd_daemon, api_client):
+        """One host asks for sld_0 eight times at once: one Connection, made
+        with one Bind vPPB (5201h)."""
+        base = api_client.base_url
+        chunk = chunk_of(api_client, "sld_0")
+
+        def ask():
+            r = requests.post(base + CONNECTIONS,
+                              json=body(base, "switch_0_host0", "sld_0", chunk), timeout=30)
+            return r.status_code, r.headers.get("Location")
+
+        results = together([ask] * 8)
+        assert sorted(status for status, _ in results) == [200] * 7 + [201]
+        assert len({where for _, where in results}) == 1
+        status, data = api_client.get(CONNECTIONS)
+        assert [m["@odata.id"] for m in data["Members"]] == [results[0][1]]
+        assert cxl_fmd_daemon["output"]().count("mock bind vPPB") == 1
+
+
+@pytest.mark.mock_topology("mock/background-bind.json")
+class TestRaceInTheBackground:
+
+    def test_eight_posts_of_one_target_one_task(self, cxl_fmd_daemon, api_client):
+        """While the switch binds in the background, the vPPB reads 01h: the
+        record of the bind under way is what the other seven requests find.
+        All eight are answered with the one task, and 5201h is sent once."""
+        base = api_client.base_url
+        chunk = chunk_of(api_client, "sld_0")
+
+        def ask():
+            r = requests.post(base + CONNECTIONS,
+                              json=body(base, "switch_0_host0", "sld_0", chunk), timeout=30)
+            return r.status_code, r.json().get("@odata.id")
+
+        results = together([ask] * 8)
+        assert [status for status, _ in results] == [202] * 8
+        assert len({task for _, task in results}) == 1
+        assert cxl_fmd_daemon["output"]().count("mock bind vPPB") == 1
+
+    def test_distinct_targets_distinct_vppbs(self, cxl_fmd_daemon, api_client):
+        """Two targets for one host at once: the first is being bound when
+        the second is asked for. The two choose different vPPBs, and the
+        switch, which runs one background command at a time, refuses the
+        second as Busy (503). On the mock the vPPB being bound reads 01h,
+        so this does not show that the record of the bind under way keeps
+        another request off a vPPB that still reads 00h: discovery-tests'
+        test_post_delete_on_a_switch does, with a switch on a CCI."""
+        base = api_client.base_url
+
+        def ask(dev):
+            return lambda: requests.post(
+                base + CONNECTIONS, timeout=30,
+                json=body(base, "switch_0_host0", dev, chunk_of(api_client, dev))).status_code
+
+        results = together([ask("sld_0"), ask("sld_1")])
+        assert sorted(results) == [202, 503]
+        out = cxl_fmd_daemon["output"]()
+        assert out.count("mock bind vPPB 1 in VCS 0") == 1
+        assert out.count("mock bind vPPB 2 in VCS 0") == 1
 
 
 @pytest.mark.mock_topology("mock/large-fabric.json")

@@ -142,6 +142,36 @@ static enum MHD_Result send_error(struct MHD_Connection *conn,
 	return send_json_response(conn, status, error);
 }
 
+/* An error with the Allow header a 405 has to have (RFC 9110 Section 15.5.6) */
+static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
+					unsigned int status, const char *message,
+					const char *allow)
+{
+	json_t *error = json_pack("{s:{s:s, s:s}}", "error",
+				  "code", "Base.1.0.GeneralError",
+				  "message", message);
+	struct MHD_Response *response;
+	enum MHD_Result ret;
+	char *body = json_dumps(error, JSON_INDENT(2));
+
+	json_decref(error);
+	if (!body)
+		return MHD_NO;
+	response = MHD_create_response_from_buffer(strlen(body), body,
+						   MHD_RESPMEM_MUST_FREE);
+	if (!response) {
+		free(body);
+		return MHD_NO;
+	}
+	MHD_add_response_header(response, "Content-Type",
+				"application/json; charset=utf-8");
+	MHD_add_response_header(response, "OData-Version", "4.0");
+	MHD_add_response_header(response, "Allow", allow);
+	ret = MHD_queue_response(conn, status, response);
+	MHD_destroy_response(response);
+	return ret;
+}
+
 /*
  * Map a negative errno from a handler to an HTTP error response
  */
@@ -1059,7 +1089,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		rc = fmd_redfish_post_memory_chunk(ctx, params[0], params[1],
 						   body, body_size, &response);
 
-		if (rc == 0 && response) {
+		/* made now (201), or there already (200): where it is */
+		if ((rc == 0 || rc == FMD_CONN_EXISTS) && response) {
 			/* Extract @odata.id for Location header */
 			json_t *odata_id = json_object_get(response, "@odata.id");
 			if (odata_id && json_is_string(odata_id)) {
@@ -1117,7 +1148,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 								response, location);
 		}
 
-		if (rc == 0 && response) {
+		/* made now (201), or there already (200): where it is */
+		if ((rc == 0 || rc == FMD_CONN_EXISTS) && response) {
 			/* Extract @odata.id for Location header */
 			json_t *odata_id = json_object_get(response, "@odata.id");
 			if (odata_id && json_is_string(odata_id)) {
@@ -1129,9 +1161,10 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 			free_params(params, 8);
 			free(norm_url);
-			return send_json_response_with_location(conn, MHD_HTTP_CREATED,
-								response, location);
+			return send_json_response_with_location(conn,
+				rc == 0 ? MHD_HTTP_CREATED : MHD_HTTP_OK, response, location);
 		}
+		json_decref(response);
 
 		free_params(params, 8);
 		free(norm_url);
@@ -1153,13 +1186,28 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "Memory chunk not found");
 		if (rc == -8)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
-					  "Cross-head access denied: host cannot access this memory");
+					  "The host is not attached to that device or head: it cannot reach this memory");
 		if (rc == -11)
 			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
 					  "The switch cannot bind now; try again");
 		if (rc == -12)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The host's Virtual CXL Switch has no unbound vPPB");
+		if (rc == -16)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "The host's connection to the target is being unbound");
+		if (rc == -17)
+			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
+					  "The switch does not support Bind vPPB (Unsupported)");
+		if (rc == -18)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The switch refused the bind as Invalid Input");
+		if (rc == -19)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The memory chunks are on more than one logical device");
+		if (rc == -20)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "AccessCapabilities can only be Read and Write: a binding gives the whole of its target");
 		if (rc == -13)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The memory chunk names no logical device that the device's port can bind");
@@ -1168,13 +1216,13 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "The head presents an MLD: which pool LD each of its LD-IDs is, is not known (CXL r4.0 Section 2.5.1)");
 		if (rc == -15)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
-					  "The memory chunk is not on the target logical device");
+					  "The memory chunk is not on the target");
 		if (rc == -10)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The host and the device are not on the same switch");
 		if (rc == -9)
 			return send_error(conn, MHD_HTTP_CONFLICT,
-					  "The device or logical device is already bound to another host");
+					  "The device or logical device is bound, or being bound, to another vPPB");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create connection");
 	}
@@ -1221,6 +1269,18 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 	if (!norm_url)
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Memory allocation failed");
+
+	/*
+	 * PATCH of a Connection: everything in it is what the switch says
+	 * (cxl-fmd's choice, though Connection_v1 lets a service update it).
+	 */
+	if (match_route("/redfish/v1/Fabrics/{id}/Connections/{conn}", norm_url, params, 8)) {
+		free_params(params, 8);
+		free(norm_url);
+		return send_error_allow(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+					"A Connection is the switch's binding: POST and DELETE change it",
+					"GET, DELETE");
+	}
 
 	/* PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev} */
 	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}", norm_url, params, 8)) {
@@ -1341,6 +1401,7 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 			return send_json_response_with_location(conn, MHD_HTTP_ACCEPTED,
 								task, location);
 		}
+		json_decref(task);
 		if (rc == -3)
 			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
 					  "The switch is carrying out another operation; try again");
@@ -1350,6 +1411,16 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -1)
 			return send_error(conn, MHD_HTTP_NOT_FOUND,
 					  "Connection not found");
+		if (rc == -4)
+			return send_error_allow(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+						"A direct-attached connection has no vPPB to unbind",
+						"GET");
+		if (rc == -5)
+			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
+					  "The switch does not support Unbind vPPB (Unsupported)");
+		if (rc == -6)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The switch refused the unbind as Invalid Input");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete connection");
 	}

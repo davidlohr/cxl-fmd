@@ -10,7 +10,10 @@
  *
  * A request that starts one does not wait for it. It is answered with 202
  * Accepted and a task, and the event loop asks the switch until the
- * operation is over. Only then is the connection made, or removed.
+ * operation is over. While it runs, a struct fmd_binding_op says what the
+ * vPPB is becoming, since a vPPB being bound or unbound reads 01h; the task
+ * frees it when the operation is over, however that is learnt, and the
+ * Connection is then what the vPPB is.
  */
 
 #include <stdio.h>
@@ -24,31 +27,69 @@
 #define FMD_TASKS_KEPT 64
 
 struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
-				struct fmd_switch *sw, uint8_t vcs_id,
-				uint8_t vppb_id, const char *connection_id)
+				struct fmd_switch *sw,
+				const struct fmd_bind_key *key,
+				uint8_t unbind_option)
 {
-	struct fmd_task *task = calloc(1, sizeof(*task));
+	enum fmd_bind_op_kind op_kind = kind == FMD_TASK_BIND ?
+					FMD_BIND_OP_BIND : FMD_BIND_OP_UNBIND;
+	struct fmd_binding_op *op;
+	struct fmd_task *task;
 
-	if (!task)
+	op = fmd_binding_op_find(ctx, key->switch_id, key->vcs_id, key->vppb_id);
+	if (op && op->kind != op_kind) {
+		fmd_binding_op_remove(ctx, op);
+		op = NULL;
+	}
+	if (!op)
+		op = fmd_binding_op_add(ctx, key, op_kind, unbind_option, NULL);
+
+	task = calloc(1, sizeof(*task));
+	if (!task || !op) {
+		/* nothing would follow it, or free the op: the vPPB says */
+		free(task);
+		if (op)
+			fmd_binding_op_remove(ctx, op);
+		fmd_err(ctx, "%s: no task for the %s of vPPB %d in VCS %d",
+			sw->base.id, kind == FMD_TASK_BIND ? "bind" : "unbind",
+			key->vppb_id, key->vcs_id);
 		return NULL;
+	}
 
 	task->id = ++ctx->task_next_id;
 	task->kind = kind;
 	task->state = FMD_TASK_RUNNING;
-	task->vcs_id = vcs_id;
-	task->vppb_id = vppb_id;
+	task->vcs_id = key->vcs_id;
+	task->vppb_id = key->vppb_id;
+	task->port_id = key->port_id;
+	task->ld_id = key->ld_id;
 	task->start = time(NULL);
 	snprintf(task->switch_id, sizeof(task->switch_id), "%s", sw->base.id);
-	snprintf(task->connection_id, sizeof(task->connection_id), "%s",
-		 connection_id);
+	fmd_conn_id_format(key, task->connection_id, sizeof(task->connection_id));
+	snprintf(op->task_id, sizeof(op->task_id), "%d", task->id);
 
 	task->next = ctx->tasks;
 	ctx->tasks = task;
 
 	fmd_info(ctx, "Task %d: %s of vPPB %d in VCS %d of %s started (connection %s)",
-		 task->id, kind == FMD_TASK_BIND ? "bind" : "unbind", vppb_id,
-		 vcs_id, sw->base.id, connection_id);
+		 task->id, kind == FMD_TASK_BIND ? "bind" : "unbind", key->vppb_id,
+		 key->vcs_id, sw->base.id, task->connection_id);
 	return task;
+}
+
+/* The task is over: the op it followed goes, and the view reads the vPPB */
+static void task_drop_op(struct fmd_ctx *ctx, struct fmd_task *task)
+{
+	struct fmd_binding_op *op;
+	char id[16];
+
+	snprintf(id, sizeof(id), "%d", task->id);
+	for (op = ctx->binding_ops; op; op = op->next) {
+		if (!strcmp(op->task_id, id)) {
+			fmd_binding_op_remove(ctx, op);
+			return;
+		}
+	}
 }
 
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id)
@@ -82,11 +123,23 @@ static void task_finish(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 	task->percent = ok ? 100 : task->percent;
 	task->end = time(NULL);
 	snprintf(task->message, sizeof(task->message), "%s", message);
+	task_drop_op(ctx, task);
 
 	if (ok)
 		fmd_info(ctx, "Task %d: %s", task->id, message);
 	else
 		fmd_err(ctx, "Task %d: %s", task->id, message);
+}
+
+/* What the task's bind makes: its vPPB, port and LD, on its switch */
+static void task_key(const struct fmd_task *task, struct fmd_bind_key *key)
+{
+	memset(key, 0, sizeof(*key));
+	snprintf(key->switch_id, sizeof(key->switch_id), "%s", task->switch_id);
+	key->vcs_id = task->vcs_id;
+	key->vppb_id = task->vppb_id;
+	key->port_id = task->port_id;
+	key->ld_id = task->ld_id;
 }
 
 /*
@@ -97,7 +150,6 @@ static void task_finish(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 			  struct fmd_switch *sw, uint16_t rc, bool logged_failed)
 {
-	struct fmd_connection *conn = fmd_connection_find(ctx, task->connection_id);
 	struct fmd_vcs *vcs;
 	struct fmd_vppb *vppb;
 	char msg[128];
@@ -108,22 +160,28 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	vppb = vcs ? fmd_vcs_find_vppb(vcs, task->vppb_id) : NULL;
 
 	if (task->kind == FMD_TASK_BIND) {
-		bool bound = vppb &&
-			(vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
-			 vppb->binding_status == FMD_VPPB_BOUND_LD);
+		/*
+		 * Bound to what was asked: the port, and the LD for 03h. Bound
+		 * Port ID and Bound LD ID are "Valid only when ... Binding
+		 * Status is 02h or 03h" (Table 7-34).
+		 */
+		bool bound = vppb && vppb->bound_port_id == task->port_id &&
+			((task->ld_id == FMD_LD_NONE &&
+			  vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT) ||
+			 (task->ld_id != FMD_LD_NONE &&
+			  vppb->binding_status == FMD_VPPB_BOUND_LD &&
+			  vppb->bound_ld_id == task->ld_id));
 
 		if (rc == CXLMI_RET_SUCCESS && bound && !logged_failed) {
-			if (conn) {
-				conn->bound = true;
-				conn->pending = FMD_CONN_SETTLED;
-			}
+			struct fmd_bind_key key;
+
+			task_key(task, &key);
+			fmd_binding_mark_add(ctx, &key);
 			task_finish(ctx, task, true, "The vPPB is bound");
 			return;
 		}
 
 		/* the host was never given the device: there is no connection */
-		if (conn)
-			fmd_connection_remove(ctx, conn);
 		if (rc != CXLMI_RET_SUCCESS)
 			snprintf(msg, sizeof(msg), "Bind vPPB failed: %s",
 				 cxlmi_cmd_retcode_tostr(rc));
@@ -132,7 +190,7 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 				 "logged it as failed");
 		else
 			snprintf(msg, sizeof(msg), "Bind vPPB completed and the "
-				 "vPPB is not bound");
+				 "vPPB is not bound to what was asked");
 		task_finish(ctx, task, false, msg);
 		return;
 	}
@@ -140,15 +198,11 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	/* unbind */
 	if (rc == CXLMI_RET_SUCCESS && !logged_failed &&
 	    (!vppb || vppb->binding_status == FMD_VPPB_UNBOUND)) {
-		if (conn)
-			fmd_connection_remove(ctx, conn);
 		task_finish(ctx, task, true, "The vPPB is unbound");
 		return;
 	}
 
 	/* the host still has the device, and the connection stands */
-	if (conn)
-		conn->pending = FMD_CONN_SETTLED;
 	if (rc != CXLMI_RET_SUCCESS)
 		snprintf(msg, sizeof(msg), "Unbind vPPB failed: %s",
 			 cxlmi_cmd_retcode_tostr(rc));
@@ -194,52 +248,18 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	return false;
 }
 
-void fmd_task_untracked(struct fmd_ctx *ctx, struct fmd_switch *sw,
-			enum fmd_task_kind kind, uint8_t vcs_id,
-			uint8_t vppb_id, const char *connection_id)
+/*
+ * A task that nothing follows any more: its switch is gone, or does not
+ * answer. It ends as an Exception, its op goes, and its Connection is
+ * what the vPPB, read again if @sw answers, now is: a vPPB still busy
+ * gives none until it settles. @sw may be NULL.
+ */
+static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
+		      struct fmd_switch *sw, const char *message)
 {
-	struct fmd_connection *conn = fmd_connection_find(ctx, connection_id);
-	struct fmd_vppb *vppb = NULL;
-
-	if (conn) {
-		conn->pending = FMD_CONN_SETTLED;
-
-		/* what the switch has now, or what was last known */
-		if (sw) {
-			struct fmd_vcs *vcs;
-
-			fmd_vcs_refresh(ctx, sw);
-			vcs = fmd_switch_find_vcs(sw, vcs_id);
-			vppb = vcs ? fmd_vcs_find_vppb(vcs, vppb_id) : NULL;
-		}
-
-		if (kind == FMD_TASK_BIND) {
-			/*
-			 * Bound, or still binding: the host may have the
-			 * device, and deleting the connection unbinds it.
-			 * Unbound, or not known: the host was never given
-			 * it, as for a bind that failed.
-			 */
-			if (vppb && (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
-				     vppb->binding_status == FMD_VPPB_BOUND_LD ||
-				     vppb->binding_status == FMD_VPPB_BUSY)) {
-				conn->bound = true;
-			} else {
-				fmd_info(ctx, "Connection %s is gone: vPPB %d of "
-					 "VCS %d is not bound", conn->id, vppb_id,
-					 vcs_id);
-				fmd_connection_remove(ctx, conn);
-			}
-		} else if (vppb && vppb->binding_status == FMD_VPPB_UNBOUND) {
-			/* the unbind is done, whatever was told of it */
-			fmd_info(ctx, "Connection %s is gone: vPPB %d of VCS %d "
-				 "is unbound", conn->id, vppb_id, vcs_id);
-			fmd_connection_remove(ctx, conn);
-		}
-	}
-
+	task_finish(ctx, task, false, message);
 	if (sw)
-		fmd_switch_settle_connections(ctx, sw);
+		fmd_vcs_refresh(ctx, sw);
 }
 
 /* forget the oldest finished tasks beyond the number kept */
@@ -284,9 +304,7 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 
 		sw = fmd_topology_find_switch(&ctx->topology, task->switch_id);
 		if (!sw) {
-			task_finish(ctx, task, false, "The switch is gone");
-			fmd_task_untracked(ctx, NULL, task->kind, task->vcs_id,
-					   task->vppb_id, task->connection_id);
+			task_lost(ctx, task, NULL, "The switch is gone");
 			continue;
 		}
 
@@ -295,12 +313,9 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 				&percent, &rc);
 		if (status < 0) {
 			/* a switch that cannot be asked, several times over */
-			if (++task->failed_polls >= 5) {
-				task_finish(ctx, task, false, "The switch does not "
-					    "answer Background Operation Status");
-				fmd_task_untracked(ctx, sw, task->kind, task->vcs_id,
-						   task->vppb_id, task->connection_id);
-			}
+			if (++task->failed_polls >= 5)
+				task_lost(ctx, task, sw, "The switch does not "
+					  "answer Background Operation Status");
 			continue;
 		}
 		task->failed_polls = 0;

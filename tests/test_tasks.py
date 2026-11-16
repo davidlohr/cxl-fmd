@@ -34,12 +34,11 @@ def post_connection(base, host, dev, chunk):
 
 
 def made(api_client):
-    """The connections that were asked for. The collection also lists one per
-    device on a switch, whether or not any host has it."""
+    """The Connections: background-bind.json has no binding to begin with,
+    so these are the ones asked for."""
     status, data = api_client.get(CONNECTIONS)
     assert status == 200
-    return [m["@odata.id"] for m in data["Members"]
-            if m["@odata.id"].rsplit("/", 1)[1].startswith("conn")]
+    return [m["@odata.id"] for m in data["Members"]]
 
 
 def wait_for(base, monitor, timeout=10):
@@ -105,6 +104,34 @@ class TestBackgroundBind:
         assert api_client.delete(connection["@odata.id"]) == 503
 
         assert wait_for(base, response.headers["Location"]).status_code == 201
+
+    def test_post_idempotent_starting(self, api_client):
+        """The Connection is there, Starting, as soon as the bind is: it is
+        in the task's CreatedResources. Asked for again while it is being
+        bound, the answer is the same task; once it is bound, 200 with the
+        Connection."""
+        base = api_client.base_url
+        chunk = chunk_of(api_client, "sld_0")
+        first = post_connection(base, "switch_0_host0", "sld_0", chunk)
+        assert first.status_code == 202
+        task = first.json()
+        created = task["Links"]["CreatedResources"][0]["@odata.id"]
+        assert created == CONNECTIONS + "/switch_0_vcs0_vppb1_p2"
+        status, conn = api_client.get(created)
+        assert status == 200 and conn["Status"]["State"] == "Starting"
+
+        again = post_connection(base, "switch_0_host0", "sld_0", chunk)
+        assert again.status_code == 202
+        assert again.json()["@odata.id"] == task["@odata.id"]
+        assert again.headers["Location"] == first.headers["Location"]
+        assert made(api_client) == [created]
+
+        assert wait_for(base, first.headers["Location"]).status_code == 201
+        done = post_connection(base, "switch_0_host0", "sld_0", chunk)
+        assert done.status_code == 200
+        assert done.headers["Location"] == created
+        status, tasks = api_client.get("/redfish/v1/TaskService/Tasks")
+        assert tasks["Members@odata.count"] == 1
 
     def test_one_operation_at_a_time(self, api_client):
         """A component runs one background command at a time: a second bind

@@ -47,7 +47,6 @@ struct fmd_ld;
 struct fmd_mem_domain;
 struct fmd_mem_chunk;
 struct fmd_host;
-struct fmd_connection;
 struct fmd_mhd;
 struct fmd_head;
 struct fmd_dcd_info;
@@ -1088,46 +1087,6 @@ struct fmd_host {
 #define FMD_ACCESS_WRITE 0x02
 
 /*
- * Connection - binding between host and device memory
- *
- * A connection binds a CXL memory chunk to a host system, making it
- * visible in the host's memory map. For switch-attached topologies,
- * this involves vPPB binding.
- *
- * Connections are stored in a linked list in fmd_ctx.
- */
-struct fmd_connection {
-	char id[FMD_MAX_ID_LEN];
-
-	/* Endpoints */
-	char initiator_id[FMD_MAX_ID_LEN];  /* Host/System ID */
-	char target_id[FMD_MAX_ID_LEN];     /* Device (SLD/MLD) ID */
-
-	/* Memory info */
-	char chunk_id[FMD_MAX_ID_LEN];      /* MemoryChunk being connected */
-	uint8_t access_caps;                 /* FMD_ACCESS_READ | FMD_ACCESS_WRITE */
-
-	/* Switch binding info (for switch-attached) */
-	uint8_t vcs_id;
-	uint8_t vppb_id;
-	bool bound;                          /* vPPB bind succeeded */
-
-	/*
-	 * The switch is still binding or unbinding for this connection: see
-	 * struct fmd_task. A connection being made is not one yet, and one
-	 * being removed still is.
-	 */
-	enum {
-		FMD_CONN_SETTLED = 0,
-		FMD_CONN_BINDING,
-		FMD_CONN_UNBINDING,
-	} pending;
-
-	/* Linked list */
-	struct fmd_connection *next;
-};
-
-/*
  * Connections derived from the switch (src/conn_view.c)
  *
  * A switch-attached Connection is a vPPB binding, as last read with Get
@@ -1286,10 +1245,6 @@ struct fmd_ctx {
 
 	/* Discovered topology */
 	struct fmd_topology topology;
-
-	/* Connections (linked list) */
-	struct fmd_connection *connections;
-	int connection_count;
 
 	/* Binds and unbinds under way, and bindings made by this run (src/conn_view.c) */
 	struct fmd_binding_op *binding_ops;
@@ -1478,60 +1433,6 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 int fmd_chunk_remove(struct fmd_topology *topo, struct fmd_mem_chunk *chunk);
 
 /*
- * Connection management
- */
-
-/**
- * fmd_connection_create - Create a new connection
- * @ctx: FMD context
- * @initiator_id: Host/System ID (initiator endpoint)
- * @target_id: Device ID (target endpoint, SLD or MLD)
- * @chunk_id: MemoryChunk ID being connected
- * @access_caps: Access capabilities (FMD_ACCESS_READ | FMD_ACCESS_WRITE)
- *
- * Creates a connection record and adds it to ctx->connections list.
- * For switch-attached devices, caller should call fmd_vppb_bind() separately.
- *
- * Return: Pointer to new connection, or NULL on error
- */
-struct fmd_connection *fmd_connection_create(struct fmd_ctx *ctx,
-					     const char *initiator_id,
-					     const char *target_id,
-					     const char *chunk_id,
-					     uint8_t access_caps);
-
-/**
- * fmd_connection_find - Find a connection by ID
- * @ctx: FMD context
- * @id: Connection ID
- *
- * Return: Pointer to connection, or NULL if not found
- */
-struct fmd_connection *fmd_connection_find(struct fmd_ctx *ctx, const char *id);
-
-/**
- * fmd_connection_find_by_chunk - Find connections using a specific chunk
- * @ctx: FMD context
- * @chunk_id: MemoryChunk ID
- *
- * Return: Pointer to first matching connection, or NULL if none
- */
-struct fmd_connection *fmd_connection_find_by_chunk(struct fmd_ctx *ctx,
-						    const char *chunk_id);
-
-/**
- * fmd_connection_remove - Remove and free a connection
- * @ctx: FMD context
- * @conn: Connection to remove
- *
- * Removes the connection from ctx->connections list and frees it.
- * For switch-attached devices, caller should call fmd_vppb_unbind() first.
- *
- * Return: 0 on success, -1 on error
- */
-int fmd_connection_remove(struct fmd_ctx *ctx, struct fmd_connection *conn);
-
-/*
  * Connections derived from the switch (src/conn_view.c). See struct
  * fmd_conn_view for the locks the caller holds, and how long what they
  * return stays valid. None of them sends a command.
@@ -1601,7 +1502,11 @@ typedef int (*fmd_conn_cb)(const struct fmd_conn_view *v, void *arg);
  * is bound (02h or 03h) or that a bind under way names, to a port that is
  * a memory device's, or that has none. A vPPB bound to a PCIe device, a
  * Type 1 or Type 2 device or a switch, and one with a Bound PID (04h, made
- * with Configure PID Binding, not Bind vPPB), give none.
+ * with Configure PID Binding, not Bind vPPB), give none. Then the
+ * direct-attached Connections, which have no vPPB (FMD_CONN_DIRECT): the
+ * only direct-attached host with each SLD and MLD on no switch, and each
+ * head of a Multi-Headed device on no switch with the host it is attached
+ * to, if that is known. Both are cxl-fmd's choice.
  *
  * @cb's non-zero return stops the walk and is returned.
  */
@@ -1622,7 +1527,9 @@ int fmd_conn_find_target(const struct fmd_ctx *ctx, const struct fmd_switch *sw,
 
 /*
  * Each memory chunk a Connection makes reachable: every chunk of an SLD,
- * the chunks on an LD, none when the target is a head or unknown.
+ * the chunks on an LD, none when the target is the head of a switch-attached
+ * device or is unknown. A direct-attached MLD's are all of its chunks, and
+ * those of a direct-attached head the chunks of the pool LDs mapped to it.
  * @cb's non-zero return stops the walk and is returned.
  */
 int fmd_conn_for_each_chunk(const struct fmd_conn_view *v,
@@ -1704,29 +1611,29 @@ struct fmd_task {
 	char switch_id[FMD_MAX_ID_LEN];
 	uint8_t vcs_id;
 	uint8_t vppb_id;
-	char connection_id[FMD_MAX_ID_LEN];
+	uint8_t port_id;                     /* what is bound, or unbound */
+	uint16_t ld_id;                      /* FMD_LD_NONE for a whole port */
+	char connection_id[FMD_CONN_ID_LEN];
 	time_t start;
 	time_t end;                          /* 0 while running */
 	char message[128];                   /* how it ended */
 	struct fmd_task *next;
 };
 
+/*
+ * A task for the bind or unbind of @key that @sw has started in the
+ * background. It takes over the struct fmd_binding_op of that vPPB, which
+ * the caller added before it sent the command (one is added if there is
+ * none), and frees it when the task ends, however it ends. If no task can
+ * be made the op is freed here and NULL returned: the caller then reads the
+ * VCSs again, and the Connection is what the vPPB is.
+ */
 struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
-				struct fmd_switch *sw, uint8_t vcs_id,
-				uint8_t vppb_id, const char *connection_id);
+				struct fmd_switch *sw,
+				const struct fmd_bind_key *key,
+				uint8_t unbind_option);
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
-
-/*
- * A bind or unbind of vPPB @vppb_id of VCS @vcs_id that the switch started
- * for connection @connection_id, and that nothing follows any more: the
- * switch is gone, does not answer, or no task could be made. The connection
- * is no longer pending, and is what the vPPB, read again if @sw answers, now
- * is. @sw may be NULL. fabric_lock held exclusively.
- */
-void fmd_task_untracked(struct fmd_ctx *ctx, struct fmd_switch *sw,
-			enum fmd_task_kind kind, uint8_t vcs_id,
-			uint8_t vppb_id, const char *connection_id);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
 void fmd_tasks_free(struct fmd_ctx *ctx);
 
@@ -1878,13 +1785,12 @@ int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
- * A device that a switch port no longer has, and the connections through
- * the switch once its vPPBs say what became of them (src/discovery.c).
+ * A device that a switch port no longer has (src/discovery.c). What became
+ * of its Connections is what the vPPBs say once they are read again.
  * fabric_lock held exclusively.
  */
 void fmd_switch_port_device_removed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 				    struct fmd_port *port, struct fmd_component *dev);
-void fmd_switch_settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
  * The event logs of the switches (src/switch_events.c): read, acted on and
@@ -2374,7 +2280,11 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx, const char *chassis_id,
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx, const char *chassis_id,
 				    const char *domain_id, const char *chunk_id);
 
-/* POST/DELETE handlers for Connections */
+/*
+ * POST/DELETE handlers for Connections. A POST of a Connection there is
+ * already returns FMD_CONN_EXISTS, answered 200.
+ */
+#define FMD_CONN_EXISTS 2
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
 				json_t **response);

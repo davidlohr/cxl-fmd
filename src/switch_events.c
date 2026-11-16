@@ -176,10 +176,8 @@ static void switch_events(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		 * Every VCS: there is no 5200h for one VCS that is cheaper
 		 * to keep apart, and another may have changed as well.
 		 */
-		if (ev.bindings) {
+		if (ev.bindings)
 			fmd_vcs_refresh(ctx, sw);
-			fmd_switch_settle_connections(ctx, sw);
-		}
 		return;
 	}
 	for (int id = 0; id < 256; id++) {

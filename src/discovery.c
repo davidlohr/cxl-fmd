@@ -1042,8 +1042,11 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 	if (!ctx || !sw)
 		return -EINVAL;
-	if (!sw->base.ep)
-		return 0;	/* mock: the table is all there is */
+	if (!sw->base.ep) {
+		/* mock: the table is all there is */
+		fmd_binding_marks_prune(ctx, sw->base.id);
+		return 0;
+	}
 
 	table = calloc(FMD_MAX_VCS, sizeof(*table));
 	if (!table)
@@ -1091,6 +1094,8 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 	/* the port and LD each bound vPPB points at */
 	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
+	/* bindings this run made that the vPPBs no longer hold */
+	fmd_binding_marks_prune(ctx, sw->base.id);
 
 	return 0;
 }
@@ -1132,9 +1137,9 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
  * managed hot-removal of an MLD, "The FM unbinds each assigned LD with the
  * Unbind vPPB command as it receives notifications from each host"
  * (Section 7.6.6.7), which cxl-fmd does not do (a known gap). So the
- * vPPBs are read again after the ports, and a connection whose device has
- * gone stands for as long as its vPPB is bound: see
- * fmd_switch_settle_connections().
+ * vPPBs are read again after the ports: a Connection is a vPPB binding, and
+ * one whose device has gone stands, Absent, for as long as its vPPB is
+ * bound (see fmd_conn_for_each()).
  */
 void fmd_switch_port_device_removed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 				    struct fmd_port *port, struct fmd_component *dev)
@@ -1354,49 +1359,6 @@ static int read_switch_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * Read some ports of a switch again, the ones an event said have changed,
  * and its VCSs. Called with fabric_lock held exclusively.
  */
-/*
- * The connections through a switch whose device has been removed, once its
- * vPPBs have been read again: one whose vPPB is no longer bound has gone
- * with its device, and one whose vPPB is still bound stands, without its
- * device, until it is deleted, which unbinds the vPPB. A connection the
- * switch is still binding or unbinding is left to its task.
- *
- * Not called from fmd_vcs_refresh(): that is also how a deletion of a
- * connection reads the vPPB it is about to unbind.
- */
-void fmd_switch_settle_connections(struct fmd_ctx *ctx, struct fmd_switch *sw)
-{
-	struct fmd_connection *conn, *next;
-
-	for (conn = ctx->connections; conn; conn = next) {
-		struct fmd_host *host;
-		struct fmd_vcs *vcs;
-		struct fmd_vppb *vppb;
-
-		next = conn->next;
-		if (conn->pending != FMD_CONN_SETTLED ||
-		    fmd_topology_find(&ctx->topology, conn->target_id))
-			continue;
-
-		host = fmd_topology_find_host(&ctx->topology, conn->initiator_id);
-		if (!host || strcmp(host->switch_id, sw->base.id))
-			continue;
-
-		vcs = fmd_switch_find_vcs(sw, conn->vcs_id);
-		vppb = vcs ? fmd_vcs_find_vppb(vcs, conn->vppb_id) : NULL;
-		if (conn->bound && vppb &&
-		    (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
-		     vppb->binding_status == FMD_VPPB_BOUND_LD))
-			continue;
-
-		fmd_info(ctx, "Connection %s of %s to %s, which was removed, is "
-			 "gone: vPPB %d of VCS %d is not bound", conn->id,
-			 conn->initiator_id, conn->target_id, conn->vppb_id,
-			 conn->vcs_id);
-		fmd_connection_remove(ctx, conn);
-	}
-}
-
 int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			     const uint8_t *port_ids, int nports)
 {
@@ -1407,7 +1369,6 @@ int fmd_switch_refresh_ports(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	rc = read_switch_ports(ctx, sw, port_ids, nports);
 	fmd_vcs_refresh(ctx, sw);
-	fmd_switch_settle_connections(ctx, sw);
 	return rc;
 }
 
@@ -1452,7 +1413,6 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 
 	/* Step 3: Discover VCS configuration */
 	fmd_vcs_refresh(ctx, sw);
-	fmd_switch_settle_connections(ctx, sw);
 
 	/*
 	 * Step 4: Create host entries for each VCS
@@ -2049,7 +2009,7 @@ static int mock_bg_start(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (result == CXLMI_RET_UNSUPPORTED) {
 		fmd_err(ctx, "%s: mock %s vPPB failed: %d (%s)", sw->base.id,
 			what, result, cxlmi_cmd_retcode_tostr(result));
-		return -EIO;
+		return -EOPNOTSUPP;
 	}
 	if (result == CXLMI_RET_SUCCESS && !sw->mock_bind_time_ms)
 		return 0;
@@ -2126,7 +2086,8 @@ struct fmd_vppb *fmd_switch_bind_target_user(struct fmd_switch *sw,
  * binding it in the background, -EINVAL for a VCS, vPPB or LD that does not
  * exist, -EALREADY if the vPPB is not unbound, -EBUSY if the target is bound
  * to a vPPB, -EAGAIN if the switch answered Busy, or Retry Required twice,
- * and -EIO if it refused.
+ * -EOPNOTSUPP if it answered Unsupported, -EPROTO if Invalid Input, and -EIO
+ * if it refused otherwise. fmd_vppb_unbind() returns the same.
  */
 int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		  uint8_t vcs_id, uint8_t vppb_id,
@@ -2261,6 +2222,11 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: bind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
+		/* Bind and Unbind vPPB are optional (Table 7-31) */
+		if (rc == CXLMI_RET_UNSUPPORTED)
+			return -EOPNOTSUPP;
+		if (rc == CXLMI_RET_INPUT)
+			return -EPROTO;
 		return -EIO;
 	}
 
@@ -2384,6 +2350,11 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: unbind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
+		/* Bind and Unbind vPPB are optional (Table 7-31) */
+		if (rc == CXLMI_RET_UNSUPPORTED)
+			return -EOPNOTSUPP;
+		if (rc == CXLMI_RET_INPUT)
+			return -EPROTO;
 		return -EIO;
 	}
 
