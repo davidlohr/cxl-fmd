@@ -4227,6 +4227,117 @@ static void test_dc_refresh_after_failed_read(void)
 	report("a DC refresh after a failed read", before);
 }
 
+/* One Dynamic Capacity Event Record (Table 8-229) of @type by @host */
+static void put_dc_record(uint8_t *rec, uint16_t handle, uint8_t type, uint16_t host,
+			  uint8_t validity, uint32_t extents, uint32_t tags)
+{
+	memcpy(rec, dc_event, 16);
+	rec[0x10] = 0x80;			/* Event Record Length */
+	put16(rec + 0x14, handle);		/* Event Record Handle */
+	rec[0x30] = type;			/* Dynamic Capacity Event Type */
+	rec[0x31] = validity;			/* Validity Flags */
+	put16(rec + 0x32, host);		/* Host ID */
+	put16(rec + 0x78, extents);		/* Number of Available Extents */
+	put16(rec + 0x7c, tags);		/* Number of Available Tags */
+}
+
+/*
+ * The Host ID of an Add Capacity Response is "the LD-ID of the host
+ * interface that triggered the generation of the event" (Table 8-229), and
+ * the 5608h bitmaps go up to LD 255. A record of host 200 is not dropped:
+ * the device has no LD 200 here, so no host is read, but the tag list is.
+ * read, clear, read, 5608h.
+ */
+static void test_dc_records_ld200(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xdf, 2);
+	uint8_t page[0x20 + 0x80] = { 0 };
+	unsigned int sent;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	put16(page + 0x14, 1);			/* Event Record Count */
+	put_dc_record(page + 0x20, 0x81, 0x04, 200, 0, 0, 0);
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	sent = commands_sent(ep);
+	fmd_dcd_poll_events(ctx);
+	CHECK(last_opcode(ep) == 0x5608 && commands_sent(ep) - sent == 4,
+	      "a record of host 200: last command %04xh, %u commands",
+	      last_opcode(ep), commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a DC record of LD 200", before);
+}
+
+/*
+ * Number of Available Extents (78h) and Number of Available Tags (7Ch) of
+ * an Add Capacity Response are those of the host, valid when Bit[0] of the
+ * Validity Flags is set (Table 8-229). Host 1's record sets its counters;
+ * host 1 alone is read again, and its 5601h fails, so the counters are the
+ * record's: read, clear, read, 5601h, 5608h. A record whose Validity Flags
+ * are clear leaves them.
+ */
+static void test_dc_records_counts(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xe0, 2);
+	uint8_t page[0x20 + 0x80] = { 0 };
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_ld *ld0, *ld1;
+	unsigned int sent;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+	device_id(id, sizeof(id), 0xe0);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	if (!ld0 || !ld1)
+		goto out;
+	ld0->dc_extents_available = ld1->dc_extents_available = 100;
+	ld0->dc_tags_available = ld1->dc_tags_available = 50;
+
+	put16(page + 0x14, 1);
+	put_dc_record(page + 0x20, 0x82, 0x04, 1, 0x01, 17, 5);
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	sent = commands_sent(ep);
+	fmd_dcd_poll_events(ctx);
+	CHECK(ld1->dc_extents_available == 17 && ld1->dc_tags_available == 5,
+	      "host 1: %u extents, %u tags available, not 17 and 5",
+	      ld1->dc_extents_available, ld1->dc_tags_available);
+	CHECK(ld0->dc_extents_available == 100 && ld0->dc_tags_available == 50,
+	      "host 0's counters changed");
+	CHECK(last_opcode(ep) == 0x5608 && commands_sent(ep) - sent == 5,
+	      "not host 1 alone: last command %04xh, %u commands",
+	      last_opcode(ep), commands_sent(ep) - sent);
+
+	put_dc_record(page + 0x20, 0x83, 0x05, 1, 0x00, 99, 99);
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_poll_events(ctx);
+	CHECK(ld1->dc_extents_available == 17 && ld1->dc_tags_available == 5,
+	      "counters a record does not say are valid were taken: %u, %u",
+	      ld1->dc_extents_available, ld1->dc_tags_available);
+out:
+	fmd_ctx_free(ctx);
+	report("counters of a DC record", before);
+}
+
 /*
  * A device found on a re-scan with records in its logs already: those send
  * no notification until they have been emptied, so the re-scan reads them.
@@ -4559,6 +4670,8 @@ int main(void)
 	test_dc_records();
 	test_record_read_again();
 	test_dc_refresh_after_failed_read();
+	test_dc_records_ld200();
+	test_dc_records_counts();
 	test_rescan_reads_new_logs();
 	test_notification_route();
 	test_chunk_delete_partition_refused();

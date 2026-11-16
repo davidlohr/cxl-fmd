@@ -39,8 +39,6 @@
 #define EVENT_FLAG_MORE		(1 << 1)
 #define DC_EVENT_MAX_PAGES	16
 #define DC_EVENT_MAX_DEVS	64
-/* Hosts the event drain can name, a 64-bit mask */
-#define DC_MASK_HOSTS		64
 
 static const uint8_t dc_event_uuid[0x10] = {
 	0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
@@ -1730,25 +1728,18 @@ out:
 }
 
 /* Caller holds ctx->dcd_lock */
-static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
+static int dcd_refresh_hosts_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
+				    const int *hosts, int n)
 {
 	struct cxlmi_tunnel_info tbuf, *ti;
 	struct cxlmi_endpoint *ep;
-	int hosts[FMD_DC_MAX_HOST_ID + 1];
-	int n, rc = 0;
+	int rc = 0;
 
 	if (unlikely(!dev_is_hw(dev)) || !fmd_memdev_dcd(dev))
 		return 0;
 
 	ep = dev->ep;
 	ti = dcd_tunnel(dev, &tbuf);
-
-	if (host_id >= 0) {
-		hosts[0] = host_id;
-		n = 1;
-	} else {
-		n = dc_hosts(dev, hosts, FMD_DC_MAX_HOST_ID + 1);
-	}
 
 	/*
 	 * A host whose regions or extents could not be read keeps what it
@@ -1773,6 +1764,21 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 			rc = r;
 	}
 	return rc;
+}
+
+/* Caller holds ctx->dcd_lock: one host, or every host for @host_id -1 */
+static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
+{
+	int hosts[FMD_DC_MAX_HOST_ID + 1];
+	int n;
+
+	if (host_id >= 0) {
+		hosts[0] = host_id;
+		n = 1;
+	} else {
+		n = dc_hosts(dev, hosts, FMD_DC_MAX_HOST_ID + 1);
+	}
+	return dcd_refresh_hosts_locked(ctx, dev, hosts, n);
 }
 
 static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
@@ -1855,8 +1861,39 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 }
 
 /*
+ * Number of Available Extents (78h) and Number of Available Tags (7Ch) of
+ * a Dynamic Capacity Event Record, valid "When set" is Bit[0] of its
+ * Validity Flags (31h, Table 8-229), into the counters of the host the
+ * record names. @d is the record from 30h on.
+ */
+static void dc_event_counts(struct fmd_component *dev, int host_id, const uint8_t *d)
+{
+	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	uint32_t ext, tags;
+
+	if (!owner || !(d[0x31 - 0x30] & 0x01))
+		return;
+	ext = (uint32_t)d[0x48] | (uint32_t)d[0x49] << 8 |
+	      (uint32_t)d[0x4a] << 16 | (uint32_t)d[0x4b] << 24;
+	tags = (uint32_t)d[0x4c] | (uint32_t)d[0x4d] << 8 |
+	       (uint32_t)d[0x4e] << 16 | (uint32_t)d[0x4f] << 24;
+	if (owner->type == FMD_COMPONENT_LD) {
+		fmd_to_ld(owner)->dc_extents_available = ext;
+		fmd_to_ld(owner)->dc_tags_available = tags;
+	} else {
+		dcd->extents_available = ext;
+		dcd->tags_available = tags;
+	}
+}
+
+/*
  * Read and clear the FM-side DC event log of one device, then refresh every
- * host that an Add Capacity Response or Capacity Released record names.
+ * host that an Add Capacity Response or Capacity Released record names,
+ * and the tag list once. The Host ID is "the LD-ID of the host interface
+ * that triggered the generation of the event" (Table 8-229), up to LD 255
+ * as the 5608h bitmaps have them. The extent a record carries (38h) is not
+ * applied: the host's 5603h, read again, says what the host has.
  */
 static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
@@ -1865,8 +1902,9 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_cmd_clear_event_records_req *clr;
 	struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
 	struct cxlmi_endpoint *ep = dev->ep;
-	uint64_t hosts = 0;		/* bit h: host h, for h < DC_MASK_HOSTS */
-	bool overflow = false;
+	uint8_t hosts[FMD_DC_LD_BITMAP_BYTES] = { 0 };	/* bit h: host h */
+	int list[FMD_DC_MAX_HOST_ID + 1], n = 0;
+	bool overflow = false, named = false;
 	uint16_t overflow_count = 0;
 	uint64_t first_ns = 0, last_ns = 0;
 	int rc = 0, err = 0;
@@ -1918,9 +1956,16 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			fmd_dc_record_keep(dev, rec);
 			if (memcmp(rec->uuid, dc_event_uuid, sizeof(dc_event_uuid)))
 				continue;
-			if ((type == DC_EVENT_ADD_RESPONSE || type == DC_EVENT_RELEASED) &&
-			    host < DC_MASK_HOSTS)
-				hosts |= 1ULL << host;
+			if (type != DC_EVENT_ADD_RESPONSE && type != DC_EVENT_RELEASED)
+				continue;
+			if (host > FMD_DC_MAX_HOST_ID) {
+				fmd_warn(ctx, "%s: DC event record names host %d, past LD 255",
+					 dev->id, host);
+				continue;
+			}
+			hosts[host / 8] |= 1 << (host % 8);
+			named = true;
+			dc_event_counts(dev, host, rec->data);
 		}
 
 		clr->event_log = DC_EVENT_LOG;
@@ -1941,10 +1986,18 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 		goto out;
 	}
 
-	for (int h = 0; h < DC_MASK_HOSTS && !rc; h++) {
-		if (hosts & (1ULL << h))
-			rc = dcd_refresh_locked(ctx, dev, h);
+	for (int h = 0; h <= FMD_DC_MAX_HOST_ID; h++) {
+		if (!fmd_dc_bm_test(hosts, h))
+			continue;
+		if (!fmd_dc_host_component(dev, h)) {
+			fmd_warn(ctx, "%s: DC event record names host %d, which it does not have",
+				 dev->id, h);
+			continue;
+		}
+		list[n++] = h;
 	}
+	if (named)
+		rc = dcd_refresh_hosts_locked(ctx, dev, list, n);
 	if (!rc)
 		rc = err;
 out:
