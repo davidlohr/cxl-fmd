@@ -404,7 +404,7 @@ device, and these requests act on the mock's state as for any other.
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}` - Set DC Region Configuration
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd` - Initiate Dynamic Capacity Add
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease` - Initiate Dynamic Capacity Release
-- `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` - Initiate Dynamic Capacity Release (Prescriptive, one extent)
+- `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` - Initiate Dynamic Capacity Release from the extent's host only: Tag-based for an extent with a tag in a Sharable region, Prescriptive for any other (cxl-fmd's meaning of DELETE, see [DCD-FM-API.md](DCD-FM-API.md#delete-of-a-memoryextent))
 - `POST /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory` - DC Add Reference / DC Remove Reference
 
 ---
@@ -552,7 +552,7 @@ CXL devices are modeled in the Chassis hierarchy.
 | `GET /redfish/v1/Chassis` | Chassis Collection |
 | `GET /redfish/v1/Chassis/{id}` | Individual Chassis (device or switch) |
 | `GET /redfish/v1/Chassis/{id}/PCIeDevices` | PCIe Devices in Chassis |
-| `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}` | PCIe Device |
+| `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}` | PCIe Device; a dynamic capacity device has its 5608h tag list in `Oem/Cxl/DynamicCapacityTags` |
 | `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices` | CXL Logical Devices |
 | `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}` | CXL Logical Device |
 | `GET .../CXLLogicalDevices/{ld}/MemoryRegions` | Dynamic capacity regions visible to the LD's host |
@@ -560,9 +560,9 @@ CXL devices are modeled in the Chassis hierarchy.
 | `PATCH .../CXLLogicalDevices/{ld}/MemoryRegions/{region}` | Set DC Region Configuration (`BlockSizeMiB`, `SanitizeOnRelease`) |
 | `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd` | Initiate Dynamic Capacity Add |
 | `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease` | Initiate Dynamic Capacity Release |
-| `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents` | Dynamic capacity extents on the device |
+| `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents` | Dynamic capacity extents on the device, one per host's extent (`ext_<ld>_<hex DPA>`) |
 | `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` | DC Extent |
-| `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` | Release the extent from every host |
+| `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` | Release the extent from its host only |
 | `POST /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory` | DC Add/Remove Reference |
 | `GET /redfish/v1/Chassis/{id}/MemoryDomains` | Memory Domains |
 | `GET /redfish/v1/Chassis/{id}/MemoryDomains/{dom}` | Memory Domain |
@@ -980,10 +980,17 @@ any of them is done.
 
 In summary:
 
-1. Dynamic capacity extents are kept by Starting DPA for the whole device,
-   not per host. `Pending` comes from the Pending Reference Bitmap of 5608h
-   per tag, and only for extents that 5603h lists for the host. See Comments
-   2 and 5 of [DCD-FM-API.md](DCD-FM-API.md#comments-for-table-3).
+1. Dynamic capacity: an extent's `Pending` comes from its host's bit of
+   the Pending Reference Bitmap of its tag (5608h), so it is per tag, not
+   per extent, and only for extents that the host's 5603h lists. An add a
+   device does not list shows only in `Oem/Cxl/DynamicCapacityTags` of the
+   `PCIeDevice`, which has no schema (the Redfish Service Validator is run
+   with `--nooemcheck`). Add and release answer `200 OK` with no `Task`. A
+   Prescriptive add cannot be named through Redfish, as `POST` on
+   `MemoryExtents` is not served. A host past LD 255 gets nothing from the
+   tag list. The Host ID of a Multi-Headed DCD is taken to be the pool
+   LD-ID, unverified. See Comments 4 and 5 and the Open Questions of
+   [DCD-FM-API.md](DCD-FM-API.md#comments-for-table-3).
 2. The managed hot-removal of an MLD (CXL r4.0 Section 7.6.6.7) is not
    carried out (see "Event logs and switch events" below).
 3. Connections are not counted. A second Connection to a port or LD

@@ -416,6 +416,16 @@ A `dcd` object on any Type 3 device (SLD, MLD or MHD) makes it a Dynamic
 Capacity Device. It mirrors the FM-API DCD Management responses; see
 [DCD-FM-API.md](DCD-FM-API.md) for the Redfish mapping.
 
+Each host has its own DPA space: "The DCD controls which DPA range it
+assigns to each region for each host. The DPA ranges exposed by the device
+to each host are independent of one another" (CXL r4.0 Section 9.13.3). An
+extent is one host's, and capacity several hosts share is one extent of
+each, with the same Tag. The mock places capacity by its offset into a
+region, which is the same on every host that has it: an extent of host *h*
+is at *h*'s Region Base plus that offset. That model is the mock's, not the
+specification's, which does not say where shared capacity is in each
+host's DPA space. `mock/dcd-shared-perhost.json` uses all of what follows.
+
 ```json
 {
     "dcd": {
@@ -459,14 +469,16 @@ Capacity Device. It mirrors the FM-API DCD Management responses; see
 | `max_tags` | integer | 64 | Tags supported per host (`TotalSupportedTags`) |
 | `total_capacity_mb` | integer | sum of region lengths | `TotalDynamicCapacityMiB` |
 | `regions` | array | [] | DC region configurations |
-| `extents` | array | [] | Extents already allocated |
+| `extents` | array | [] | Capacity already allocated, see Extent Fields |
+| `tags` | array | [] | Entries of the 5608h tag list besides those the extents give, see Tag Fields |
 
 #### Region Fields (Get Host DC Region Configuration 0x5601)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `region_id` | integer | array index | Region number (0-7) |
-| `base_mb` | integer | 0 | Region base in the device address space (DPA) |
+| `base_mb` | integer | 0 | Region Base of every host in `hosts` that `host_base_mb` does not name; 256 MB aligned |
+| `host_base_mb` | object | {} | A host's own Region Base, keyed by Host ID as a string: `{"1": 16384}`. A key that is not a host of the region is a load error, and each base is 256 MB aligned (Table 8-347). That only the base differs per host, while the length, decode length and block size are the region's, is the mock's choice |
 | `region_len_mb` | integer | - | Region length, required. 0 is a region "unavailable for Dynamic Capacity" (Table 8-347): it counts among the supported regions, is skipped otherwise, may have `block_size_mb` 0, and can hold no extent |
 | `decode_len_mb` | integer | `region_len_mb` | HDM decode length |
 | `block_size_mb` | integer | 256 | Current block size |
@@ -485,18 +497,84 @@ Each host listed gets its own view of the region under its
 
 #### Extent Fields (Get DC Region Extent Lists 0x5603, List Tags 0x5608)
 
+An entry of `extents` is capacity, and one extent of each host it names.
+The hosts are named in one of two ways:
+
+- `hosts` or `host_id`: `start_mb` is a DPA in the space `base_mb` gives,
+  and each host named gets an extent at the same offset into its own view
+  of the region. With no `host_base_mb`, that is the same DPA on every
+  host, as files written before `host_base_mb` expect.
+- `per_host`: a list of the hosts, each with its own `start_mb` in its own
+  DPA space. It cannot be given with `hosts` or `host_id`.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `start_mb` | integer | - | Extent start (DPA); must fall inside a region |
+| `start_mb` | integer | - | With `hosts`/`host_id`: start (DPA in `base_mb`'s space); must fall inside a region |
 | `len_mb` | integer | - | Extent length |
-| `tag` | string | all zeros | 16-byte tag as a UUID string |
-| `shared_seq` | integer | 0 | Shared extent sequence number |
-| `host_id` / `hosts` | integer / array | 0 | Host(s) the extent is allocated to |
-| `pending` | boolean | false | Host has not accepted the extent yet |
-| `fm_referenced` | boolean | false | Fabric Manager holds a reference on the tag |
+| `tag` | string | all zeros | 16-byte tag as a UUID string; all zeros is no tag (cxl-fmd's convention) |
+| `shared_seq` | integer | 0 | Shared Extent Sequence |
+| `host_id` / `hosts` | integer / array | 0 | Host(s) the capacity is allocated to. `"hosts": []` is capacity no host holds, and needs `fm_referenced` |
+| `per_host` | array | - | `[{"host_id": 1, "start_mb": 16384}]`: each host's extent, `start_mb` (required) in that host's DPA space and inside one of its regions. `len_mb`, `shared_seq` and `pending` may be given to differ from the entry's |
+| `pending` | boolean | false | The host(s) have not answered the add: the extent is pending, and the host's bit is set in the tag's Pending Reference Bitmap. On hardware an extent with no tag has no row of that list and is never pending; the mock takes this flag as it is |
+| `fm_referenced` | boolean | false | The FM holds a reference on the tag (5606h). It is the tag's, not the extent's |
 
-Mock add and release operate on this state. The mock host accepts added
-capacity immediately, so new extents are never pending.
+Capacity of `"hosts": []` with `fm_referenced` is what an FM reference keeps
+after every host released it (Section 7.6.7.6.7). It is in no host's
+Extent List, so it is no `MemoryExtent`; it is a row of the tag list with
+no LD in its Reference Bitmap. It counts against its region, keeps 5602h
+from it, and Enable Shared Access gives it to a host again. Without
+`fm_referenced` it is a load error.
+
+Two hosts' capacity, or a host's and what an FM reference keeps, at the
+same offset into a region is a load error, unless it has the same non-zero
+Tag and the region is Sharable: that is shared capacity, "all Tag values
+shall be identical for all hosts sharing the same extent" (Table 8-230).
+A host given two extents at one DPA is a load error too.
+
+#### Tag Fields (Dynamic Capacity List Tags 0x5608)
+
+The mock builds the 5608h list a device would send: a row for each tag of
+an extent or of capacity an FM reference keeps, with an extent's host in
+the Pending Reference Bitmap if the extent is pending and in the Reference
+Bitmap otherwise, and FM Holds Reference from `fm_referenced`. The
+Validity Bitmap says both bitmaps are valid. `tags` adds to it:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tag` | string | - | 16-byte tag as a UUID string, not all zeros |
+| `fm_referenced` | boolean | false | The FM holds a reference on the tag |
+| `pending_hosts` | array | [] | Host IDs set in the tag's Pending Reference Bitmap with no extent: an add the host has not answered, which the device's 5603h does not list. Whether a device lists such an add, the specification does not say; this is the mock's means to show one that does not |
+
+#### What the mock does
+
+Mock add and release operate on this state:
+
+- The mock host accepts added capacity immediately, so new extents are
+  never pending.
+- Free and Contiguous take capacity at an offset into the region that no
+  host, and no FM reference, has. In a Sharable region the new extents'
+  Shared Extent Sequences go on from the host's extents with the tag;
+  elsewhere they are 0.
+- Enable Shared Access gives the host extents of its own, copied from the
+  holder with the lowest Host ID (or from what an FM reference keeps), at
+  the same offset into the host's view of the region. It is `400` when
+  the region is not Sharable, when the tag is held through a region that
+  is not Sharable, when the host already has the tag (Section 7.6.7.6.5),
+  and when the region number is not the one the holders have the tag in
+  (the mock's device-imposed restriction).
+- A release takes capacity from the host the request names only. A
+  Prescriptive list with a pending extent and no `ForcedRemoval`, and a
+  release of only part of a host's capacity of a sharable tag (a
+  Prescriptive list that leaves some out, or a Tag-based `Length` short
+  of it), are `400` (Section 7.6.7.6.6; that the short `Length` is the
+  "portion" there is the mock's reading). A Tag-based release in a region
+  that is not Sharable is taken from the tail.
+- When the last host's extents of a tag go and the FM holds a reference
+  on it, the capacity stays, as capacity no host holds. Removing the
+  reference (5607h) frees it.
+- AvailableExtents counts each host's extents (and capacity an FM
+  reference keeps in a region the host sees), AvailableTags each host's
+  distinct tags (the mock's choice).
 
 ### Switch Attachment
 

@@ -59,9 +59,14 @@ or reading, not the specification's, says so.
 - **Dynamic capacity.** The Host ID of an LD-FAM device is the LD-ID of the
   host interface (Table 7-66). On a Multi-Headed device cxl-fmd takes it to be
   the pool LD index; the specification does not say (see
-  [docs/DCD-FM-API.md](../docs/DCD-FM-API.md)). An extent lies in a region,
-  aligned to its block size; one extent can be held by several hosts only in a
-  Sharable region (Sections 7.6.7.6.5 and 9.13.3.2).
+  [docs/DCD-FM-API.md](../docs/DCD-FM-API.md)). An extent is one host's, in
+  that host's DPA space: "The DPA ranges exposed by the device to each host are
+  independent of one another" (Section 9.13.3). It lies in a region of its
+  host, aligned to its block size. Capacity several hosts share is one extent
+  of each, with the same Tag, and only in a Sharable region (Sections 7.6.7.6.5
+  and 9.13.3.2). A region may be at a different DPA on each host
+  (`host_base_mb`, the mock's means). Capacity an FM reference keeps that no
+  host holds is no extent: it is a row of the 5608h tag list only.
 
 ## Not represented
 

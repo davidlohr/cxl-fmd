@@ -87,7 +87,7 @@ meson test -C build --list
 | `api` | topology-inventory, orchestration, tasks, hot-removal, event-logs, concurrency, memory-lifecycle, connections, cxl-business-rules, error-handling, dcd | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
 | `unit` | discovery, mock-topologies, manpage, unit-topologies | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, and 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch) | pytest, requests (the pytest ones) |
-| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, and `dcd-device.json` | pytest, `.venv-validator` |
+| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, and `dcd-shared-perhost.json` (whose `Oem` tag view has no schema: the validator is run with `--nooemcheck`) | pytest, `.venv-validator` |
 
 ### Test Timeouts
 
@@ -156,8 +156,10 @@ stand between a file and the daemon:
   not an upstream port or a Fabric Port, a device on a port whose Connected
   Device Type is another, capacities that do not add up, an MLD with no LDs
   or more than 16, a head of a Multi-Headed device with no LD mapped, DC
-  regions and extents that are not aligned, extents that overlap, two
-  devices with one serial number.
+  regions and extents that are not aligned, extents of one host that
+  overlap, a Shared Extent Sequence out of place, a tag two hosts hold
+  through a region that is not Sharable, two devices with one serial
+  number.
 
 A topology that fails either is refused: the daemon exits instead of serving
 it. To check one without serving it:
@@ -259,7 +261,7 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_error_handling.py` | Error responses (404, 400, 409) | 31 |
 | `test_fuzzing.py` | Input fuzzing and boundary tests | 28 |
 | `test_adversarial.py` | Security and adversarial tests | 59 |
-| `test_dcd.py` | Dynamic capacity | 61 |
+| `test_dcd.py` | Dynamic capacity | 87 |
 | `test_mock_topologies.py` | The mock topologies, and the checker refusing invalid ones | 74 |
 | `test_manpage.py` | The man page against `--help` | 5 |
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 68 |
