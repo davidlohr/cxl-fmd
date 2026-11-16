@@ -1275,9 +1275,15 @@ A Multi-Headed Device (MHD) has multiple CXL upstream ports (heads), allowing mu
 | `lds` | array | [] | Pool indices of LDs mapped to this head |
 | `max_link_width` | integer | 16 | Maximum link width (lanes) |
 | `negotiated_link_width` | integer | 16 | Negotiated link width |
-| `attached_host` | string | - | Host ID connected to this head (required for connection validation) |
+| `attached_host` | string | - | Host ID connected to this head directly (see the note) |
 
-**Note:** The `attached_host` field is critical for MHD memory provisioning. When creating a Connection, the server validates that the host's attached head can access the chunk's pool LD. Without this field set, Connection creation for MHD will fail.
+**Note:** A head that is on no switch port has a direct-attached Connection
+only when `attached_host` names its host: that host with the pool LDs
+mapped to the head (`lds`). A head with neither `attached_host` nor
+`parent_switch`/`parent_port` has no Connection, which `--check` warns of,
+and a `POST` of a Connection to its LDs is 400. Which host or switch port a
+head is on is something only a mock topology can say: no CXL command maps a
+head's Port Number to either.
 
 #### LD Pool Fields
 

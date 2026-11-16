@@ -359,10 +359,22 @@ DSP0288 maps none of these commands. The mapping is cxl-fmd's own:
 | Unbind vPPB (5202h) | `Connection` | `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}`, with Unbind Option 1h, Simulate Managed Hot-Remove |
 | Unbind vPPB (5202h) | `Connection` | `POST /redfish/v1/Fabrics/CXL/Connections/{id}/Actions/Oem/Cxl.ForceUnbind`, with Unbind Option 2h, Simulate Surprise Hot-Remove (cxl-fmd's Oem action) |
 
-Bind vPPB has no action, and Unbind vPPB only the Oem `#Cxl.ForceUnbind`: a `POST` to
-`/redfish/v1/Fabrics/CXL/Connections` for a host on a switch binds a vPPB
-of the host's VCS, and a `DELETE` of the connection unbinds it (see
-"Memory Binding (Connections)").
+DSP0288 1.4.0 is silent on Bind vPPB and Unbind vPPB: it names neither
+command, nor a `Connection`, and of Get Virtual CXL Switch Info it maps
+only the Binding Status, to `VirtualPCI2PCIBridge.BindingStatus`. That a
+`Connection` is a vPPB binding, made by a `POST` and removed by a `DELETE`,
+follows the OCP white paper "CMS: Memory Fabric Orchestration
+Architecture", Version 1.0, Section 4.2.5, "Manage Memory Binding for
+VHS", which is informative, not a standard: "To assign the composed memory
+chunk to a host is by POST a connection to the endpoints between the
+memory chunk and the target host endpoint in the fabric", and "To remove
+the existing binding, the user issues DELETE method to the connection to
+be unbinded." How cxl-fmd does it is its own choice throughout.
+
+Bind vPPB has no action, and Unbind vPPB only the Oem `#Cxl.ForceUnbind`:
+a `POST` to `/redfish/v1/Fabrics/CXL/Connections` for a host on a switch
+binds a vPPB of the host's VCS, and a `DELETE` of the connection unbinds it
+(see "Memory Binding (Connections)").
 
 ---
 
@@ -380,9 +392,6 @@ operations:"
 Currently implemented write operations:
 - `POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks` - Create Memory Chunk (Set LD Allocations / Set Partition Info)
 - `DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}` - Delete Memory Chunk (Set LD Allocations / Set Partition Info)
-- `POST /redfish/v1/Fabrics/CXL/Connections` - Create Connection (Bind vPPB for switch-attached)
-- `DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}` - Delete Connection (Unbind vPPB for switch-attached)
-- `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` - Unbind vPPB, Simulate Surprise Hot-Remove (cxl-fmd's Oem action)
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}` - Set Timestamp
 - `PATCH /redfish/v1/Chassis/{id}/Memory/{mem}` - Set Partition Info
 - `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.ScanMedia` - Scan Media
@@ -392,22 +401,30 @@ Currently implemented write operations:
 - `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisableMasterPassphrase` - Disable Master Passphrase
 - `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.FreezeSecurityState` - Freeze Security State
 - `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SecureEraseUnit` - Secure Erase Unit
-
-An SLD that a switch reports on one of its ports (`{switch}_port{n}_dev`)
-is sent none of these commands. It has no endpoint of its own, and the
-switch cannot pass them on: "Valid targets for the tunneled commands
-include switch MLD Ports, valid LDs within an MLD, and the LD Pool CCI in
-a Multi-Headed device" (CXL r4.0 Section 7.6.7.3.1). Its `PCIeDevice` has
-no `CXLDevice/Timestamp`, a `PATCH` of the timestamp returns 400, and the
-`Memory` writes and actions fail. An MLD on a switch port is reached
-through that port. In mock mode (`--mock`) no command is sent for any
-device, and these requests act on the mock's state as for any other.
 - `POST /redfish/v1/Fabrics/CXL/Switches/{sw}/Ports/{port}/Actions/Port.ResetPPB` - Reset PPB
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}` - Set DC Region Configuration
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd` - Initiate Dynamic Capacity Add
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease` - Initiate Dynamic Capacity Release
 - `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` - Initiate Dynamic Capacity Release from the extent's host only: Tag-based for an extent with a tag in a Sharable region, Prescriptive for any other (cxl-fmd's meaning of DELETE, see [DCD-FM-API.md](DCD-FM-API.md#delete-of-a-memoryextent))
 - `POST /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory` - DC Add Reference / DC Remove Reference
+
+An SLD that a switch reports on one of its ports (`{switch}_port{n}_dev`)
+is sent none of the memory device commands above. It has no MCTP endpoint
+of its own, and the switch cannot pass them on: "Valid targets for the
+tunneled commands include switch MLD Ports, valid LDs within an MLD, and
+the LD Pool CCI in a Multi-Headed device" (CXL r4.0 Section 7.6.7.3.1).
+Its `PCIeDevice` has no `CXLDevice/Timestamp`, a `PATCH` of the timestamp
+returns 400, and the `Memory` writes and actions fail. An MLD on a switch
+port is reached through that port. In mock mode (`--mock`) no command is
+sent for any device, and these requests act on the mock's state as for any
+other.
+
+The write operations on a `Connection`, which no DSP0288 rule maps (see
+"cxl-fmd mapping (not in DSP0288)" above), are cxl-fmd's:
+
+- `POST /redfish/v1/Fabrics/CXL/Connections` - Bind vPPB for a switch-attached host; for a direct-attached pair, the Connection it has already
+- `DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}` - Unbind vPPB, Simulate Managed Hot-Remove (switch-attached only)
+- `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` - Unbind vPPB, Simulate Surprise Hot-Remove (cxl-fmd's Oem action)
 
 ---
 
@@ -419,18 +436,18 @@ All error responses follow the Redfish error format with an `error` object conta
 
 | Status | Meaning | When Used |
 |--------|---------|-----------|
-| 200 OK | Success | GET requests returning data; actions |
-| 201 Created | Resource created | POST to collections (MemoryChunks; Connections that need no bind, or whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
-| 202 Accepted | Started, not finished | POST and DELETE of a Connection when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; the task monitor while the task runs (see "Binds and unbinds in the background") |
-| 204 No Content | Success, no body | DELETE requests; the task monitor of an unbind once it has succeeded |
-| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection whose host and device are not on the same switch, whose host cannot reach the chunk's LD through its head, whose chunk names no LD the MLD's port can bind, whose target is an LD Endpoint and chunk is on another LD, or whose target is the Endpoint of a head that presents an MLD; `ResetPPB` on a port that is not a DSP |
-| 404 Not Found | Resource not found | Invalid resource ID or path |
-| 405 Method Not Allowed | Method not supported | Using unsupported HTTP method on endpoint |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound to another host's VCS, or for a host whose VCS has no unbound vPPB |
+| 200 OK | Success | GET requests returning data; actions; a `POST` of a Connection the host has already, switch-attached (bound, `Absent` included) or direct-attached, with the Connection and `Location` |
+| 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
+| 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs (see "Binds and unbinds in the background") |
+| 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once; the task monitor of an unbind once it has succeeded |
+| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
+| 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
+| 405 Method Not Allowed | Method not supported, with an `Allow` header | `PATCH` of a Connection (`Allow: GET, DELETE`); `DELETE` of a direct-attached Connection (`Allow: GET`) |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
-| 500 Internal Server Error | The operation failed | A bind or unbind the switch refused, or another failure; the task monitor of a task that ended in `Exception` |
-| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none |
-| 503 Service Unavailable | Try again | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE of a Connection whose bind or unbind is under way |
+| 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` |
+| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
+| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
 specification sets it.
@@ -543,7 +560,32 @@ For switch-attached topologies, each Virtual CXL Switch (VCS) represents a host 
 
 For direct-attached topologies (no switch), a default "local" host is automatically created representing the system running cxl-fmd. This ensures the Systems collection always contains at least one system when devices are present.
 
-**MemoryDomains from Connections:** A host's MemoryDomains are dynamically derived from active Connections where that host is the initiator. Each Connection creates a MemoryDomain exposing the connected device's memory chunk to the host. The MemoryDomain ID matches the Connection ID (e.g., `conn0`).
+For switch-attached topologies, real discovery makes a host only for a VCS
+whose VCS State is Enabled: its USP ID is "Valid only when the VCS is
+enabled" (CXL r4.0 Table 7-34). The mock does the same. A host made while
+its VCS was enabled is not removed if the VCS is later read as disabled.
+
+**MemoryDomains from Connections:** A host's MemoryDomains are computed,
+when served, from its Connections (see "Memory Binding (Connections)"),
+whoever made the binding: one per Connection of the host whose
+`Status.State` is `Enabled`. A `Starting`, `Updating` or `Absent`
+Connection, or one whose target is not known (`Enabled` with `Health`
+`Warning`), gives none: no memory is reachable through it, or none can be
+named. Which Connections give one is cxl-fmd's choice.
+
+- `Id`: the Connection's ID (e.g. `cxl_switch_0_vcs0_vppb1_p2`)
+- `MemorySizeMiB`: the sum of its chunks; for an LD of an MLD or a
+  Multi-Headed device that has none, the LD's size (cxl-fmd's choice)
+- `Links.CXLLogicalDevices`: the CXLLogicalDevice(s) the Connection reaches
+- `MemoryChunks`: one member per chunk of the target, each with its
+  `MemoryChunkSizeMiB` and `AddressRangeType`, `MediaLocation` `Remote`
+  ("created using remote media accessible through a fabric",
+  MemoryChunks_v1), and `Links.Endpoints` the Connection's targets
+
+This is what a binding makes reachable, not what the host has mapped: the
+FM does not see that. "The switch prohibits any CXL.io access from the FM
+to a bound SLD port and any CXL.io access from the FM to a bound LD within
+an MLD component" (CXL r4.0 Section 7.2.3.1).
 
 ### Chassis Model
 
@@ -636,6 +678,8 @@ require it.
 - `Links.ConnectedPorts`: Switch port the device connects to (if
   switch-attached); for a pool LD, the port of the head it is mapped to
 - `Links.Zones`: each VCS a vPPB of which is bound to this Endpoint
+- `Links.Connections`: each Connection whose `TargetEndpoints` has this
+  Endpoint
 
 What a vPPB is bound to: an SLD for Binding Status 02h on its port, the LD
 with the Bound LD ID for 03h on an MLD's port, the pool LD mapped to the
@@ -647,10 +691,11 @@ is each target Endpoint at the other end of its link; a
 `VirtualCXLSwitch`'s `Links.Endpoints` is its Zone's.
 
 `POST /redfish/v1/Fabrics/CXL/Connections` takes an LD Endpoint as the
-target, with a chunk of that LD (400 if the chunk is on another LD), and a
-head Endpoint is refused with 400. For compatibility, the ID of an MLD or
-of a Multi-Headed device, which have no Endpoint any more, is still taken
-as the target, with the LD the chunk is on.
+target, with or without chunks of that LD (400 for a chunk on another LD),
+and a head Endpoint is refused with 400. For compatibility, the ID of an
+MLD or of a Multi-Headed device, which have no Endpoint any more, is still
+accepted as the target, with `MemoryChunkInfo` naming chunks of one LD,
+which is then the target.
 
 **Initiator Endpoints (Hosts)**
 - Represent host systems that issue CXL.mem requests
@@ -663,6 +708,7 @@ as the target, with the LD the chunk is on.
   no Processor resource
 - `EntityRole`: `Initiator` (issues memory requests)
 - `Links.Zones`: VCS the host connects through (if switch-attached)
+- `Links.Connections`: each Connection of the host
 
 Example host endpoint:
 ```json
@@ -704,8 +750,12 @@ Zones represent Virtual CXL Switches (VCS) as access domains. Each Zone contains
 | `.../Memory/{mem}/Actions/Memory.DisableMasterPassphrase` | POST | Disable master passphrase |
 | `.../Memory/{mem}/Actions/Memory.FreezeSecurityState` | POST | Freeze security state |
 | `.../Memory/{mem}/Actions/Memory.SecureEraseUnit` | POST | Secure erase |
+| `/redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` | POST | Unbind vPPB with Simulate Surprise Hot-Remove (cxl-fmd's Oem action, switch-attached Connections only) |
 
-**Note:** vPPB Bind/Unbind operations are performed automatically through the Connections API (see Memory Binding section below).
+**Note:** vPPB Bind and Unbind are done through the Connections API, a
+`POST` binding and a `DELETE` unbinding (see "Memory Binding
+(Connections)" below). A vPPB has no action, and a `PATCH` of its
+`Links.Port` is not served.
 
 ---
 
@@ -838,7 +888,9 @@ Key differences from MLD:
 - LD Pool can have **more than 16 LDs** (unlike MLD's 16 max)
 - Each head sees **head-local LD-IDs** (0 to n-1), which map to pool indices
 - FM uses **pool indices** in Redfish (not head-local IDs)
-- Connections validate that the chunk's pool LD is accessible from the host's head
+- A head's Connection reaches only the pool LDs mapped to it (the LD Map,
+  Table 7-61): a `POST` naming a pool LD that is not mapped to the host's
+  head is 400
 
 **LD-ID Translation:**
 ```
@@ -849,7 +901,8 @@ FM Redfish view: all pool LDs 0-5 visible as CXLLogicalDevices/0 through /5
 
 **Hardware Behavior:**
 - POST uses LD Pool CCI `Set LD Allocations (0x5402h)` with pool index
-- Connection creation validates host's head can access the chunk's pool LD
+- A head with one pool LD on a switch port is bound whole; a head that
+  presents an MLD is not bound (see "Memory Binding (Connections)")
 
 ### SLD Memory Model
 
@@ -863,7 +916,158 @@ For Single Logical Devices (SLDs):
 
 ## Memory Binding (Connections)
 
-Memory binding assigns provisioned memory chunks to host systems, making them visible to the host's operating system. This is performed through the Connections API.
+A host gets memory on a switch when a vPPB of its VCS is bound to the
+memory device's port, or to an LD of it. cxl-fmd serves each such binding
+as a `Connection`, and binds and unbinds vPPBs when a client creates and
+deletes Connections. DSP0288 maps neither (see "cxl-fmd mapping (not in
+DSP0288)"); what follows is cxl-fmd's design, with the CXL text it rests
+on quoted.
+
+### What a Connection is
+
+A switch-attached Connection is a vPPB binding, as last read with Get
+Virtual CXL Switch Info (5200h): the FM "issues Get Virtual CXL Switch Info
+for each enabled VCS to check for all bound vPPBs in the system and create
+a list of binding targets" (CXL r4.0 Section 7.6.6.2). No Connection is
+stored. The list is computed whenever it is served, from the switch's VCS
+tables and from the binds and unbinds cxl-fmd has under way, so the
+Connections and the bindings cannot disagree, except by being as old as
+the last read (see "When the switch is read").
+
+Nothing the switch reports says who made a binding: no field of Get
+Virtual CXL Switch Info (Table 7-34) or of a Binding Change (Table 7-80)
+records it. A binding made by cxl-fmd, by the switch's initial
+configuration, by another Fabric Manager, or through another CCI of the
+switch, is a Connection all the same, and a `DELETE` unbinds it.
+
+A vPPB gives a Connection when all of these hold (cxl-fmd's choice):
+
+- its VCS's VCS State is Enabled: the host is known only by the USP ID,
+  "Valid only when the VCS is enabled" (Table 7-34);
+- it is not vPPB 0: "vPPBs within a VCS are ordered in the following
+  sequence: the USP vPPB, then the DSP vPPBs" (Section 7.1.4);
+- its Binding Status is 02h (Bound Physical Port) or 03h (Bound LD), or a
+  bind cxl-fmd started names it;
+- the bound port has a memory device (an SLD, an MLD, or a head of a
+  Multi-Headed device), or no device, or one cxl-fmd never discovered.
+
+A port with a PCIe, Type 1 or Type 2 device, or a downstream switch, gives
+none, and neither does a vPPB with Binding Status 04h (Bound PID). Those
+are seen only on the vPPB, in `BindingStatus`.
+
+A direct-attached Connection has no vPPB: there is no VCS, and no bind,
+on a link from a host's root port to a device. That the link is the
+Connection is cxl-fmd's choice. It derives one, always `Enabled`, for:
+
+- the only direct-attached host (the `local` host of a topology with no
+  switch) with each SLD and MLD that is on no switch port; for an MLD, its
+  `TargetEndpoints` are all of its LDs. What an MLD on a root port gives
+  its host, the specification does not say. With more than one
+  direct-attached host, nothing says whose link a device is on, and there
+  is none;
+- each head of a Multi-Headed device that is on no switch port and whose
+  host is known, with the pool LDs that the LD Map (Table 7-61) maps to
+  that head. Only a mock topology says which host a head is attached to
+  (`attached_host`): no command maps a head to a host.
+
+#### Connection IDs
+
+The ID is cxl-fmd's choice, and is the same after a restart while the
+binding is:
+
+| Connection | ID |
+|------------|----|
+| A vPPB bound to a port (02h) | `{switch}_vcs{V}_vppb{P}_p{N}` |
+| A vPPB bound to an LD (03h) | `{switch}_vcs{V}_vppb{P}_p{N}_ld{L}` |
+| A direct-attached SLD or MLD | `{host}_direct_{device}` |
+| A direct-attached head of a Multi-Headed device | `{host}_direct_{mhd}_h{H}` |
+
+`V`, `P`, `N` and `L` are the VCS ID, vPPB ID, Physical Port ID and LD-ID
+in decimal. The vPPB is in the ID, so that a `DELETE` of an ID whose vPPB
+now holds something else finds nothing (404) instead of unbinding the later
+binding, and so that one LD shown on two vPPBs, which the specification
+does not forbid, gives two Connections. A rebind of the same target to
+another vPPB is another ID; a `POST` of that target finds it.
+
+#### Properties
+
+```json
+{
+    "@odata.id": "/redfish/v1/Fabrics/CXL/Connections/cxl_switch_0_vcs0_vppb1_p2_ld0",
+    "@odata.type": "#Connection.v1_4_0.Connection",
+    "Id": "cxl_switch_0_vcs0_vppb1_p2_ld0",
+    "Name": "CXL vPPB Binding",
+    "ConnectionType": "Memory",
+    "Status": {"State": "Enabled", "Health": "OK"},
+    "Links": {
+        "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host0"}],
+        "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/cxl_mld_0_ld0"}]
+    },
+    "MemoryChunkInfo": [{
+        "MemoryChunk": {"@odata.id": "/redfish/v1/Chassis/cxl_mld_0/MemoryDomains/cxl_mld_0_domain0/MemoryChunks/cxl_mld_0_ld0_chunk"},
+        "AccessCapabilities": ["Read", "Write"],
+        "AccessState": "Optimized"
+    }],
+    "Oem": {"Cxl": {"Origin": "Discovered"}},
+    "Actions": {
+        "Oem": {
+            "#Cxl.ForceUnbind": {
+                "target": "/redfish/v1/Fabrics/CXL/Connections/cxl_switch_0_vcs0_vppb1_p2_ld0/Actions/Oem/Cxl.ForceUnbind"
+            }
+        }
+    }
+}
+```
+
+- `Name`: `CXL vPPB Binding`, or `CXL Direct-Attached Connection`
+- `Links.InitiatorEndpoints`: the host's Endpoint
+- `Links.TargetEndpoints`: what the binding reaches: the SLD, the LD of an
+  MLD, the pool LD mapped to a head that presents an SLD, or the head
+  Endpoint (`{mhd}_head{H}`) for an LD of a head that presents an MLD (see
+  "Endpoints"). Left out while `Absent`
+- `MemoryChunkInfo`: one entry per chunk of the target: every chunk of an
+  SLD, each chunk on the LD of an LD. A binding exposes the whole of what
+  it reaches, and Bind vPPB has no field for how a host may use it (Table
+  7-35): `AccessCapabilities` is always `Read` and `Write`, and
+  `AccessState` `Optimized` (cxl-fmd's choice). Left out while `Absent`,
+  and when the target is not known
+- `Oem.Cxl.Origin` (switch-attached only): see "Forcing an Unbind"
+- `Actions.Oem["#Cxl.ForceUnbind"]` (switch-attached only): see "Forcing
+  an Unbind"
+
+`Status` uses the standard `State` values; what each means here is
+cxl-fmd's choice:
+
+| `State` | `Health` | When |
+|---------|----------|------|
+| `Starting` | `OK` | cxl-fmd's bind of it is under way |
+| `Updating` | `OK` | cxl-fmd's unbind of it is under way |
+| `Enabled` | `OK` | bound, and what it reaches is known; every direct-attached Connection |
+| `Enabled` | `Warning` | bound, and what it reaches is not known: an LD of a head that presents an MLD (see "Endpoints"), or an LD-ID the MLD does not have |
+| `Absent` | `OK` | bound, and no device is on the port (see "When a Device Is Removed") |
+
+A `PATCH` of a Connection is answered `405 Method Not Allowed`, `Allow:
+GET, DELETE`: everything in it is what the switch says. Connection_v1
+marks the resource updatable; not taking a `PATCH` is cxl-fmd's choice.
+
+#### When the switch is read
+
+A `GET` sends no command: a Connection is as old as the last read of the
+switch's VCSs (cxl-fmd's choice). They are read:
+
+- when the switch is discovered;
+- every VCS of the switch, before each `POST` and `DELETE` of a
+  Connection and each `#Cxl.ForceUnbind`, as another FM, or a request
+  through another CCI, may have changed one;
+- after a Binding Change (Virtual CXL Switch Event Record, Event Type 00h)
+  that no task of cxl-fmd follows, once per poll of the switch's logs, all
+  of its VCSs. The record's own binding fields are not taken as they are
+  (cxl-fmd's choice);
+- after the switch's event log overflowed;
+- on the `--rescan` timer, which stays the backstop: whether a switch
+  records binds made by another FM or through another CCI in logs this FM
+  reads, the specification does not say;
+- in mock mode, when a background bind or unbind is over.
 
 ### Creating Connections (POST)
 
@@ -893,73 +1097,104 @@ Content-Type: application/json
 **Request Body:**
 | Property | Type | Required | Description |
 |----------|------|:--------:|-------------|
-| `ConnectionType` | string | No | Connection type, should be `"Memory"` |
-| `Links.InitiatorEndpoints` | array | Yes | Host endpoint(s) with `EntityRole: Initiator` |
-| `Links.TargetEndpoints` | array | Yes | Target endpoint: an SLD or an LD (`{dev}_ld{N}`, with a chunk of that LD); the ID of an MLD or a Multi-Headed device is still taken, for compatibility |
-| `MemoryChunkInfo` | array | Yes | Memory chunk(s) to bind |
-| `MemoryChunkInfo[].MemoryChunk` | object | Yes | Reference to the MemoryChunk |
-| `MemoryChunkInfo[].AccessCapabilities` | array | No | `["Read"]`, `["Write"]`, or `["Read", "Write"]` (default) |
+| `ConnectionType` | string | No | Not read; the Connection is `"Memory"` |
+| `Links.InitiatorEndpoints` | array | Yes | Exactly one: the host's Endpoint |
+| `Links.TargetEndpoints` | array | Yes | Exactly one: an SLD's Endpoint, or an LD's (`{dev}_ld{N}`). Accepted for compatibility: the ID of an MLD or a Multi-Headed device, which have no Endpoint, with `MemoryChunkInfo` naming the LD |
+| `MemoryChunkInfo` | array | With an MLD or Multi-Headed device's ID | Chunks of the target; with an SLD or LD Endpoint it can be left out. It does not choose what is bound: a binding gives the whole SLD or LD |
+| `MemoryChunkInfo[].MemoryChunk` | object | Yes, in each entry | Reference to the MemoryChunk |
+| `MemoryChunkInfo[].AccessCapabilities` | array | No | `["Read", "Write"]` only: anything else is 400 |
 
-**Response:** `201 Created` and the Connection when no bind is needed (a
-direct-attached host, or a port or LD already bound to the host's VCS) or
-the switch finished the bind before answering; `202 Accepted` with a
-`Task`, and the task monitor in `Location`, when the switch binds in the
-background (see "Binds and unbinds in the background" below). The errors
-are in "HTTP Status Codes".
+Each chunk named must be the target's, and the chunks of an MLD or a
+Multi-Headed device must all be on one LD (400 otherwise). The target is:
 
-**Hardware Behavior (Switch-Attached Hosts):**
-- Automatically finds an unbound vPPB in the host's VCS (409 if there is none)
-- Issues `Bind vPPB (0x5201h)` to bind the device's port to the vPPB: for an
-  MLD, its LD, by the LD-ID of the chunk (400 if the chunk names none); for
-  an SLD, the whole port, with LD ID FFFFh. The port of a head of a
-  Multi-Headed device is bound as a whole, with LD ID FFFFh: that is
-  cxl-fmd's assumption, that the head presents an SLD. A head that
-  presents an MLD binds LD-IDs "from 0 to n-1 relative to that head" (CXL
-  r4.0 Section 2.5.1); cxl-fmd has no map from a pool LD to them, and such a
-  bind is refused (a known gap)
-- A Retry Required answer is sent once more ("An optional single retry may
-  resolve the issue", Table 8-208); a second one, or Busy, is answered with
-  503
+| Target | Bound |
+|--------|-------|
+| An SLD on a switch port | The port, LD ID FFFFh ("Must be FFFFh for other EP types", Table 7-35) |
+| An LD of an MLD on a switch port, or the MLD's ID with chunks of that LD | The port and the LD's LD-ID |
+| A pool LD of a Multi-Headed device, or the device's ID with chunks of that LD, when the LD is mapped to a head on a switch port that presents an SLD | That head's port, LD ID FFFFh: "A head with one LD mapped shall present itself as an SLD" (CXL r4.0 Section 2.5) |
+| A head that presents an MLD, its Endpoint, or a pool LD mapped to it | Nothing: 400. "The MH-MLD maps the LD-IDs received at a head to the device-wide LD index in the MH-MLD's LD pool" (Section 2.5.1) by no rule the FM is told |
+| A device on no switch port | Nothing: see "Direct-attached" below |
 
-**Binds and unbinds in the background:**
-"All binding operations are executed as background commands" (CXL r4.0 Section
-7.6.7.2.2). A switch answers Bind vPPB or Unbind vPPB with Background Command
-Started and finishes later, one such command at a time. cxl-fmd does not wait:
+A host on a switch reaches only the devices of that switch (400 for a
+device elsewhere, or for a direct-attached host and a switch-attached
+device).
+
+**What a POST of a switch-attached target does.** With `fabric_lock` held
+for the whole request, as for every write, in one step:
+
+1. Every VCS of the switch is read (5200h).
+2. If the host's VCS has a Connection to the target already, whoever made
+   it, the answer is that Connection: `200 OK` with it and `Location`
+   when it is `Enabled` or `Absent`; `202 Accepted` with the task of the
+   bind when it is `Starting`; `409 Conflict` when it is `Updating`.
+   Nothing is sent. That a second bind of a target is not sent is
+   cxl-fmd's choice: the specification does not say whether it is an
+   error, and lists the return codes of Bind vPPB without conditions.
+3. If the target is bound, or being bound or unbound, for another vPPB,
+   the answer is `409`. This covers the whole port while an LD of it is
+   bound, and an LD while the port is bound whole. An SLD port "is bound
+   to only one VCS" (Section 7.2.3.1); that an LD, too, is bound to one
+   vPPB only is cxl-fmd's reading.
+4. The lowest vPPB above 0 of the host's VCS that reads unbound (00h) and
+   has no bind or unbind of cxl-fmd's under way is chosen; if there is
+   none, `409`.
+5. The bind is recorded as under way, then Bind vPPB (5201h) is sent.
+
+So eight `POST`s of one target send one Bind vPPB, and `POST`s of two
+targets never choose the same vPPB.
+
+**Response:**
+
+| Switch's answer | HTTP |
+|-----------------|------|
+| Success | `201 Created`, the Connection, `Location` |
+| Background Command Started | `202 Accepted`, a `Task`, `Location` the task monitor; the Connection is `Starting` meanwhile (see "Binds and unbinds in the background") |
+| Busy, or Retry Required twice ("An optional single retry may resolve the issue", Table 8-208), or the vPPB chosen was bound meanwhile | `503` |
+| Invalid Input | `400` |
+| Unsupported | `501` (Bind vPPB is "O", optional, in Table 7-31) |
+| Internal Error, or another code | `500` |
+
+The status codes are cxl-fmd's choice; the errors are listed in "HTTP
+Status Codes".
+
+**Direct-attached.** A direct-attached host and device have their
+Connection already (see "What a Connection is"): a `POST` of the pair is
+answered `200 OK` with it, and sends nothing. A pair that has none, such as
+a host and a chunk of a pool LD not mapped to the host's head, is `400`.
+
+### Binds and unbinds in the background
+
+"All binding operations are executed as background commands" (CXL r4.0
+Section 7.6.7.2.2). A switch answers Bind vPPB or Unbind vPPB with
+Background Command Started and finishes later, one such command at a time.
+cxl-fmd does not wait:
 
 | Request | Answer | Then |
 |---------|--------|------|
-| `POST .../Connections` | `202 Accepted`, a `Task`, `Location:` the task monitor | The connection exists with `Status.State` `Starting`; it is made, or removed, when the bind is over |
-| `DELETE .../Connections/{id}` | `202 Accepted`, a `Task`, `Location:` the task monitor | The connection stands, with `Status.State` `Updating`, until the vPPB is unbound |
-| Either, while the switch has an operation under way | `503 Service Unavailable` | Try again |
-| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs; then `201` and the connection for a bind, `204` for an unbind, or the error | |
+| `POST .../Connections` | `202 Accepted`, a `Task`, `Location:` the task monitor | The Connection is listed, `Starting`, and is in the task's `CreatedResources` while it runs; it is `Enabled` when the bind is over, and gone if the bind failed |
+| `DELETE .../Connections/{id}` | `202 Accepted`, a `Task`, `Location:` the task monitor | The Connection stands, `Updating`, until the vPPB reads unbound; then a `GET` of it is `404` |
+| `POST` of a target being bound for the host | `202 Accepted` and the same `Task` | |
+| Another bind or unbind while the switch is busy | `503 Service Unavailable` | Try again |
+| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs; then `201` and the Connection for a bind, `204` for an unbind, or the error | |
 
 The task is at `/redfish/v1/TaskService/Tasks/{id}`. Its `PercentComplete` is
-the Percentage Complete of Background Operation Status (0002h), which the event
-loop reads until the operation is over; the return code there, and what the
-vPPB is afterwards, decide between `Completed` and `Exception`. A switch that
-finishes a bind before it answers is answered for with `201`, and no task.
-A task whose switch is gone, or does not answer Background Operation Status
-five times running, ends in `Exception`, and its connection is no longer
-`Starting` or `Updating`: it is what the vPPB is when read again (or as last
-read). After a lost bind, a vPPB that is bound or still busy keeps the
-connection, which a DELETE unbinds; an unbound one removes it. After a lost
-unbind, an unbound vPPB removes the connection, and a bound one leaves it
-standing.
-- Records binding info (`vcs_id`, `vppb_id`) in the connection
+the Percentage Complete of Background Operation Status (0002h), which the
+event loop reads until the operation is over, or a Binding Change for the
+vPPB ends it. A bind is `Completed` only when the vPPB, read again, is
+bound to the port and LD asked for; an unbind only when it reads unbound.
+Otherwise the task ends in `Exception`, with the return code of Background
+Operation Status when the switch logged the operation as failed: "Failed
+bind and unbind operations generate events to the Warning Event Log"
+(Table 7-80). A switch that finishes a bind before it answers is answered
+for with `201`, and no task.
 
-**MHD Direct-Attached Validation:**
-For MHD connections, the server validates that the host can access the chunk's LD:
-1. Finds which head the host is attached to (via `head.attached_host_id`)
-2. Extracts the pool LD index from the chunk's InterleaveSets
-3. Verifies `ld.binding_point_id == head.head_id` (LD is mapped to the head)
-4. Returns HTTP 400 if the LD is not accessible from the host's head
-
-Example error: Host 1 trying to access an LD mapped to Head 0 will be rejected.
-
-**Host Visibility:**
-After creating a connection, the bound memory appears in the host's Systems view:
-- `GET /redfish/v1/Systems/{host}/MemoryDomains` lists connected memory
-- Each connection creates a virtual MemoryDomain under the host
+However a task ends, what was under way is forgotten, and the Connection is
+what the vPPB is: completed, failed, its switch gone, five reads of
+Background Operation Status that failed, or no task made after the switch
+started. After a task is lost the switch is read again if it answers, and
+a vPPB that still reads busy (01h) gives no Connection until it reads
+otherwise. The specification sets no time limit on a bind or an unbind,
+and cxl-fmd does not abort one (see "Forcing an Unbind").
 
 ### Deleting Connections (DELETE)
 
@@ -967,18 +1202,31 @@ After creating a connection, the bound memory appears in the host's Systems view
 DELETE /redfish/v1/Fabrics/CXL/Connections/{conn_id}
 ```
 
-**Response:** `204 No Content` when no unbind is needed or the switch
-finished it before answering; `202 Accepted` with a `Task` when the switch
-unbinds in the background (see "Binds and unbinds in the background").
+Every VCS of the switch is read first. Then:
 
-**Hardware Behavior (Switch-Attached Hosts):**
-- Issues `Unbind vPPB (0x5202h)` with Unbind Option 1h, Simulate Managed
-  Hot-Remove, if the connection bound the vPPB
-- Releases the vPPB for reuse
-- The task follows the unbind for as long as the switch takes: no time
-  limit is set, and the switch, which runs one background command at a
-  time, answers every other bind and unbind Busy (503) until the host has
-  released the device (a known gap); `#Cxl.ForceUnbind` is the way out
+| Case | Answer |
+|------|--------|
+| The ID is not a Connection now: unknown, or its vPPB holds something else, or nothing | `404`; nothing is sent |
+| A bind or unbind of it is under way | `503` |
+| A direct-attached Connection | `405`, `Allow: GET`: there is no vPPB to unbind (cxl-fmd's choice) |
+| Otherwise | Unbind vPPB (5202h) with Unbind Option 1h, Simulate Managed Hot-Remove (Table 7-36), whoever made the binding, an `Absent` Connection included |
+
+The switch's answer: Success, `204 No Content`; Background Command
+Started, `202 Accepted` with a `Task`; Busy or Retry Required, `503`;
+Invalid Input, `400`; Unsupported, `501`; another code, `500`. A vPPB found
+unbound by the time it was asked is `404`.
+
+Option 0h, "Wait for port Link Down before unbinding", is never sent: the
+specification does not say how it applies to an LD, whose link "cannot be
+impacted by binding and unbinding of an LD within an MLD component"
+(Section 7.2.3.2).
+
+The unbind task follows the switch for as long as it takes: "The timeout
+value for the host handshakes to complete is implementation specific"
+(Section 7.6.6.7), and cxl-fmd sets none. The switch, which runs one
+background command at a time, answers every other bind and unbind Busy
+(503) until the host has released the device; `#Cxl.ForceUnbind` is the
+way out.
 
 ### Forcing an Unbind (Oem action)
 
@@ -1012,26 +1260,54 @@ parameters, and a body, if any, is ignored.
 run of cxl-fmd made the binding and `"Discovered"` otherwise. It is
 advisory, never decides what a `DELETE` does, and is lost on restart:
 nothing the switch reports says who made a binding (Tables 7-34 and 7-80),
-so after a restart every binding is `"Discovered"`.
+so after a restart every binding is `"Discovered"`. Both `Oem` properties
+are cxl-fmd's and have no schema.
 
 ### Connection Lifecycle
 
 The complete memory lifecycle is:
 
-1. **Discovery** - Devices and hosts are discovered, topology built. Existing LD allocations are represented as MemoryChunks; remaining capacity is tracked for future provisioning.
-2. **Provisioning** - `POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks` allocates memory from the remaining capacity, creating a new chunk.
-3. **Binding** - `POST /redfish/v1/Fabrics/CXL/Connections` binds a chunk to a host (vPPB bind for switch-attached).
-4. **Unbinding** - `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}` releases the binding (vPPB unbind).
+1. **Discovery** - Devices and hosts are discovered, topology built. Existing LD allocations are represented as MemoryChunks; remaining capacity is tracked for future provisioning. Each vPPB already bound is a Connection.
+2. **Provisioning** - `POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks` allocates memory from the remaining capacity, creating a new chunk. Not on an LD or SLD that is bound (409).
+3. **Binding** - `POST /redfish/v1/Fabrics/CXL/Connections` binds the SLD or LD to a host (vPPB bind for switch-attached). The host gets a `MemoryDomain` once the Connection is `Enabled`.
+4. **Unbinding** - `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}` releases the binding (vPPB unbind), or `#Cxl.ForceUnbind` forces it.
 5. **Deprovisioning** - `DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}` returns capacity to the available pool, once no switch-attached Connection exposes the chunk (409 until then).
 
 ### Direct-Attached vs Switch-Attached
 
-| Topology | vPPB Binding | Connection Effect |
-|----------|--------------|-------------------|
-| Direct-attached | Not applicable | Creates logical association only |
-| Switch-attached | Automatic | Binds vPPB to port/LD via FM-API |
+| Topology | vPPB Binding | Connections |
+|----------|--------------|-------------|
+| Direct-attached | None: there is no switch | Derived from the link, always `Enabled`; `POST` of the pair is `200`, `DELETE` is `405` |
+| Switch-attached | Bind vPPB and Unbind vPPB | One per vPPB binding of a host's VCS to a memory device's port, whoever made it; `POST` binds, `DELETE` unbinds |
 
-For direct-attached hosts (`host.direct_attached = true`), connections track the host-to-device association but no vPPB binding occurs.
+### Open questions, and the choice made for each
+
+Where neither the CXL specification nor DMTF settles how a binding is to be
+served, cxl-fmd chose. Each choice is its own, not a reading of either
+standard:
+
+| Question | What the standards say | cxl-fmd's choice |
+|----------|------------------------|------------------|
+| Is binding a port or LD that is already bound an error, and with which return code? | Bind vPPB lists its return codes with no conditions (CXL r4.0 Section 7.6.7.2.2) | cxl-fmd refuses it itself: a target bound in another VCS is 409; the same target in the host's VCS is answered with the Connection it has (200), and nothing is sent |
+| May one LD be bound to two vPPBs? | Not said. "For a DSP above an MLD, there is a vPPB for each LD" (Table 7-93) is about routing | Refused on `POST` (409). The Connection ID has the vPPB in it, so a switch that shows one LD on two vPPBs gives two Connections, and nothing collides |
+| Are Binding Change records made, and seen by this FM, for binds made by another FM, through another CCI, or at boot? | Not said | The switch's VCSs are read again after every Binding Change no task follows, the whole switch before each `POST`, `DELETE` and `#Cxl.ForceUnbind`; `--rescan` stays the backstop |
+| Who made a binding? | No field of Table 7-34 or Table 7-80 says | A `DELETE` unbinds whoever made it. `Oem.Cxl.Origin` is advisory and lost on restart. There is no option to protect bindings cxl-fmd did not make: with the record lost on restart, it would protect cxl-fmd's own bindings after one |
+| May Set LD Allocations, or Set Partition Info, change an LD or SLD that is bound? | Not said | 409 for a chunk `DELETE`, and for a chunk `POST` that would send either command, while a switch-attached Connection that is not `Absent` exposes it. A `"PMEM"` chunk of an SLD sends nothing and is not refused. Direct-attached Connections, and Dynamic Capacity extents, are not gated |
+| Which chunks does a binding expose? | A binding names a port and an LD-ID only (Table 7-35); what LD Allocation Ranges 1 and 2 (Table 7-49) mean to a host is not said | The chunks cxl-fmd records for the SLD, or for the LD |
+| Which pool LD is LD-ID `n` of a head that presents an MLD? | "The MH-MLD maps the LD-IDs received at a head to the device-wide LD index in the MH-MLD's LD pool" (Section 2.5.1), by no rule given | `POST` to such a head is 400. A binding found there is a Connection to the head's Endpoint, `Enabled` with `Health` `Warning`, and no chunks |
+| Which switch port, or host, is a head of a Multi-Headed device on? | No command maps a head's Port Number (Table 7-64) to either | Only a mock topology says. On hardware a Multi-Headed device has no Connections, and a `POST` to it is 400 |
+| What does a switch that does not do Bind vPPB or Unbind vPPB answer? | Both are "O" in Table 7-31 | Unsupported is answered 501 |
+| How long may a managed unbind take? | "The timeout value for the host handshakes to complete is implementation specific" (Section 7.6.6.7) | No automatic abort or escalation. A client can force the unbind with `#Cxl.ForceUnbind` (option 2h), also while a `DELETE`'s unbind is under way |
+| How does Unbind Option 0h apply to an LD? | Not said | Option 0h is never sent |
+| Do bindings survive a reset of the switch? | Not said | The VCSs are read again when the switch is rediscovered. The IDs are derived from the bindings, so they come back the same if the bindings do |
+| Are MLDs supported on PBR switches, and what is a Bound PID? | The specification disagrees with itself: "MLDs are not supported by PBR switches" (Section 14.7.4.1), and "Edge DSPs support PCIe devices, SLDs, MLDs, GFDs, PCIe switches, and CXL HBR switches" (Section 7.7.6.1). A Bound PID is made by the Configure PID Binding command, not by Bind vPPB: "The Bind vPPB command is used to bind a direct attached device or LD to a switch's VCS" (Section 7.7.12.3) | A vPPB with Binding Status 04h is shown on the vPPB, `BoundPBRId` decoded from Bits[11:0], and gives no Connection |
+| What identifies a host? | Only the USP ID of an enabled VCS, "Valid only when the VCS is enabled" (Table 7-34) | One `ComputerSystem` per enabled VCS. A host recabled to another port is another host |
+| What does a direct-attached MLD give its host? | Not said | One Connection, whose targets are all of its LDs |
+| Is one Connection per binding what DMTF means, and may a service make Connection members itself? | DSP0288 is silent. The OCP white paper, which is informative, says: "The user can also check the memory device and host binding information through the resources under Endpoints and Connection collection." (Section 4.2.2) | Yes to both: a Connection is a binding, and every binding found is one |
+| Which EntityType is a CXL host, and a Type 3 target? | DMTF names none | `RootComplex` with `EntityLink` to its `ComputerSystem`, and `CXLDevice` with `EntityLink` to its `CXLLogicalDevice`, as Endpoint_v1 describes those values |
+| Does a `PATCH` of a vPPB's `Links.Port` mean bind? | Not said | No: it is not served. A `PATCH` of a Connection is 405, though Connection_v1 marks it updatable |
+| Which Connections give a host a `MemoryDomain`? | Left to the service | `Enabled` ones only |
+| Which free vPPB is bound? | Not said | The lowest one above 0 that reads unbound and has nothing of cxl-fmd's under way |
 
 ### When a Device Is Removed
 
@@ -1048,18 +1324,19 @@ log overflowed, or on the `--rescan` timer. Which record the switch makes
 depends on the removal (CXL r4.0): from an unbound port, "The switch
 notifies the FM by generating Physical Switch Event Records" (Section
 7.6.6.7); for a surprise removal, "The switch notifies the FM of a surprise
-removal by generating Virtual CXL Switch Event Records" (Section 7.6.6.8),
-which cxl-fmd does not act on (see Known Gaps); for an SLD or PCIe device on
-a bound port, "the FM can be notified but is not involved" (Section
+removal by generating Virtual CXL Switch Event Records for the change in
+link status and Presence Detect" (Section 7.6.6.8), which cxl-fmd only
+logs: of those records, only a Binding Change is acted on (see Known Gaps);
+for an SLD or PCIe device on a bound port, "the FM can be notified but is not involved" (Section
 7.6.6.7), and the removal may be seen only on the `--rescan` timer.
 
 Its connections are the switch's to decide, and can change without a request:
 
 | The device was | The switch | The connection |
 |----------------|------------|------------|
-| An MLD, removed by surprise | "The switch will automatically unbind any existing LD bindings" (Section 7.6.6.8) | Goes, once the vPPBs are read as unbound. Nothing deletes it |
+| An MLD, removed by surprise | "The switch will automatically unbind any existing LD bindings" (Section 7.6.6.8) | Goes, once the vPPBs are read as unbound (after a Binding Change, if the switch records one, or on the `--rescan` timer). Nothing deletes it |
 | An MLD, removed by a managed hot-removal | Nothing: "The FM unbinds each assigned LD with the Unbind vPPB command as it receives notifications from each host" (Section 7.6.6.7), and cxl-fmd does not (see Known Gaps) | Stands for as long as its vPPB is bound |
-| An SLD on a bound port | The specification does not say what becomes of the binding: "the FM can be notified but is not involved" (Section 7.6.6.7). A vPPB bound to an SLD port "behaves the same as a PPB in a PCIe switch" (Section 7.2.3.1), so cxl-fmd assumes it stays bound to the port | Stands, with `Status.State` `Absent` and no `TargetEndpoints` or `MemoryChunkInfo`. `DELETE` unbinds the vPPB as usual. A device plugged back into the port is the host's again, and the connection has its device again |
+| An SLD on a bound port | The specification does not say what becomes of the binding: "the FM can be notified but is not involved" (Section 7.6.6.7). A vPPB bound to an SLD port "behaves the same as a PPB in a PCIe switch" (Section 7.2.3.1), so cxl-fmd assumes it stays bound to the port | Stands, with the same ID, `Status.State` `Absent`, no `TargetEndpoints` or `MemoryChunkInfo`, and no `MemoryDomain` of the host. `DELETE` unbinds the vPPB as usual. A device plugged back into the port is the host's again, and the connection has its device again |
 | Being bound or unbound | finishes the operation | Its task decides, as for any other |
 
 A device attached directly to an MCTP endpoint of its own, and a Multi-Headed
@@ -1089,14 +1366,15 @@ In summary:
    [DCD-FM-API.md](DCD-FM-API.md#comments-for-table-3).
 2. The managed hot-removal of an MLD (CXL r4.0 Section 7.6.6.7) is not
    carried out (see "Event logs and switch events" below).
-3. Connections are not counted. A second Connection to a port or LD
-   already bound to the host's VCS adopts the binding, and only the
-   Connection that made the binding unbinds it when deleted, even while
-   another stands. Deleting an adopted Connection, or one that names a
-   binding made before cxl-fmd started, does not unbind (see "Binding").
-4. No Connection is made for a vPPB bound by someone other than cxl-fmd.
-   The Connections cxl-fmd serves for each device have no
-   `InitiatorEndpoints`, whatever the device's vPPBs are bound to (see
+3. A Connection is as old as the last read of its switch's VCSs: a `GET`
+   sends no command. A binding made by another FM or through another CCI,
+   of which the switch records no Binding Change this FM reads, is seen
+   only before the next `POST` or `DELETE` on that switch, or on the
+   `--rescan` timer (see "Binding").
+4. On hardware, a Multi-Headed device has no Connections, and a `POST` to
+   it is 400: no command maps a head's Port Number to a switch port or a
+   host. A head that presents an MLD cannot be bound per LD, and a binding
+   found on one is `Enabled` with `Health` `Warning` and no chunks (see
    "Binding").
 5. The security actions are served on `Memory`, not on
    `CXLLogicalDevice`, where DSP0288 1.3.0 and 1.4.0 put them (see
@@ -1108,8 +1386,9 @@ In summary:
    Port Presence Pin State (PRSNT#, Bit[2] of Link State Flags, Table 7-21)
    and its Supported CXL Modes are not used to decide it (see "When a
    Device Is Removed").
-8. An unbind is followed for as long as the switch takes, with no time
-   limit and no abort (see "Binding").
+8. A bind or unbind is followed for as long as the switch takes: there is
+   no time limit and no automatic abort. `#Cxl.ForceUnbind` is the
+   recourse for an unbind (see "Binding").
 9. `Status/Conditions` is not served. The `Status` of the Chassis of an MLD,
    a Multi-Headed device or a switch is worked out from the Health Status
    and Media Status of all its LDs or devices together. The Health Status
@@ -1158,18 +1437,31 @@ These are known gaps in what cxl-fmd does, not properties of a schema:
 
 These are known gaps in what cxl-fmd does:
 
-- An unbind is followed for as long as the switch takes: there is no time
-  limit, and no abort. "The timeout value for the host handshakes to
-  complete is implementation specific" (Section 7.6.6.7). A host that does
-  not release the device keeps the task running, and the switch, busy with
-  that background command, refuses every other bind and unbind (503).
-- The port of a Multi-Headed device's head is always bound whole, with LD
-  ID FFFFh. A head that presents an MLD cannot be bound per LD: nothing maps
-  a pool LD to the LD-ID the head uses for it.
-- A host's binding is seen only on a Connection cxl-fmd made, or on the
-  vPPB: a vPPB bound before cxl-fmd started, or by another FM, gets no
-  Connection with `InitiatorEndpoints`, and the host's `MemoryDomains` do
-  not list it. An MLD is one `Endpoint`, whichever of its LDs a host has.
+- A bind or unbind is followed for as long as the switch takes: there is no
+  time limit, and no automatic abort. "The timeout value for the host
+  handshakes to complete is implementation specific" (Section 7.6.6.7). A
+  host that does not release the device keeps the task running, and the
+  switch, busy with that background command, refuses every other bind and
+  unbind (503) until a client sends `#Cxl.ForceUnbind`.
+- A `GET` sends no command. Connections, and the host's `MemoryDomains`,
+  are as the switch's VCSs were last read: at discovery, before each
+  `POST`, `DELETE` and `#Cxl.ForceUnbind` on that switch, after a Binding
+  Change no task follows, after a log overflowed, and on the `--rescan`
+  timer.
+- A head of a Multi-Headed device that presents an MLD cannot be bound per
+  LD, and a `POST` to it is 400: nothing maps a pool LD to the LD-ID the
+  head uses for it (Section 2.5.1). A vPPB found bound to one of its LDs is
+  a Connection to the head's Endpoint, `Enabled` with `Health` `Warning`,
+  with no chunks and no `MemoryDomain`.
+- On hardware, no command maps a head's Port Number (Table 7-64) to a
+  switch port or a host, so cxl-fmd knows neither: a Multi-Headed device
+  has no Connections, and a `POST` to it is 400. Only a mock topology can
+  say where a head is (`parent_switch` and `parent_port`, or `attached_host`).
+- `Oem.Cxl.Origin` is lost on restart: after one, every binding is
+  `"Discovered"`.
+- What a host has mapped of what is bound is not known: the FM has no
+  CXL.io access to a bound port or LD (Section 7.2.3.1). A `MemoryDomain`
+  of a host is what a binding makes reachable.
 
 ### DSP0288 mappings
 
@@ -1206,7 +1498,7 @@ Properties and links defined in DMTF schemas but not yet implemented:
 
 | Property | Schema | Notes |
 |----------|--------|-------|
-| `MediaLocation` | MemoryChunks.v1_5_0+ | Location of memory media (e.g., "Local", "Remote"). |
+| `MediaLocation` | MemoryChunks.v1_5_0+ | Not served on a device's chunks under `/redfish/v1/Chassis`. A host's chunks under `/redfish/v1/Systems/{host}/MemoryDomains` have `Remote`. |
 | `RequestedOperationalState` | MemoryChunks.v1_5_0+ | Requested operational state for the chunk. |
 
 #### CXLLogicalDevice
@@ -1214,6 +1506,130 @@ Properties and links defined in DMTF schemas but not yet implemented:
 | Property | Schema | Notes |
 |----------|--------|-------|
 | `Links.PCIeFunctions` | CXLLogicalDevice.v1_0_0+ | Link to associated PCIe functions. Requires PCIeFunction resource implementation. |
+
+---
+
+## Changes for Clients
+
+cxl-fmd has no release notes. These are the changes a client can see from
+the work that made Connections the switch's bindings (the commits from
+"discovery, mock: Bound LD ID is FFh unless Bound LD, and decode Bound
+PID" on). None of them is shimmed: a client that used the old IDs or
+types has to change.
+
+### IDs and URIs
+
+- **Connection IDs.** `conn0`, `conn1`, ... (numbered from 0 on each
+  start of the daemon) are gone. A switch-attached Connection is
+  `{switch}_vcs{V}_vppb{P}_p{N}`, with `_ld{L}` for an LD; a
+  direct-attached one is `{host}_direct_{device}` or
+  `{host}_direct_{mhd}_h{H}`. They are the same after a restart.
+- **Implicit Connections.** The Connection each switch-attached device had
+  under its own device ID, bound or not, with no `InitiatorEndpoints`, is
+  gone: `GET /redfish/v1/Fabrics/CXL/Connections/{device_id}` is 404. A
+  device with no binding has no Connection.
+- **Host MemoryDomain IDs** follow the Connection IDs:
+  `/redfish/v1/Systems/{host}/MemoryDomains/{connection_id}`.
+- **The `/redfish/v1/Fabrics/CXL/MemoryChunks/{chunk}` URI** that a
+  Connection's `MemoryChunkInfo` used when it could not find a chunk's
+  domain is gone; every entry is the chunk's URI under `Chassis`.
+- **Endpoints of MLDs and Multi-Headed devices.** `Endpoints/{mld}` and
+  `Endpoints/{mhd}` are gone (404). Each LD of an MLD, and each pool LD of
+  a Multi-Headed device, is `Endpoints/{dev}_ld{N}`. A head that presents
+  an MLD is `Endpoints/{mhd}_head{H}`. An SLD's Endpoint keeps its ID.
+- **Hosts on hardware.** Discovery makes a host (`ComputerSystem` and
+  `Endpoint`) only for a VCS whose VCS State is Enabled; it made one for
+  every VCS in the Active VCS Bitmask.
+
+### EntityTypes and links
+
+- A host Endpoint's `EntityType` is `RootComplex`, with `EntityLink` to
+  `/redfish/v1/Systems/{host}`; it was `Processor`, with none.
+- An SLD Endpoint's `EntityType` is `CXLDevice`, with `EntityLink` to its
+  `CXLLogicalDevices/0`; it was `MemoryChunk`. An LD Endpoint is
+  `CXLDevice` with `EntityLink` to its `CXLLogicalDevices/{N}`; a head
+  Endpoint is `Memory`, with none.
+- New links: `Links.Connections` on an Endpoint that is an end of a Connection; `Links.Endpoints` on a
+  `VirtualPCI2PCIBridge` (what it is bound to) and on a `VirtualCXLSwitch`
+  (its Zone's Endpoints); a `CXLLogicalDevice`'s `Links.Endpoints` is its
+  own LD Endpoint, not the device's; a Port's `Links.AssociatedEndpoints`
+  are the LD Endpoints at the other end of its link; a pool LD Endpoint's
+  `Links.ConnectedPorts` is the port of its head.
+- A Zone lists each LD Endpoint bound to its VCS, not the device: an MLD
+  with LD 0 in VCS 0 and LD 1 in VCS 1 is `{mld}_ld0` in one Zone and
+  `{mld}_ld1` in the other, where it was the MLD in both.
+- A `VirtualPCI2PCIBridge` with `BindingStatus` `BoundPID` has the PID in
+  `BoundPBRId` (it was 0 from discovery).
+
+### Connections
+
+- **What is listed.** Every vPPB of an enabled VCS (but vPPB 0) bound to a
+  memory device's port, whoever made it: bindings made before cxl-fmd
+  started, by another FM or through another CCI are Connections, with
+  `InitiatorEndpoints`, and give the host a `MemoryDomain`. Direct-attached
+  Connections exist from startup, with no `POST`.
+- **Body.** `Name` is `CXL vPPB Binding` or `CXL Direct-Attached
+  Connection` (was `CXL Memory Connection`, or `CXL SLD Connection` / `CXL
+  MLD Connection` for an implicit one). `MemoryChunkInfo` has one entry per
+  chunk of the target, not the one chunk the `POST` named, each with
+  `AccessCapabilities` `["Read", "Write"]` and `AccessState` `Optimized`.
+  `Status` can be `Enabled` with `Health` `Warning` (target not known).
+  `TargetEndpoints` is the LD Endpoint for an LD. New:
+  `Oem.Cxl.Origin`, and `Actions.Oem["#Cxl.ForceUnbind"]`.
+- **Tasks.** A bind's `Task` lists the Connection in
+  `Links.CreatedResources` while it runs (only once `Completed`, before).
+  A task that is lost no longer leaves its Connection `Starting` or
+  `Updating`.
+
+### Requests and status codes
+
+| Request | Was | Now |
+|---------|-----|-----|
+| `POST` of a target the host's VCS has bound already | `201` and a second Connection that did not unbind on `DELETE` | `200` and the existing Connection, `Location` its URI; nothing sent |
+| `POST` of a target being bound for the host | another Bind vPPB sent, for another vPPB (a vPPB being bound reads 01h, which was not taken as holding the target), which a switch busy with the first answers Busy: `503` | `202` and the same `Task`; nothing sent |
+| `POST` of a target being unbound for the host | `201` and a Connection that adopted the binding while the vPPB still read bound; once it read 01h, another Bind vPPB, answered as above | `409` |
+| `POST` with more than one initiator or target | the first of each taken, the rest ignored | `400` |
+| `POST` from a switch-attached host to a device on no switch, or from a direct-attached host to a device on a switch | `201` and a Connection, with nothing bound | `400` |
+| `POST` of a direct-attached pair | `201` and a new Connection | `200` and the Connection it has |
+| `POST` with `AccessCapabilities` other than `Read` and `Write` | taken, and served as asked | `400` |
+| `POST` naming a chunk that is not the target's | taken | `400` |
+| `POST` with chunks on two LDs of one device | taken (only the first entry was read) | `400` |
+| `POST` with an SLD or LD Endpoint and no `MemoryChunkInfo` | `400` | taken |
+| `POST` or `DELETE` the switch answers Unsupported | `500` | `501` |
+| `POST` or `DELETE` the switch answers Invalid Input | `500` | `400` |
+| `DELETE` of a Connection whose binding cxl-fmd did not make, or adopted | `204` and nothing unbound | Unbind vPPB, option 1h: `204` or `202` |
+| `DELETE` of a direct-attached Connection | `204` | `405`, `Allow: GET` |
+| `DELETE` of a stale ID (the vPPB now holds something else) | (IDs were not tied to a vPPB) | `404`, nothing unbound |
+| `DELETE` of a Connection whose task was lost | `503`, for good | taken |
+| `PATCH` of a Connection | `501` | `405`, `Allow: GET, DELETE` |
+| `POST .../Actions/Oem/Cxl.ForceUnbind` | (not served) | Unbind vPPB, option 2h |
+| Chunk `DELETE`, or a chunk `POST` that sends Set LD Allocations or Set Partition Info, on an LD or SLD a switch-attached Connection binds | sent | `409`, nothing sent |
+| `GET` of an MLD's or Multi-Headed device's Endpoint | `200` | `404` |
+
+The text of several error messages changed; for example, a `POST` from a
+host to a pool LD not mapped to its head was "Cross-head access denied:
+host cannot access this memory", and is "The host is not attached to that
+device or head: it cannot reach this memory".
+
+### Systems
+
+- A host's `MemoryDomains` are those of its `Enabled` Connections, made by
+  anyone. A domain's `MemorySizeMiB` is that of all of the target's
+  chunks, and it has `Links.CXLLogicalDevices`. Its `MemoryChunks` has one
+  member per chunk (it had one), each with `MediaLocation` `Remote` and
+  `Links.Endpoints`.
+
+### Mock topologies and `--check`
+
+- A switch takes `bind_result` and `unbind_result`, and a topology an
+  `external` list played by `SIGUSR2` (see
+  [mock-topology.md](mock-topology.md)).
+- A `bound_ld` vPPB with no `bound_ld_id` is LD 255, which `--check`
+  refuses; it was LD 0. A `bound_ld_id` other than 255 on a vPPB that is
+  not `bound_ld` is warned of and loaded as 255.
+- `--check` refuses vPPB 0 of an enabled VCS bound to anything but that
+  VCS's USP, and warns of bindings that give no Connection, or an
+  unresolved one.
 
 ---
 

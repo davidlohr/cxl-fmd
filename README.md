@@ -136,8 +136,8 @@ Returns the Redfish service root with links to available resource collections.
 | vPPB | `.../VPPBs/{vppb}` | vPPB binding status and target |
 | Endpoint Collection | `/redfish/v1/Fabrics/CXL/Endpoints` | CXL endpoints (hosts and devices) |
 | Endpoint | `.../Endpoints/{ep}` | Endpoint with connected entity |
-| Connection Collection | `/redfish/v1/Fabrics/CXL/Connections` | Host-to-device connections (POST/DELETE) |
-| Connection | `.../Connections/{conn}` | Connection with initiator/target endpoints |
+| Connection Collection | `/redfish/v1/Fabrics/CXL/Connections` | One per vPPB binding of a host's VCS to a memory device, whoever made it, and per direct-attached link; POST binds a vPPB |
+| Connection | `.../Connections/{conn}` | Connection with initiator/target endpoints; DELETE unbinds, `Actions/Oem/Cxl.ForceUnbind` forces the unbind |
 | Zone Collection | `/redfish/v1/Fabrics/CXL/Zones` | CXL zones (per VCS) |
 | Zone | `.../Zones/{zone}` | Zone with endpoint membership |
 | **Systems** | | |

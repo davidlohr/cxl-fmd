@@ -42,9 +42,14 @@ vPPBs; Single Logical Devices (SLDs), Multi-Logical Devices (MLDs) with their
 Logical Devices, and Multi-Headed devices; the hosts on each VCS; and dynamic
 capacity regions and extents.
 A client provisions memory by creating and removing Redfish resources:
-a connection between a host and a device binds a switch port or a Logical
-Device to a vPPB of the host's VCS, memory chunks set Logical Device
-allocations, and actions add and release dynamic capacity.
+creating a connection between a host and a device binds a switch port or a
+Logical Device to a vPPB of the host's VCS, and deleting it unbinds the vPPB;
+memory chunks set Logical Device allocations, and actions add and release
+dynamic capacity.
+Each vPPB found bound to a memory device is a connection, whoever bound it:
+.BR cxl-fmd ,
+the switch's own configuration, another Fabric Manager, or another
+interface of the switch.
 .PP
 The service root is at
 .IR http://host:port/redfish/v1 .
@@ -178,10 +183,19 @@ A port that a Physical Switch Event Record names, for a change of its link
 state or slot status, is read again: a device that has appeared on it is
 discovered, and one that is no longer there is removed.
 .IP \(bu 2
+A Virtual CXL Switch Event Record of a binding change that no bind or unbind
+of
+.B cxl-fmd
+explains has the switch's virtual switches read again, so that a binding made
+elsewhere becomes, or stops being, a connection.
+The virtual switches of a switch are also read before each request that binds
+or unbinds on it.
+.IP \(bu 2
 Every
 .B \-\-rescan
 seconds the switches are read again in full and new endpoints are looked for,
 including any that was not ready before.
+A binding made elsewhere that the switch logged nothing for is seen then.
 .IP \(bu 2
 The Dynamic Capacity event log of each dynamic capacity device is read, and
 the extents of the hosts it names are brought up to date.
@@ -237,8 +251,12 @@ When it has started one and not finished it,
 .B cxl-fmd
 answers the request with
 .B 202 Accepted
-and a Redfish task, and the connection is made, or removed, when the switch is
-done.
+and a Redfish task.
+The connection is listed meanwhile with the state Starting while it is bound,
+or Updating while it is unbound; a bind that fails leaves none, and an unbind
+removes it once the vPPB reads unbound.
+A request to bind the same target for the same host while that runs is
+answered with the same task.
 The
 .I Location
 header of the answer is a task monitor; a GET of it answers 202 while the
@@ -247,6 +265,14 @@ A switch runs one such command at a time: a request for another is answered
 with
 .B 503
 and is to be tried again.
+An unbind waits for the host for as long as the switch does;
+.B cxl-fmd
+sets no time limit.
+The connection's
+.I Cxl.ForceUnbind
+action, which is
+.BR cxl-fmd 's
+own, sends the unbind again as a simulated surprise hot-removal.
 .SH SIGNALS
 .TP
 .BR SIGINT ", " SIGTERM

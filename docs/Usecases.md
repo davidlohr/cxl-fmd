@@ -15,7 +15,7 @@ Scenario 5, all of "Orchestration Integration" and "Deployment
 Architectures", and the parts of "Middleware Value Proposition" marked so. None of the Kubernetes,
 OpenStack, vSphere, container runtime or Prometheus components named there
 exists in this repository. cxl-fmd itself has no EventService, no Prometheus
-metrics endpoint (it serves Redfish `PortMetrics` and `MemoryMetrics`), no authentication or audit log, no `PATCH` of a `Connection` or a
+metrics endpoint (it serves Redfish `PortMetrics` and `MemoryMetrics`), no authentication or audit log, no `PATCH` of a `Connection` (405) or a
 `CXLLogicalDevice`, and no `$filter` query (a query string is ignored). The
 known gaps of what it does implement are listed under "Known Gaps" in
 `docs/Redfish-API.md`.
@@ -186,7 +186,7 @@ Returns 204 No Content on success.
 
 ### Connection Management Operations
 
-Connections bind memory chunks to hosts, making CXL memory accessible. For switch-attached devices, cxl-fmd automatically manages vPPB binding.
+A Connection is a host's binding to an SLD or an LD: for switch-attached devices, a vPPB of the host's VCS bound to the device's port or LD, whoever made it. cxl-fmd binds and unbinds vPPBs when Connections are created and deleted (see "Memory Binding (Connections)" in `docs/Redfish-API.md`).
 
 **Create a Connection:**
 ```bash
@@ -199,7 +199,7 @@ Content-Type: application/json
             "@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/{host}"
         }],
         "TargetEndpoints": [{
-            "@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/{device}"
+            "@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/{sld or ld}"
         }]
     },
     "MemoryChunkInfo": [{
@@ -211,17 +211,22 @@ Content-Type: application/json
 }
 ```
 
-The answer is `201 Created`, or `202 Accepted` with a `Task` when the
-switch binds in the background (see "Binds and unbinds in the background"
-in `docs/Redfish-API.md`).
+The target is an SLD's Endpoint (`{device}`) or an LD's (`{device}_ld{N}`);
+`MemoryChunkInfo` can be left out, as the whole SLD or LD is bound. The
+answer is `201 Created`, `202 Accepted` with a `Task` when the switch binds
+in the background (see "Binds and unbinds in the background" in
+`docs/Redfish-API.md`), or `200 OK` with the Connection the host has
+already.
 
 **Delete a Connection:**
 ```bash
 DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}
 ```
-For switch-attached devices, this unbinds the vPPB if this Connection made
-the binding; one that found the port or LD already bound to the host's VCS
-does not unbind it (a known gap).
+For switch-attached devices, this unbinds the vPPB, whoever bound it, with
+Simulate Managed Hot-Remove. A direct-attached Connection cannot be deleted
+(405). `POST .../Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` forces the
+unbind (Simulate Surprise Hot-Remove) for a host that does not release the
+device.
 
 ### MHD Access Control
 
@@ -261,7 +266,8 @@ POST /Connections → 400 Bad Request
 
 4. Create Connection (bind to host)
    POST /Fabrics/CXL/Connections
-   → 201, or 202 and a Task while the switch binds
+   → 201, or 202 and a Task while the switch binds (200 if the host
+     has it already)
 
 5. Use Memory
    (outside cxl-fmd: the host's kernel and applications)
@@ -410,10 +416,10 @@ When workload demands change, orchestrators can dynamically rebalance memory acr
 ```bash
 # Step 1: Release memory from underutilized Host 1
 DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}
-→ the vPPB is unbound if this Connection bound it (204, or 202 and a Task)
+→ the vPPB is unbound (204, or 202 and a Task)
 
 DELETE /redfish/v1/Chassis/mld_2/MemoryDomains/.../MemoryChunks/{chunk}
-→ Capacity returned to pool
+→ Capacity returned to pool (409 until the unbind is over)
 
 # Step 2: Verify the chunk is gone
 GET /redfish/v1/Chassis/mld_2/MemoryDomains/mld_2_domain0/MemoryChunks
@@ -429,7 +435,7 @@ POST /redfish/v1/Fabrics/CXL/Connections
 {
     "Links": {
         "InitiatorEndpoints": [{"@odata.id": ".../Endpoints/host2"}],
-        "TargetEndpoints": [{"@odata.id": ".../Endpoints/mld_2"}]
+        "TargetEndpoints": [{"@odata.id": ".../Endpoints/mld_2_ld0"}]
     },
     "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../chunk_new"}}]
 }
@@ -468,13 +474,13 @@ POST /Chassis/mld_0/MemoryDomains/.../MemoryChunks
         "Memory": {"@odata.id": "/redfish/v1/Chassis/mld_0/Memory/mld_0_ld3"}
     }]
 }
-POST /Fabrics/CXL/Connections  # Bind to host3
+POST /Fabrics/CXL/Connections  # Bind LD 3 (Endpoints/mld_0_ld3) to host3
 ```
 
 **cxl-fmd Role**:
 - Discover and inventory all memory devices, switches, and VCS configurations
 - Expose VCS partitions as Zones for host isolation visibility
-- Track vPPB bindings and automatically manage them during Connection create/delete
+- Serve every vPPB binding of a host's VCS as a Connection, whoever made it, and bind and unbind vPPBs as Connections are created and deleted
 - Serve the capacity of each device and domain, and its chunks
 - Support per-LD allocation for fine-grained MLD pooling
 - Serve health (Get Health Info, read when a device is discovered) and
@@ -508,7 +514,7 @@ POST /Fabrics/CXL/Connections  # Bind to host3
    {
        "Links": {
            "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/hostA"}],
-           "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld_0"}]
+           "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld_0_ld1"}]
        },
        "MemoryChunkInfo": [{
            "MemoryChunk": {"@odata.id": "/redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks/{chunk}"}
@@ -678,7 +684,9 @@ POST /Fabrics/CXL/Connections
     },
     "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_0"}}]
 }
-→ 201 Created
+→ 200 OK: a directly attached head has its Connection already
+  ("mhd_0" with a chunk of one LD is accepted for compatibility; the
+  Endpoint of the LD is "mhd_0_ld0")
 
 # Host A attempts to access Host B's memory - DENIED
 POST /Fabrics/CXL/Connections
@@ -689,16 +697,19 @@ POST /Fabrics/CXL/Connections
     },
     "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_from_ld2"}}]
 }
-→ 400 Bad Request: "Cross-head access denied: host cannot access this memory"
+→ 400 Bad Request: "The host is not attached to that device or head: it cannot reach this memory"
 ```
 
 **cxl-fmd Role**:
-- Discover MHD head-to-host mappings from topology
-- Validate all Connection requests against head assignments
-- Reject cross-head access attempts (400)
+- Take the head-to-host mapping from the mock topology (`attached_host`):
+  no CXL command maps a head to a host or a switch port, so on hardware a
+  Multi-Headed device has no Connections (a known gap)
+- Give each directly attached head a Connection to the pool LDs mapped to
+  it, and refuse a Connection to any other (400)
 - Support both direct-attached and switch-attached MHD configurations; a
-  head on a switch port is bound whole, with LD ID FFFFh, so a head that
-  presents an MLD cannot be bound per LD (a known gap)
+  head on a switch port that presents an SLD is bound whole, with LD ID
+  FFFFh, and a head that presents an MLD cannot be bound per LD (400, a
+  known gap)
 
 ---
 
@@ -1470,7 +1481,9 @@ POST /redfish/v1/Chassis/{dev}/MemoryDomains/{dom}/MemoryChunks
 }
 
 # Add to existing connection (not implemented: cxl-fmd answers a PATCH of a
-# Connection with 501)
+# Connection with 405; a Connection lists every chunk of the SLD or LD it
+# binds, so a chunk made on that LD would be in it, but no chunk is made on
+# a bound LD: 409)
 PATCH /redfish/v1/Fabrics/CXL/Connections/{conn}
 {
     "MemoryChunkInfo": [
