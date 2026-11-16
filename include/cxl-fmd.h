@@ -1413,10 +1413,16 @@ struct fmd_dc_region *fmd_dc_region_create(const char *id, uint8_t region_id,
 					   uint16_t host_id);
 struct fmd_dc_extent *fmd_dc_extent_create(const char *id);
 
+/* The offset fmd_chunk_create_in_domain() is to choose itself */
+#define FMD_CHUNK_OFFSET_AUTO UINT64_MAX
+
 /*
- * Create a memory chunk in a domain with full configuration.
- * offset = UINT64_MAX means auto-assign (append at end of existing chunks).
- * Returns NULL on error (insufficient capacity, overlap, etc.).
+ * Create a memory chunk in a domain with full configuration. The chunk
+ * lies within the domain: [offset, offset + size) within [0, capacity).
+ * offset = FMD_CHUNK_OFFSET_AUTO places it at the lowest offset where it
+ * fits (first fit).
+ * Returns NULL on error (insufficient capacity, out of the domain, overlap,
+ * no free range of that size, etc.).
  */
 struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	struct fmd_topology *topo,

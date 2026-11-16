@@ -794,9 +794,9 @@ Content-Type: application/json
 **Request Body:**
 | Property | Type | Required | Description |
 |----------|------|:--------:|-------------|
-| `MemoryChunkSizeMiB` | integer | Conditional | Size of the chunk in MiB (required unless InterleaveSets.SizeMiB provided) |
-| `AddressRangeType` | string | No | `"Volatile"` or `"PMEM"` (default: `"PMEM"`) |
-| `AddressRangeOffsetMiB` | integer | No | Base offset in MiB (auto-assigned if omitted) |
+| `MemoryChunkSizeMiB` | integer | Conditional | Size of the chunk in MiB, greater than 0 (required unless InterleaveSets.SizeMiB provided) |
+| `AddressRangeType` | string | No | `"Volatile"` or `"PMEM"` (default: `"PMEM"`); any other value is `400` |
+| `AddressRangeOffsetMiB` | integer | No | Offset of the chunk in its domain, in MiB: from 0 to the domain's `MemorySizeMiB` less `MemoryChunkSizeMiB`. If omitted, the lowest offset where the chunk fits (first fit) |
 | `InterleaveSets` | array | No | Array of interleave set entries (see below) |
 
 **InterleaveSets Entry:**
@@ -809,6 +809,14 @@ Content-Type: application/json
 | `RegionId` | string | Region identifier |
 
 **Response:** Returns the created MemoryChunk resource with HTTP 201 Created.
+
+Every size and offset in MiB, `InterleaveSets` entries included, is an
+integer from 0 to 17592186044415 (2^44 - 1, the most MiB a byte count of
+64 bits holds); one that is not, is negative or is past it is `400`, as is
+a chunk that would not lie within its domain. `AddressRangeOffsetMiB` is
+cxl-fmd's coordinate within the domain: DSP0288 maps no CXL field to it,
+and no CXL command places an allocation at an offset, so it is never sent
+to a device. Nothing is changed or sent for a request refused with `400`.
 
 For MLD chunks, the response includes `Links.CXLLogicalDevices` referencing the target LD.
 
@@ -1630,6 +1638,22 @@ device or head: it cannot reach this memory".
 - `--check` refuses vPPB 0 of an enabled VCS bound to anything but that
   VCS's USP, and warns of bindings that give no Connection, or an
   unresolved one.
+
+### Requests after the design review
+
+Changes from the fixes of the external design review (branch
+`review-fixes`):
+
+| Request | Was | Now |
+|---------|-----|-----|
+| Chunk `POST` with a size in MiB past 2^44 - 1 (`MemoryChunkSizeMiB` or `InterleaveSets[].SizeMiB`) | `201`, and a chunk of the size wrapped to 64 bits of bytes, which Set LD Allocations or Set Partition Info was sent for | `400`, nothing sent |
+| Chunk `POST` with `MemoryChunkSizeMiB` 0 or negative | `409` | `400` |
+| Chunk `POST` with an `InterleaveSets[]` `SizeMiB` or `OffsetMiB` that is negative, not an integer, or past 2^44 - 1 | ignored (0) when not an integer; a negative one wrapped | `400` |
+| Chunk `POST` with a `MemoryChunkSizeMiB` that is not an integer, next to an `InterleaveSets[0].SizeMiB` | the `SizeMiB` taken instead | `400` |
+| Chunk `POST` with an `AddressRangeOffsetMiB` that is negative, not an integer, or puts any of the chunk past the domain's `MemorySizeMiB` | `201` (a negative or wrapped offset, or an offset past the end; one that was not an integer was ignored) | `400` |
+| Chunk `POST` with no `AddressRangeOffsetMiB` | placed after the chunk that ends last, even past the end of the domain | placed at the lowest offset where it fits, within the domain, or `409` |
+| Chunk `POST` with an `AddressRangeType` other than `PMEM` or `Volatile`, or not a string | `201`, as `PMEM` | `400` |
+| `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
 
 ---
 

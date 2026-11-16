@@ -703,45 +703,63 @@ static void generate_chunk_id(struct fmd_mem_domain *domain, char *buf, size_t l
 }
 
 /*
- * Find the next available offset (append at end of existing chunks).
+ * Whether [a, a + as) and [b, b + bs) overlap, both sizes > 0: written
+ * without the sums, which need not fit in 64 bits.
  */
-static uint64_t find_next_offset(struct fmd_mem_domain *domain)
+static bool ranges_overlap(uint64_t a, uint64_t as, uint64_t b, uint64_t bs)
 {
-	uint64_t max_end = 0;
-	struct fmd_component *child;
-
-	fmd_for_each_child(&domain->base, child) {
-		if (child->type == FMD_COMPONENT_CHUNK) {
-			struct fmd_mem_chunk *c = fmd_to_chunk(child);
-			uint64_t end = c->base_address + c->size;
-			if (end > max_end)
-				max_end = end;
-		}
-	}
-
-	return max_end;
+	return a < b ? b - a < as : a - b < bs;
 }
 
 /*
- * Check if offset+size overlaps with existing chunks.
+ * Check if [offset, offset + size) overlaps an existing chunk.
  */
 static bool chunk_overlaps(struct fmd_mem_domain *domain, uint64_t offset, uint64_t size)
 {
 	struct fmd_component *child;
-	uint64_t new_end = offset + size;
 
-	fmd_for_each_child(&domain->base, child) {
-		if (child->type == FMD_COMPONENT_CHUNK) {
-			struct fmd_mem_chunk *c = fmd_to_chunk(child);
-			uint64_t chunk_end = c->base_address + c->size;
+	fmd_for_each_child_type(&domain->base, child, FMD_COMPONENT_CHUNK) {
+		struct fmd_mem_chunk *c = fmd_to_chunk(child);
 
-			/* Check for overlap */
-			if (offset < chunk_end && new_end > c->base_address)
-				return true;
-		}
+		if (c->size && ranges_overlap(offset, size, c->base_address, c->size))
+			return true;
 	}
 
 	return false;
+}
+
+/*
+ * The lowest offset at which @size bytes lie within the domain and overlap
+ * no chunk (first fit), or FMD_CHUNK_OFFSET_AUTO if there is none. The
+ * chunks are in no order: a candidate overlapping one moves past its end,
+ * and the walk starts again until no chunk is in the way. Each move goes
+ * up, so it ends.
+ */
+static uint64_t find_free_offset(struct fmd_mem_domain *domain, uint64_t size)
+{
+	struct fmd_component *child;
+	uint64_t offset = 0;
+	bool moved;
+
+	if (size > domain->capacity)
+		return FMD_CHUNK_OFFSET_AUTO;
+
+	do {
+		moved = false;
+		fmd_for_each_child_type(&domain->base, child, FMD_COMPONENT_CHUNK) {
+			struct fmd_mem_chunk *c = fmd_to_chunk(child);
+
+			if (!c->size || !ranges_overlap(offset, size, c->base_address, c->size))
+				continue;
+			if (__builtin_add_overflow(c->base_address, c->size, &offset))
+				return FMD_CHUNK_OFFSET_AUTO;
+			moved = true;
+		}
+		if (offset > domain->capacity - size)
+			return FMD_CHUNK_OFFSET_AUTO;
+	} while (moved);
+
+	return offset;
 }
 
 struct fmd_mem_chunk *fmd_chunk_create_in_domain(
@@ -764,8 +782,15 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 		return NULL;
 
 	/* Auto-assign offset if not specified */
-	if (offset == UINT64_MAX)
-		offset = find_next_offset(domain);
+	if (offset == FMD_CHUNK_OFFSET_AUTO) {
+		offset = find_free_offset(domain, size);
+		if (offset == FMD_CHUNK_OFFSET_AUTO)
+			return NULL;
+	}
+
+	/* Within the domain */
+	if (offset > domain->capacity || size > domain->capacity - offset)
+		return NULL;
 
 	/* Check for overlap with existing chunks */
 	if (chunk_overlaps(domain, offset, size))

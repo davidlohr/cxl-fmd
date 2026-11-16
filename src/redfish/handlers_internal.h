@@ -59,6 +59,36 @@ static inline int safe_parse_int(const char *str)
 }
 
 /*
+ * The largest number of MiB that a byte count of 64 bits holds: 2^44 - 1.
+ * The CXL fields a size in MiB becomes are such counts: Length, "The
+ * number of bytes of capacity to add" (Table 7-72) and "to remove" (Table
+ * 7-73), each 8 bytes, and Region Block Size (Table 7-69), "in bytes"
+ * (Table 8-347); so are the sizes and offsets cxl-fmd keeps. A value past
+ * it cannot be carried, and is refused rather than wrapped (cxl-fmd's
+ * bound, from that representation).
+ */
+#define RF_MIB_MAX (UINT64_MAX >> 20)
+
+/*
+ * A size or offset in MiB from a request, @v, as a number of bytes.
+ * Returns 0 with *bytes set, or -EINVAL when @v is not an integer, is
+ * negative, is 0 and !@allow_zero, or is past RF_MIB_MAX. Nothing is
+ * written to *bytes on an error.
+ */
+static inline int rf_mib_to_bytes(const json_t *v, bool allow_zero, uint64_t *bytes)
+{
+	json_int_t mib;
+
+	if (!json_is_integer(v))
+		return -EINVAL;
+	mib = json_integer_value(v);
+	if (mib < 0 || (mib == 0 && !allow_zero) || (uint64_t)mib > RF_MIB_MAX)
+		return -EINVAL;
+	*bytes = (uint64_t)mib << 20;
+	return 0;
+}
+
+/*
  * Parse numeric LD ID from a string.
  * Handles two formats:
  *   1. Full format with "_ld": "mld_0_ld2" -> 2

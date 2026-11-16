@@ -241,7 +241,7 @@ class TestCapacityConstraints:
             "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": 0}
         )
-        assert status in [400, 409]
+        assert status == 400
 
     def test_reject_negative_size_chunk(self, api_client):
         """Test that negative-size chunks are rejected."""
@@ -254,7 +254,7 @@ class TestCapacityConstraints:
             "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": -1024}
         )
-        assert status in [400, 409]
+        assert status == 400
 
 
 # =============================================================================
@@ -325,3 +325,118 @@ class TestCXLLogicalDeviceChunkLinks:
         # Either no MemoryChunks key or empty array
         if "Links" in data and "MemoryChunks" in data["Links"]:
             assert len(data["Links"]["MemoryChunks"]) == 0
+
+
+# =============================================================================
+# Sizes and offsets in MiB (review F11)
+# =============================================================================
+
+SLD_CHUNKS = "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks"
+SLD_SHIPPED = SLD_CHUNKS + "/cxl_mem0_chunk0"
+SLD_DOMAIN_MIB = 16384
+# The most MiB a 64-bit byte count can hold: 2^44 - 1
+MIB_MAX = ((1 << 64) - 1) >> 20
+
+
+def chunk_members(api_client):
+    status, data = api_client.get(SLD_CHUNKS)
+    assert status == 200
+    return sorted(m["@odata.id"] for m in data["Members"])
+
+
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestChunkSizeAndOffsetBounds:
+    """A size or offset in MiB is a byte count of 64 bits once converted:
+    one that does not fit is refused with 400, and so is a chunk that
+    would not lie within its domain. Nothing is created for any of them."""
+
+    @pytest.mark.parametrize("size", [MIB_MAX + 1, (1 << 44) + 1024, (1 << 63) - 1,
+                                      -1, 0])
+    def test_size_out_of_range_400(self, api_client, size):
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": size,
+                                                       "AddressRangeType": "PMEM"})
+        assert status == 400, data
+        assert chunk_members(api_client) == []
+
+    def test_interleave_size_out_of_range_400(self, api_client):
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS,
+                                          {"InterleaveSets": [{"SizeMiB": (1 << 44) + 1025}]})
+        assert status == 400, data
+        assert chunk_members(api_client) == []
+
+    @pytest.mark.parametrize("entry", [
+        {"SizeMiB": -1024}, {"SizeMiB": "1024"}, {"SizeMiB": 1024.5},
+        {"SizeMiB": 1024, "OffsetMiB": -1}, {"SizeMiB": 1024, "OffsetMiB": "0"},
+        {"SizeMiB": 1024, "OffsetMiB": MIB_MAX + 1},
+    ])
+    def test_interleave_mib_not_an_integer_in_range_400(self, api_client, entry):
+        """InterleaveSets SizeMiB and OffsetMiB are integers from 0 to
+        2^44 - 1 too: one that is not was ignored, or wrapped."""
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024,
+                                                       "InterleaveSets": [entry]})
+        assert status == 400, data
+        assert chunk_members(api_client) == []
+
+    @pytest.mark.parametrize("size", ["1024", 1024.0, None])
+    def test_size_not_an_integer_400(self, api_client, size):
+        """A MemoryChunkSizeMiB that is there and not an integer is refused,
+        not passed over for InterleaveSets[0].SizeMiB."""
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": size,
+                                                       "InterleaveSets": [{"SizeMiB": 1024}]})
+        assert status == 400, data
+        assert chunk_members(api_client) == []
+
+    @pytest.mark.parametrize("offset", [-5, MIB_MAX, SLD_DOMAIN_MIB - 1024 + 1,
+                                        999999, "zero"])
+    def test_offset_out_of_range_400(self, api_client, offset):
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024,
+                                                       "AddressRangeOffsetMiB": offset})
+        assert status == 400, data
+        assert chunk_members(api_client) == []
+
+    @pytest.mark.parametrize("range_type", ["Bogus", 5])
+    def test_address_range_type_400(self, api_client, range_type):
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024,
+                                                       "AddressRangeType": range_type})
+        assert status == 400, data
+        assert chunk_members(api_client) == []
+
+    def test_chunk_at_the_end_of_the_domain(self, api_client):
+        """The last MiB of the domain can be given; chunks placed
+        automatically then fill the room below it, first fit, and none
+        lies past the end of the domain: once it is full, 409."""
+        assert api_client.delete(SLD_SHIPPED) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {
+            "MemoryChunkSizeMiB": 1024, "AddressRangeOffsetMiB": SLD_DOMAIN_MIB - 1024})
+        assert status == 201, data
+        assert data["AddressRangeOffsetMiB"] == SLD_DOMAIN_MIB - 1024
+
+        offsets = []
+        for _ in range(SLD_DOMAIN_MIB // 1024 - 1):
+            status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024})
+            assert status == 201, data
+            offsets.append(data["AddressRangeOffsetMiB"])
+        assert sorted(offsets) == list(range(0, SLD_DOMAIN_MIB - 1024, 1024))
+
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024})
+        assert status == 409, data
+
+    def test_auto_offset_fills_a_hole(self, api_client):
+        """A hole left by a DELETE is used again, before the end."""
+        assert api_client.delete(SLD_SHIPPED) == 204
+        made = []
+        for _ in range(3):
+            status, data, location = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024})
+            assert status == 201, data
+            made.append((location, data["AddressRangeOffsetMiB"]))
+        assert [o for _, o in made] == [0, 1024, 2048]
+        assert api_client.delete(made[1][0]) == 204
+        status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024})
+        assert status == 201, data
+        assert data["AddressRangeOffsetMiB"] == 1024

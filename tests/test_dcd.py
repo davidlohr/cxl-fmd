@@ -1129,3 +1129,43 @@ class TestDeleteWithoutTagBased:
         assert extent_ids(api_client, PR) == ["ext_1_200000000"]
         status, data = api_client.get(PR + "/MemoryExtents/ext_1_200000000")
         assert data["Tag"] == TAG_D1 and data["ExtentSizeMiB"] == 1024
+
+
+# =============================================================================
+# Lengths and block sizes in MiB that a 64-bit byte count cannot hold (F11)
+# =============================================================================
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+class TestDCMiBRange:
+    """Length is "The number of bytes of capacity to add" (Table 7-72) or
+    "to remove" (Table 7-73), and Region Block Size of Set DC Region
+    Configuration (Table 7-69) "The Dynamic Capacity block size for this
+    region in bytes" (Table 8-347), each 8 bytes: a value in MiB past 2^44 - 1 has no byte
+    count, and is refused rather than sent wrapped."""
+
+    def extent_size(self, api_client, ext="ext_0_400000000"):
+        status, data = api_client.get(SLD + "/MemoryExtents/" + ext)
+        assert status == 200
+        return data["ExtentSizeMiB"]
+
+    @pytest.mark.parametrize("length", [(1 << 44) + 256, 1 << 44, (1 << 63) - 1])
+    def test_add_length_out_of_range_400(self, api_client, length):
+        before = extent_ids(api_client)
+        status, data, _ = api_client.post(SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": length, "Tag": TAG_NEW})
+        assert status == 400, data
+        assert extent_ids(api_client) == before
+
+    def test_release_length_out_of_range_400(self, api_client):
+        status, data, _ = api_client.post(SLD_RELEASE, release_body(
+            "TagBased", Tag=TAG_SEED, Length=(1 << 44) + 1024))
+        assert status == 400, data
+        assert self.extent_size(api_client) == 4096
+
+    def test_block_size_out_of_range_400(self, api_client):
+        assert api_client.delete(SLD + "/MemoryExtents/ext_0_400000000") == 204
+        status, data = api_client.patch(SLD_LD0 + "/MemoryRegions/0",
+                                        {"BlockSizeMiB": (1 << 44) + 512})
+        assert status == 400, data
+        status, data = api_client.get(SLD_LD0 + "/MemoryRegions/0")
+        assert data["BlockSizeMiB"] == 256

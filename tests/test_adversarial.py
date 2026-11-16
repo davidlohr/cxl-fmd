@@ -829,7 +829,7 @@ class TestIntegerOverflow:
             "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": -1}
         )
-        assert status in [400, 409]
+        assert status == 400
 
 
 # =============================================================================

@@ -2023,6 +2023,102 @@ static struct fmd_component *hw_dcd(struct fmd_ctx *ctx, struct cxlmi_endpoint *
 }
 
 /*
+ * A size in MiB that no byte count of 64 bits holds is refused before
+ * anything is sent (review F11). MemoryChunkSizeMiB 2^44 + 256 wrapped to
+ * 256 MiB, which Set LD Allocations (5402h) then gave; Length 2^44 + 256
+ * of a DC add to 256 MiB, which Initiate Dynamic Capacity Add (5604h) then
+ * asked for, though Length is "The number of bytes of capacity to add"
+ * (Table 7-72). The same requests with 256 do send, so the mock sees it.
+ */
+static void test_mib_out_of_range_sends_nothing(void)
+{
+	static const char *const sizes[] = { "17592186044672", "17592186044416",
+					     "-1", "0" };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0x1170, 2, 0, 4);
+	struct fmd_mem_domain *domain;
+	struct fmd_component *dev;
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[256];
+	uint8_t alloc[4 + 16] = { 0 }, set[4] = { 0 };
+	const char *msg = NULL;
+	int before = failures, rc, chunks;
+	unsigned int sent;
+	json_t *resp = NULL;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x1170);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	CHECK(domain, "no domain %s", dom);
+	if (!domain)
+		goto dcd;
+	/* room for 256 MiB more */
+	domain->capacity += 256ULL << 20;
+	domain->remaining += 256ULL << 20;
+	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
+
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		snprintf(body, sizeof(body),
+			 "{\"MemoryChunkSizeMiB\": %s, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"%s_ld0\"}}]}", sizes[i], id);
+		sent = commands_sent(ep);
+		rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+		CHECK(rc == -10 && !resp && commands_sent(ep) == sent &&
+		      fmd_component_count_children(&domain->base,
+						   FMD_COMPONENT_CHUNK) == chunks,
+		      "MemoryChunkSizeMiB %s: %d, %u commands sent", sizes[i], rc,
+		      commands_sent(ep) - sent);
+		json_decref(resp);
+		resp = NULL;
+	}
+
+	/* 256 MiB: LD 0 goes from 4 to 5 units of 256 MB */
+	alloc[0] = 2;				/* Number of LDs */
+	alloc[3] = 1;				/* LD Allocation List Length */
+	put64(alloc + 4, 4);			/* Range 1 Allocation Multiplier */
+	answer(ep, 0x5401, alloc, sizeof(alloc));
+	set[0] = 1;				/* Number of LDs */
+	answer(ep, 0x5402, set, sizeof(set));
+	snprintf(body, sizeof(body),
+		 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
+		 "{\"@odata.id\": \"%s_ld0\"}}]}", id);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == 0 && last_opcode(ep) == 0x5402,
+	      "MemoryChunkSizeMiB 256: %d, last %04xh", rc, last_opcode(ep));
+	json_decref(resp);
+
+dcd:
+	fmd_ctx_free(ctx);
+
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0x1171, 0);
+	if (!dev)
+		goto out;
+	device_id(id, sizeof(id), 0x1171);
+	for (size_t i = 0; i < 2; i++) {
+		snprintf(body, sizeof(body),
+			 "{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": %s, "
+			 "\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}", sizes[i]);
+		sent = commands_sent(ep);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg);
+		CHECK(rc == -EINVAL && commands_sent(ep) == sent,
+		      "DC add Length %s: %d, %u commands sent", sizes[i], rc,
+		      commands_sent(ep) - sent);
+	}
+	answer(ep, 0x5604, NULL, 0);
+	snprintf(body, sizeof(body),
+		 "{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": 256, "
+		 "\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}");
+	sent = commands_sent(ep);
+	fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg);
+	CHECK(commands_sent(ep) > sent, "DC add Length 256: nothing sent");
+out:
+	fmd_ctx_free(ctx);
+	report("a size in MiB past 2^44 - 1 sends nothing", before);
+}
+
+/*
  * What a DCD Management command the device refused comes to. Initiate
  * Dynamic Capacity Add (5604h) "shall fail with Invalid Input", "with
  * Invalid Extent List", "with Resources Exhausted" and "with Retry Required"
@@ -6275,6 +6371,7 @@ int main(void)
 	test_set_partition();
 	test_dcd_info();
 	test_dc_return_codes();
+	test_mib_out_of_range_sends_nothing();
 	test_dc_reserved_fields();
 	test_dc_same_dpa_two_hosts();
 	test_dc_region_per_host();

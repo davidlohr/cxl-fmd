@@ -1120,10 +1120,19 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "Insufficient capacity in memory domain");
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_CONFLICT,
-					  "Address range overlaps with existing chunk");
+					  "Address range overlaps with existing chunk, or no free range of that size");
 		if (rc == -6)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The device cannot be given that size");
+		if (rc == -8)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "AddressRangeType must be PMEM or Volatile");
+		if (rc == -9)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "AddressRangeOffsetMiB must be an integer from 0 to the domain's MemorySizeMiB less the chunk's size");
+		if (rc == -10)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "A size or offset in MiB must be an integer from 0 to 17592186044415, and MemoryChunkSizeMiB greater than 0");
 		if (rc == -7)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "A Connection binds the logical device: delete the Connection first");

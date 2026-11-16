@@ -145,8 +145,7 @@ class Test400BadRequest:
             "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": 256, "AddressRangeType": "InvalidType"}
         )
-        # TODO: Implementation should validate AddressRangeType (currently returns 201 or 500)
-        assert status in [400, 201, 500]
+        assert status == 400
 
     def test_negative_chunk_size(self, api_client):
         """Verify negative chunk size is rejected."""
@@ -154,8 +153,7 @@ class Test400BadRequest:
             "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": -1024}
         )
-        # Implementation treats negative as unsigned overflow (huge number) -> 409 insufficient capacity
-        assert status in [400, 409]
+        assert status == 400
 
     def test_zero_chunk_size(self, api_client):
         """Verify zero chunk size is rejected."""
@@ -163,8 +161,7 @@ class Test400BadRequest:
             "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": 0}
         )
-        # Implementation may treat as insufficient capacity (409) or bad request (400)
-        assert status in [400, 409]
+        assert status == 400
 
     def test_non_numeric_size(self, api_client):
         """Verify 400 for non-numeric chunk size."""
@@ -287,8 +284,7 @@ class TestErrorResponseFormat:
             "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": -1}
         )
-        # Should return error (400 or 409)
-        assert status in [400, 409]
+        assert status == 400
         if data:
             assert "error" in data or "@Message.ExtendedInfo" in data
 

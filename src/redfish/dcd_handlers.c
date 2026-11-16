@@ -834,12 +834,11 @@ static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassi
 
 	json_object_foreach(root, key, val) {
 		if (strcmp(key, "BlockSizeMiB") == 0) {
-			if (!json_is_integer(val) || json_integer_value(val) <= 0) {
+			if (rf_mib_to_bytes(val, false, &block_size)) {
 				json_decref(root);
-				*msg = "BlockSizeMiB must be a positive integer";
+				*msg = "BlockSizeMiB must be an integer from 1 to 17592186044415";
 				return -EINVAL;
 			}
-			block_size = (uint64_t)json_integer_value(val) * FMD_MIB;
 		} else if (strcmp(key, "SanitizeOnRelease") == 0) {
 			if (!json_is_boolean(val)) {
 				json_decref(root);
@@ -935,12 +934,11 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 
 	val = json_object_get(root, "Length");
 	if (val) {
-		if (!json_is_integer(val) || json_integer_value(val) <= 0) {
+		if (rf_mib_to_bytes(val, false, &length)) {
 			json_decref(root);
-			*msg = "Length must be a positive integer (MiB)";
+			*msg = "Length must be an integer from 1 to 17592186044415 (MiB)";
 			return -EINVAL;
 		}
-		length = (uint64_t)json_integer_value(val) * FMD_MIB;
 	}
 
 	val = json_object_get(root, "Tag");
@@ -1091,12 +1089,12 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 
 	val = json_object_get(root, "Length");
 	if (val) {
-		if (!json_is_integer(val) || json_integer_value(val) < 0) {
+		/* 0 is refused below for TagBased, with its own message */
+		if (rf_mib_to_bytes(val, true, &length)) {
 			json_decref(root);
-			*msg = "Length must be a positive integer (MiB)";
+			*msg = "Length must be an integer from 1 to 17592186044415 (MiB)";
 			return -EINVAL;
 		}
-		length = (uint64_t)json_integer_value(val) * FMD_MIB;
 		have_length = true;
 	}
 

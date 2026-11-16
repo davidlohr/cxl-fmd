@@ -90,7 +90,7 @@ class TestBoundaryValues:
             {"MemoryChunkSizeMiB": -1}
         )
         # Should reject as invalid, not create huge chunk
-        assert status in [400, 409]
+        assert status == 400
 
     def test_huge_size_rejected(self, api_client):
         """Extremely large MemoryChunkSizeMiB is rejected."""
@@ -98,7 +98,7 @@ class TestBoundaryValues:
             "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": 9223372036854775807}  # INT64_MAX
         )
-        assert status in [400, 409]
+        assert status == 400
 
     def test_zero_size_rejected(self, api_client):
         """Zero MemoryChunkSizeMiB is rejected."""
@@ -106,7 +106,7 @@ class TestBoundaryValues:
             "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": 0}
         )
-        assert status in [400, 409]
+        assert status == 400
 
     def test_float_size_rejected(self, api_client):
         """Floating point MemoryChunkSizeMiB is rejected."""
@@ -178,8 +178,7 @@ class TestTypeValidation:
             "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks",
             {"MemoryChunkSizeMiB": 512, "AddressRangeType": 12345}
         )
-        # Should reject (400) or ignore the bad type
-        assert status in [201, 400, 409]
+        assert status == 400
 
 
 # =============================================================================
