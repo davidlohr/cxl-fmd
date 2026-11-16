@@ -9,9 +9,10 @@
  * what the caller holds while it uses what is computed here.
  *
  * A direct-attached Connection has no vPPB: there is no VCS, nor any
- * bind, on a link from a host's root port to a device (Section 7.6.7.2,
- * "the FM ... binds and unbinds vPPBs in a switch"). That the link is the
- * Connection is cxl-fmd's choice; see for_each_direct().
+ * bind, on a link from a host's root port to a device. The Virtual Switch
+ * Command Set, Bind vPPB among it, "is supported only by the CXL switch"
+ * (Section 7.6.7.2). That the link is the Connection is cxl-fmd's choice;
+ * see for_each_direct().
  */
 #include <errno.h>
 #include <stdio.h>

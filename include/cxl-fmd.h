@@ -1126,9 +1126,10 @@ enum fmd_bind_op_kind {
 /*
  * A bind or an unbind the switch is carrying out in the background for
  * cxl-fmd. It lives only while that runs: a vPPB being bound or unbound
- * reads 01h, and its Bound Port ID and Bound LD ID are "Valid only when
- * vPPB[Start vPPB] Binding Status is 02h or 03h" (Table 7-34), so what it
- * is becoming is known only from here. Kept on ctx->binding_ops,
+ * reads 01h, and its Bound Port ID is "Valid only when Binding Status is
+ * 02h or 03h" and its Bound LD ID "Valid only when vPPB[Start vPPB]
+ * Binding Status is 03h" (Table 7-34), so what it is becoming is known
+ * only from here. Kept on ctx->binding_ops,
  * fabric_lock held exclusively to change, shared to read.
  */
 struct fmd_binding_op {

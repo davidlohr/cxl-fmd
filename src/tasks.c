@@ -162,8 +162,9 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	if (task->kind == FMD_TASK_BIND) {
 		/*
 		 * Bound to what was asked: the port, and the LD for 03h. Bound
-		 * Port ID and Bound LD ID are "Valid only when ... Binding
-		 * Status is 02h or 03h" (Table 7-34).
+		 * Port ID is "Valid only when Binding Status is 02h or 03h",
+		 * and Bound LD ID "Valid only when vPPB[Start vPPB] Binding
+		 * Status is 03h" (Table 7-34).
 		 */
 		bool bound = vppb && vppb->bound_port_id == task->port_id &&
 			((task->ld_id == FMD_LD_NONE &&

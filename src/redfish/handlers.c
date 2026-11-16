@@ -768,8 +768,8 @@ static bool is_target_endpoint(const struct fmd_component *comp)
 
 /*
  * The target Endpoint a vPPB is bound to, NULL if none: it is not bound
- * (Bound Port ID is "Valid only when vPPB[Start vPPB] Binding Status is
- * 02h or 03h", Table 7-34), or what is on the port is not a memory
+ * (Bound Port ID is "Valid only when Binding Status is 02h or 03h",
+ * Table 7-34), or what is on the port is not a memory
  * device cxl-fmd knows.
  *
  *  - 02h, an SLD on the port: the SLD;
