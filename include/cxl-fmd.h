@@ -2136,6 +2136,8 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx, const char *switch_id,
 json_t *fmd_redfish_dc_capabilities(struct fmd_ctx *ctx, struct fmd_component *dev,
 				    const char *chassis_id, const char *dev_id);
 json_t *fmd_redfish_dc_pcie_actions(const char *chassis_id, const char *dev_id);
+json_t *fmd_redfish_dc_tags_oem(struct fmd_ctx *ctx, struct fmd_component *dev,
+				const char *chassis_id, const char *dev_id);
 void fmd_redfish_dc_logical_device_props(struct fmd_ctx *ctx, struct fmd_component *dev,
 					 int ld_idx, const char *chassis_id,
 					 const char *dev_id, const char *ld_id,

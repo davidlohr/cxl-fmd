@@ -2661,6 +2661,8 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 			json_object_set_new(cxl_device, "DynamicCapacity", dyn);
 			json_object_set_new(result, "Actions",
 				fmd_redfish_dc_pcie_actions(chassis_id, dev_id));
+			json_object_set_new(result, "Oem",
+				fmd_redfish_dc_tags_oem(ctx, comp, chassis_id, dev_id));
 		}
 	}
 

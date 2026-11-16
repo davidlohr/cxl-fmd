@@ -8,6 +8,7 @@
  *   PCIeDevice.CXLDevice/DynamicCapacity                 <- Get DCD Info (5600h)
  *   PCIeDevice/MemoryExtents/{ext}                       <- Get DC Region Extent Lists (5603h)
  *   PCIeDevice.CXLReferenceDCMemory action               -> DC Add/Remove Reference (5606h/5607h)
+ *   PCIeDevice Oem/Cxl/DynamicCapacityTags               <- Get DC Region Tag List (5608h)
  *   CXLLogicalDevice/MemoryRegions/{region}              <- Get Host DC Region Config (5601h)
  *   PATCH CXLLogicalDevice/MemoryRegions/{region}        -> Set DC Region Config (5602h)
  *   CXLLogicalDevice.DynamicCapacityAdd action           -> Initiate DC Add (5604h)
@@ -282,6 +283,88 @@ json_t *fmd_redfish_dc_pcie_actions(const char *chassis_id, const char *dev_id)
 		"target", rf_uri(0, "/redfish/v1/Chassis/%s/PCIeDevices/%s/Actions/PCIeDevice.CXLReferenceDCMemory",
 				 chassis_id, dev_id),
 		"title", "CXLReferenceDCMemory");
+}
+
+/* The LD-IDs of the bits set in a 5608h LD bitmap, in order */
+static json_t *ld_bitmap_array(const uint8_t *bm)
+{
+	json_t *arr = json_array();
+
+	for (unsigned int ld = 0; ld <= FMD_DC_MAX_HOST_ID; ld++) {
+		if (fmd_dc_bm_test(bm, ld))
+			json_array_append_new(arr, json_integer(ld));
+	}
+	return arr;
+}
+
+static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
+				  const char *chassis_id, const char *dev_id)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	json_t *tags = json_array();
+
+	fmd_topology_rdlock(&ctx->topology);
+	for (uint32_t i = 0; dcd->tags.known && i < dcd->tags.n; i++) {
+		const struct fmd_dc_tag *t = &dcd->tags.v[i];
+		struct fmd_component *child;
+		json_t *row, *links = json_array();
+		char tag_str[40];
+
+		fmd_dc_tag_to_str(t->tag, tag_str, sizeof(tag_str));
+		row = json_pack("{s:s, s:b}", "Tag", tag_str,
+				"FMHoldsReference", t->fm_ref ? 1 : 0);
+		/* Validity Bitmap: Bit[0] the Reference Bitmap, Bit[1] the Pending one */
+		if (dcd->tags.validity & 0x01)
+			json_object_set_new(row, "AcceptedLDs", ld_bitmap_array(t->ref));
+		if (dcd->tags.validity & 0x02)
+			json_object_set_new(row, "PendingLDs", ld_bitmap_array(t->pend));
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+			char euri[512];
+
+			if (memcmp(ext->tag, t->tag, FMD_DC_TAG_LEN))
+				continue;
+			extent_uri(chassis_id, dev_id, dev, ext, euri, sizeof(euri));
+			json_array_append_new(links, rf_link("%s", euri));
+		}
+		json_object_set_new(row, "Extents", links);
+		json_array_append_new(tags, row);
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+
+	return json_pack("{s:{s:{s:b, s:I, s:o}}}", "Cxl", "DynamicCapacityTags",
+			 "TagsKnown", dcd->tags.known ? 1 : 0,
+			 "Generation", (json_int_t)dcd->tags.gen,
+			 "Tags", tags);
+}
+
+/*
+ * PCIeDevice Oem/Cxl/DynamicCapacityTags: the device's tag list, from Get
+ * DC Region Tag List (5608h, Table 7-78). DMTF has no resource for a tag,
+ * nor for the LDs that have accepted or been offered its capacity, and
+ * DSP0288 maps no Dynamic Capacity command: this view, its names and its
+ * having no schema are cxl-fmd's.
+ *
+ * A tag is listed as the device lists it, which a MemoryExtent cannot show
+ * of capacity no host's Extent List has: capacity only an FM reference
+ * keeps, and an add an LD has not answered that its 5603h does not list.
+ * AcceptedLDs and PendingLDs are the LD-IDs of the Reference and Pending
+ * Reference Bitmaps, each said only when the Validity Bitmap says it is
+ * valid; Extents are every host's MemoryExtents with the tag.
+ *
+ * Returns NULL when the device is not a DCD.
+ */
+json_t *fmd_redfish_dc_tags_oem(struct fmd_ctx *ctx, struct fmd_component *dev,
+				const char *chassis_id, const char *dev_id)
+{
+	json_t *res = NULL;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	if (fmd_memdev_dcd(dev))
+		res = dc_tags_oem_locked(ctx, dev, chassis_id, dev_id);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return res;
 }
 
 /*

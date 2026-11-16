@@ -722,6 +722,7 @@ class TestNonDCDDevice:
         assert status == 200
         assert "DynamicCapacity" not in data["CXLDevice"]
         assert "Actions" not in data
+        assert "Oem" not in data
         status, data = api_client.get(
             "/redfish/v1/Chassis/cxl_mem0/PCIeDevices/cxl_mem0/CXLLogicalDevices/0")
         assert "MemoryRegions" not in data
@@ -785,6 +786,7 @@ PH_REFERENCE = PH + "/Actions/PCIeDevice.CXLReferenceDCMemory"
 TAG_C1 = "6f1a2c3e-0000-4000-8000-0000000000c1"     # hosts 0 and 1, offset 0 of region 0
 TAG_C2 = "6f1a2c3e-0000-4000-8000-0000000000c2"     # hosts 0 and 1, host 1 pending
 TAG_C3 = "6f1a2c3e-0000-4000-8000-0000000000c3"     # held by an FM reference only
+TAG_C4 = "6f1a2c3e-0000-4000-8000-0000000000c4"     # offered to host 2, not listed
 
 
 def ph_action(ld, name):
@@ -793,6 +795,19 @@ def ph_action(ld, name):
 
 def ph_extent(api_client, ext):
     return api_client.get(PH + "/MemoryExtents/" + ext)
+
+
+def tag_view(api_client, device=PH):
+    """PCIeDevice Oem/Cxl/DynamicCapacityTags, its Tags by tag"""
+    status, data = api_client.get(device)
+    assert status == 200
+    view = data["Oem"]["Cxl"]["DynamicCapacityTags"]
+    assert view["TagsKnown"] is True
+    return {t["Tag"]: t for t in view["Tags"]}
+
+
+def tag_extents(row):
+    return sorted(e["@odata.id"].rsplit("/", 1)[1] for e in row["Extents"])
 
 
 @pytest.mark.mock_topology("mock/dcd-shared-perhost.json")
@@ -933,6 +948,11 @@ class TestPerHostDPA:
         and it is allocated until the reference goes."""
         for ext in extent_ids(api_client, PH):
             assert ph_extent(api_client, ext)[1].get("Tag") != TAG_C3
+        # the device's tag list has it, held by the FM and by no LD
+        row = tag_view(api_client)[TAG_C3]
+        assert row["FMHoldsReference"] is True
+        assert row["AcceptedLDs"] == [] and row["PendingLDs"] == []
+        assert row["Extents"] == []
         status, _ = api_client.patch(PH + "/CXLLogicalDevices/2/MemoryRegions/0",
                                      {"BlockSizeMiB": 256})
         assert status == 409
@@ -943,6 +963,7 @@ class TestPerHostDPA:
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
         assert status == 200
         assert "ext_0_260000000" in extent_ids(api_client, PH)      # 8192 + 1536 MiB
+        assert TAG_C3 not in tag_view(api_client)
         status, _, _ = api_client.post(PH_REFERENCE, {"Tag": TAG_C3, "FMReference": True})
         assert status == 400
 
@@ -954,6 +975,43 @@ class TestPerHostDPA:
         assert "ext_1_400000000" not in ids
         assert "ext_0_200000000" in ids
         assert "ext_2_200000000" in ids
+
+    def test_tag_view(self, api_client):
+        """The 5608h list: who has accepted each tag, who has not answered,
+        whether the FM holds it, and every host's extents with it."""
+        status, data = api_client.get(PH)
+        view = data["Oem"]["Cxl"]["DynamicCapacityTags"]
+        assert "@odata.type" not in view and "@odata.type" not in data["Oem"]
+        assert isinstance(view["Generation"], int)
+        tags = tag_view(api_client)
+        assert sorted(tags) == [TAG_C1, TAG_C2, TAG_C3, TAG_C4]
+        assert tags[TAG_C1]["AcceptedLDs"] == [0, 1]
+        assert tags[TAG_C1]["PendingLDs"] == []
+        assert tags[TAG_C1]["FMHoldsReference"] is False
+        assert tag_extents(tags[TAG_C1]) == ["ext_0_200000000", "ext_1_400000000"]
+        assert tags[TAG_C2]["AcceptedLDs"] == [0]
+        assert tags[TAG_C2]["PendingLDs"] == [1]
+        assert tags[TAG_C2]["FMHoldsReference"] is True
+        assert tag_extents(tags[TAG_C2]) == ["ext_0_240000000", "ext_1_440000000"]
+
+    def test_tag_view_pending_hosts(self, api_client):
+        """An add LD 2 has not answered, which its 5603h does not list: no
+        MemoryExtent has it, the tag list does."""
+        row = tag_view(api_client)[TAG_C4]
+        assert row["PendingLDs"] == [2]
+        assert row["AcceptedLDs"] == []
+        assert row["FMHoldsReference"] is False
+        assert row["Extents"] == []
+        for ext in extent_ids(api_client, PH):
+            assert ph_extent(api_client, ext)[1].get("Tag") != TAG_C4
+
+    def test_tag_view_follows_shared_access(self, api_client):
+        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityAdd"), {
+            "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_C1})
+        assert status == 200
+        row = tag_view(api_client)[TAG_C1]
+        assert row["AcceptedLDs"] == [0, 1, 2]
+        assert tag_extents(row) == ["ext_0_200000000", "ext_1_400000000", "ext_2_0"]
 
     def test_delete_shared_releases_one_host(self, api_client):
         """DELETE of an extent of a sharable tag removes its host's access to
@@ -977,6 +1035,11 @@ class TestPerHostDPA:
         assert data["FMReferencedExtent"] == fm_ref
         # host 1's other tag is untouched
         assert "ext_1_440000000" in ids
+        # the tag is still the device's, held by LD 0 only
+        row = tag_view(api_client)[TAG_C1]
+        assert row["FMHoldsReference"] == fm_ref
+        assert row["AcceptedLDs"] == [0] and row["PendingLDs"] == []
+        assert tag_extents(row) == ["ext_0_200000000"]
 
     def test_delete_nonshared_prescriptive(self, api_client):
         """Any other extent is released by itself, Prescriptive: of a tag in
