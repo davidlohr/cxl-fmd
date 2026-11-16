@@ -5865,6 +5865,114 @@ out:
 	report("POST and DELETE of Connections on a switch", before);
 }
 
+/*
+ * A chunk of an LD that a vPPB binds is not deleted, nor another made on
+ * that LD, while the binding stands (cxl-fmd's choice: the specification
+ * does not say whether Set LD Allocations may change a bound LD). Refused
+ * before Get or Set LD Allocations is sent; after the unbind the DELETE
+ * goes on to Set LD Allocations (5402h).
+ */
+static void test_chunk_guard(void)
+{
+	static const uint8_t ld0[3] = { 0x03, 5, 0 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5107);
+	char sw_id[FMD_MAX_ID_LEN], dev[FMD_MAX_ID_LEN + 16], dom[FMD_MAX_ID_LEN + 32];
+	char chunk[FMD_MAX_ID_LEN + 32], body[512], cid[FMD_CONN_ID_LEN];
+	uint8_t alloc[4 + 16] = { 0 }, set[4 + 16] = { 0 };
+	struct fmd_mem_domain *domain;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	json_t *resp = NULL;
+	int before = failures, rc, task_id;
+	uint16_t op;
+
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5107);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	host = sw ? vcs_host(ctx, sw_id, 2) : NULL;
+	snprintf(dev, sizeof(dev), "%.32s_port5_dev", sw_id);
+	snprintf(dom, sizeof(dom), "%s_domain0", dev);
+	snprintf(chunk, sizeof(chunk), "%s_ld0_chunk", dev);
+	CHECK(sw && host && fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "no switch, host of VCS 2 or chunk %s", chunk);
+	if (!sw || !host || !fmd_topology_find_chunk(&ctx->topology, chunk))
+		goto out;
+
+	/* bind LD 0 to vPPB 1 of VCS 2, in the background */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	snprintf(body, sizeof(body),
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/e/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/e/%s_ld0\"}]}}",
+		 host->base.id, dev);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
+	json_decref(resp);
+	resp = NULL;
+	CHECK(rc == FMD_OP_STARTED, "POST of LD 0: %d", rc);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld0", sw_id);
+
+	/* Starting: the chunk is already the Connection's */
+	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+	CHECK(rc == -5 && fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "chunk DELETE while the bind is under way: %d", rc);
+
+	answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
+	fmd_tasks_poll(ctx);
+	CHECK(conn_state(ctx, cid) == FMD_CONN_ENABLED, "%s: %d (task %d)", cid,
+	      conn_state(ctx, cid), task_id);
+
+	/* bound: DELETE and POST on LD 0 are 409, with nothing sent */
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	if (domain) {		/* room for another chunk */
+		domain->capacity += 256ULL << 20;
+		domain->remaining += 256ULL << 20;
+	}
+	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+	op = last_opcode(ep);
+	CHECK(rc == -5 && op != 0x5401 && op != 0x5402 &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "chunk DELETE of a bound LD: %d, last %04xh", rc, op);
+	snprintf(body, sizeof(body),
+		 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
+		 "{\"@odata.id\": \"%s_ld0\"}}]}", dev);
+	rc = fmd_redfish_post_memory_chunk(ctx, dev, dom, body, strlen(body), &resp);
+	op = last_opcode(ep);
+	CHECK(rc == -7 && !resp && op != 0x5401 && op != 0x5402,
+	      "chunk POST on a bound LD: %d, last %04xh", rc, op);
+	json_decref(resp);
+	resp = NULL;
+
+	/* unbound: the DELETE sets LD 0's allocation */
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	json_decref(resp);
+	resp = NULL;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_vcs_refresh(ctx, sw);
+	CHECK(rc == 0 && conn_state(ctx, cid) < 0, "DELETE of %s: %d, then %d", cid,
+	      rc, conn_state(ctx, cid));
+
+	alloc[0] = 2;				/* Number of LDs */
+	alloc[3] = 1;				/* LD Allocation List Length */
+	put64(alloc + 4, 4);			/* Range 1 Allocation Multiplier */
+	answer(ep, 0x5401, alloc, sizeof(alloc));
+	set[0] = 1;				/* Number of LDs */
+	answer(ep, 0x5402, set, sizeof(set));
+	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+	CHECK(rc == 0 && last_opcode(ep) == 0x5402 &&
+	      !fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "chunk DELETE after the unbind: %d, last %04xh", rc, last_opcode(ep));
+out:
+	fmd_ctx_free(ctx);
+	report("no chunk of a bound LD is changed", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -5940,6 +6048,7 @@ int main(void)
 	test_untracked_binding_change_refreshes();
 	test_lost_task_frees_op();
 	test_post_delete_on_a_switch();
+	test_chunk_guard();
 	test_conn_view_prebound_sld_ld();
 	test_conn_view_skips_vppb0_disabled_nonmemory_pid();
 	test_conn_id_roundtrip_underscored_switch();

@@ -4357,6 +4357,52 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 
 
 /*
+ * A chunk a binding exposes is not changed under the host (cxl-fmd's
+ * choice: the specification does not say whether Set LD Allocations or
+ * Set Partition Info may be used on an LD or an SLD that is bound). The
+ * Connection that exposes @chunk is a vPPB binding, not Absent, whose
+ * chunks (fmd_conn_for_each_chunk()) include it. A direct-attached
+ * Connection is none: it has no binding to undo, cannot be deleted, and
+ * would keep the device's memory from ever being changed.
+ */
+struct chunk_user {
+	const struct fmd_mem_chunk *chunk;
+	char id[FMD_CONN_ID_LEN];
+};
+
+static int chunk_is(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	return chunk == ((struct chunk_user *)arg)->chunk;
+}
+
+static int chunk_user_conn(const struct fmd_conn_view *v, void *arg)
+{
+	struct chunk_user *u = arg;
+
+	if (v->kind != FMD_CONN_SWITCH || v->state == FMD_CONN_ABSENT)
+		return 0;
+	if (fmd_conn_for_each_chunk(v, chunk_is, u) != 1)
+		return 0;
+	snprintf(u->id, sizeof(u->id), "%s", v->id);
+	return 1;
+}
+
+/* Whether a Connection exposes @chunk, logged with its ID if one does */
+static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chunk)
+{
+	struct chunk_user u = { .chunk = chunk };
+	int rc;
+
+	fmd_topology_rdlock(&ctx->topology);
+	rc = fmd_conn_for_each(ctx, chunk_user_conn, &u);
+	fmd_topology_rdunlock(&ctx->topology);
+	if (rc == 1)
+		fmd_warn(ctx, "chunk %s is exposed by Connection %s: refused",
+			 chunk->base.id, u.id);
+	return rc == 1;
+}
+
+/*
  * POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks
  *
  * Create a new memory chunk in the specified domain.
@@ -4378,6 +4424,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
  *  -5 = CCI command failed
  *  -6 = the device cannot be given that size (allocation granularity,
  *       partition alignment, or no partitionable capacity)
+ *  -7 = the chunk would change an LD or an SLD a Connection binds
  */
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -4514,6 +4561,18 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 					   interleave_count);
 	if (!chunk)
 		return -4;
+
+	/*
+	 * A chunk of an LD a vPPB has bound changes the LD's allocation
+	 * (5402h), and a Volatile one of a bound SLD its partition (4101h):
+	 * refused while the binding stands, as a DELETE is. Checked on a
+	 * mock too, so that it answers as a device would.
+	 */
+	if ((chassis->type != FMD_COMPONENT_SLD ||
+	     !strcmp(addr_type, "Volatile")) && chunk_connected(ctx, chunk)) {
+		fmd_chunk_remove(&ctx->topology, chunk);
+		return -7;
+	}
 
 	/*
 	 * Issue CCI command for hardware mode.
@@ -4681,6 +4740,9 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
  *   0 = success
  *  -1 = chunk not found
  *  -2 = chunk not in specified domain
+ *  -3 = CCI command failed
+ *  -4 = the device cannot be given the partition left
+ *  -5 = a Connection, a vPPB binding, exposes the chunk
  */
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				    const char *chassis_id,
@@ -4704,6 +4766,10 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 	struct fmd_component *domain_parent = chunk->base.parent->parent;
 	if (!domain_parent || strcmp(domain_parent->id, chassis_id) != 0)
 		return -2;
+
+	/* a chunk a binding exposes stays while it does (see chunk_connected()) */
+	if (chunk_connected(ctx, chunk))
+		return -5;
 
 	/*
 	 * Issue CCI command for hardware mode before removing from topology.

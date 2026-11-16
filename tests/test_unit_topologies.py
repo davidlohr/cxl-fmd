@@ -719,20 +719,31 @@ class TestSwitchSLDMemoryLifecycle:
         assert status == 200
         assert data["Members@odata.count"] >= 1
 
-    def test_delete_and_recreate(self, api_client):
-        """DELETE and POST cycle works."""
-        # Get and delete chunk
-        status, data = api_client.get(
-            "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks"
-        )
-        chunk_uri = data["Members"][0]["@odata.id"]
-        status = api_client.delete(chunk_uri)
-        assert status == 204
+    CHUNKS = "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks"
+    CONNECTION = "/redfish/v1/Fabrics/CXL/Connections/switch_0_vcs0_vppb1_p1"
 
-        # Recreate
+    def test_chunk_delete_while_connected_409(self, api_client):
+        """sld_0 is bound to vPPB 1 before cxl-fmd starts: its chunk is
+        what Connection switch_0_vcs0_vppb1_p1 exposes, and is not deleted
+        under the host (cxl-fmd's choice)."""
+        status, data = api_client.get(self.CHUNKS)
+        chunk_uri = data["Members"][0]["@odata.id"]
+        assert api_client.delete(chunk_uri) == 409
+        status, _ = api_client.get(chunk_uri)
+        assert status == 200
+        status, conn = api_client.get(self.CONNECTION)
+        assert chunk_uri in [i["MemoryChunk"]["@odata.id"] for i in conn["MemoryChunkInfo"]]
+
+    def test_chunk_delete_after_unbind_ok(self, api_client):
+        """Once the Connection is deleted, the vPPB unbound, the chunk can
+        be deleted and made again."""
+        status, data = api_client.get(self.CHUNKS)
+        chunk_uri = data["Members"][0]["@odata.id"]
+        assert api_client.delete(self.CONNECTION) == 204
+        assert api_client.delete(chunk_uri) == 204
+
         status, data, _ = api_client.post(
-            "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks",
-            {"MemoryChunkSizeMiB": 1024, "AddressRangeType": "PMEM"}
+            self.CHUNKS, {"MemoryChunkSizeMiB": 1024, "AddressRangeType": "PMEM"}
         )
         assert status == 201
 

@@ -788,6 +788,15 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
   the volatile capacity staged (or else active) less the chunk, staged for
   the next reset as on creation. A `"PMEM"` chunk sends no command.
 
+**While bound (409 Conflict):** a chunk that a switch-attached Connection
+exposes (one that is not Absent: Starting, Updating and Enabled ones
+included) is not deleted, and no chunk is created that would change the
+allocation of a bound LD (Set LD Allocations) or, `"Volatile"`, the
+partition of a bound SLD (Set Partition Info). Delete the Connection
+first. The CXL specification does not say whether an LD or SLD that is
+bound may be changed; refusing it is cxl-fmd's choice. Direct-attached
+Connections, which have no binding to undo, do not hold their chunks.
+
 ### MLD Memory Model
 
 For Multi-Logical Devices (MLDs), the memory hierarchy is:
@@ -976,7 +985,7 @@ The complete memory lifecycle is:
 2. **Provisioning** - `POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks` allocates memory from the remaining capacity, creating a new chunk.
 3. **Binding** - `POST /redfish/v1/Fabrics/CXL/Connections` binds a chunk to a host (vPPB bind for switch-attached).
 4. **Unbinding** - `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}` releases the binding (vPPB unbind).
-5. **Deprovisioning** - `DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}` returns capacity to the available pool.
+5. **Deprovisioning** - `DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}` returns capacity to the available pool, once no switch-attached Connection exposes the chunk (409 until then).
 
 ### Direct-Attached vs Switch-Attached
 
