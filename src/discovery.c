@@ -336,6 +336,25 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 }
 
 /*
+ * Add @comp, discovered, under @parent (NULL: the root). An Id some
+ * component has already is refused (fmd_topology_add()): logged, and
+ * @comp freed. Returns 0 or the error; the caller is not to use @comp
+ * after an error.
+ */
+static int discovered_add(struct fmd_ctx *ctx, struct fmd_component *comp,
+			  struct fmd_component *parent)
+{
+	int rc = fmd_topology_add(&ctx->topology, comp, parent);
+
+	if (rc) {
+		fmd_err(ctx, "%s: not added: %s", comp->id,
+			rc == -EEXIST ? "a component has that ID already" : "error");
+		fmd_component_free(comp);
+	}
+	return rc;
+}
+
+/*
  * Discover MLD - Complex memory device with multiple LDs
  *
  * Commands: Get Supported Logs (0400h), Get Log/CEL (0401h),
@@ -534,7 +553,8 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 			ld->qos_limit_bw = limit_bw->qos_limit_fraction[i];
 
 		/* Add to topology */
-		fmd_topology_add(&ctx->topology, &ld->base, &mld->base);
+		if (discovered_add(ctx, &ld->base, &mld->base))
+			continue;
 
 		/* Discover per-LD info via tunneled commands */
 		discover_ld(ctx, ld, mld);
@@ -658,7 +678,8 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 				head->state = FMD_HEAD_DISABLED;
 		}
 
-		fmd_topology_add(&ctx->topology, &head->base, &mhd->base);
+		if (discovered_add(ctx, &head->base, &mhd->base))
+			continue;
 
 		fmd_dbg(ctx, "%s: head %d link_width=%d state=%d",
 			mhd->base.id, i, head->negotiated_link_width, head->state);
@@ -704,7 +725,8 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 		ld->visible_ld_id = i;  /* Pool index */
 		ld->base.msg_limit = tunnelled_msg_limit(&mhd->base);
 
-		fmd_topology_add(&ctx->topology, &ld->base, &mhd->base);
+		if (discovered_add(ctx, &ld->base, &mhd->base))
+			continue;
 
 		/*
 		 * The LD Pool CCI tunnels "management commands to all LDs
@@ -819,7 +841,9 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 		 * separate component: nothing either CCI reports ties the two
 		 * together.
 		 */
-		fmd_topology_add(&ctx->topology, &sld->base, &port->base);
+		rc = discovered_add(ctx, &sld->base, &port->base);
+		if (rc)
+			return rc;
 
 		fmd_info(ctx, "%s: SLD %s on port %d: not manageable through "
 			 "the switch, capacity unknown",
@@ -863,11 +887,13 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 		mld->switch_port = port->port_number;
 		mld->base.msg_limit = tunnelled_msg_limit(&port->base);
 
-		fmd_topology_add(&ctx->topology, &mld->base, &port->base);
+		rc = discovered_add(ctx, &mld->base, &port->base);
+		if (rc)
+			return rc;
 
 		rc = discover_mld(ctx, mld);
 		if (rc == 0)
-			fmd_create_mld_memory_resources(ctx, mld);
+			rc = fmd_create_mld_memory_resources(ctx, mld);
 		if (rc == 0)
 			fmd_dcd_discover(ctx, &mld->base);
 
@@ -1252,8 +1278,8 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	}
 
 	/* Add to topology */
-	if (!known)
-		fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+	if (!known && discovered_add(ctx, &port->base, &sw->base))
+		return;
 
 	fmd_dbg(ctx, "%s: port %d conn_type=%d link=%s width=%d",
 		sw->base.id, port->port_number,
@@ -1446,7 +1472,8 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 			host->usp_port_id = vcs->upstream_port_id;
 			host->direct_attached = false;  /* Switch-attached */
 
-			fmd_topology_add(&ctx->topology, &host->base, NULL);
+			if (discovered_add(ctx, &host->base, NULL))
+				continue;
 
 			fmd_dbg(ctx, "Created host %s for VCS %d USP port %d",
 				host_id, vcs->vcs_id, vcs->upstream_port_id);
@@ -1539,7 +1566,9 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		sw->identify = identify;
 		sw->base.ep = ep;
 		sw->base.msg_limit = msg_limit;
-		fmd_topology_add(&ctx->topology, &sw->base, NULL);
+		rc = discovered_add(ctx, &sw->base, NULL);
+		if (rc)
+			return rc;
 
 		/*
 		 * Have it say when something changes before it is read, so
@@ -1585,11 +1614,13 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			mhd->identify = identify;
 			mhd->base.ep = ep;
 			mhd->base.msg_limit = msg_limit;
-			fmd_topology_add(&ctx->topology, &mhd->base, NULL);
+			rc = discovered_add(ctx, &mhd->base, NULL);
+			if (rc)
+				return rc;
 
 			rc = discover_mhd(ctx, mhd);
 			if (rc == 0)
-				fmd_create_mhd_memory_resources(ctx, mhd);
+				rc = fmd_create_mhd_memory_resources(ctx, mhd);
 			if (rc == 0)
 				fmd_dcd_discover(ctx, &mhd->base);
 			fmd_device_events_enable(ctx, &mhd->base);
@@ -1614,11 +1645,13 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			sld->identify = identify;
 			sld->base.ep = ep;
 			sld->base.msg_limit = msg_limit;
-			fmd_topology_add(&ctx->topology, &sld->base, NULL);
+			rc = discovered_add(ctx, &sld->base, NULL);
+			if (rc)
+				return rc;
 
 			rc = discover_sld(ctx, sld);
 			if (rc == 0)
-				fmd_create_sld_memory_resources(ctx, sld);
+				rc = fmd_create_sld_memory_resources(ctx, sld);
 			if (rc == 0)
 				fmd_dcd_discover(ctx, &sld->base);
 			fmd_device_events_enable(ctx, &sld->base);
@@ -1635,11 +1668,13 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			mld->switch_port = -1;  /* Direct-attached */
 			mld->base.ep = ep;
 			mld->base.msg_limit = msg_limit;
-			fmd_topology_add(&ctx->topology, &mld->base, NULL);
+			rc = discovered_add(ctx, &mld->base, NULL);
+			if (rc)
+				return rc;
 
 			rc = discover_mld(ctx, mld);
 			if (rc == 0)
-				fmd_create_mld_memory_resources(ctx, mld);
+				rc = fmd_create_mld_memory_resources(ctx, mld);
 			if (rc == 0)
 				fmd_dcd_discover(ctx, &mld->base);
 			fmd_device_events_enable(ctx, &mld->base);
@@ -1917,8 +1952,8 @@ int fmd_discover(struct fmd_ctx *ctx)
 			snprintf(local_host->name, sizeof(local_host->name),
 				 "Local System");
 			local_host->direct_attached = true;
-			fmd_topology_add(&ctx->topology, &local_host->base, NULL);
-			fmd_dbg(ctx, "Created default local host for direct-attached devices");
+			if (!discovered_add(ctx, &local_host->base, NULL))
+				fmd_dbg(ctx, "Created default local host for direct-attached devices");
 		}
 	}
 

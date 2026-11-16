@@ -878,8 +878,12 @@ Chunk IDs:
   `cxl_mld_0_ld0_chunk`), for an MLD and for a pool LD of a Multi-Headed
   device;
 - the chunk of an SLD, found at discovery: `{device}_chunk0`;
-- a chunk made with `POST`: `{domain_id}_chunk{N}`, N the number of chunks
-  the domain had before it;
+- a chunk made with `POST`: `{domain_id}_chunk{N}`, N from a counter of
+  the domain that starts at 0 and only goes up: an ID a deleted chunk had
+  is not given to another while cxl-fmd runs, and a POST never takes an
+  ID some component has. It starts again at 0 when cxl-fmd starts, or
+  when the device is discovered again (cxl-fmd's choice: chunk IDs are
+  not kept);
 - in the `{switch}_pool` domain of a switch's Chassis: `{device}_chunk` for
   an SLD on one of its ports, `{device}_ld{N}_chunk` for an LD of an MLD.
 
@@ -1653,7 +1657,17 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` with an `AddressRangeOffsetMiB` that is negative, not an integer, or puts any of the chunk past the domain's `MemorySizeMiB` | `201` (a negative or wrapped offset, or an offset past the end; one that was not an integer was ignored) | `400` |
 | Chunk `POST` with no `AddressRangeOffsetMiB` | placed after the chunk that ends last, even past the end of the domain | placed at the lowest offset where it fits, within the domain, or `409` |
 | Chunk `POST` with an `AddressRangeType` other than `PMEM` or `Volatile`, or not a string | `201`, as `PMEM` | `400` |
+| Chunk `POST` after a `DELETE` of a chunk of the domain | the ID of a chunk the domain still had, so that two chunks had one URI, a collection listed it twice, and a Connection's `MemoryChunkInfo` too | an ID that no chunk of the domain has had since cxl-fmd started, or discovered the device |
+| Chunk `POST` on a domain with chunks found at discovery (the `{device}_ld{N}_chunk` of an MLD or MHD) | `{domain}_chunk{N}`, N the number of chunks in the domain | `{domain}_chunk0` for the first, then 1, 2, ... |
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
+
+Mock topologies and discovery:
+
+- Two components with one ID, and two LDs of an MLD with one LD-ID, are
+  refused while the file is loaded ("two components with ID ...", "two
+  LDs with LD-ID ..."), as they were by the validation after it. On
+  hardware, a component discovered with an ID another one has is not
+  added, and an error is logged.
 
 ---
 

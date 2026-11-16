@@ -46,6 +46,26 @@ static void load_error(const char *fmt, ...)
 	load_errors++;
 }
 
+/*
+ * Add @comp under @parent (NULL: the root). A second component with its Id
+ * is a load error, as validate.c would find it, and @comp is freed: the
+ * caller is not to use it after false.
+ */
+static bool mock_add(struct fmd_ctx *ctx, struct fmd_component *comp,
+		     struct fmd_component *parent)
+{
+	int rc = fmd_topology_add(&ctx->topology, comp, parent);
+
+	if (!rc)
+		return true;
+	if (rc == -EEXIST)
+		load_error("two components with ID %s", comp->id);
+	else
+		load_error("%s could not be added: %d", comp->id, rc);
+	fmd_component_free(comp);
+	return false;
+}
+
 /* a number, given as one or as a string in any base strtoull() takes */
 static bool json_number(json_t *val, const char *what, bool is_signed,
 			uint64_t max, uint64_t *out)
@@ -1691,7 +1711,8 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 		if (!mhd)
 			return -1;
 
-		fmd_topology_add(&ctx->topology, &mhd->base, parent);
+		if (!mock_add(ctx, &mhd->base, parent))
+			return -1;
 
 		/* Get default health for LDs */
 		json_t *health_obj = json_object_get(jdev, "health_info");
@@ -1716,7 +1737,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 				struct fmd_ld *ld = parse_ld_pool_entry(ctx, jld, id, ld_idx,
 									def_health, def_media);
 				if (ld)
-					fmd_topology_add(&ctx->topology, &ld->base, &mhd->base);
+					mock_add(ctx, &ld->base, &mhd->base);
 			}
 
 			mhd->total_lds = (uint8_t)json_array_size(ld_pool);
@@ -1737,8 +1758,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 				}
 
 				struct fmd_head *head = parse_head(ctx, jhead, id, head_idx);
-				if (head) {
-					fmd_topology_add(&ctx->topology, &head->base, &mhd->base);
+				if (head && mock_add(ctx, &head->base, &mhd->base)) {
 
 					/* Update LD bindings based on head's lds array */
 					json_t *jlds = json_object_get(jhead, "lds");
@@ -1749,7 +1769,8 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 			mhd->num_heads = (uint8_t)json_array_size(heads);
 		}
 
-		fmd_create_mhd_memory_resources(ctx, mhd);
+		if (fmd_create_mhd_memory_resources(ctx, mhd))
+			load_error("%s: its memory domain could not be made", id);
 		parse_dcd(ctx, jdev, &mhd->base);
 
 		fmd_info(ctx, "Mock MHD %s: %d heads, %d LDs", id, mhd->num_heads, mhd->total_lds);
@@ -1764,8 +1785,10 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 		if (!sld)
 			return -1;
 
-		fmd_topology_add(&ctx->topology, &sld->base, parent);
-		fmd_create_sld_memory_resources(ctx, sld);
+		if (!mock_add(ctx, &sld->base, parent))
+			return -1;
+		if (fmd_create_sld_memory_resources(ctx, sld))
+			load_error("%s: its memory domain could not be made", id);
 		parse_dcd(ctx, jdev, &sld->base);
 		parse_event_records(ctx, jdev, &sld->base);
 
@@ -1783,7 +1806,8 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 			mld->switch_port = port->port_number;
 		}
 
-		fmd_topology_add(&ctx->topology, &mld->base, parent);
+		if (!mock_add(ctx, &mld->base, parent))
+			return -1;
 
 		/* Get default health for LDs */
 		json_t *health_obj = json_object_get(jdev, "health_info");
@@ -1806,8 +1830,24 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 				struct fmd_ld *ld = parse_ld(ctx, jld, id, ld_idx,
 							    def_health, def_media);
-				if (ld)
-					fmd_topology_add(&ctx->topology, &ld->base, &mld->base);
+				struct fmd_component *other;
+
+				if (!ld)
+					continue;
+				/*
+				 * One LD per LD-ID: a second would give the
+				 * domain two chunks with one ID.
+				 */
+				fmd_for_each_child_type(&mld->base, other, FMD_COMPONENT_LD) {
+					if (fmd_to_ld(other)->ld_id == ld->ld_id)
+						break;
+				}
+				if (other) {
+					load_error("%s: two LDs with LD-ID %d", id, ld->ld_id);
+					fmd_component_free(&ld->base);
+					continue;
+				}
+				mock_add(ctx, &ld->base, &mld->base);
 			}
 
 			/* Update ld_count based on array size */
@@ -1833,12 +1873,13 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 					ld->qos_limit_bw = 255;
 					ld->health.health_status = def_health;
 					ld->health.media_status = def_media;
-					fmd_topology_add(&ctx->topology, &ld->base, &mld->base);
+					mock_add(ctx, &ld->base, &mld->base);
 				}
 			}
 		}
 
-		fmd_create_mld_memory_resources(ctx, mld);
+		if (fmd_create_mld_memory_resources(ctx, mld))
+			load_error("%s: its memory domain could not be made", id);
 		parse_dcd(ctx, jdev, &mld->base);
 		parse_event_records(ctx, jdev, &mld->base);
 
@@ -2005,7 +2046,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 	sw->mock_bind_result = parse_bind_result(jsw, "bind_result");
 	sw->mock_unbind_result = parse_bind_result(jsw, "unbind_result");
 
-	fmd_topology_add(&ctx->topology, &sw->base, NULL);
+	if (!mock_add(ctx, &sw->base, NULL))
+		return -1;
 
 	/* Parse ports array if present */
 	json_t *ports = json_object_get(jsw, "ports");
@@ -2052,8 +2094,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 				/* the same defaults as a DSP's, below */
 				port->port_cxl_ver_bitmask = (uint8_t)json_int_or(jport, "port_cxl_ver_bitmask", 0x06);
 				port->supported_link_speeds = (uint8_t)json_int_or(jport, "supported_link_speeds", 0x1F);
-				sw->num_usps++;
-				fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+				if (mock_add(ctx, &port->base, &sw->base))
+					sw->num_usps++;
 				fmd_dbg(ctx, "Mock USP %s: link=%s",
 					port_id, port->link_status == FMD_LINK_UP ? "up" : "down");
 				continue;
@@ -2099,8 +2141,9 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			port->port_cxl_ver_bitmask = (uint8_t)json_int_or(jport, "port_cxl_ver_bitmask", 0x06);
 			port->supported_link_speeds = (uint8_t)json_int_or(jport, "supported_link_speeds", 0x1F);
 
+			if (!mock_add(ctx, &port->base, &sw->base))
+				continue;
 			sw->num_dsps++;
-			fmd_topology_add(&ctx->topology, &port->base, &sw->base);
 
 			fmd_dbg(ctx, "Mock port %s: conn=%d link=%s",
 				port_id, port->conn_dev_type,
@@ -2117,8 +2160,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			if (port) {
 				port->link_status = FMD_LINK_DOWN;
 				port->conn_dev_type = FMD_CONN_NONE;
-				sw->num_dsps++;
-				fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+				if (mock_add(ctx, &port->base, &sw->base))
+					sw->num_dsps++;
 			}
 		}
 	}
@@ -2165,8 +2208,10 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 					port->conn_dev_cxl_ver = 0x2;
 					port->port_cxl_ver_bitmask = 0x06;
 					port->supported_link_speeds = 0x1F;
-					sw->num_dsps++;
-					fmd_topology_add(&ctx->topology, &port->base, &sw->base);
+					if (mock_add(ctx, &port->base, &sw->base))
+						sw->num_dsps++;
+					else
+						port = NULL;
 				}
 			}
 
@@ -2251,10 +2296,9 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 			host->usp_port_id = vcs->upstream_port_id;
 			host->direct_attached = false;
 
-			fmd_topology_add(&ctx->topology, &host->base, NULL);
-
-			fmd_info(ctx, "Mock host %s: VCS %d USP port %d",
-				 host_id, vcs->vcs_id, vcs->upstream_port_id);
+			if (mock_add(ctx, &host->base, NULL))
+				fmd_info(ctx, "Mock host %s: VCS %d USP port %d",
+					 host_id, vcs->vcs_id, vcs->upstream_port_id);
 		}
 	}
 
@@ -2374,7 +2418,8 @@ static int parse_host(struct fmd_ctx *ctx, json_t *jhost)
 			snprintf(host->switch_id, sizeof(host->switch_id), "%s", sw_id);
 	}
 
-	fmd_topology_add(&ctx->topology, &host->base, NULL);
+	if (!mock_add(ctx, &host->base, NULL))
+		return -1;
 
 	fmd_info(ctx, "Mock host %s: %s%s",
 		 id, host->name,
@@ -2481,8 +2526,8 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 			snprintf(local_host->name, sizeof(local_host->name),
 				 "Local System");
 			local_host->direct_attached = true;
-			fmd_topology_add(&ctx->topology, &local_host->base, NULL);
-			fmd_info(ctx, "Created default local host for direct-attached devices");
+			if (mock_add(ctx, &local_host->base, NULL))
+				fmd_info(ctx, "Created default local host for direct-attached devices");
 		}
 	}
 

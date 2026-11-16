@@ -2023,6 +2023,54 @@ static struct fmd_component *hw_dcd(struct fmd_ctx *ctx, struct cxlmi_endpoint *
 }
 
 /*
+ * An Id names one component (review F10): a second component with an Id
+ * the topology has is refused, before anything of the topology changes,
+ * so that lookup cannot find one and hide the other. The first is kept.
+ */
+static void test_duplicate_id_refused(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct fmd_topology *topo = &ctx->topology;
+	struct fmd_sld *a = fmd_sld_create("dup_dev"), *b = fmd_sld_create("dup_dev");
+	struct fmd_host *h = fmd_host_create("dup_dev");
+	struct fmd_component *first_child;
+	unsigned int added;
+	int count, devices, hosts;
+	uint32_t generation;
+	int before = failures, rc;
+
+	rc = fmd_topology_add(topo, &a->base, NULL);
+	CHECK(rc == 0, "first add: %d", rc);
+
+	count = topo->components.count;
+	added = topo->added;
+	generation = topo->generation;
+	devices = topo->root->device_count;
+	hosts = topo->root->host_count;
+	first_child = topo->root->base.first_child;
+
+	/* the same Id, of the same type and of another */
+	rc = fmd_topology_add(topo, &b->base, NULL);
+	CHECK(rc == -EEXIST, "second SLD dup_dev: %d", rc);
+	rc = fmd_topology_add(topo, &h->base, NULL);
+	CHECK(rc == -EEXIST, "host dup_dev: %d", rc);
+
+	CHECK(topo->components.count == count && topo->added == added &&
+	      topo->generation == generation && topo->root->device_count == devices &&
+	      topo->root->host_count == hosts && topo->root->base.first_child == first_child,
+	      "the topology changed: %d/%d components, generation %u/%u",
+	      topo->components.count, count, topo->generation, generation);
+	CHECK(!b->base.parent && !b->base.fabric && !h->base.parent,
+	      "a refused component was linked in");
+	CHECK(fmd_topology_find(topo, "dup_dev") == &a->base, "dup_dev is not the first");
+
+	fmd_component_free(&b->base);
+	fmd_component_free(&h->base);
+	fmd_ctx_free(ctx);
+	report("a second component with an Id is refused", before);
+}
+
+/*
  * A size in MiB that no byte count of 64 bits holds is refused before
  * anything is sent (review F11). MemoryChunkSizeMiB 2^44 + 256 wrapped to
  * 256 MiB, which Set LD Allocations (5402h) then gave; Length 2^44 + 256
@@ -6372,6 +6420,7 @@ int main(void)
 	test_dcd_info();
 	test_dc_return_codes();
 	test_mib_out_of_range_sends_nothing();
+	test_duplicate_id_refused();
 	test_dc_reserved_fields();
 	test_dc_same_dpa_two_hosts();
 	test_dc_region_per_host();

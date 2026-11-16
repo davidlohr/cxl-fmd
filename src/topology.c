@@ -10,6 +10,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <inttypes.h>
+#include <errno.h>
 
 #include "cxl-fmd.h"
 
@@ -228,6 +229,15 @@ int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 		parent = &topo->root->base;
 
 	pthread_rwlock_wrlock(&topo->lock);
+
+	/*
+	 * An Id names one component: lookup would find one of two and hide
+	 * the other. A second is refused before anything is changed.
+	 */
+	if (hash_table_find(&topo->components, comp->id)) {
+		pthread_rwlock_unlock(&topo->lock);
+		return -EEXIST;
+	}
 
 	/* Set fabric pointer for direct access to root */
 	comp->fabric = topo->root;
@@ -687,19 +697,18 @@ struct fmd_mem_chunk *fmd_chunk_create(const char *id)
 }
 
 /*
- * Generate a unique chunk ID within a domain.
+ * The Id of a new chunk of @domain: {domain}_chunk{N}, N from the domain's
+ * own counter, which only goes up, so that an Id a chunk had is not given
+ * to another while the daemon runs (cxl-fmd's choice: Ids are not kept
+ * over a restart). An Id some component has already is skipped.
+ * Takes the topology read lock: not to be called with it held.
  */
-static void generate_chunk_id(struct fmd_mem_domain *domain, char *buf, size_t len)
+static void generate_chunk_id(struct fmd_topology *topo, struct fmd_mem_domain *domain,
+			      char *buf, size_t len)
 {
-	int next_num = 0;
-	struct fmd_component *child;
-
-	fmd_for_each_child(&domain->base, child) {
-		if (child->type == FMD_COMPONENT_CHUNK)
-			next_num++;
-	}
-
-	snprintf(buf, len, "%s_chunk%d", domain->base.id, next_num);
+	do
+		snprintf(buf, len, "%s_chunk%u", domain->base.id, domain->next_chunk++);
+	while (fmd_topology_find(topo, buf));
 }
 
 /*
@@ -797,7 +806,7 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 		return NULL;
 
 	/* Generate chunk ID */
-	generate_chunk_id(domain, chunk_id, sizeof(chunk_id));
+	generate_chunk_id(topo, domain, chunk_id, sizeof(chunk_id));
 
 	/* Create the chunk */
 	chunk = fmd_chunk_create(chunk_id);
@@ -1074,6 +1083,24 @@ void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_swit
 	}
 }
 
+
+/*
+ * Add @comp under @parent for a device's memory resources; on an error,
+ * logged, @comp is freed and the error returned.
+ */
+static int add_resource(struct fmd_ctx *ctx, struct fmd_component *comp,
+			struct fmd_component *parent)
+{
+	int rc = fmd_topology_add(&ctx->topology, comp, parent);
+
+	if (rc) {
+		fmd_err(ctx, "%s: %s not added: %s", parent->id, comp->id,
+			rc == -EEXIST ? "a component has that ID" : "error");
+		fmd_component_free(comp);
+	}
+	return rc;
+}
+
 /*
  * Memory Resource Creation
  *
@@ -1086,6 +1113,7 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	struct fmd_mem_domain *domain;
 	struct fmd_mem_chunk *chunk;
 	char id[128];
+	int rc;
 
 	if (sld->memory_size == 0)
 		return 0;
@@ -1099,7 +1127,9 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	domain->capacity = sld->memory_size;
 	domain->remaining = sld->memory_size;
 
-	fmd_topology_add(&ctx->topology, &domain->base, &sld->base);
+	rc = add_resource(ctx, &domain->base, &sld->base);
+	if (rc)
+		return rc;
 
 	/* Create chunk for existing allocation */
 	(void)snprintf(id, sizeof(id), "%.50s_chunk0", sld->base.id);
@@ -1118,7 +1148,9 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
 		strncpy(chunk->address_range_type, "PMEM",
 			sizeof(chunk->address_range_type) - 1);
 
-	fmd_topology_add(&ctx->topology, &chunk->base, &domain->base);
+	rc = add_resource(ctx, &chunk->base, &domain->base);
+	if (rc)
+		return rc;
 	domain->remaining -= chunk->size;
 
 	fmd_dbg(ctx, "%s: created domain and chunk (%" PRIu64 " MB)",
@@ -1134,6 +1166,7 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	uint64_t total_size = 0;
 	uint64_t base_addr = 0;
 	char id[128];
+	int rc;
 
 	/* Sum up all LD memory sizes */
 	fmd_for_each_child_type(&mld->base, child, FMD_COMPONENT_LD) {
@@ -1153,7 +1186,9 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	domain->capacity = total_size;
 	domain->remaining = total_size;
 
-	fmd_topology_add(&ctx->topology, &domain->base, &mld->base);
+	rc = add_resource(ctx, &domain->base, &mld->base);
+	if (rc)
+		return rc;
 
 	/* Create one chunk per LD (each LD = MemoryChunk per OCP model) */
 	fmd_for_each_child_type(&mld->base, child, FMD_COMPONENT_LD) {
@@ -1182,7 +1217,9 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
 			sizeof(chunk->interleave_sets[0].memory_id) - 1);
 		chunk->interleave_sets[0].size_mib = ld->memory_size / (1024ULL * 1024);
 
-		fmd_topology_add(&ctx->topology, &chunk->base, &domain->base);
+		rc = add_resource(ctx, &chunk->base, &domain->base);
+		if (rc)
+			return rc;
 		domain->remaining -= chunk->size;
 
 		base_addr += ld->memory_size;
@@ -1201,6 +1238,7 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	uint64_t total_size = 0;
 	uint64_t base_addr = 0;
 	char id[128];
+	int rc;
 
 	/* Sum up all LD pool memory sizes */
 	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD) {
@@ -1220,7 +1258,9 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	domain->capacity = total_size;
 	domain->remaining = total_size;
 
-	fmd_topology_add(&ctx->topology, &domain->base, &mhd->base);
+	rc = add_resource(ctx, &domain->base, &mhd->base);
+	if (rc)
+		return rc;
 
 	/* Create one chunk per LD in the pool */
 	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD) {
@@ -1249,7 +1289,9 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 			sizeof(chunk->interleave_sets[0].memory_id) - 1);
 		chunk->interleave_sets[0].size_mib = ld->memory_size / (1024ULL * 1024);
 
-		fmd_topology_add(&ctx->topology, &chunk->base, &domain->base);
+		rc = add_resource(ctx, &chunk->base, &domain->base);
+		if (rc)
+			return rc;
 		domain->remaining -= chunk->size;
 
 		base_addr += ld->memory_size;

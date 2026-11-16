@@ -148,6 +148,34 @@ class TestPreboundConnections:
         assert data["Id"] == "cxl_switch_0_vcs0_vppb3_p3"
 
 
+@pytest.mark.mock_topology("mock/switch-attached.json")
+class TestChunkIdsInConnections:
+    """A Connection lists each chunk of its target once (review F10): with
+    a chunk Id reused after a DELETE, two chunks of dev0 had one URI, and
+    MemoryChunkInfo listed it twice."""
+
+    def test_no_duplicate_chunk_after_delete_and_rebind(self, api_client):
+        dev = "cxl_switch0_dev0"
+        chunks = f"/redfish/v1/Chassis/{dev}/MemoryDomains/{dev}_domain0/MemoryChunks"
+        assert api_client.delete(f"{CONNECTIONS}/cxl_switch_0_vcs0_vppb1_p1") == 204
+        assert api_client.delete(f"{chunks}/{dev}_chunk0") == 204
+        made = []
+        for _ in range(3):
+            status, data, _ = api_client.post(chunks, {"MemoryChunkSizeMiB": 1024})
+            assert status == 201, data
+            made.append(data["@odata.id"])
+        assert api_client.delete(made[1]) == 204
+        status, data, _ = api_client.post(chunks, {"MemoryChunkSizeMiB": 1024})
+        assert status == 201, data
+        assert data["@odata.id"] not in made
+
+        status, conn, _ = post(api_client, HOST0, dev)
+        assert status == 201, conn
+        listed = [i["MemoryChunk"]["@odata.id"] for i in conn["MemoryChunkInfo"]]
+        assert len(listed) == len(set(listed)) == 3
+        assert sorted(listed) == chunks_of(api_client, dev)
+
+
 @pytest.mark.mock_topology("mock/fm-boots-first.json")
 class TestPostIdempotent:
 

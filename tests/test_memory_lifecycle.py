@@ -440,3 +440,79 @@ class TestChunkSizeAndOffsetBounds:
         status, data, _ = api_client.post(SLD_CHUNKS, {"MemoryChunkSizeMiB": 1024})
         assert status == 201, data
         assert data["AddressRangeOffsetMiB"] == 1024
+
+
+# =============================================================================
+# Chunk Ids (review F10)
+# =============================================================================
+
+MLD_CHUNKS = "/redfish/v1/Chassis/cxl_mld_0/MemoryDomains/cxl_mld_0_domain0/MemoryChunks"
+
+
+def post_chunk(api_client, chunks, mib=1024):
+    status, data, location = api_client.post(chunks, {"MemoryChunkSizeMiB": mib})
+    assert status == 201, data
+    assert location == data["@odata.id"]
+    return data["@odata.id"], data["AddressRangeOffsetMiB"]
+
+
+def unique_members(api_client, chunks):
+    status, data = api_client.get(chunks)
+    assert status == 200
+    members = [m["@odata.id"] for m in data["Members"]]
+    assert len(members) == len(set(members)) == data["Members@odata.count"], members
+    return set(members)
+
+
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestChunkIdentity:
+    """A chunk's Id is "The unique identifier for this resource within the
+    collection of similar resources" (Resource_v1): one a chunk holds is
+    not given to another. cxl-fmd numbers a domain's chunks from a counter
+    of its own, so a deleted Id does not come back while the daemon runs
+    (cxl-fmd's choice; Ids are not kept over a restart)."""
+
+    def test_ids_unique_after_middle_delete(self, api_client):
+        assert api_client.delete(SLD_SHIPPED) == 204
+        a, _ = post_chunk(api_client, SLD_CHUNKS)
+        b, _ = post_chunk(api_client, SLD_CHUNKS)
+        c, c_off = post_chunk(api_client, SLD_CHUNKS)
+        assert api_client.delete(b) == 204
+        d, d_off = post_chunk(api_client, SLD_CHUNKS)
+        assert len({a, b, c, d}) == 4
+        assert unique_members(api_client, SLD_CHUNKS) == {a, c, d}
+        assert api_client.get(c)[1]["AddressRangeOffsetMiB"] == c_off
+        assert api_client.get(d)[1]["AddressRangeOffsetMiB"] == d_off
+        # a deleted chunk's URI stays gone, and the other is untouched
+        assert api_client.delete(d) == 204
+        assert api_client.get(d)[0] == 404
+        assert api_client.get(c)[0] == 200
+        assert api_client.get(b)[0] == 404
+
+    def test_first_ids_are_unchanged(self, api_client):
+        """On a fresh domain the Ids are _chunk0, _chunk1, ... as before."""
+        assert api_client.delete(SLD_SHIPPED) == 204
+        made = [post_chunk(api_client, SLD_CHUNKS)[0] for _ in range(3)]
+        assert [m.rsplit("/", 1)[1] for m in made] == [
+            "cxl_mem0_domain0_chunk0", "cxl_mem0_domain0_chunk1", "cxl_mem0_domain0_chunk2"]
+
+
+@pytest.mark.mock_topology("mock/mld-device.json")
+class TestMLDChunkIdentity:
+    """The same on an MLD, whose domain also holds the chunk of each LD
+    (named for the LD, not numbered): deleting one of those does not let
+    a later POST take an Id a chunk holds."""
+
+    def test_ids_unique_after_ld_chunk_delete(self, api_client):
+        assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld0_chunk") == 204
+        a, _ = post_chunk(api_client, MLD_CHUNKS)
+        # numbered from the domain's own counter, not from its chunks
+        assert a == MLD_CHUNKS + "/cxl_mld_0_domain0_chunk0"
+        assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld1_chunk") == 204
+        b, _ = post_chunk(api_client, MLD_CHUNKS)
+        assert a != b
+        assert unique_members(api_client, MLD_CHUNKS) == {
+            a, b, MLD_CHUNKS + "/cxl_mld_0_ld2_chunk", MLD_CHUNKS + "/cxl_mld_0_ld3_chunk"}
+        assert api_client.delete(a) == 204
+        assert api_client.get(b)[0] == 200
+        assert api_client.get(a)[0] == 404

@@ -836,6 +836,9 @@ struct fmd_mem_domain {
 	uint64_t capacity;
 	uint64_t remaining;
 
+	/* the number in the Id of the next chunk a POST makes: only goes up */
+	unsigned int next_chunk;
+
 	/* QoS settings */
 	struct {
 		bool enabled;
@@ -1336,7 +1339,11 @@ void fmd_ctx_free(struct fmd_ctx *ctx);
 int fmd_topology_init(struct fmd_topology *topo);
 void fmd_topology_cleanup(struct fmd_topology *topo);
 
-/* Add component to topology (handles tree insertion and hash table) */
+/*
+ * Add component to topology (handles tree insertion and hash table).
+ * Returns 0, or -EEXIST, with nothing changed, if a component has its Id
+ * already: the caller still owns @comp then, and frees it.
+ */
 int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 		     struct fmd_component *parent);
 
