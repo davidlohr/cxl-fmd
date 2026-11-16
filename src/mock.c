@@ -1237,10 +1237,11 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 				if (!ext)
 					continue;
 				ext->pending = pending;
-				ext->fm_referenced = fm_ref;
 				n_extents++;
 			}
 
+			if (fm_ref)
+				fmd_dc_mock_ref_set(dcd, tag, true);
 			if (!n_hosts) {
 				struct fmd_dc_mock_hold *hold;
 
@@ -1263,6 +1264,8 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 	}
 	/* Number of Available Extents and Tags, Section 9.13.3.3 */
 	fmd_dc_mock_recount(dev);
+	/* Dynamic Capacity List Tags (5608h) */
+	fmd_dc_mock_retag(dev);
 
 	fmd_info(ctx, "Mock DCD %s: %d hosts, %d regions (%d host views), %d extents, %" PRIu64 " MB dynamic",
 		 dev->id, dcd->num_hosts, dcd->num_regions, n_regions, n_extents,

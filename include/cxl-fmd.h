@@ -887,6 +887,34 @@ struct fmd_mem_chunk {
 #define FMD_DC_REGION_READ_ONLY     (1 << 6)
 
 /*
+ * One Dynamic Capacity Tag Information entry of Dynamic Capacity List Tags
+ * (5608h, Table 7-78): the bitmaps are kept as the device sent them, bit n
+ * of byte n / 8 for LD n.
+ */
+struct fmd_dc_tag {
+	uint8_t tag[FMD_DC_TAG_LEN];
+	bool    fm_ref;                             /* Flags Bit[0], FM Holds Reference */
+	uint8_t ref[FMD_DC_LD_BITMAP_BYTES];        /* Reference Bitmap: LDs that accepted */
+	uint8_t pend[FMD_DC_LD_BITMAP_BYTES];       /* Pending Reference Bitmap */
+};
+
+/* The device's tag list, as the last complete 5608h read gave it */
+struct fmd_dc_tags {
+	struct fmd_dc_tag *v;
+	uint32_t n;
+	uint32_t gen;                       /* Generation Number (Table 7-77) */
+	uint8_t  validity;                  /* Validity Bitmap: Bit[0] ref, Bit[1] pending */
+	bool     known;                     /* the last read completed */
+	bool     unsupported;               /* the device answered Unsupported */
+};
+
+/* Bit @ld of a 5608h LD bitmap; false past LD 255 */
+static inline bool fmd_dc_bm_test(const uint8_t *bm, unsigned int ld)
+{
+	return ld <= FMD_DC_MAX_HOST_ID && ((bm[ld / 8] >> (ld % 8)) & 1);
+}
+
+/*
  * Device-wide Dynamic Capacity capabilities
  *
  * From FM-API Get DCD Info (5600h). Attached to fmd_sld, fmd_mld or
@@ -908,8 +936,14 @@ struct fmd_dcd_info {
 	uint32_t tags_supported;
 	uint32_t tags_available;
 
+	/* Dynamic Capacity List Tags (5608h); the mock builds its own */
+	struct fmd_dc_tags tags;
+
 	/* Mock only: FM-referenced capacity no host holds */
 	struct fmd_dc_mock_hold *mock_orphans;
+	/* Mock only: the tags the FM holds a reference on (5606h) */
+	uint8_t (*mock_refs)[FMD_DC_TAG_LEN];
+	uint32_t n_mock_refs;
 };
 
 /*
@@ -952,8 +986,7 @@ struct fmd_dc_extent {
 	uint8_t  tag[FMD_DC_TAG_LEN];       /* all zero: no tag (cxl-fmd's choice) */
 	uint16_t shared_seq;
 	uint8_t  region_id;                 /* this host's region, or FMD_DC_REGION_NONE */
-	bool     pending;                   /* added, the host has not responded */
-	bool     fm_referenced;             /* FM holds a reference on the tag */
+	bool     pending;                   /* this host's bit in the tag's Pending Reference Bitmap */
 };
 
 /*
@@ -1864,6 +1897,17 @@ struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_componen
  * keeps them on dcd, MLD/MHD on the LD) from its extents, Section 9.13.3.3
  */
 void fmd_dc_mock_recount(struct fmd_component *dev);
+
+/* Build a mock device's 5608h tag list from its extents and FM references */
+void fmd_dc_mock_retag(struct fmd_component *dev);
+
+/* The 5608h entry of a tag, NULL when the list has none or is not known */
+const struct fmd_dc_tag *fmd_dc_tag_find(struct fmd_component *dev,
+					 const uint8_t tag[FMD_DC_TAG_LEN]);
+
+/* Mock only: hold, or drop, an FM reference on a tag */
+void fmd_dc_mock_ref_set(struct fmd_dcd_info *dcd, const uint8_t tag[FMD_DC_TAG_LEN],
+			 bool on);
 
 /* Component (SLD or LD) that owns the DC regions of a host */
 struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_id);

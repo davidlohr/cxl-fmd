@@ -39,7 +39,7 @@
 #define EVENT_FLAG_MORE		(1 << 1)
 #define DC_EVENT_MAX_PAGES	16
 #define DC_EVENT_MAX_DEVS	64
-/* Hosts the event drain and the pending state can name, a 64-bit mask */
+/* Hosts the event drain can name, a 64-bit mask */
 #define DC_MASK_HOSTS		64
 
 static const uint8_t dc_event_uuid[0x10] = {
@@ -252,6 +252,8 @@ void fmd_dcd_info_free(struct fmd_dcd_info *dcd)
 		next = h->next;
 		free(h);
 	}
+	free(dcd->mock_refs);
+	free(dcd->tags.v);
 	free(dcd);
 }
 
@@ -328,6 +330,20 @@ int fmd_dc_tag_from_str(const char *str, uint8_t tag[FMD_DC_TAG_LEN])
 	}
 
 	return (n == 0 || n == FMD_DC_TAG_LEN) ? 0 : -1;
+}
+
+const struct fmd_dc_tag *fmd_dc_tag_find(struct fmd_component *dev,
+					 const uint8_t tag[FMD_DC_TAG_LEN])
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	if (!dcd || !dcd->tags.known || dc_tag_is_zero(tag))
+		return NULL;
+	for (uint32_t i = 0; i < dcd->tags.n; i++) {
+		if (!memcmp(dcd->tags.v[i].tag, tag, FMD_DC_TAG_LEN))
+			return &dcd->tags.v[i];
+	}
+	return NULL;
 }
 
 /*
@@ -482,6 +498,106 @@ static bool extent_shared(struct fmd_component *dev, struct fmd_dc_extent *ext)
 	return false;
 }
 
+static bool mock_ref_has(struct fmd_dcd_info *dcd, const uint8_t *tag)
+{
+	for (uint32_t i = 0; i < dcd->n_mock_refs; i++) {
+		if (!memcmp(dcd->mock_refs[i], tag, FMD_DC_TAG_LEN))
+			return true;
+	}
+	return false;
+}
+
+void fmd_dc_mock_ref_set(struct fmd_dcd_info *dcd, const uint8_t tag[FMD_DC_TAG_LEN],
+			 bool on)
+{
+	if (dc_tag_is_zero(tag))
+		return;
+	for (uint32_t i = 0; i < dcd->n_mock_refs; i++) {
+		if (memcmp(dcd->mock_refs[i], tag, FMD_DC_TAG_LEN))
+			continue;
+		if (!on)
+			memmove(dcd->mock_refs[i], dcd->mock_refs[i + 1],
+				(dcd->n_mock_refs - i - 1) * sizeof(dcd->mock_refs[0]));
+		dcd->n_mock_refs -= !on;
+		return;
+	}
+	if (on) {
+		uint8_t (*tmp)[FMD_DC_TAG_LEN] = realloc(dcd->mock_refs,
+				(dcd->n_mock_refs + 1) * sizeof(dcd->mock_refs[0]));
+
+		if (!tmp)
+			return;
+		dcd->mock_refs = tmp;
+		memcpy(dcd->mock_refs[dcd->n_mock_refs++], tag, FMD_DC_TAG_LEN);
+	}
+}
+
+/* The mock's tag list entry of @tag, added if it has none */
+static struct fmd_dc_tag *mock_tag_row(struct fmd_dcd_info *dcd, const uint8_t *tag)
+{
+	struct fmd_dc_tag *tmp;
+
+	for (uint32_t i = 0; i < dcd->tags.n; i++) {
+		if (!memcmp(dcd->tags.v[i].tag, tag, FMD_DC_TAG_LEN))
+			return &dcd->tags.v[i];
+	}
+	tmp = realloc(dcd->tags.v, (dcd->tags.n + 1) * sizeof(*tmp));
+	if (!tmp)
+		return NULL;
+	dcd->tags.v = tmp;
+	tmp = &dcd->tags.v[dcd->tags.n++];
+	memset(tmp, 0, sizeof(*tmp));
+	memcpy(tmp->tag, tag, FMD_DC_TAG_LEN);
+	return tmp;
+}
+
+/*
+ * The mock answers 5608h as a device would: an entry for each tag an
+ * extent or an FM reference has, the host of each extent in the Reference
+ * Bitmap or, when it has not responded, in the Pending Reference Bitmap,
+ * and both bitmaps valid, as they "shall" be for any device but a GFD
+ * (Table 7-77).
+ */
+void fmd_dc_mock_retag(struct fmd_component *dev)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	struct fmd_component *child;
+	struct fmd_dc_mock_hold *hold;
+
+	if (!dcd)
+		return;
+
+	free(dcd->tags.v);
+	dcd->tags.v = NULL;
+	dcd->tags.n = 0;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		struct fmd_dc_tag *t;
+		uint8_t *bm;
+
+		if (dc_tag_is_zero(ext->tag) || !(t = mock_tag_row(dcd, ext->tag)))
+			continue;
+		if (ext->host_id > FMD_DC_MAX_HOST_ID)
+			continue;
+		bm = ext->pending ? t->pend : t->ref;
+		bm[ext->host_id / 8] |= 1 << (ext->host_id % 8);
+	}
+	for (hold = dcd->mock_orphans; hold; hold = hold->next)
+		mock_tag_row(dcd, hold->tag);
+	for (uint32_t i = 0; i < dcd->n_mock_refs; i++) {
+		struct fmd_dc_tag *t = mock_tag_row(dcd, dcd->mock_refs[i]);
+
+		if (t)
+			t->fm_ref = true;
+	}
+
+	dcd->tags.validity = 0x03;
+	dcd->tags.known = true;
+	dcd->tags.unsupported = false;
+	dcd->tags.gen++;
+}
+
 /*
  * Remove a host's extent. Capacity of an FM-referenced tag "will remain
  * allocated ... even if all DCD Extents that reference it are removed"
@@ -492,7 +608,7 @@ static void mock_extent_remove(struct fmd_ctx *ctx, struct fmd_component *dev,
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 
-	if (ext->fm_referenced && dcd && !extent_shared(dev, ext)) {
+	if (dcd && mock_ref_has(dcd, ext->tag) && !extent_shared(dev, ext)) {
 		struct fmd_dc_mock_hold *hold = calloc(1, sizeof(*hold));
 
 		if (hold) {
@@ -823,7 +939,6 @@ static int mock_share(struct fmd_ctx *ctx, struct fmd_component *dev, int host_i
 						 region->region_id);
 			if (!copy)
 				return -ENOMEM;
-			copy->fm_referenced = ext->fm_referenced;
 		}
 		return 0;
 	}
@@ -838,7 +953,6 @@ static int mock_share(struct fmd_ctx *ctx, struct fmd_component *dev, int host_i
 					 hold->len, tag, 0, region->region_id);
 		if (!copy)
 			return -ENOMEM;
-		copy->fm_referenced = true;
 	}
 	/* a host holds it now */
 	mock_orphans_drop(dcd, tag);
@@ -1031,12 +1145,8 @@ static int mock_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 	if (!sharable)
 		return -EINVAL;
 
-	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-
-		if (memcmp(ext->tag, tag, FMD_DC_TAG_LEN) == 0)
-			ext->fm_referenced = add;
-	}
+	/* adding it again succeeds (Section 7.6.7.6.7) */
+	fmd_dc_mock_ref_set(dcd, tag, add);
 	/* the reference was what kept it */
 	if (!add)
 		mock_orphans_drop(dcd, tag);
@@ -1396,24 +1506,75 @@ out:
 	return rc;
 }
 
+/*
+ * Pending, from the tag list: an extent is pending when its host's bit is
+ * set in the Pending Reference Bitmap of its tag, "an LD for which the
+ * tagged capacity has been added with no host response yet" (Table 7-78).
+ * The bitmaps are per tag, not per extent: with both accepted and pending
+ * capacity under one tag, every extent of that host and tag shows pending
+ * (cxl-fmd's choice). The bitmap counts only when "Pending Reference
+ * Bitmaps Valid" is set (Table 7-77). An extent with no tag has no entry,
+ * and is never pending.
+ */
+static void dc_tags_apply(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	struct fmd_component *child;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		const struct fmd_dc_tag *t = fmd_dc_tag_find(dev, ext->tag);
+
+		ext->pending = t && (dcd->tags.validity & 0x02) &&
+			       fmd_dc_bm_test(t->pend, ext->host_id);
+		/*
+		 * 5603h lists it for the host, and the tag list says the
+		 * host neither accepted it nor has it pending: the two were
+		 * read at different times.
+		 */
+		if (t && (dcd->tags.validity & 0x01) && ext->host_id <= FMD_DC_MAX_HOST_ID &&
+		    !fmd_dc_bm_test(t->ref, ext->host_id) &&
+		    !fmd_dc_bm_test(t->pend, ext->host_id))
+			fmd_dbg(ctx, "%s: host %u extent at %#" PRIx64 " is not in its "
+				"tag's bitmaps", dev->id, ext->host_id, ext->start_dpa);
+	}
+}
+
+/* Rows a 5608h read keeps at most: Total Number of Tags is not trusted */
+#define DC_TAG_LIST_MAX 4096
+
+/*
+ * Dynamic Capacity List Tags (5608h) into the device's tag list. The list
+ * is read a page at a time from Starting Index 0, and read again from 0
+ * when the Generation Number, which "shall change every time the remainder
+ * of the command's payload would change" (Table 7-77), changes on a later
+ * page. Total Number of Tags is described as "Maximum number of tags to
+ * return in the response payload", the text of Max Tags: the read stops at
+ * it, or at a page with no tags, whichever comes first, and keeps at most
+ * DC_TAG_LIST_MAX entries.
+ *
+ * Only a complete read replaces the list. 5608h is "DCO" and "DCS" in
+ * Table 8-397, as every 56xxh command is: "Optional for DCDs", and
+ * "Mandatory for all DCDs that implement an MCTP-based CCI". A device
+ * without it answers Unsupported, and has no list; on any other failure
+ * the last list is kept, and is not known to be current. Neither fails
+ * the refresh, and the extents are kept either way.
+ */
 static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 			   struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti)
 {
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct cxlmi_cmd_fmapi_dc_list_tags_req req;
 	struct cxlmi_cmd_fmapi_dc_list_tags_rsp *rsp;
-	struct fmd_component *child;
-	uint32_t start = 0;
+	struct fmd_dc_tag *v = NULL;
+	uint32_t n = 0, cap = 0, start = 0, gen = 0;
+	uint8_t validity = 0;
+	int retries = 0;
 	int rc = 0;
 
 	rsp = calloc(1, sizeof(*rsp) + DC_TAG_LIST_PAGE * sizeof(rsp->tags_list[0]));
 	if (!rsp)
 		return -ENOMEM;
-
-	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-		ext->fm_referenced = false;
-		ext->pending = false;
-	}
 
 	for (;;) {
 		memset(&req, 0, sizeof(req));
@@ -1423,40 +1584,62 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 						  DC_TAG_LIST_PAGE);
 
 		rc = cxlmi_cmd_fmapi_dc_list_tags(ep, ti, &req, rsp);
+		if (rc == CXLMI_RET_UNSUPPORTED) {
+			fmd_dbg(ctx, "%s: DC list tags unsupported", dev->id);
+			free(dcd->tags.v);
+			dcd->tags.v = NULL;
+			dcd->tags.n = 0;
+			dcd->tags.known = false;
+			dcd->tags.unsupported = true;
+			goto done;
+		}
 		if (rc) {
-			/*
-			 * Not fatal: the extents are kept, with no FM
-			 * reference and nothing pending. 5608h is "DCO" and
-			 * "DCS" in CXL r4.0 Table 8-397, as every 56xxh
-			 * command is: "Optional for DCDs", and "Mandatory for
-			 * all DCDs that implement an MCTP-based CCI". A
-			 * device without it answers Unsupported; anything
-			 * else is worth a warning.
-			 */
-			if (rc == CXLMI_RET_UNSUPPORTED)
-				fmd_dbg(ctx, "%s: DC list tags unsupported", dev->id);
-			else
-				fmd_warn(ctx, "%s: DC list tags failed: %d", dev->id, rc);
-			rc = 0;
-			break;
+			fmd_warn(ctx, "%s: DC list tags failed: %d", dev->id, rc);
+			goto failed;
 		}
 
 		FMD_CCI_LIST_CLAMP(rsp->num_tags_returned, DC_TAG_LIST_PAGE);
 
-		for (uint32_t i = 0; i < rsp->num_tags_returned; i++) {
-			const uint8_t *pend = rsp->tags_list[i].pending_ref_bitmap;
-
-			fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-				struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
-				unsigned int h = ext->host_id;
-
-				if (memcmp(ext->tag, rsp->tags_list[i].tag, FMD_DC_TAG_LEN))
-					continue;
-				ext->fm_referenced = rsp->tags_list[i].flags & 0x01;
-				ext->pending = (rsp->validity_bitmap & 0x02) &&
-					       h < DC_MASK_HOSTS &&
-					       (pend[h / 8] & (1 << (h % 8)));
+		if (start == 0) {
+			gen = rsp->generation_num;
+			validity = rsp->validity_bitmap;
+		} else if (rsp->generation_num != gen) {
+			/* the list changed while it was read: again from 0 */
+			if (++retries > DC_LIST_RETRIES) {
+				fmd_warn(ctx, "%s: DC tag list kept changing as it was read",
+					 dev->id);
+				goto failed;
 			}
+			n = 0;
+			start = 0;
+			continue;
+		}
+
+		if (n + rsp->num_tags_returned > DC_TAG_LIST_MAX) {
+			fmd_warn(ctx, "%s: DC tag list is longer than %d tags",
+				 dev->id, DC_TAG_LIST_MAX);
+			goto failed;
+		}
+		if (n + rsp->num_tags_returned > cap) {
+			uint32_t ncap = 2 * (n + rsp->num_tags_returned);
+			struct fmd_dc_tag *tmp = realloc(v, ncap * sizeof(*v));
+
+			if (!tmp) {
+				rc = -ENOMEM;
+				goto out;
+			}
+			v = tmp;
+			cap = ncap;
+		}
+
+		for (uint32_t i = 0; i < rsp->num_tags_returned; i++) {
+			struct fmd_dc_tag *t = &v[n++];
+
+			memcpy(t->tag, rsp->tags_list[i].tag, FMD_DC_TAG_LEN);
+			t->fm_ref = rsp->tags_list[i].flags & 0x01;
+			memcpy(t->ref, rsp->tags_list[i].ref_bitmap, FMD_DC_LD_BITMAP_BYTES);
+			memcpy(t->pend, rsp->tags_list[i].pending_ref_bitmap,
+			       FMD_DC_LD_BITMAP_BYTES);
 		}
 
 		start += rsp->num_tags_returned;
@@ -1464,6 +1647,23 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 			break;
 	}
 
+	free(dcd->tags.v);
+	dcd->tags.v = v;
+	dcd->tags.n = n;
+	dcd->tags.gen = gen;
+	dcd->tags.validity = validity;
+	dcd->tags.known = true;
+	dcd->tags.unsupported = false;
+	v = NULL;
+	goto done;
+
+failed:
+	dcd->tags.known = false;
+done:
+	rc = 0;
+	dc_tags_apply(ctx, dev);
+out:
+	free(v);
 	free(rsp);
 	return rc;
 }
@@ -1837,6 +2037,7 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 				     tag, extents, ext_count);
 
 		fmd_dc_mock_recount(dev);
+		fmd_dc_mock_retag(dev);
 		return rc;
 	}
 
@@ -1949,6 +2150,7 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 					 extents, ext_count);
 
 		fmd_dc_mock_recount(dev);
+		fmd_dc_mock_retag(dev);
 		return rc;
 	}
 
@@ -2014,6 +2216,7 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		int rc = mock_dc_reference(ctx, dev, tag, add);
 
 		fmd_dc_mock_recount(dev);
+		fmd_dc_mock_retag(dev);
 		return rc;
 	}
 

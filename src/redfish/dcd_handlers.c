@@ -385,7 +385,7 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 	fmd_dc_tag_to_str(ext->tag, tag_str, sizeof(tag_str));
 
 	result = json_pack(
-		"{s:s, s:s, s:s, s:s, s:I, s:I, s:s, s:I, s:b, s:o}",
+		"{s:s, s:s, s:s, s:s, s:I, s:I, s:s, s:I, s:o}",
 		"@odata.id", uri,
 		"@odata.type", "#MemoryExtent.v1_0_0.MemoryExtent",
 		"Id", ext_id,
@@ -394,9 +394,23 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 		"ExtentSizeMiB", (json_int_t)(ext->len / FMD_MIB),
 		"Tag", tag_str,
 		"SequenceNumber", (json_int_t)ext->shared_seq,
-		"FMReferencedExtent", ext->fm_referenced ? 1 : 0,
 		"Status", rf_status(ext->pending ? "Starting" : "Enabled",
 				    ext->region_id == FMD_DC_REGION_NONE ? "Warning" : "OK"));
+
+	/*
+	 * FMReferencedExtent: Flags Bit[0] "FM Holds Reference" of the tag's
+	 * 5608h entry (Table 7-78). Not said when the tag list is not known,
+	 * or the extent has no tag.
+	 */
+	{
+		struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+		const struct fmd_dc_tag *t = fmd_dc_tag_find(dev, ext->tag);
+
+		if (t)
+			json_object_set_new(result, "FMReferencedExtent", json_boolean(t->fm_ref));
+		else if (dcd->tags.known && tag_str[0])
+			json_object_set_new(result, "FMReferencedExtent", json_false());
+	}
 
 	/*
 	 * Links/MemoryRegions: the region of the host whose extent it is,

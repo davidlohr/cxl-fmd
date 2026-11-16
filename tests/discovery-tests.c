@@ -2042,6 +2042,16 @@ static void test_dc_return_codes(void)
 	if (!dev)
 		goto out;
 
+	/*
+	 * 5608h answered Unsupported at discovery: the extents are kept, with
+	 * no tag list and nothing pending.
+	 */
+	CHECK(!fmd_memdev_dcd(dev)->tags.known && fmd_memdev_dcd(dev)->tags.unsupported &&
+	      fmd_dc_find_extent(dev, 0, 1ULL << 30) &&
+	      !fmd_dc_find_extent(dev, 0, 1ULL << 30)->pending,
+	      "a device without 5608h: known %d, unsupported %d",
+	      fmd_memdev_dcd(dev)->tags.known, fmd_memdev_dcd(dev)->tags.unsupported);
+
 	for (size_t i = 0; i < sizeof(add) / sizeof(add[0]); i++) {
 		answer_rc(ep, 0x5604, add[i].rc);
 		rc = fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_FREE, 0, 1ULL << 28,
@@ -2501,6 +2511,275 @@ static void test_dc_set_region_busy_any_host(void)
 out:
 	fmd_ctx_free(ctx);
 	report("a region in use by any host", before);
+}
+
+struct dc_tag_row {
+	const uint8_t *tag;
+	bool fm_ref;
+	int ref[4], n_ref;		/* LDs in the Reference Bitmap */
+	int pend[4], n_pend;		/* and in the Pending Reference Bitmap */
+};
+
+/*
+ * One page of Dynamic Capacity List Tags (5608h, Tables 7-77 and 7-78):
+ * @n entries of @total, generation @gen, Validity Bitmap @validity.
+ */
+static void answer_dc_tags(struct cxlmi_endpoint *ep, uint32_t gen, uint32_t total,
+			   uint8_t validity, const struct dc_tag_row *r, int n)
+{
+	uint8_t pl[0x10 + 4 * 0x54] = { 0 };
+
+	put64(pl + 0x00, gen);			/* Generation Number */
+	pl[0x04] = total;			/* Total Number of Tags */
+	pl[0x08] = n;				/* Number of Tags Returned */
+	pl[0x0c] = validity;			/* Validity Bitmap */
+	for (int i = 0; i < n; i++) {
+		uint8_t *t = pl + 0x10 + i * 0x54;
+
+		memcpy(t, r[i].tag, 16);	/* Tag */
+		t[0x10] = r[i].fm_ref;		/* Flags Bit[0]: FM Holds Reference */
+		for (int j = 0; j < r[i].n_ref; j++)
+			t[0x14 + r[i].ref[j] / 8] |= 1 << (r[i].ref[j] % 8);
+		for (int j = 0; j < r[i].n_pend; j++)
+			t[0x34 + r[i].pend[j] / 8] |= 1 << (r[i].pend[j] % 8);
+	}
+	answer(ep, 0x5608, pl, 0x10 + n * 0x54);
+}
+
+/* refresh one host, with the 5608h answers the caller queued */
+static int dc_refresh_host_tags(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+				struct fmd_component *dev, int host,
+				const struct dc_ext *e, int n)
+{
+	answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+	answer_dc_extents(ep, 1, 0, n, e, n);
+	return fmd_dcd_refresh(ctx, dev, host);
+}
+
+/*
+ * Pending is the host's bit in the Pending Reference Bitmap of the tag,
+ * "an LD for which the tagged capacity has been added with no host
+ * response yet"; the Reference Bitmap has "an LD that has accepted the
+ * capacity" (Table 7-78). Hosts 0 and 1 both list tag dc_tag: with host 0
+ * accepted and host 1 pending, only host 1's extent is pending; with both
+ * accepted, neither is. FM Holds Reference is the tag's.
+ */
+static void test_dc_tags_pending(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd8, 2);
+	struct dc_ext e = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct fmd_dc_extent *e0, *e1;
+	const struct fmd_dc_tag *t;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, true,
+		       { 0 }, 1, { 1 }, 1 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 0, &e, 1);
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, true,
+		       { 0 }, 1, { 1 }, 1 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 1, &e, 1);
+	e0 = fmd_dc_find_extent(dev, 0, 1ULL << 30);
+	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
+	t = fmd_dc_tag_find(dev, dc_tag);
+	CHECK(e0 && e1 && t, "no extents, or no tag entry");
+	if (!e0 || !e1 || !t)
+		goto out;
+	CHECK(!e0->pending && e1->pending,
+	      "pending: host 0 %d, host 1 %d; only host 1's bit is set",
+	      e0->pending, e1->pending);
+	CHECK(t->fm_ref && fmd_dc_bm_test(t->ref, 0) && fmd_dc_bm_test(t->pend, 1) &&
+	      !fmd_dc_bm_test(t->ref, 1), "the tag's entry is not as the device sent it");
+
+	answer_dc_tags(ep, 2, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
+		       { 0, 1 }, 2, { 0 }, 0 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 1, &e, 1);
+	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
+	t = fmd_dc_tag_find(dev, dc_tag);
+	CHECK(e1 && !e1->pending && !e0->pending, "accepted by host 1, still pending");
+	CHECK(t && !t->fm_ref && fmd_memdev_dcd(dev)->tags.gen == 2,
+	      "the tag list was not replaced");
+out:
+	fmd_ctx_free(ctx);
+	report("pending from the Pending Reference Bitmap", before);
+}
+
+/*
+ * The bitmaps are "reserved if the ... Valid bit is not set" (Table 7-78):
+ * with a Validity Bitmap of 0 nothing is pending, whatever they hold.
+ */
+static void test_dc_tags_validity0(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xd9, 2);
+	struct dc_ext e = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct fmd_dc_extent *e1;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	answer_dc_tags(ep, 1, 1, 0x00, &(struct dc_tag_row){ dc_tag, false,
+		       { 0, 1 }, 2, { 0, 1 }, 2 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 1, &e, 1);
+	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
+	CHECK(e1 && !e1->pending, "pending from a Pending Reference Bitmap that is not valid");
+	CHECK(fmd_memdev_dcd(dev)->tags.known && fmd_memdev_dcd(dev)->tags.validity == 0,
+	      "the list was not kept, with its Validity Bitmap");
+out:
+	fmd_ctx_free(ctx);
+	report("tag bitmaps that are not valid", before);
+}
+
+/*
+ * "Bit[0] of the first byte represents LD 0, and bit[7] of the last byte
+ * represents LD 255" (Table 7-78): LDs past 63 are kept.
+ */
+static void test_dc_tags_ld200(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xda, 2);
+	const struct fmd_dc_tag *t;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
+		       { 64, 255 }, 2, { 200 }, 1 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 0, NULL, 0);
+	t = fmd_dc_tag_find(dev, dc_tag);
+	CHECK(t && fmd_dc_bm_test(t->pend, 200) && !fmd_dc_bm_test(t->pend, 199) &&
+	      fmd_dc_bm_test(t->ref, 64) && fmd_dc_bm_test(t->ref, 255) &&
+	      !fmd_dc_bm_test(t->ref, 256), "LDs 64, 200 and 255 are not in the entry");
+out:
+	fmd_ctx_free(ctx);
+	report("tag bitmaps up to LD 255", before);
+}
+
+/*
+ * The Generation Number "shall change every time the remainder of the
+ * command's payload would change" (Table 7-77): when it changes between
+ * pages, the list is read again from Starting Index 0, and nothing of the
+ * old generation is kept. A list that keeps changing past the retries
+ * leaves the last complete one, not known to be current.
+ */
+static void test_dc_tags_generation_restart(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xdb, 2);
+	struct fmd_dcd_info *dcd;
+	struct dc_tag_row a = { dc_tag, false, { 0 }, 1, { 0 }, 0 };
+	struct dc_tag_row b = { dc_tag_b, false, { 0 }, 1, { 0 }, 0 };
+	struct dc_tag_row c = { dc_tag_c, false, { 1 }, 1, { 0 }, 0 };
+	uint8_t pl[16];
+	uint16_t op;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+	dcd = fmd_memdev_dcd(dev);
+
+	answer_dc_tags(ep, 1, 2, 0x03, &a, 1);	/* page 1, generation 1 */
+	answer_dc_tags(ep, 2, 2, 0x03, &c, 1);	/* page 2, generation 2 */
+	answer_dc_tags(ep, 2, 2, 0x03, &b, 1);	/* again: page 1 */
+	answer_dc_tags(ep, 2, 2, 0x03, &c, 1);	/* page 2 */
+	dc_refresh_host_tags(ctx, ep, dev, 0, NULL, 0);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(dcd->tags.known && dcd->tags.gen == 2 && dcd->tags.n == 2 &&
+	      !fmd_dc_tag_find(dev, dc_tag) && fmd_dc_tag_find(dev, dc_tag_b) &&
+	      fmd_dc_tag_find(dev, dc_tag_c),
+	      "after a restart: known %d, generation %u, %u tags, old tag %s",
+	      dcd->tags.known, dcd->tags.gen, dcd->tags.n,
+	      fmd_dc_tag_find(dev, dc_tag) ? "kept" : "gone");
+	CHECK(op == 0x5608 && pl[0] == 1, "the last page read was not page 2: %04xh at %u",
+	      op, pl[0]);
+
+	/* every second page of a new generation: four reads, then given up */
+	for (int i = 0; i < 4; i++) {
+		answer_dc_tags(ep, 10 + 2 * i, 2, 0x03, &a, 1);
+		answer_dc_tags(ep, 11 + 2 * i, 2, 0x03, &a, 1);
+	}
+	dc_refresh_host_tags(ctx, ep, dev, 0, NULL, 0);
+	CHECK(!dcd->tags.known && dcd->tags.gen == 2 && dcd->tags.n == 2 &&
+	      fmd_dc_tag_find(dev, dc_tag) == NULL,
+	      "a list that kept changing: known %d, generation %u, %u tags",
+	      dcd->tags.known, dcd->tags.gen, dcd->tags.n);
+	CHECK(dcd->tags.v && !memcmp(dcd->tags.v[0].tag, dc_tag_b, 16),
+	      "the last complete list was not kept");
+	answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+	dc_refresh_host_tags(ctx, ep, dev, 0, NULL, 0);
+	CHECK(!dcd->tags.known && dcd->tags.n == 2 && !dcd->tags.unsupported,
+	      "a failed read dropped the list");
+out:
+	fmd_ctx_free(ctx);
+	report("a tag list that changes as it is read", before);
+}
+
+/*
+ * Capacity the FM holds a reference on, that no host has: 5608h has its
+ * tag, FM Holds Reference set, no LD in either bitmap; no host's 5603h
+ * lists it. It is an entry of the tag list, and no extent.
+ */
+static void test_dc_tags_orphan(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xdc, 2);
+	struct fmd_component *child;
+	const struct fmd_dc_tag *t;
+	int before = failures, n = 0;
+
+	if (!dev)
+		goto out;
+
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, true,
+		       { 0 }, 0, { 0 }, 0 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 0, NULL, 0);
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT)
+		n++;
+	t = fmd_dc_tag_find(dev, dc_tag);
+	CHECK(fmd_memdev_dcd(dev)->tags.n == 1 && t && t->fm_ref && n == 0,
+	      "%u tags, %d extents", fmd_memdev_dcd(dev)->tags.n, n);
+out:
+	fmd_ctx_free(ctx);
+	report("an FM reference no host holds", before);
+}
+
+/*
+ * Whether 5603h lists an extent the host has not responded to is not said
+ * (only Get Dynamic Capacity Extent List, 4801h, excludes them): host 1's
+ * list does not have it, and the tag's Pending Reference Bitmap has host 1.
+ * No extent is made up for it; the tag list has it.
+ */
+static void test_dc_pending_unlisted(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xdd, 2);
+	const struct fmd_dc_tag *t;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
+		       { 0 }, 0, { 1 }, 1 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 1, NULL, 0);
+	t = fmd_dc_tag_find(dev, dc_tag);
+	CHECK(!dev->first_child || !fmd_dc_find_extent(dev, 1, 1ULL << 30),
+	      "an extent was made up");
+	CHECK(t && fmd_dc_bm_test(t->pend, 1), "the tag list has no pending host 1");
+out:
+	fmd_ctx_free(ctx);
+	report("a pending add 5603h does not list", before);
 }
 
 /*
@@ -4221,6 +4500,12 @@ int main(void)
 	test_dc_extent_in_decode_tail();
 	test_dc_prescriptive_release_payload();
 	test_dc_set_region_busy_any_host();
+	test_dc_tags_pending();
+	test_dc_tags_validity0();
+	test_dc_tags_ld200();
+	test_dc_tags_generation_restart();
+	test_dc_tags_orphan();
+	test_dc_pending_unlisted();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);
