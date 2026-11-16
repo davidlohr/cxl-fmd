@@ -5037,6 +5037,649 @@ out:
 	report("a lost task leaves no connection pending", before);
 }
 
+/*
+ * Connections computed from the switch (src/conn_view.c). Helpers.
+ */
+
+/* a chunk of @dev, in its domain (made if it has none), on LD @memory_id */
+static struct fmd_mem_chunk *add_chunk(struct fmd_ctx *ctx,
+				       struct fmd_component *dev,
+				       const char *name, const char *memory_id)
+{
+	struct fmd_component *dom = fmd_first_child_type(dev, FMD_COMPONENT_DOMAIN);
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mem_chunk *chunk;
+
+	if (!dom) {
+		struct fmd_mem_domain *d;
+
+		snprintf(id, sizeof(id), "%.50s_domain0", dev->id);
+		d = fmd_domain_create(id);
+		if (!d) {
+			printf("FAIL  cannot create a domain\n");
+			exit(1);
+		}
+		fmd_topology_add(&ctx->topology, &d->base, dev);
+		dom = &d->base;
+	}
+	snprintf(id, sizeof(id), "%.40s_%s", dev->id, name);
+	chunk = fmd_chunk_create(id);
+	if (!chunk) {
+		printf("FAIL  cannot create a chunk\n");
+		exit(1);
+	}
+	chunk->size = 256 << 20;
+	if (memory_id) {
+		chunk->interleave_set_count = 1;
+		snprintf(chunk->interleave_sets[0].memory_id,
+			 sizeof(chunk->interleave_sets[0].memory_id), "%s",
+			 memory_id);
+	}
+	fmd_topology_add(&ctx->topology, &chunk->base, dom);
+	return chunk;
+}
+
+/* The Connections, by ID, of a walk with fmd_conn_for_each() */
+struct conn_list {
+	int n;
+	char id[16][FMD_CONN_ID_LEN];
+	enum fmd_conn_state state[16];
+};
+
+static int collect_conn(const struct fmd_conn_view *v, void *arg)
+{
+	struct conn_list *l = arg;
+
+	if (l->n < 16) {
+		snprintf(l->id[l->n], sizeof(l->id[0]), "%s", v->id);
+		l->state[l->n] = v->state;
+	}
+	l->n++;
+	return 0;
+}
+
+static int conn_index(const struct conn_list *l, const char *id)
+{
+	for (int i = 0; i < l->n && i < 16; i++) {
+		if (!strcmp(l->id[i], id))
+			return i;
+	}
+	return -1;
+}
+
+static struct conn_list list_conns(struct fmd_ctx *ctx)
+{
+	struct conn_list l = { 0 };
+
+	fmd_conn_for_each(ctx, collect_conn, &l);
+	return l;
+}
+
+/* the chunks of a Connection: how many, and whether @want is one */
+struct chunk_count {
+	int n;
+	const struct fmd_mem_chunk *want;
+	bool found;
+};
+
+static int count_chunk(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	struct chunk_count *c = arg;
+
+	c->n++;
+	if (chunk == c->want)
+		c->found = true;
+	return 0;
+}
+
+static struct chunk_count conn_chunks(const struct fmd_conn_view *v,
+				      const struct fmd_mem_chunk *want)
+{
+	struct chunk_count c = { .want = want };
+
+	fmd_conn_for_each_chunk(v, count_chunk, &c);
+	return c;
+}
+
+static struct fmd_bind_key bind_key(const char *sw, uint8_t vcs, uint8_t vppb,
+				    uint8_t port, uint16_t ld)
+{
+	struct fmd_bind_key k = { .vcs_id = vcs, .vppb_id = vppb,
+				  .port_id = port, .ld_id = ld };
+
+	snprintf(k.switch_id, sizeof(k.switch_id), "%s", sw);
+	return k;
+}
+
+/*
+ * Bindings that were there before cxl-fmd: an SLD bound whole (02h) to a
+ * vPPB of VCS 0, LD 1 of an MLD (03h) to one of VCS 2, as Get Virtual CXL
+ * Switch Info reads them. Each is a Connection of the host of its VCS, to
+ * the SLD with every chunk of it, or to the LD with the chunks on that LD.
+ * A bind and an unbind under way show as Starting and Updating.
+ */
+static void test_conn_view_prebound_sld_ld(void)
+{
+	static const uint8_t sld4[3] = { 0x02, 4, 0xff };
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], want[FMD_CONN_ID_LEN];
+	char host[FMD_MAX_ID_LEN + 16], ldid[2 * FMD_MAX_ID_LEN + 64];
+	struct fmd_component *sld, *mld, *ld0, *ld1c;
+	struct fmd_mem_chunk *s0, *s1, *c0, *c1, *c1uri;
+	struct fmd_binding_op *bind_op, *unbind_op;
+	struct fmd_conn_view v;
+	struct fmd_bind_key key;
+	struct chunk_count cc;
+	struct conn_list l;
+	struct fmd_switch *sw;
+	int before = failures, rc, i;
+
+	answer_identify(ep, 0x5200, 0x00);
+	answer_switch_ports(ep, 6, 0x04, 0x04);	/* an SLD on port 4 */
+	answer_vcs(ep, 0, 0, port2, sld4);
+	answer_vcs(ep, 2, 1, ld1, unbound);
+	fmd_discover(ctx);
+
+	device_id(sw_id, sizeof(sw_id), 0x5200);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	snprintf(ldid, sizeof(ldid), "%.32s_port4_dev", sw_id);
+	sld = fmd_topology_find(&ctx->topology, ldid);
+	snprintf(ldid, sizeof(ldid), "%.32s_port5_dev", sw_id);
+	mld = fmd_topology_find(&ctx->topology, ldid);
+	CHECK(sw && sld && sld->type == FMD_COMPONENT_SLD &&
+	      mld && mld->type == FMD_COMPONENT_MLD, "no switch, SLD or MLD");
+	if (!sw || !sld || !mld)
+		goto out;
+	/* the MLD on port 5 has LD-IDs 0 and 1 */
+	for (i = 0; i < 2; i++) {
+		struct fmd_ld *ld;
+
+		snprintf(ldid, sizeof(ldid), "%.40s_ld%d", mld->id, i);
+		ld = fmd_ld_create(ldid, i);
+		if (!ld) {
+			printf("FAIL  cannot create an LD\n");
+			exit(1);
+		}
+		fmd_topology_add(&ctx->topology, &ld->base, mld);
+	}
+	ld0 = &fmd_topology_find_ld(&ctx->topology, mld->id, 0)->base;
+	ld1c = &fmd_topology_find_ld(&ctx->topology, mld->id, 1)->base;
+
+	s0 = add_chunk(ctx, sld, "chunk0", NULL);
+	s1 = add_chunk(ctx, sld, "chunk1", NULL);
+	c0 = add_chunk(ctx, mld, "ld0_chunk", ld0->id);
+	c1 = add_chunk(ctx, mld, "ld1_chunk", ld1c->id);
+	/* named for LD 1, as a chunk made with the device is, no Memory */
+	c1uri = add_chunk(ctx, mld, "more_ld1_chunk", NULL);
+
+	l = list_conns(ctx);
+	CHECK(l.n == 2, "%d Connections, not 2", l.n);
+
+	/* the SLD: whole port, VCS 0 vPPB 2 */
+	snprintf(want, sizeof(want), "%s_vcs0_vppb2_p4", sw_id);
+	CHECK(conn_index(&l, want) >= 0, "no Connection %s", want);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0, "lookup %s: %d", want, rc);
+	if (!rc) {
+		snprintf(host, sizeof(host), "%.50s_host0", sw_id);
+		CHECK(v.kind == FMD_CONN_SWITCH && v.sw == sw &&
+		      v.state == FMD_CONN_ENABLED, "SLD: kind %d state %d",
+		      v.kind, v.state);
+		CHECK(v.host && !strcmp(v.host->base.id, host), "SLD host %s",
+		      v.host ? v.host->base.id : "none");
+		CHECK(v.target == sld && v.device == sld && !v.ld && !v.head,
+		      "SLD target");
+		CHECK(v.key.vcs_id == 0 && v.key.vppb_id == 2 &&
+		      v.key.port_id == 4 && v.key.ld_id == FMD_LD_NONE,
+		      "SLD key %d/%d/%d/%x", v.key.vcs_id, v.key.vppb_id,
+		      v.key.port_id, v.key.ld_id);
+		CHECK(!v.op && !v.made_here, "SLD op or mark");
+		cc = conn_chunks(&v, s1);
+		CHECK(cc.n == 2 && cc.found, "SLD chunks: %d", cc.n);
+		(void)s0;
+	}
+
+	/* LD 1: VCS 2 (an ID, not an index) vPPB 1 */
+	snprintf(want, sizeof(want), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	CHECK(conn_index(&l, want) >= 0, "no Connection %s", want);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0, "lookup %s: %d", want, rc);
+	if (!rc) {
+		snprintf(host, sizeof(host), "%.50s_host2", sw_id);
+		CHECK(v.host && !strcmp(v.host->base.id, host), "LD host %s",
+		      v.host ? v.host->base.id : "none");
+		CHECK(v.state == FMD_CONN_ENABLED && v.target == ld1c &&
+		      v.device == mld && v.ld == fmd_to_ld(ld1c),
+		      "LD 1: state %d", v.state);
+		cc = conn_chunks(&v, c1uri);
+		CHECK(cc.n == 2 && cc.found, "LD 1 chunks: %d", cc.n);
+		cc = conn_chunks(&v, c0);
+		CHECK(!cc.found, "LD 0's chunk on LD 1's Connection");
+		(void)c1;
+	}
+
+	/* by target, in the VCS it is bound in only */
+	rc = fmd_conn_find_target(ctx, sw, 2, 5, 1, &v);
+	CHECK(rc == 0 && !strcmp(v.id, want), "find LD 1 in VCS 2: %d", rc);
+	rc = fmd_conn_find_target(ctx, sw, 0, 5, 1, &v);
+	CHECK(rc == -ENOENT, "LD 1 found in VCS 0: %d", rc);
+	rc = fmd_conn_find_target(ctx, sw, 2, 5, 0, &v);
+	CHECK(rc == -ENOENT, "LD 0 found in VCS 2: %d", rc);
+	rc = fmd_conn_find_target(ctx, sw, 0, 4, FMD_LD_NONE, &v);
+	CHECK(rc == 0 && v.target == sld, "find the SLD in VCS 0: %d", rc);
+
+	/* a bind under way on unbound vPPB 2 of VCS 2: Starting, found */
+	key = bind_key(sw_id, 2, 2, 5, 0);
+	bind_op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, "1");
+	l = list_conns(ctx);
+	snprintf(want, sizeof(want), "%s_vcs2_vppb2_p5_ld0", sw_id);
+	i = conn_index(&l, want);
+	CHECK(l.n == 3 && i >= 0 && l.state[i] == FMD_CONN_STARTING,
+	      "bind under way: %d Connections, %s %s", l.n, want,
+	      i >= 0 ? "listed" : "not listed");
+	rc = fmd_conn_find_target(ctx, sw, 2, 5, 0, &v);
+	CHECK(rc == 0 && v.op == bind_op && v.state == FMD_CONN_STARTING &&
+	      v.ld == fmd_to_ld(ld0), "find the LD being bound: %d", rc);
+	CHECK(fmd_binding_op_find_target(ctx, sw_id, 5, 0) == bind_op,
+	      "the op by target");
+	/* 01h while the switch binds: still the op's */
+	fmd_vcs_find_vppb(fmd_switch_find_vcs(sw, 2), 2)->binding_status =
+		FMD_VPPB_BUSY;
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_STARTING, "01h, binding: %d", rc);
+	fmd_binding_op_remove(ctx, bind_op);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == -ENOENT, "01h with no op: %d", rc);
+	fmd_vcs_find_vppb(fmd_switch_find_vcs(sw, 2), 2)->binding_status =
+		FMD_VPPB_UNBOUND;
+
+	/* an unbind under way of the SLD: Updating, and gone at 00h */
+	key = bind_key(sw_id, 0, 2, 4, FMD_LD_NONE);
+	unbind_op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, 1, "2");
+	snprintf(want, sizeof(want), "%s_vcs0_vppb2_p4", sw_id);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_UPDATING && v.op == unbind_op,
+	      "unbind under way: %d, state %d", rc, v.state);
+	fmd_vcs_find_vppb(fmd_switch_find_vcs(sw, 0), 2)->binding_status =
+		FMD_VPPB_BUSY;
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_UPDATING, "01h, unbinding: %d", rc);
+	fmd_vcs_find_vppb(fmd_switch_find_vcs(sw, 0), 2)->binding_status =
+		FMD_VPPB_UNBOUND;
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == -ENOENT, "unbound, the op not yet freed: %d", rc);
+	fmd_binding_op_remove(ctx, unbind_op);
+	CHECK(!ctx->binding_ops, "an op left");
+
+	/* a mark: made here, until the vPPB no longer holds it */
+	snprintf(want, sizeof(want), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	fmd_binding_mark_add(ctx, &key);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0 && v.made_here, "marked: %d", rc);
+	fmd_binding_marks_prune(ctx, sw_id);
+	CHECK(fmd_binding_mark_find(ctx, &key), "a mark still held dropped");
+	fmd_vcs_find_vppb(fmd_switch_find_vcs(sw, 2), 1)->bound_ld_id = 0;
+	fmd_binding_marks_prune(ctx, NULL);
+	CHECK(!fmd_binding_mark_find(ctx, &key), "a mark no longer held kept");
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == -ENOENT, "LD 1's ID names LD 0's binding: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("Connections of bindings made before cxl-fmd", before);
+}
+
+/*
+ * vPPBs that give no Connection: vPPB 0, the USP's ("the USP vPPB, then
+ * the DSP vPPBs", Section 7.1.4) even bound to a memory device; one of a
+ * VCS that is not enabled; one bound to a PCIe device; one with a Bound
+ * PID (04h); one being bound or unbound (01h) by no one cxl-fmd knows of.
+ */
+static void test_conn_view_skips_vppb0_disabled_nonmemory_pid(void)
+{
+	static const uint8_t pid[3] = { 0x04, 0x34, 0x02 };
+	static const uint8_t sld4[3] = { 0x02, 4, 0xff };
+	static const uint8_t busy[3] = { 0x01, 0, 0xff };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], want[FMD_CONN_ID_LEN];
+	char host_id[FMD_MAX_ID_LEN + 16];
+	struct fmd_host *host;
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	struct conn_list l;
+	int before = failures;
+
+	answer_identify(ep, 0x5201, 0x00);
+	answer_switch_ports(ep, 6, 0x04, 0x04);	/* an SLD on port 4 */
+	answer_vcs(ep, 0, 0, port2, pid);	/* PCIe device, Bound PID */
+	answer_vcs_state(ep, 2, 0x00, 1, sld4, busy);	/* not enabled */
+	fmd_discover(ctx);
+
+	device_id(sw_id, sizeof(sw_id), 0x5201);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw && sw->num_vcs == 2, "no switch with 2 VCSs");
+	if (!sw)
+		goto out;
+
+	/*
+	 * A host for VCS 2 as if it had been enabled once, so that only its
+	 * state keeps it from a Connection.
+	 */
+	snprintf(host_id, sizeof(host_id), "%.50s_host2", sw_id);
+	host = fmd_host_create(host_id);
+	snprintf(host->switch_id, sizeof(host->switch_id), "%s", sw_id);
+	host->vcs_id = 2;
+	host->direct_attached = false;
+	fmd_topology_add(&ctx->topology, &host->base, NULL);
+
+	/* vPPB 0 of VCS 0 bound to the SLD's port, not the USP */
+	vcs = fmd_switch_find_vcs(sw, 0);
+	vcs->vppbs[0].bound_port_id = 4;
+
+	l = list_conns(ctx);
+	CHECK(l.n == 0, "%d Connections: %s", l.n, l.n ? l.id[0] : "");
+
+	/* the same port on a DSP vPPB of VCS 0 is one */
+	vcs->vppbs[2] = (struct fmd_vppb){ .vppb_id = 2,
+		.binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 4, .bound_ld_id = 0xff };
+	l = list_conns(ctx);
+	snprintf(want, sizeof(want), "%s_vcs0_vppb2_p4", sw_id);
+	CHECK(l.n == 1 && !strcmp(l.id[0], want), "%d Connections, not %s",
+	      l.n, want);
+out:
+	fmd_ctx_free(ctx);
+	report("vPPBs that are not Connections", before);
+}
+
+/*
+ * A Connection ID is the switch's ID with "_vcs{V}_vppb{P}_p{N}", and
+ * "_ld{L}" for an LD, read from the right: a switch ID holds '_', and may
+ * hold what looks like any of these. One spelling only.
+ */
+static void test_conn_id_roundtrip_underscored_switch(void)
+{
+	static const char *const switches[] = {
+		"cxl_0000000000005202", "sw_vcs1_vppb2_p3", "a_ld3", "x_p_ld",
+		"_", "sw_vcs1_vppb2_p3_ld4",
+	};
+	static const char *const bad[] = {
+		"sw_vcs0_vppb1_p05", "sw_vcs0_vppb1_p+5", "sw_vcs0_vppb1_p256",
+		"sw_vcs0_vppb1_p5_ld", "sw_vcs0_vppb1_p5_ld01", "_vcs0_vppb1_p5",
+		"sw_vcs0_p5", "sw_vppb1_p5", "sw_vcs0_vppb1", "sw_vcs0_vppb1_p5_",
+		"sw_vcs0_vppb1_p5_ld65535", "",
+	};
+	static const uint8_t sld4[3] = { 0x02, 4, 0xff };
+	struct fmd_bind_key k, back;
+	char id[FMD_CONN_ID_LEN], first[FMD_CONN_ID_LEN];
+	struct fmd_conn_view v;
+	struct conn_list l;
+	int before = failures, rc;
+
+	for (size_t s = 0; s < sizeof(switches) / sizeof(switches[0]); s++) {
+		for (int ld = -1; ld <= 1; ld++) {
+			k = bind_key(switches[s], 7, 31, 255,
+				     ld < 0 ? FMD_LD_NONE : (uint16_t)(ld ? 4094 : 0));
+			rc = fmd_conn_id_format(&k, id, sizeof(id));
+			CHECK(rc == 0, "format %s: %d", switches[s], rc);
+			memset(&back, 0, sizeof(back));
+			rc = fmd_conn_id_parse(id, &back);
+			CHECK(rc == 0 && fmd_bind_key_eq(&k, &back),
+			      "%s parsed back as %s/%d/%d/%d/%x: %d", id,
+			      back.switch_id, back.vcs_id, back.vppb_id,
+			      back.port_id, back.ld_id, rc);
+		}
+	}
+	for (size_t b = 0; b < sizeof(bad) / sizeof(bad[0]); b++) {
+		rc = fmd_conn_id_parse(bad[b], &back);
+		CHECK(rc == -EINVAL, "\"%s\" parsed: %d", bad[b], rc);
+	}
+
+	/* a switch read twice gives the same ID, as after a restart */
+	for (int run = 0; run < 2; run++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		char sw_id[FMD_MAX_ID_LEN];
+
+		answer_identify(ep, 0x5202, 0x00);
+		answer_switch_ports(ep, 6, 0x04, 0x04);
+		answer_vcs(ep, 0, 0, port2, sld4);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+		fmd_discover(ctx);
+		device_id(sw_id, sizeof(sw_id), 0x5202);
+		CHECK(strchr(sw_id, '_'), "switch ID %s has no '_'", sw_id);
+
+		l = list_conns(ctx);
+		CHECK(l.n == 1, "run %d: %d Connections", run, l.n);
+		if (l.n != 1) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		if (!run)
+			snprintf(first, sizeof(first), "%s", l.id[0]);
+		else
+			CHECK(!strcmp(first, l.id[0]), "%s, then %s", first, l.id[0]);
+		rc = fmd_conn_lookup(ctx, l.id[0], &v);
+		CHECK(rc == 0 && !strcmp(v.id, l.id[0]), "lookup %s: %d",
+		      l.id[0], rc);
+
+		/* another spelling of it is not it */
+		snprintf(id, sizeof(id), "%s_vcs0_vppb2_p04", sw_id);
+		rc = fmd_conn_lookup(ctx, id, &v);
+		CHECK(rc == -ENOENT, "lookup %s: %d", id, rc);
+
+		/* nor is it once its vPPB is bound to another port */
+		fmd_switch_find_vcs(fmd_topology_find_switch(&ctx->topology,
+							     sw_id), 0)
+			->vppbs[2].bound_port_id = 5;
+		rc = fmd_conn_lookup(ctx, l.id[0], &v);
+		CHECK(rc == -ENOENT, "stale %s: %d", l.id[0], rc);
+		fmd_ctx_free(ctx);
+	}
+	report("Connection IDs, and a switch ID with '_'", before);
+}
+
+/*
+ * A vPPB bound to a port that has no device: "a physical port whose link
+ * is down" is bound whole (Section 7.6.7.2.2), and the device on a bound
+ * port may go. The Connection is Absent, reaches nothing, and keeps its
+ * ID.
+ */
+static void test_conn_view_absent(void)
+{
+	static const uint8_t sld4[3] = { 0x02, 4, 0xff };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], want[FMD_CONN_ID_LEN];
+	char dev_id[FMD_MAX_ID_LEN + 16];
+	struct fmd_component *sld;
+	struct fmd_conn_view v;
+	struct fmd_switch *sw;
+	struct fmd_port *port;
+	struct conn_list l;
+	int before = failures, rc;
+
+	answer_identify(ep, 0x5203, 0x00);
+	answer_switch_ports(ep, 6, 0x04, 0x04);	/* an SLD on port 4 */
+	answer_vcs(ep, 0, 0, port2, sld4);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_discover(ctx);
+
+	device_id(sw_id, sizeof(sw_id), 0x5203);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	snprintf(dev_id, sizeof(dev_id), "%.32s_port4_dev", sw_id);
+	sld = fmd_topology_find(&ctx->topology, dev_id);
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 4);
+	CHECK(sw && sld && port, "no switch, SLD or port 4");
+	if (!sw || !sld || !port)
+		goto out;
+	add_chunk(ctx, sld, "chunk0", NULL);
+
+	snprintf(want, sizeof(want), "%s_vcs0_vppb2_p4", sw_id);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_ENABLED && conn_chunks(&v, NULL).n == 1,
+	      "before the removal: %d", rc);
+
+	/* the SLD goes, and the port reports no device */
+	fmd_topology_remove(&ctx->topology, sld);
+	port->conn_dev_type = FMD_CONN_NONE;
+	l = list_conns(ctx);
+	CHECK(l.n == 1 && !strcmp(l.id[0], want) &&
+	      l.state[0] == FMD_CONN_ABSENT, "%d Connections, %s state %d",
+	      l.n, l.n ? l.id[0] : "", l.n ? (int)l.state[0] : -1);
+	rc = fmd_conn_lookup(ctx, want, &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_ABSENT && !v.device &&
+	      !v.target && !v.ld && conn_chunks(&v, NULL).n == 0,
+	      "absent: %d, state %d", rc, v.state);
+	CHECK(v.host != NULL, "an Absent Connection has no host");
+
+	/* a port with a device cxl-fmd does not serve is none */
+	port->conn_dev_type = FMD_CONN_TYPE2;
+	l = list_conns(ctx);
+	CHECK(l.n == 0, "%d Connections to a Type 2 device", l.n);
+out:
+	fmd_ctx_free(ctx);
+	report("a binding to a port with no device is Absent", before);
+}
+
+/*
+ * A Multi-Headed device on a switch. A head that presents an SLD, bound
+ * whole, reaches the one pool LD mapped to it ("A head with one LD mapped
+ * shall present itself as an SLD", Section 2.5). One that presents an
+ * MLD is bound by an LD-ID "relative to that head", which "The MH-MLD maps
+ * ... to the device-wide LD index" (Section 2.5.1) by no rule the FM is
+ * told: that Connection reaches the head, Unresolved, with no chunks. So
+ * is a binding of an MLD that is not one of its LDs (cxl-fmd's choice).
+ */
+static void test_conn_view_unresolved_mh_mld(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct fmd_switch *sw = fmd_switch_create("sw_mh");
+	struct fmd_port *p4, *p5, *p3;
+	struct fmd_mhd *mhd;
+	struct fmd_head *h0, *h1;
+	struct fmd_mld *mld;
+	struct fmd_ld *lds[3], *mld_ld;
+	struct fmd_mem_chunk *chunk2;
+	struct fmd_host *host;
+	struct fmd_conn_view v;
+	struct conn_list l;
+	int before = failures, rc;
+	char id[FMD_MAX_ID_LEN];
+
+	fmd_topology_add(&ctx->topology, &sw->base, NULL);
+	add_port(ctx, sw, 0, FMD_PORT_USP);
+	p3 = add_port(ctx, sw, 3, FMD_PORT_DSP);
+	p4 = add_port(ctx, sw, 4, FMD_PORT_DSP);
+	p5 = add_port(ctx, sw, 5, FMD_PORT_DSP);
+
+	mhd = fmd_mhd_create("mhd");
+	fmd_topology_add(&ctx->topology, &mhd->base, NULL);
+	h0 = fmd_head_create("mhd_head0", 0);
+	h0->presentation = FMD_HEAD_MLD;
+	h1 = fmd_head_create("mhd_head1", 1);
+	h1->presentation = FMD_HEAD_SLD;
+	fmd_topology_add(&ctx->topology, &h0->base, &mhd->base);
+	fmd_topology_add(&ctx->topology, &h1->base, &mhd->base);
+	h0->port = p4;
+	p4->head = h0;
+	h1->port = p5;
+	p5->head = h1;
+	for (int i = 0; i < 3; i++) {
+		snprintf(id, sizeof(id), "mhd_ld%d", i);
+		lds[i] = fmd_ld_create(id, i);
+		lds[i]->binding_point_id = i < 2 ? 0 : 1;
+		fmd_topology_add(&ctx->topology, &lds[i]->base, &mhd->base);
+	}
+	add_chunk(ctx, &mhd->base, "ld0_chunk", "mhd_ld0");
+	add_chunk(ctx, &mhd->base, "ld1_chunk", "mhd_ld1");
+	/* as POST makes one: InterleaveSets[0].Memory is a URI */
+	chunk2 = add_chunk(ctx, &mhd->base, "posted",
+			   "/redfish/v1/Chassis/mhd/PCIeDevices/mhd/CXLLogicalDevices/2");
+
+	/* an MLD on port 3 with LD 0 only */
+	mld = fmd_mld_create("mld3");
+	fmd_topology_add(&ctx->topology, &mld->base, &p3->base);
+	p3->conn_dev_type = FMD_CONN_MLD;
+	mld_ld = fmd_ld_create("mld3_ld0", 0);
+	fmd_topology_add(&ctx->topology, &mld_ld->base, &mld->base);
+
+	host = fmd_host_create("sw_mh_host0");
+	snprintf(host->switch_id, sizeof(host->switch_id), "sw_mh");
+	host->vcs_id = 0;
+	host->direct_attached = false;
+	fmd_topology_add(&ctx->topology, &host->base, NULL);
+
+	sw->num_vcs = 1;
+	sw->vcs[0].vcs_id = 0;
+	sw->vcs[0].state = 0x01;
+	sw->vcs[0].num_vppbs = 5;
+	sw->vcs[0].vppbs[0] = (struct fmd_vppb){ .vppb_id = 0,
+		.binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 0, .bound_ld_id = 0xff };
+	/* LD-ID 1 of the head that presents an MLD */
+	sw->vcs[0].vppbs[1] = (struct fmd_vppb){ .vppb_id = 1,
+		.binding_status = FMD_VPPB_BOUND_LD,
+		.bound_port_id = 4, .bound_ld_id = 1 };
+	/* the head that presents an SLD, whole */
+	sw->vcs[0].vppbs[2] = (struct fmd_vppb){ .vppb_id = 2,
+		.binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 5, .bound_ld_id = 0xff };
+	/* LD 3 of an MLD with LD 0 only */
+	sw->vcs[0].vppbs[3] = (struct fmd_vppb){ .vppb_id = 3,
+		.binding_status = FMD_VPPB_BOUND_LD,
+		.bound_port_id = 3, .bound_ld_id = 3 };
+	sw->vcs[0].vppbs[4] = (struct fmd_vppb){ .vppb_id = 4,
+		.binding_status = FMD_VPPB_UNBOUND, .bound_ld_id = 0xff };
+	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
+
+	l = list_conns(ctx);
+	CHECK(l.n == 3, "%d Connections, not 3", l.n);
+
+	rc = fmd_conn_lookup(ctx, "sw_mh_vcs0_vppb1_p4_ld1", &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_UNRESOLVED, "MH-MLD head: %d, state %d",
+	      rc, rc ? -1 : (int)v.state);
+	if (!rc) {
+		CHECK(v.target == &h0->base && v.head == h0 && !v.ld &&
+		      v.device == &mhd->base, "MH-MLD head: target %s",
+		      v.target ? v.target->id : "none");
+		CHECK(conn_chunks(&v, NULL).n == 0, "chunks of an unresolved LD");
+	}
+
+	rc = fmd_conn_lookup(ctx, "sw_mh_vcs0_vppb2_p5", &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_ENABLED, "MH-SLD head: %d", rc);
+	if (!rc) {
+		struct chunk_count cc = conn_chunks(&v, chunk2);
+
+		CHECK(v.target == &lds[2]->base && v.ld == lds[2] &&
+		      v.head == h1 && v.device == &mhd->base,
+		      "MH-SLD head: target %s", v.target ? v.target->id : "none");
+		CHECK(cc.n == 1 && cc.found, "MH-SLD head: %d chunks", cc.n);
+	}
+
+	rc = fmd_conn_lookup(ctx, "sw_mh_vcs0_vppb3_p3_ld3", &v);
+	CHECK(rc == 0 && v.state == FMD_CONN_UNRESOLVED && !v.target &&
+	      v.device == &mld->base && conn_chunks(&v, NULL).n == 0,
+	      "an LD the MLD does not have: %d", rc);
+
+	/* the handlers' rule for a vPPB is the same */
+	CHECK(fmd_bind_target(p4, 1) == &h0->base &&
+	      fmd_bind_target(p5, FMD_LD_NONE) == &lds[2]->base &&
+	      fmd_bind_target(p5, 0) == NULL && fmd_bind_target(p4, FMD_LD_NONE) == NULL &&
+	      fmd_bind_target(p3, 0) == &mld_ld->base &&
+	      fmd_bind_target(p3, FMD_LD_NONE) == NULL,
+	      "fmd_bind_target");
+	CHECK(fmd_ld_head(lds[0]) == h0 && fmd_ld_head(lds[2]) == h1 &&
+	      fmd_head_whole_ld(h1) == lds[2] && !fmd_head_whole_ld(h0),
+	      "heads and LDs");
+
+	fmd_ctx_free(ctx);
+	report("a binding to a head that presents an MLD is Unresolved", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -5111,6 +5754,11 @@ int main(void)
 	test_disabled_vcs_has_no_host();
 	test_untracked_binding_change_refreshes();
 	test_lost_task_clears_pending();
+	test_conn_view_prebound_sld_ld();
+	test_conn_view_skips_vppb0_disabled_nonmemory_pid();
+	test_conn_id_roundtrip_underscored_switch();
+	test_conn_view_absent();
+	test_conn_view_unresolved_mh_mld();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

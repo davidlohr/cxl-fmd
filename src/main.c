@@ -145,6 +145,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 	/* connections are kept on the context, not in the topology */
 	while (ctx->connections)
 		fmd_connection_remove(ctx, ctx->connections);
+	fmd_binding_state_free(ctx);
 
 	fmd_topology_cleanup(&ctx->topology);
 	pthread_mutex_destroy(&ctx->dcd_lock);

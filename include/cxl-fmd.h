@@ -1127,6 +1127,119 @@ struct fmd_connection {
 	struct fmd_connection *next;
 };
 
+/*
+ * Connections derived from the switch (src/conn_view.c)
+ *
+ * A switch-attached Connection is a vPPB binding, as last read with Get
+ * Virtual CXL Switch Info (5200h): the FM "issues Get Virtual CXL Switch
+ * Info for each enabled VCS to check for all bound vPPBs in the system
+ * and create a list of binding targets" (CXL r4.0 Section 7.6.6.2). No
+ * field of it records who made a binding, and bindings exist that
+ * cxl-fmd never made, so none is stored: a Connection is computed, when
+ * it is needed, from the VCS tables and the binds and unbinds cxl-fmd has
+ * under way. That a Connection is a binding is cxl-fmd's choice.
+ */
+
+/* LD ID of a bind target that is not an LD: "Must be FFFFh for other EP types" (Table 7-35) */
+#define FMD_LD_NONE 0xFFFF
+
+/* Room for a Connection ID: "{switch}_vcs{V}_vppb{P}_p{N}_ld{L}" */
+#define FMD_CONN_ID_LEN 160
+
+/*
+ * What a vPPB is bound to, and where: the fields of Bind vPPB (Table
+ * 7-35), with the switch. @ld_id is FMD_LD_NONE unless the Binding Status
+ * is 03h, Bound LD.
+ */
+struct fmd_bind_key {
+	char     switch_id[FMD_MAX_ID_LEN];
+	uint8_t  vcs_id;		/* Virtual CXL Switch ID, not an index */
+	uint8_t  vppb_id;		/* index of the vPPB within the VCS */
+	uint8_t  port_id;		/* Physical Port ID */
+	uint16_t ld_id;			/* LD-ID, or FMD_LD_NONE */
+};
+
+enum fmd_bind_op_kind {
+	FMD_BIND_OP_BIND,		/* Bind vPPB (5201h) */
+	FMD_BIND_OP_UNBIND,		/* Unbind vPPB (5202h) */
+};
+
+/*
+ * A bind or an unbind the switch is carrying out in the background for
+ * cxl-fmd. It lives only while that runs: a vPPB being bound or unbound
+ * reads 01h, and its Bound Port ID and Bound LD ID are "Valid only when
+ * vPPB[Start vPPB] Binding Status is 02h or 03h" (Table 7-34), so what it
+ * is becoming is known only from here. Kept on ctx->binding_ops,
+ * fabric_lock held exclusively to change, shared to read.
+ */
+struct fmd_binding_op {
+	struct fmd_bind_key key;
+	enum fmd_bind_op_kind kind;
+	uint8_t unbind_option;		/* Unbind Option (Table 7-36), for an unbind */
+	char task_id[FMD_MAX_ID_LEN];
+	struct fmd_binding_op *next;
+};
+
+/*
+ * A binding this run of cxl-fmd made. Advisory only: it feeds the
+ * Oem.Cxl.Origin of a Connection, and never decides whether a Connection
+ * exists. Dropped when the vPPB no longer holds the key, and lost on a
+ * restart: nothing the switch reports says who made a binding (Table
+ * 7-34, Table 7-80). Kept on ctx->binding_marks, under fabric_lock as the
+ * operations are.
+ */
+struct fmd_binding_mark {
+	struct fmd_bind_key key;
+	struct fmd_binding_mark *next;
+};
+
+enum fmd_conn_kind {
+	FMD_CONN_SWITCH,		/* a vPPB binding */
+	FMD_CONN_DIRECT,		/* a device on a host's link, no switch */
+};
+
+/* What a Connection's Status says. Their meaning is cxl-fmd's choice. */
+enum fmd_conn_state {
+	FMD_CONN_ENABLED,		/* bound, and the target is known */
+	FMD_CONN_STARTING,		/* a bind of it is under way */
+	FMD_CONN_UPDATING,		/* an unbind of it is under way */
+	FMD_CONN_ABSENT,		/* bound, and no device is on the port */
+	FMD_CONN_UNRESOLVED,		/* bound, and what it reaches is not known */
+};
+
+/*
+ * A Connection, computed by the functions below.
+ *
+ * LIFETIME: a view holds raw pointers into the topology, the VCS tables
+ * and ctx->binding_ops. It is valid only while the caller holds both
+ * ctx->fabric_lock (shared or exclusive) and the topology read lock, as it
+ * did when the view was computed. Copy what is needed (the ID, the key:
+ * switch, VCS, vPPB, port and LD) before letting either go. No view, nor
+ * any pointer taken from one, may be kept across a lock release or across
+ * a Bind vPPB (5201h) or Unbind vPPB (5202h) sent to the switch, which
+ * reads the VCSs again. The functions take no locks themselves.
+ */
+struct fmd_conn_view {
+	char id[FMD_CONN_ID_LEN];
+	enum fmd_conn_kind kind;
+	struct fmd_bind_key key;		/* FMD_CONN_SWITCH only */
+	const struct fmd_host *host;		/* the initiator */
+	const struct fmd_switch *sw;		/* NULL for FMD_CONN_DIRECT */
+	/*
+	 * What the binding reaches: an SLD, an LD of an MLD or a pool LD
+	 * of a Multi-Headed device, or a head that presents an MLD (see
+	 * fmd_bind_target()). NULL if no device is on the port, or the
+	 * binding reaches nothing cxl-fmd knows on it.
+	 */
+	const struct fmd_component *target;
+	const struct fmd_component *device;	/* the SLD, MLD or MHD; NULL if gone */
+	const struct fmd_ld *ld;		/* the target if it is an LD, else NULL */
+	const struct fmd_head *head;		/* the head of an MHD, if any */
+	enum fmd_conn_state state;
+	const struct fmd_binding_op *op;	/* the bind or unbind under way */
+	bool made_here;				/* a struct fmd_binding_mark has it */
+};
+
 
 /*
  * Hash table for O(1) component lookup
@@ -1177,6 +1290,10 @@ struct fmd_ctx {
 	/* Connections (linked list) */
 	struct fmd_connection *connections;
 	int connection_count;
+
+	/* Binds and unbinds under way, and bindings made by this run (src/conn_view.c) */
+	struct fmd_binding_op *binding_ops;
+	struct fmd_binding_mark *binding_marks;
 
 	/* Redfish HTTP server */
 	struct fmd_redfish redfish;
@@ -1413,6 +1530,135 @@ struct fmd_connection *fmd_connection_find_by_chunk(struct fmd_ctx *ctx,
  * Return: 0 on success, -1 on error
  */
 int fmd_connection_remove(struct fmd_ctx *ctx, struct fmd_connection *conn);
+
+/*
+ * Connections derived from the switch (src/conn_view.c). See struct
+ * fmd_conn_view for the locks the caller holds, and how long what they
+ * return stays valid. None of them sends a command.
+ */
+
+/*
+ * What a binding of physical port @port, with LD-ID @ld_id (FMD_LD_NONE
+ * for the whole port), reaches. NULL if @port is NULL or nothing on it is
+ * reached that way.
+ *
+ *  - the SLD on the port, bound whole;
+ *  - LD @ld_id of the MLD on the port: "If the bind target is a physical
+ *    port connected to an MLD, then a corresponding LD-ID must also be
+ *    specified" (CXL r4.0 Section 7.6.7.2.2);
+ *  - the port is a head of a Multi-Headed device, bound whole: the one
+ *    pool LD mapped to the head, "A head with one LD mapped shall present
+ *    itself as an SLD" (Section 2.5);
+ *  - the port is a head that presents an MLD, bound by an LD-ID: the
+ *    head. "The MH-MLD maps the LD-IDs received at a head to the
+ *    device-wide LD index in the MH-MLD's LD pool" (Section 2.5.1) by no
+ *    rule the FM is told.
+ */
+struct fmd_component *fmd_bind_target(const struct fmd_port *port, uint16_t ld_id);
+
+/* A pool LD of a Multi-Headed device: the head it is mapped to, if any */
+struct fmd_head *fmd_ld_head(const struct fmd_ld *ld);
+
+/*
+ * The pool LD a head that presents an SLD reaches: the one LD mapped to
+ * it ("In MH-SLDs, there is a 1:1 mapping between heads and LDs", Section
+ * 2.5). NULL if the head presents an MLD, or is mapped to no LD or to more
+ * than one.
+ */
+struct fmd_ld *fmd_head_whole_ld(const struct fmd_head *head);
+
+/*
+ * The LD of @dev (an MLD or a Multi-Headed device) that chunk @chunk is
+ * on, NULL if it names none: its InterleaveSets[0].Memory is the LD's
+ * component ID, or a URI ending in CXLLogicalDevices/{N} or "_ld{N}", or
+ * else the chunk's own ID ends in "_ld{N}_chunk".
+ */
+const struct fmd_ld *fmd_chunk_ld(const struct fmd_component *dev,
+				  const struct fmd_mem_chunk *chunk);
+
+bool fmd_bind_key_eq(const struct fmd_bind_key *a, const struct fmd_bind_key *b);
+
+/*
+ * The Connection ID of a switch-attached binding,
+ * "{switch}_vcs{V}_vppb{P}_p{N}", with "_ld{L}" for an LD (cxl-fmd's
+ * choice). The vPPB is in it so that a stale ID never names a later
+ * binding of the same target or of the same vPPB.
+ */
+int fmd_conn_id_format(const struct fmd_bind_key *key, char *buf, size_t size);
+
+/*
+ * The key a switch-attached Connection ID names: parsed from the right,
+ * since a switch ID may hold '_'. -EINVAL unless @id is exactly what
+ * fmd_conn_id_format() makes of it.
+ */
+int fmd_conn_id_parse(const char *id, struct fmd_bind_key *key);
+
+typedef int (*fmd_conn_cb)(const struct fmd_conn_view *v, void *arg);
+
+/*
+ * Each Connection: for each enabled VCS of each switch, each vPPB but the
+ * USP's (vPPB 0, "the USP vPPB, then the DSP vPPBs", Section 7.1.4) that
+ * is bound (02h or 03h) or that a bind under way names, to a port that is
+ * a memory device's, or that has none. A vPPB bound to a PCIe device, a
+ * Type 1 or Type 2 device or a switch, and one with a Bound PID (04h, made
+ * with Configure PID Binding, not Bind vPPB), give none.
+ *
+ * @cb's non-zero return stops the walk and is returned.
+ */
+int fmd_conn_for_each(const struct fmd_ctx *ctx, fmd_conn_cb cb, void *arg);
+
+/* The Connection @id; -ENOENT if there is none, or its vPPB no longer holds it */
+int fmd_conn_lookup(const struct fmd_ctx *ctx, const char *id,
+		    struct fmd_conn_view *v);
+
+/*
+ * The Connection of VCS @vcs_id of @sw to port @port_id and LD @ld_id
+ * (FMD_LD_NONE for the whole port), on any of its vPPBs, a bind under way
+ * included. -ENOENT if there is none.
+ */
+int fmd_conn_find_target(const struct fmd_ctx *ctx, const struct fmd_switch *sw,
+			 uint8_t vcs_id, uint8_t port_id, uint16_t ld_id,
+			 struct fmd_conn_view *v);
+
+/*
+ * Each memory chunk a Connection makes reachable: every chunk of an SLD,
+ * the chunks on an LD, none when the target is a head or unknown.
+ * @cb's non-zero return stops the walk and is returned.
+ */
+int fmd_conn_for_each_chunk(const struct fmd_conn_view *v,
+			    int (*cb)(const struct fmd_mem_chunk *chunk, void *arg),
+			    void *arg);
+
+/*
+ * The binds and unbinds under way. fabric_lock held exclusively to add or
+ * remove, shared to look.
+ */
+struct fmd_binding_op *fmd_binding_op_add(struct fmd_ctx *ctx,
+					  const struct fmd_bind_key *key,
+					  enum fmd_bind_op_kind kind,
+					  uint8_t unbind_option,
+					  const char *task_id);
+/* The op on vPPB @vppb_id of VCS @vcs_id of switch @switch_id */
+struct fmd_binding_op *fmd_binding_op_find(const struct fmd_ctx *ctx,
+					   const char *switch_id,
+					   uint8_t vcs_id, uint8_t vppb_id);
+/* The op on port @port_id, LD @ld_id of switch @switch_id, in any VCS */
+struct fmd_binding_op *fmd_binding_op_find_target(const struct fmd_ctx *ctx,
+						  const char *switch_id,
+						  uint8_t port_id, uint16_t ld_id);
+void fmd_binding_op_remove(struct fmd_ctx *ctx, struct fmd_binding_op *op);
+
+/* The bindings this run made: fabric_lock as for the operations */
+int fmd_binding_mark_add(struct fmd_ctx *ctx, const struct fmd_bind_key *key);
+bool fmd_binding_mark_find(const struct fmd_ctx *ctx, const struct fmd_bind_key *key);
+/*
+ * Drop the marks of switch @switch_id (each switch's, if NULL) whose vPPB
+ * no longer holds them, or whose switch is gone. Topology read lock held.
+ */
+void fmd_binding_marks_prune(struct fmd_ctx *ctx, const char *switch_id);
+
+/* Free the operations and the marks */
+void fmd_binding_state_free(struct fmd_ctx *ctx);
 
 /**
  * fmd_host_find - Find a host by ID

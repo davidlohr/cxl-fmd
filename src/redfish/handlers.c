@@ -680,45 +680,6 @@ json_t *fmd_redfish_fabric(struct fmd_ctx *ctx, const char *fabric_id)
  * an LD of that head is shown to reach.
  */
 
-/* A pool LD of a Multi-Headed device: the head it is mapped to, if any */
-static struct fmd_head *ld_head(const struct fmd_ld *ld)
-{
-	struct fmd_component *mhd = ld->base.parent;
-	struct fmd_component *child;
-
-	if (!mhd || mhd->type != FMD_COMPONENT_MHD || ld->binding_point_id == 0xFF)
-		return NULL;
-	fmd_for_each_child_type(mhd, child, FMD_COMPONENT_HEAD) {
-		if (fmd_to_head(child)->head_id == ld->binding_point_id)
-			return fmd_to_head(child);
-	}
-	return NULL;
-}
-
-/*
- * The pool LD a head that is bound whole reaches: the one LD mapped to it.
- * "In MH-SLDs, there is a 1:1 mapping between heads and LDs", and "A head
- * with one LD mapped shall present itself as an SLD" (Section 2.5). NULL
- * if the head presents an MLD, or is mapped to no LD or to more than one.
- */
-static struct fmd_ld *head_whole_ld(const struct fmd_head *head)
-{
-	struct fmd_component *mhd = head->base.parent;
-	struct fmd_component *child;
-	struct fmd_ld *found = NULL;
-
-	if (!mhd || head->presentation == FMD_HEAD_MLD)
-		return NULL;
-	fmd_for_each_child_type(mhd, child, FMD_COMPONENT_LD) {
-		if (fmd_to_ld(child)->binding_point_id != head->head_id)
-			continue;
-		if (found)
-			return NULL;
-		found = fmd_to_ld(child);
-	}
-	return found;
-}
-
 /* Whether @comp has a target Endpoint of its own */
 static bool is_target_endpoint(const struct fmd_component *comp)
 {
@@ -750,30 +711,15 @@ static bool is_target_endpoint(const struct fmd_component *comp)
  *    whole: the pool LD mapped to that head;
  *  - 03h, the port is a head that presents an MLD: the head.
  *
- * Caller holds the topology read lock.
+ * The rule is fmd_bind_target()'s, which the Connections computed from
+ * the switch use too. Caller holds the topology read lock.
  */
 static struct fmd_component *vppb_target(const struct fmd_vppb *vppb)
 {
-	struct fmd_port *port = vppb->port;
-	struct fmd_component *dev;
-
-	if (!port || (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
-		      vppb->binding_status != FMD_VPPB_BOUND_LD))
-		return NULL;
-
-	dev = port->base.first_child;
-	if (dev && dev->type == FMD_COMPONENT_SLD)
-		return vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ? dev : NULL;
-	if (dev && dev->type == FMD_COMPONENT_MLD)
-		return (vppb->binding_status == FMD_VPPB_BOUND_LD && vppb->ld &&
-			vppb->ld->base.parent == dev) ? &vppb->ld->base : NULL;
-	if (port->head) {
-		if (vppb->binding_status == FMD_VPPB_BOUND_LD)
-			return port->head->presentation == FMD_HEAD_MLD ?
-			       &port->head->base : NULL;
-		struct fmd_ld *ld = head_whole_ld(port->head);
-		return ld ? &ld->base : NULL;
-	}
+	if (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT)
+		return fmd_bind_target(vppb->port, FMD_LD_NONE);
+	if (vppb->binding_status == FMD_VPPB_BOUND_LD)
+		return fmd_bind_target(vppb->port, vppb->bound_ld_id);
 	return NULL;
 }
 
@@ -1028,7 +974,7 @@ host_done:
 		entity_link = rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%u",
 				      dev->id, dev->id, ld->ld_id);
 		if (dev->type == FMD_COMPONENT_MHD) {
-			struct fmd_head *head = ld_head(ld);
+			struct fmd_head *head = fmd_ld_head(ld);
 
 			port = head ? head->port : NULL;
 		}

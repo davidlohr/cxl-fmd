@@ -48,6 +48,7 @@ src = files(
     'src/log.c',
     'src/discovery.c',
     'src/topology.c',
+    'src/conn_view.c',
     'src/mock.c',
     'src/validate.c',
     'src/tasks.c',
