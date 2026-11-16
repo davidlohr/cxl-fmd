@@ -119,14 +119,19 @@ static struct fmd_dc_extent *find_extent_by_rf_id(struct fmd_component *dev,
 static struct fmd_dc_extent *find_extent_by_link(struct fmd_component *dev,
 						 const char *odata_id)
 {
-	const char *p;
+	char prefix[2 * FMD_MAX_ID_LEN + 64];
+	size_t n;
 
 	if (!odata_id)
 		return NULL;
-	p = strstr(odata_id, "/MemoryExtents/");
-	if (!p)
+
+	/* an extent of this device: a link to another's names none of these */
+	n = (size_t)snprintf(prefix, sizeof(prefix),
+			     "/redfish/v1/Chassis/%s/PCIeDevices/%s/MemoryExtents/",
+			     dev->id, dev->id);
+	if (n >= sizeof(prefix) || strncmp(odata_id, prefix, n))
 		return NULL;
-	return find_extent_by_rf_id(dev, p + strlen("/MemoryExtents/"));
+	return find_extent_by_rf_id(dev, odata_id + n);
 }
 
 /* An all-zero Tag is no tag (cxl-fmd's convention) */

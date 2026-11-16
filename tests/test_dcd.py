@@ -522,6 +522,17 @@ class TestDynamicCapacityRelease:
         assert "ext_1_200000000" in extent_ids(api_client, MLD)
         assert "ext_0_200000000" in extent_ids(api_client, MLD)
 
+    def test_release_extent_of_another_device_400(self, api_client):
+        """A link names an extent of the device it is under: one of another
+        device's MemoryExtents is not this device's extent with the same Id,
+        and naming it is refused with 400."""
+        rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
+        status, _, _ = api_client.post(rel, release_body(
+            "Prescriptive",
+            ExtentList=[{"@odata.id": SLD + "/MemoryExtents/ext_0_200000000"}]))
+        assert status == 400
+        assert "ext_0_200000000" in extent_ids(api_client, MLD)
+
     def test_release_foreign_with_own_extent_400(self, api_client):
         """One foreign link refuses the whole list: nothing is released."""
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
