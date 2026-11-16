@@ -185,16 +185,20 @@ class TestDCDDiscovery:
             seen[ld] = (data["SequenceNumber"], data["ExtentSizeMiB"])
         assert seen[0] == seen[1]
 
-    def test_pending_extent_flagged_in_region(self, api_client):
+    def test_pending_add_is_the_tags(self, api_client):
+        """An add host 1 has not answered is in its tag's PendingLDs; no
+        listed extent is Pending or Starting (cxl-fmd's choice: the Pending
+        Reference Bitmap is per tag, Table 7-78)."""
         status, data = api_client.get(MLD + "/CXLLogicalDevices/1/MemoryRegions/0")
         assert status == 200
+        assert data["Status"]["Health"] == "OK"
         pending = {e["ExtentLink"]["@odata.id"]: e["Pending"] for e in data["MemoryExtents"]}
-        assert pending[MLD + "/MemoryExtents/ext_1_280000000"] is True
+        assert pending[MLD + "/MemoryExtents/ext_1_280000000"] is False
         assert pending[MLD + "/MemoryExtents/ext_1_200000000"] is False
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_1_280000000")
-        assert data["Status"]["State"] == "Starting"
-        status, data = api_client.get(MLD + "/MemoryExtents/ext_1_200000000")
-        assert data["Status"]["State"] == "Enabled"
+        for ext in ("ext_1_280000000", "ext_1_200000000"):
+            status, data = api_client.get(MLD + "/MemoryExtents/" + ext)
+            assert data["Status"] == {"State": "Enabled", "Health": "OK"}
+        assert tag_view(api_client, MLD)[TAG_PENDING]["PendingLDs"] == [1]
 
     def test_mld_host_views_are_per_ld(self, api_client):
         """A region lists its own host's extents only."""
@@ -880,15 +884,18 @@ class TestPerHostDPA:
         assert data["ExtentSizeMiB"] == 1024
 
     def test_pending_is_per_host(self, api_client):
+        """Host 1 has not answered the add of TAG_C2, host 0 has: the tag's
+        row says so, and no listed extent is Pending."""
         status, data = api_client.get(PH + "/CXLLogicalDevices/1/MemoryRegions/0")
         pending = {e["ExtentLink"]["@odata.id"]: e["Pending"] for e in data["MemoryExtents"]}
-        assert pending[PH + "/MemoryExtents/ext_1_440000000"] is True
+        assert pending[PH + "/MemoryExtents/ext_1_440000000"] is False
         assert pending[PH + "/MemoryExtents/ext_1_400000000"] is False
-        status, data = ph_extent(api_client, "ext_1_440000000")
-        assert data["Status"]["State"] == "Starting"
-        status, data = ph_extent(api_client, "ext_0_240000000")
-        assert data["Tag"] == TAG_C2
-        assert data["Status"]["State"] == "Enabled"
+        for ext in ("ext_1_440000000", "ext_0_240000000"):
+            status, data = ph_extent(api_client, ext)
+            assert data["Tag"] == TAG_C2
+            assert data["Status"]["State"] == "Enabled"
+        row = tag_view(api_client)[TAG_C2]
+        assert row["PendingLDs"] == [1] and row["AcceptedLDs"] == [0]
 
     def test_tags_entry_fm_reference(self, api_client):
         """A "tags" entry of the file gives the 5608h FM Holds Reference, and

@@ -962,6 +962,16 @@ struct fmd_dc_tags {
 	bool     unsupported;               /* the device answered Unsupported */
 };
 
+/*
+ * The tag list is not known for a reason other than the device answering
+ * Unsupported: a read failed, or kept changing, or none was made. What it
+ * would say (an add an LD has not answered, an FM reference) is not known.
+ */
+static inline bool fmd_dc_tags_failed(const struct fmd_dc_tags *tags)
+{
+	return !tags->known && !tags->unsupported;
+}
+
 /* Bit @ld of a 5608h LD bitmap; false past LD 255 */
 static inline bool fmd_dc_bm_test(const uint8_t *bm, unsigned int ld)
 {
@@ -1052,7 +1062,12 @@ struct fmd_dc_extent {
 	uint8_t  tag[FMD_DC_TAG_LEN];       /* all zero: no tag (cxl-fmd's choice) */
 	uint16_t shared_seq;
 	uint8_t  region_id;                 /* this host's region, or FMD_DC_REGION_NONE */
-	bool     pending;                   /* this host's bit in the tag's Pending Reference Bitmap */
+	/*
+	 * Mock only: the topology file has the host not answered the add. The
+	 * mock's 5608h list and its Prescriptive release take it; Redfish
+	 * does not show it, and nothing read from a device sets it.
+	 */
+	bool     pending;
 };
 
 /*

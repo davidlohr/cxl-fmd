@@ -1477,10 +1477,9 @@ any of them is done.
 
 In summary:
 
-1. Dynamic capacity: an extent's `Pending` comes from its host's bit of
-   the Pending Reference Bitmap of its tag (5608h), so it is per tag, not
-   per extent, and only for extents that the host's 5603h lists. An add a
-   device does not list shows only in `Oem/Cxl/DynamicCapacityTags` of the
+1. Dynamic capacity: no extent is shown pending. The Pending Reference
+   Bitmap of 5608h is per tag, so an add a host has not answered shows
+   only in `Oem/Cxl/DynamicCapacityTags` (`PendingLDs`) of the
    `PCIeDevice`, which has no schema (the Redfish Service Validator is run
    with `--nooemcheck`). Add and release answer `200 OK` with no `Task`. A
    Prescriptive add cannot be named through Redfish, as `POST` on
@@ -1802,6 +1801,8 @@ Changes from the fixes of the external design review (branch
 | Connection `POST` naming a chunk by its URI in a host's view, `/redfish/v1/Systems/{host}/MemoryDomains/{dom}/MemoryChunks/{chunk}` | taken, by its last segment | `400`: a chunk is named by its Chassis URI |
 | Connection `POST` with `InitiatorEndpointGroups` or `TargetEndpointGroups` | ignored: `201` from the Endpoints alone | `400`, nothing bound |
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
+| `GET` of a DCD's `MemoryRegion` or `MemoryExtent` when the host's LD is in the Pending Reference Bitmap of a tag (5608h), and of an extent a mock topology file declares `pending` | `Pending` `true` in the region's `MemoryExtents[]` and `Status.State` `Starting` for every extent of that host and tag, accepted ones too | `Pending` `false` and `Enabled` for every extent 5603h lists; the add is in the tag's `PendingLDs` of `Oem/Cxl/DynamicCapacityTags` only |
+| `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
 
 Mock topologies and discovery:
 

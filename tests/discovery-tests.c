@@ -2210,7 +2210,7 @@ static void test_dc_return_codes(void)
 
 	/*
 	 * 5608h answered Unsupported at discovery: the extents are kept, with
-	 * no tag list and nothing pending.
+	 * no tag list, and none of them pending.
 	 */
 	CHECK(!fmd_memdev_dcd(dev)->tags.known && fmd_memdev_dcd(dev)->tags.unsupported &&
 	      fmd_dc_find_extent(dev, 0, 1ULL << 30) &&
@@ -2722,13 +2722,63 @@ static int dc_refresh_host_tags(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	return fmd_dcd_refresh(ctx, dev, host);
 }
 
+/* "Pending" of the first of @dev's region (@ld, @region)'s MemoryExtents[] linking @ext */
+static int dc_region_pending(struct fmd_component *dev, struct fmd_ctx *ctx,
+			     const char *ld, const char *region, const char *ext)
+{
+	json_t *j = fmd_redfish_dc_memory_region(ctx, dev->id, dev->id, ld, region);
+	json_t *arr = json_object_get(j, "MemoryExtents");
+	int ret = -1;
+
+	for (size_t i = 0; i < json_array_size(arr); i++) {
+		json_t *e = json_array_get(arr, i);
+		const char *u = json_string_value(json_object_get(json_object_get(e, "ExtentLink"),
+								  "@odata.id"));
+
+		if (u && strrchr(u, '/') && !strcmp(strrchr(u, '/') + 1, ext)) {
+			json_t *p = json_object_get(e, "Pending");
+
+			ret = json_is_boolean(p) ? json_is_true(p) : -2;
+			break;
+		}
+	}
+	json_decref(j);
+	return ret;
+}
+
+/* Status.State and Status.Health of MemoryExtent @ext of @dev, or "" */
+static void dc_extent_status(struct fmd_component *dev, struct fmd_ctx *ctx, const char *ext,
+			     char *state, char *health, size_t len)
+{
+	json_t *j = fmd_redfish_dc_memory_extent(ctx, dev->id, dev->id, ext);
+	json_t *st = json_object_get(j, "Status");
+	const char *s = json_string_value(json_object_get(st, "State"));
+	const char *h = json_string_value(json_object_get(st, "Health"));
+
+	snprintf(state, len, "%s", s ? s : "");
+	snprintf(health, len, "%s", h ? h : "");
+	json_decref(j);
+}
+
+/* Status.Health of MemoryRegion (@ld, @region) of @dev, or "" */
+static void dc_region_health(struct fmd_component *dev, struct fmd_ctx *ctx, const char *ld,
+			     const char *region, char *health, size_t len)
+{
+	json_t *j = fmd_redfish_dc_memory_region(ctx, dev->id, dev->id, ld, region);
+	const char *h = json_string_value(json_object_get(json_object_get(j, "Status"), "Health"));
+
+	snprintf(health, len, "%s", h ? h : "");
+	json_decref(j);
+}
+
 /*
- * Pending is the host's bit in the Pending Reference Bitmap of the tag,
- * "an LD for which the tagged capacity has been added with no host
- * response yet"; the Reference Bitmap has "an LD that has accepted the
- * capacity" (Table 7-78). Hosts 0 and 1 both list tag dc_tag: with host 0
- * accepted and host 1 pending, only host 1's extent is pending; with both
- * accepted, neither is. FM Holds Reference is the tag's.
+ * The Pending Reference Bitmap is per tag, "Each 1 indicates an LD for
+ * which the tagged capacity has been added with no host response yet"
+ * (Table 7-78): it is the tag's, and no extent is made pending from it
+ * (cxl-fmd's choice). Hosts 0 and 1 both list tag dc_tag, host 0 in the
+ * Reference Bitmap and host 1 in the Pending one: neither listed extent is
+ * pending, and host 1's add is in the tag's row. FM Holds Reference is the
+ * tag's.
  */
 static void test_dc_tags_pending(void)
 {
@@ -2738,6 +2788,8 @@ static void test_dc_tags_pending(void)
 	struct dc_ext e = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
 	struct fmd_dc_extent *e0, *e1;
 	const struct fmd_dc_tag *t;
+	char state[32], health[32];
+	json_t *view, *pend;
 	int before = failures;
 
 	if (!dev)
@@ -2755,23 +2807,129 @@ static void test_dc_tags_pending(void)
 	CHECK(e0 && e1 && t, "no extents, or no tag entry");
 	if (!e0 || !e1 || !t)
 		goto out;
-	CHECK(!e0->pending && e1->pending,
-	      "pending: host 0 %d, host 1 %d; only host 1's bit is set",
-	      e0->pending, e1->pending);
+	CHECK(dc_region_pending(dev, ctx, "1", "1", "ext_1_40000000") == 0,
+	      "host 1's listed extent is Pending %d",
+	      dc_region_pending(dev, ctx, "1", "1", "ext_1_40000000"));
+	dc_extent_status(dev, ctx, "ext_1_40000000", state, health, sizeof(state));
+	CHECK(!strcmp(state, "Enabled") && !strcmp(health, "OK"),
+	      "host 1's listed extent is %s, %s", state, health);
 	CHECK(t->fm_ref && fmd_dc_bm_test(t->ref, 0) && fmd_dc_bm_test(t->pend, 1) &&
 	      !fmd_dc_bm_test(t->ref, 1), "the tag's entry is not as the device sent it");
+	view = fmd_redfish_dc_tags_oem(ctx, dev, dev->id, dev->id);
+	pend = json_object_get(json_object_get(json_object_get(view, "Cxl"),
+					       "DynamicCapacityTags"), "Tags");
+	pend = json_object_get(json_array_get(pend, 0), "PendingLDs");
+	CHECK(json_array_size(pend) == 1 && json_integer_value(json_array_get(pend, 0)) == 1,
+	      "the tag view has no PendingLDs [1]");
+	json_decref(view);
 
 	answer_dc_tags(ep, 2, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
 		       { 0, 1 }, 2, { 0 }, 0 }, 1);
 	dc_refresh_host_tags(ctx, ep, dev, 1, &e, 1);
-	e1 = fmd_dc_find_extent(dev, 1, 1ULL << 30);
 	t = fmd_dc_tag_find(dev, dc_tag);
-	CHECK(e1 && !e1->pending && !e0->pending, "accepted by host 1, still pending");
-	CHECK(t && !t->fm_ref && fmd_memdev_dcd(dev)->tags.gen == 2,
-	      "the tag list was not replaced");
+	CHECK(t && !t->fm_ref && !fmd_dc_bm_test(t->pend, 1) &&
+	      fmd_memdev_dcd(dev)->tags.gen == 2, "the tag list was not replaced");
 out:
 	fmd_ctx_free(ctx);
-	report("pending from the Pending Reference Bitmap", before);
+	report("an add not answered is the tag's, not an extent's", before);
+}
+
+/*
+ * Review F12 and DCD-Q T4b: one host holds accepted capacity and an add it
+ * has not answered under one tag, its bit set in both the Reference and the
+ * Pending Reference Bitmap (Table 7-78). Its two extents that 5603h lists
+ * are neither of them pending, nor Starting: the bitmap does not say which
+ * extent, if any, is the add.
+ */
+static void test_dc_tags_accepted_and_pending(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xf1, 2);
+	struct dc_ext e[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag, 0 },
+	};
+	static const char *const ids[2] = { "ext_0_40000000", "ext_0_50000000" };
+	char state[32], health[32];
+	int before = failures;
+
+	if (!dev)
+		goto out;
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
+		       { 0 }, 1, { 0 }, 1 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 0, e, 2);
+	for (int i = 0; i < 2; i++) {
+		int p = dc_region_pending(dev, ctx, "0", "1", ids[i]);
+
+		dc_extent_status(dev, ctx, ids[i], state, health, sizeof(state));
+		CHECK(p == 0 && !strcmp(state, "Enabled"),
+		      "%s, accepted under a tag with an add outstanding: Pending %d, %s",
+		      ids[i], p, state);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("accepted and pending capacity under one tag", before);
+}
+
+/*
+ * Review F12: a tag list that cannot be read is not "nothing pending". The
+ * bitmaps are "reserved if the Pending Reference Bitmaps Valid bit is not
+ * set" (Table 7-78), and with no read there is not even that. A failed
+ * 5608h, with no list read before and after one was: the tag view has
+ * TagsKnown false and no Tags, the host's region and its tagged extent are
+ * Warning. A device that answers Unsupported has no list to fail: OK.
+ */
+static void test_dc_tags_unreadable(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xf2, 2);
+	struct dc_ext e = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	char state[32], health[32], rhealth[32];
+	json_t *view, *tags;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+	for (int round = 0; round < 3; round++) {
+		/* 0: never read; 1: read with host 0 pending; 2: then failed */
+		if (round == 1)
+			answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
+				       { 0 }, 0, { 0 }, 1 }, 1);
+		else
+			answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+		dc_refresh_host_tags(ctx, ep, dev, 0, &e, 1);
+
+		dc_extent_status(dev, ctx, "ext_0_40000000", state, health, sizeof(state));
+		dc_region_health(dev, ctx, "0", "1", rhealth, sizeof(rhealth));
+		view = fmd_redfish_dc_tags_oem(ctx, dev, dev->id, dev->id);
+		tags = json_object_get(json_object_get(json_object_get(view, "Cxl"),
+						       "DynamicCapacityTags"), "Tags");
+		CHECK(dc_region_pending(dev, ctx, "0", "1", "ext_0_40000000") == 0 &&
+		      !strcmp(state, "Enabled"), "round %d: Pending %d, %s", round,
+		      dc_region_pending(dev, ctx, "0", "1", "ext_0_40000000"), state);
+		if (round == 1)
+			CHECK(!strcmp(health, "OK") && !strcmp(rhealth, "OK") &&
+			      json_array_size(tags) == 1,
+			      "a list read: extent %s, region %s, %zu tags", health, rhealth,
+			      json_array_size(tags));
+		else
+			CHECK(!strcmp(health, "Warning") && !strcmp(rhealth, "Warning") && !tags,
+			      "round %d, no list: extent %s, region %s, Tags %s", round,
+			      health, rhealth, tags ? "given" : "absent");
+		json_decref(view);
+	}
+
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	dc_refresh_host_tags(ctx, ep, dev, 0, &e, 1);
+	dc_extent_status(dev, ctx, "ext_0_40000000", state, health, sizeof(state));
+	dc_region_health(dev, ctx, "0", "1", rhealth, sizeof(rhealth));
+	CHECK(!strcmp(health, "OK") && !strcmp(rhealth, "OK"),
+	      "5608h Unsupported: extent %s, region %s", health, rhealth);
+out:
+	fmd_ctx_free(ctx);
+	report("a tag list that cannot be read", before);
 }
 
 /*
@@ -7440,6 +7598,8 @@ int main(void)
 	test_dc_prescriptive_release_payload();
 	test_dc_set_region_busy_any_host();
 	test_dc_tags_pending();
+	test_dc_tags_accepted_and_pending();
+	test_dc_tags_unreadable();
 	test_dc_tags_validity0();
 	test_dc_tags_ld200();
 	test_dc_tags_generation_restart();

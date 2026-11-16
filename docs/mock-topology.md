@@ -515,7 +515,7 @@ The hosts are named in one of two ways:
 | `shared_seq` | integer | 0 | Shared Extent Sequence |
 | `host_id` / `hosts` | integer / array | 0 | Host(s) the capacity is allocated to. `"hosts": []` is capacity no host holds, and needs `fm_referenced` |
 | `per_host` | array | - | `[{"host_id": 1, "start_mb": 16384}]`: each host's extent, `start_mb` (required) in that host's DPA space and inside one of its regions. `len_mb`, `shared_seq` and `pending` may be given to differ from the entry's |
-| `pending` | boolean | false | The host(s) have not answered the add: the extent is pending, and the host's bit is set in the tag's Pending Reference Bitmap. On hardware an extent with no tag has no row of that list and is never pending; the mock takes this flag as it is |
+| `pending` | boolean | false | The host(s) have not answered the add: the host's bit is set in the tag's Pending Reference Bitmap, not in its Reference Bitmap, and the mock's Prescriptive release refuses the extent without `ForcedRemoval`. Redfish shows no extent pending: the extent is `Pending` `false` and `Enabled`, and the add is in the tag's `PendingLDs` ([DCD-FM-API.md](DCD-FM-API.md) Comment 5). An extent with no tag has no row of that list; the mock takes this flag as it is |
 | `fm_referenced` | boolean | false | The FM holds a reference on the tag (5606h). It is the tag's, not the extent's |
 
 Capacity of `"hosts": []` with `fm_referenced` is what an FM reference keeps

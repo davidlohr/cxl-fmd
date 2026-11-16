@@ -76,11 +76,11 @@ table is cxl-fmd's proposal, not DSP0288 text.
 | Dynamic Capacity Add Reference (5606h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `true` | Yes |
 | Dynamic Capacity Remove Reference (5607h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `false` | Yes |
 | Dynamic Capacity List Tags (5608h) | Generation Number | `PCIeDevice` | `Oem/Cxl/DynamicCapacityTags/Generation` (Comment 4) | Yes |
-| Dynamic Capacity List Tags | Validity Bitmap | `PCIeDevice` | whether `AcceptedLDs` and `PendingLDs` are given (Comment 4); whether `Pending` is ever true (Comment 5) | Yes |
+| Dynamic Capacity List Tags | Validity Bitmap | `PCIeDevice` | whether `AcceptedLDs` and `PendingLDs` are given (Comment 4) | Yes |
 | Dynamic Capacity List Tags | Tag | `PCIeDevice` | `Oem/Cxl/DynamicCapacityTags/Tags[].Tag` | Yes |
 | Dynamic Capacity List Tags | Flags Bit[0]: FM Holds Reference | `MemoryExtent`, `PCIeDevice` | `FMReferencedExtent` on every extent with the tag; `Tags[].FMHoldsReference` | Yes |
 | Dynamic Capacity List Tags | Reference Bitmap | `PCIeDevice` | `Tags[].AcceptedLDs` (Comment 4) | Yes, Oem |
-| Dynamic Capacity List Tags | Pending Reference Bitmap | `MemoryRegion`, `MemoryExtent`, `PCIeDevice` | `MemoryExtents[].Pending` and `Status.State` `Starting` of the host's extents with the tag (Comment 5); `Tags[].PendingLDs` | Yes, per tag |
+| Dynamic Capacity List Tags | Pending Reference Bitmap | `PCIeDevice` | `Tags[].PendingLDs`, per tag; not `MemoryExtents[].Pending`, which is `false` for every extent 5603h lists (Comment 5) | Yes, Oem |
 | Dynamic Capacity Event Record (via Get Event Records) | Event Types 04h (Add Capacity Response) and 05h (Capacity Released) | `LogEntry` | `CXLEntryType` = `DynamicCapacity`, in the `DeviceLog` of the host's LD; not for Multi-Headed devices | Yes |
 | Dynamic Capacity Event Record, 04h and 05h | Number of Available Extents (78h), Number of Available Tags (7Ch), when Validity Flags Bit[0] is set | `CXLLogicalDevice` | `AvailableExtents`, `AvailableTags` of the host the record names | Yes |
 
@@ -192,7 +192,7 @@ schema are cxl-fmd's choice; the Redfish Service Validator is run with
 
 | Property | From |
 |----------|------|
-| `TagsKnown` | whether the last 5608h read of the device completed. `false` when it failed, or the device answered Unsupported; `Tags` is then empty |
+| `TagsKnown` | whether the last 5608h read of the device completed. `false` when it failed, or the device answered Unsupported; `Tags` is then left out, not empty, as an empty list would say that no LD has an add outstanding (cxl-fmd's choice) |
 | `Generation` | Generation Number of the last complete read, "Generation number of the tags list. This number shall change every time the remainder of the command's payload would change" (Table 7-77) |
 | `Tags[].Tag` | the Tag, as a UUID string |
 | `Tags[].FMHoldsReference` | Flags Bit[0] |
@@ -207,28 +207,35 @@ host holds (`AcceptedLDs` empty, no `Extents`), and an add an LD has not
 answered that its 5603h does not list (the LD in `PendingLDs`, no
 `Extents` of that LD).
 
-**Comment 5:** `Pending` is per host. An extent is pending when its host's
-LD-ID is set in the Pending Reference Bitmap of the extent's tag, and only
-when the Validity Bitmap has "Pending Reference Bitmaps Valid" set: the
-bitmap "is reserved if the Pending Reference Bitmaps Valid bit is not set"
-(Table 7-78). A pending extent has `Pending` `true` in its region's
-`MemoryExtents[]` and `Status.State` `Starting`; the extents other hosts
-have of the same tag are not affected. What is still open:
+**Comment 5:** `MemoryExtents[].Pending` of a `MemoryRegion` is `false`,
+and `Status.State` of a `MemoryExtent` `Enabled`, for every extent the
+host's 5603h lists (cxl-fmd's choice). An add an LD has not answered is
+shown only in the tag view, as `PendingLDs` (Comment 4). Why:
 
-- Only extents that 5603h lists can be pending. Section 9.13.3 says of the
-  Extent List a host sees that it "does not contain extents that are still
-  pending acceptance from the host via the Add Dynamic Capacity Response
-  command"; 5603h says only that it is the "Extent list for the specified
-  host" (Table 7-71), and does not say whether it lists them. cxl-fmd
-  assumes neither (cxl-fmd's choice): a listed extent takes `Pending` from
-  the bitmap, and an add that is not listed is shown only in the tag view
-  (Comment 4, `PendingLDs`). No extent is made up from the 5604h request.
-- The bitmaps are per tag, not per extent. A host with accepted and
-  pending capacity under one tag has every extent of that tag pending
-  (cxl-fmd's choice).
-- On hardware, an extent with no tag (all zero, cxl-fmd's convention) has
-  no row of the tag list and is never pending, nor is any extent while the
-  tag list is not known.
+- The Pending Reference Bitmap is per tag: "Each 1 indicates an LD for
+  which the tagged capacity has been added with no host response yet"
+  (Table 7-78). A host can hold capacity it accepted and an add it has not
+  answered under one tag, its LD in both bitmaps; which of its extents, if
+  any, is the add, the bitmap does not say. So no extent is made pending
+  from it.
+- Section 9.13.3 says of the Extent List a host sees that it "does not
+  contain extents that are still pending acceptance from the host via the
+  Add Dynamic Capacity Response command". 5603h says only that its list is
+  the "Extent list for the specified host as defined in Table 8-230"
+  (Table 7-71), and does not say that it is the same list. cxl-fmd takes
+  an extent 5603h lists not to be pending, as Section 9.13.3 says of the
+  host's list; that 5603h is that list is cxl-fmd's reading, not the
+  specification's. No extent is made up from the 5604h request or from
+  the tag list.
+- When the tag list could not be read (a 5608h that failed, or kept
+  changing as it was read), whether an add is outstanding is not known:
+  `TagsKnown` is `false`, `Tags` is left out, and the `MemoryRegion`s of
+  the device and its `MemoryExtent`s with a tag have `Status.Health`
+  `Warning`. The listed extents stay `Pending` `false`, which does not
+  depend on the tag list. A device that answers Unsupported (5608h is
+  "DCO", "Optional for DCDs", in Table 8-397) has no tag list to fail:
+  `TagsKnown` `false`, no `Tags`, and no `Warning`; on it an add a host
+  has not answered cannot be seen at all.
 - 5604h and 5605h complete at the device when the host answers, which the
   FM learns from a DC event record, an Add Capacity Response (04h) or a
   Capacity Released (05h). The specification does not say whether the
@@ -237,7 +244,7 @@ have of the same tag are not affected. What is still open:
   actions answer `200 OK` once the FM-API command succeeds, with no
   `Task`, and a record only makes cxl-fmd read the host again (cxl-fmd's
   choice). The mock host accepts added capacity at once, so in the mock
-  `Pending` is only true for what a topology file declares pending.
+  only a topology file has an add the host has not answered.
 
 **Comment 6:** A host's Extent List is read a page at a time, and its
 Extent List Generation Number is "A device-generated value that is used to
@@ -420,7 +427,8 @@ empty.
 ```
 
 `ExtentsCount` and `MemoryExtents[]` are the extents of this LD's host in
-the region, and `Pending` is that host's (Comment 5).
+the region; `Pending` is `false` for each (Comment 5). `Status.Health` is
+`Warning` while the tag list could not be read (Comment 5).
 
 ### Set DC Region Configuration (5602h)
 
@@ -493,10 +501,11 @@ int cxlmi_cmd_fmapi_get_dc_region_ext_list(struct cxlmi_endpoint *ep,
 
 `FMReferencedExtent` is the FM Holds Reference flag of the extent's tag in
 the last complete 5608h read; it is left out while that read is not known
-(Comment 4). `Status.State` is `Starting` while the extent is pending
-(Comment 5), `Enabled` otherwise. `Status.Health` is `Warning` when the
-extent is in no region of its host, or when its host's last read failed
-and it is what the read before listed (Comment 6); `OK` otherwise.
+(Comment 4). `Status.State` is `Enabled`: an extent 5603h lists is not
+pending (Comment 5). `Status.Health` is `Warning` when the
+extent is in no region of its host, when its host's last read failed
+and it is what the read before listed (Comment 6), or when it has a tag
+and the tag list could not be read (Comment 5); `OK` otherwise.
 
 ```json
 {
@@ -596,7 +605,8 @@ exceed the region's decode length (Section 7.6.7.6.5), which is `409`
 (Comment 3). The mock checks the region's free space itself (`409`, or
 `400` for more than the region's length). On success cxl-fmd reads 5601h
 and 5603h for that host again, then 5608h; whether the new extent is then
-listed, and shows as `Pending`, depends on the device (Comment 5). The
+listed, or only shown in `PendingLDs` of its tag until the host answers,
+depends on the device (Comment 5). The
 answer is `200 OK`.
 
 ### Initiate Dynamic Capacity Release (5605h)
@@ -637,7 +647,9 @@ read again, and 5608h.
 
 What the mock refuses, as the specification says a device does:
 
-- A Prescriptive list with a pending extent and `ForcedRemoval` `false`:
+- A Prescriptive list with an extent the topology file declares pending
+  (the mock's choice; Redfish does not show it pending) and
+  `ForcedRemoval` `false`:
   "The command shall fail with Invalid Physical Address if an extent in the
   Extent List covers a nonexistent or pending (Pending state as defined in
   Section 9.13.3.3) DPA range and the Forced Removal flag is not set"
@@ -737,7 +749,7 @@ curl -X POST .../PCIeDevices/cxl_dcd0/Actions/PCIeDevice.CXLReferenceDCMemory \
 
 No dedicated Redfish resource: the list is shown as
 `Oem/Cxl/DynamicCapacityTags` on the `PCIeDevice` (Comment 4), and gives
-the extents `Pending` and `FMReferencedExtent`. Read once per device after
+the extents `FMReferencedExtent`. Read once per device after
 the hosts' 5601h and 5603h: on discovery, after 5602h, 5604h and 5605h,
 after 5606h and 5607h (alone), and after the DC event records name a host.
 
@@ -755,7 +767,8 @@ it or at a page with no tags, whichever comes first, and keeps at most 4096
 tags (cxl-fmd's limit). Only a complete read replaces the list. A device
 that answers Unsupported has no list (`TagsKnown` `false`); on any other
 failure the last list is kept, not known to be current (`TagsKnown`
-`false`, and no extent is pending). The extents are kept either way.
+`false`, `Tags` left out, and the device's regions and tagged extents
+`Warning`, Comment 5). The extents are kept either way.
 
 ```c
 int cxlmi_cmd_fmapi_dc_list_tags(struct cxlmi_endpoint *ep,
@@ -767,11 +780,11 @@ int cxlmi_cmd_fmapi_dc_list_tags(struct cxlmi_endpoint *ep,
 | Response field | Encoding | Redfish |
 |----------------|----------|---------|
 | `generation_num` | changes whenever the tag list changes | `Generation`; restart paging on change |
-| `validity_bitmap` | bit 0: `ref_bitmap` valid, bit 1: `pending_ref_bitmap` valid | gates `AcceptedLDs` and `PendingLDs`, and `Pending` (bit 1) |
+| `validity_bitmap` | bit 0: `ref_bitmap` valid, bit 1: `pending_ref_bitmap` valid | gates `AcceptedLDs` and `PendingLDs` |
 | `tags_list[i].tag` | 16 bytes | `Tags[].Tag` |
 | `tags_list[i].flags` | bit 0: FM reference held | `Tags[].FMHoldsReference`; `MemoryExtent.FMReferencedExtent` on every extent with this tag |
 | `tags_list[i].ref_bitmap` | 256 bits, bit n for LD n | `Tags[].AcceptedLDs` (Comment 4) |
-| `tags_list[i].pending_ref_bitmap` | 256 bits, bit n for LD n | `Tags[].PendingLDs`; `Pending` of every extent of LD n with this tag that 5603h lists (Comment 5) |
+| `tags_list[i].pending_ref_bitmap` | 256 bits, bit n for LD n | `Tags[].PendingLDs`; no extent's `Pending` (Comment 5) |
 
 An extent that 5603h lists for a host, and whose tag's row has the host in
 neither bitmap while the Reference Bitmap is valid, is logged at debug
@@ -794,7 +807,7 @@ DCD. Redfish never exposes it; cxl-fmd derives it from the
 
 The Host ID is two bytes, but the bitmaps of 5608h stop at LD 255 ("bit[7]
 of the last byte represents LD 255", Table 7-78). A host past 255 keeps
-its extents, but none of them is ever pending, it is in no `AcceptedLDs`
+its extents, it is in no `AcceptedLDs`
 or `PendingLDs`, and a DC event
 record that names it is logged as a warning and does not refresh it.
 
@@ -917,7 +930,7 @@ struct fmd_dc_extent {
 	uint8_t  tag[FMD_DC_TAG_LEN];       /* all zero: no tag (cxl-fmd's choice) */
 	uint16_t shared_seq;
 	uint8_t  region_id;                 /* this host's region, or FMD_DC_REGION_NONE */
-	bool     pending;                   /* this host's bit in the tag's Pending Reference Bitmap */
+	bool     pending;                   /* mock only: the file has the add not answered */
 };
 
 /* Mock only: capacity an FM reference keeps that no host holds; no MemoryExtent */
@@ -949,8 +962,8 @@ After the existing Type 3 classification:
    5601h, then 5603h into a scratch list, applied when complete (Comment
    6). A host that fails keeps its extents and is marked stale; the others
    are still read.
-3. 5608h once, device-wide; then each extent's `pending` is worked out
-   from its host's bit (Comment 5).
+3. 5608h once, device-wide; each extent's tag is checked against it,
+   and none is made pending from it (Comment 5).
 4. After 5602h: steps 2 and 3 for every host. After 5604h or 5605h: step
    2 for that host, then step 3. After 5606h or 5607h: step 3. After DC
    event records: step 2 for each host they name, then step 3.
@@ -985,8 +998,11 @@ Tag conversion (16 bytes to UUID string and back) belongs in
 
 A `dcd` object on any Type 3 device, so all of the above can be exercised
 and validated without hardware; [mock-topology.md](mock-topology.md) has
-the format. The mock host accepts added capacity immediately, so `Pending`
-is only ever `true` for extents a topology file declares pending, and the
+the format. The mock host accepts added capacity immediately, so only a
+topology file has an add the host has not answered: in the tag's
+`PendingLDs`, and, for an extent the file declares `pending`, in the
+mock's own Prescriptive release (the mock's choice); no extent shows
+`Pending` `true`. The
 mock builds the 5608h list a device would send from its extents, its FM
 references and the file's `tags` (the mock's choice).
 
@@ -1049,10 +1065,10 @@ where it says so), not the specification's.
    the Redfish Forum together with the missing DCD rows in DSP0288.
 2. **Does 5603h list extents still pending for the host?** Section 9.13.3
    says the host's Extent List "does not contain extents that are still
-   pending acceptance from the host"; 5603h (Table 7-71) does not say.
-   Choice: neither is assumed. A listed extent with a tag takes `Pending`
-   from its host's bit of the Pending Reference Bitmap; an add 5603h does
-   not list shows only in `Oem/Cxl/DynamicCapacityTags` (`PendingLDs`). No
+   pending acceptance from the host"; 5603h (Table 7-71) does not say
+   whether its list is that one. Choice: an extent 5603h lists is not
+   pending (`Pending` `false`, `Enabled`), and an add an LD has not
+   answered shows only in `Oem/Cxl/DynamicCapacityTags` (`PendingLDs`). No
    extent is made up. `tests/discovery-tests.c` covers both.
 3. **Where is shared capacity in each host's DPA space?** "The DPA ranges
    exposed by the device to each host are independent of one another"
@@ -1070,11 +1086,15 @@ where it says so), not the specification's.
    host's 5601h reports is kept for that host; the mock's `host_base_mb`
    varies the base only.
 5. **Which Tag is "no tag"?** The Tag is "Optional" (Table 8-230). Choice:
-   all zeros. Such an extent has no `Tag`, no `FMReferencedExtent`, and is
-   never pending; Enable Shared Access, 5606h and 5607h with it are `400`.
+   all zeros. Such an extent has no `Tag` and no `FMReferencedExtent`;
+   Enable Shared Access, 5606h and 5607h with it are `400`.
 6. **One host with accepted and pending capacity under one tag.** The
-   bitmaps are per tag (Table 7-78). Choice: the pending bit wins, and
-   every extent of that host and tag is pending.
+   bitmaps are per tag (Table 7-78), and do not say which extent, if any,
+   is the add. Choice: no extent is made pending from them; the host's LD
+   is in the tag's `AcceptedLDs` and `PendingLDs`, and its listed extents
+   are `Pending` `false` and `Enabled` (Comment 5). While the tag list
+   cannot be read, the regions and tagged extents are `Warning` and the
+   view has no `Tags`, rather than showing nothing outstanding.
 7. **Completion of an add or a release.** Whether 04h is sent for an add a
    host accepts none of, or 05h after a Forced Removal or a device's own
    reclaim, is not said; nor whether the FM's 04h records follow the order

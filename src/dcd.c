@@ -1651,16 +1651,16 @@ out:
 }
 
 /*
- * Pending, from the tag list: an extent is pending when its host's bit is
- * set in the Pending Reference Bitmap of its tag, "an LD for which the
- * tagged capacity has been added with no host response yet" (Table 7-78).
- * The bitmaps are per tag, not per extent: with both accepted and pending
- * capacity under one tag, every extent of that host and tag shows pending
- * (cxl-fmd's choice). The bitmap counts only when "Pending Reference
- * Bitmaps Valid" is set (Table 7-77). An extent with no tag has no entry,
- * and is never pending.
+ * The tag list against the extents 5603h lists. No extent is made pending
+ * from it (cxl-fmd's choice): the Pending Reference Bitmap is per tag,
+ * "Each 1 indicates an LD for which the tagged capacity has been added with
+ * no host response yet" (Table 7-78), and a host can hold accepted capacity
+ * and an add it has not answered under one tag; which of its extents, if
+ * any, is that add, the bitmap does not say. An extent 5603h lists is not
+ * pending; an add an LD has not answered is shown only in the tag view
+ * (PendingLDs).
  */
-static void dc_tags_apply(struct fmd_ctx *ctx, struct fmd_component *dev)
+static void dc_tags_check(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_component *child;
@@ -1669,8 +1669,6 @@ static void dc_tags_apply(struct fmd_ctx *ctx, struct fmd_component *dev)
 		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 		const struct fmd_dc_tag *t = fmd_dc_tag_find(dev, ext->tag);
 
-		ext->pending = t && (dcd->tags.validity & 0x02) &&
-			       fmd_dc_bm_test(t->pend, ext->host_id);
 		/*
 		 * 5603h lists it for the host, and the tag list says the
 		 * host neither accepted it nor has it pending: the two were
@@ -1802,10 +1800,12 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 	goto done;
 
 failed:
+	/* the last list is kept, not known to be current; nor is this Unsupported */
 	dcd->tags.known = false;
+	dcd->tags.unsupported = false;
 done:
 	rc = 0;
-	dc_tags_apply(ctx, dev);
+	dc_tags_check(ctx, dev);
 out:
 	free(v);
 	free(rsp);

@@ -317,7 +317,7 @@ static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev
 				  const char *chassis_id, const char *dev_id)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
-	json_t *tags = json_array();
+	json_t *tags = json_array(), *view;
 
 	fmd_topology_rdlock(&ctx->topology);
 	for (uint32_t i = 0; dcd->tags.known && i < dcd->tags.n; i++) {
@@ -349,10 +349,18 @@ static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev
 	}
 	fmd_topology_rdunlock(&ctx->topology);
 
-	return json_pack("{s:{s:{s:b, s:I, s:o}}}", "Cxl", "DynamicCapacityTags",
+	/*
+	 * Tags only from a list that is known: an empty one would say that
+	 * no LD has an add outstanding and the FM holds no reference.
+	 */
+	view = json_pack("{s:b, s:I}",
 			 "TagsKnown", dcd->tags.known ? 1 : 0,
-			 "Generation", (json_int_t)dcd->tags.gen,
-			 "Tags", tags);
+			 "Generation", (json_int_t)dcd->tags.gen);
+	if (dcd->tags.known)
+		json_object_set_new(view, "Tags", tags);
+	else
+		json_decref(tags);
+	return json_pack("{s:{s:o}}", "Cxl", "DynamicCapacityTags", view);
 }
 
 /*
@@ -515,13 +523,17 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 		"ExtentSizeMiB", (json_int_t)(ext->len / FMD_MIB),
 		"SequenceNumber", (json_int_t)ext->shared_seq,
 		/*
-		 * Warning: the extent is in no region of its host, or is what
-		 * the host's last complete 5603h listed, the read after it
-		 * having failed.
+		 * Enabled: an extent 5603h lists is not pending (cxl-fmd's
+		 * choice, see dc_tags_check()). Warning: the extent is in no
+		 * region of its host, or is what the host's last complete
+		 * 5603h listed, the read after it having failed, or it has a
+		 * tag and the tag list could not be read, so whether the FM
+		 * holds a reference on it is not known.
 		 */
-		"Status", rf_status(ext->pending ? "Starting" : "Enabled",
+		"Status", rf_status("Enabled",
 				    ext->region_id == FMD_DC_REGION_NONE ||
-				    fmd_dc_host_sync(dev, ext->host_id) == FMD_DC_SYNC_STALE ?
+				    fmd_dc_host_sync(dev, ext->host_id) == FMD_DC_SYNC_STALE ||
+				    (tag_str[0] && fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags)) ?
 				    "Warning" : "OK"));
 
 	/* An extent with no tag (all zero, cxl-fmd's convention) has no Tag */
@@ -753,8 +765,9 @@ static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_
 			continue;
 
 		extent_uri(chassis_id, dev_id, dev, ext, euri, sizeof(euri));
+		/* listed by 5603h, so not pending (cxl-fmd's choice, dc_tags_check()) */
 		json_array_append_new(extents, json_pack("{s:b, s:{s:s}}",
-			"Pending", ext->pending ? 1 : 0,
+			"Pending", 0,
 			"ExtentLink", "@odata.id", euri));
 		count++;
 	}
@@ -782,7 +795,13 @@ static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_
 		"SanitizeOnRelease", region->sanitize_on_release ? 1 : 0,
 		"ExtentsCount", count,
 		"MemoryExtents", extents,
-		"Status", rf_status("Enabled", "OK"));
+		/*
+		 * Warning: the tag list could not be read, so whether an add
+		 * this host has not answered is outstanding is not known.
+		 */
+		"Status", rf_status("Enabled",
+				    fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags) ?
+				    "Warning" : "OK"));
 
 	fmd_topology_rdunlock(&ctx->topology);
 	return result;
