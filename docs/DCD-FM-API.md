@@ -285,7 +285,9 @@ Id is cxl-fmd's choice, as DSP0288 maps no Dynamic Capacity command. It is
 stable across rescans, where the index into the Extent List would shift
 whenever an extent is released, and unique on the device, where the DPA
 alone is not (Comment 2). The earlier form `ext_<hex DPA>` named an extent
-of every host with that DPA; it is `404 Not Found`, with no alias. On a
+of every host with that DPA; it is `404 Not Found`, with no alias. So is
+any other spelling of an Id, with leading zeros, a `0x` or upper-case hex,
+in a URI or an `ExtentList` link. On a
 Multi-Headed device `<ld>` is the pool LD-ID, as the Host ID is (see
 [Host ID Resolution](#host-id-resolution)). Region Ids are the region
 index (`0`..`7`).

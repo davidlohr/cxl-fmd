@@ -74,8 +74,9 @@ static void extent_rf_id(struct fmd_component *dev, struct fmd_dc_extent *ext,
 static struct fmd_dc_extent *find_extent_by_rf_id(struct fmd_component *dev,
 						  const char *ext_id)
 {
+	struct fmd_dc_extent *ext;
 	const char *p;
-	char *end;
+	char *end, id[32];
 	unsigned long ld;
 	uint64_t dpa;
 	int host_id;
@@ -101,7 +102,17 @@ static struct fmd_dc_extent *find_extent_by_rf_id(struct fmd_component *dev,
 	host_id = fmd_dc_host_id(dev, (int)ld);
 	if (host_id < 0)
 		return NULL;
-	return fmd_dc_find_extent(dev, host_id, dpa);
+	ext = fmd_dc_find_extent(dev, host_id, dpa);
+	if (!ext)
+		return NULL;
+
+	/*
+	 * Only the Id the extent is listed by names it: strtoul() and
+	 * strtoull() also take leading zeros, a "0x" or an upper-case DPA,
+	 * which would be aliases of it, each answered with its own "Id".
+	 */
+	extent_rf_id(dev, ext, id, sizeof(id));
+	return strcmp(id, ext_id) ? NULL : ext;
 }
 
 /* Resolve a MemoryExtent @odata.id link to the extent under this device */

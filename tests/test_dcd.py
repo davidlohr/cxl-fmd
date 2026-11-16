@@ -157,6 +157,21 @@ class TestDCDDiscovery:
         status, _ = api_client.get(MLD + "/MemoryExtents/ext_200000000")
         assert status == 404
 
+    def test_extent_id_has_one_spelling(self, api_client):
+        """An extent has one Id: another spelling of its LD or DPA is no
+        alias of it, for GET, DELETE or an ExtentList link."""
+        for alias in ("ext_00_200000000", "ext_0_0x200000000", "ext_0_0200000000",
+                      "ext_0_200000000A", "ext_+0_200000000", "ext_0_+200000000"):
+            status, _ = api_client.get(MLD + "/MemoryExtents/" + alias)
+            assert status == 404, alias
+            assert api_client.delete(MLD + "/MemoryExtents/" + alias) == 404, alias
+        rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
+        status, _, _ = api_client.post(rel, release_body("Prescriptive", ExtentList=[
+            {"@odata.id": MLD + "/MemoryExtents/ext_00_200000000"}]))
+        assert status == 400
+        status, data = api_client.get(MLD + "/MemoryExtents/ext_0_200000000")
+        assert status == 200 and data["Id"] == "ext_0_200000000"
+
     def test_shared_capacity_is_one_extent_per_host(self, api_client):
         """Shared capacity is an extent in each host's list, with the same Tag."""
         seen = {}
