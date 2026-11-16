@@ -12,7 +12,7 @@
  *   PATCH CXLLogicalDevice/MemoryRegions/{region}        -> Set DC Region Config (5602h)
  *   CXLLogicalDevice.DynamicCapacityAdd action           -> Initiate DC Add (5604h)
  *   CXLLogicalDevice.DynamicCapacityRelease action       -> Initiate DC Release (5605h)
- *   DELETE PCIeDevice/MemoryExtents/{ext}                -> Initiate DC Release, Prescriptive
+ *   DELETE PCIeDevice/MemoryExtents/{ext}                -> Initiate DC Release, from that one host
  *
  * A MemoryExtent is one host's extent: 5603h lists extents per host, in
  * that host's DPA space, so its Id names the CXLLogicalDevice as well as
@@ -117,6 +117,16 @@ static struct fmd_dc_extent *find_extent_by_link(struct fmd_component *dev,
 	return find_extent_by_rf_id(dev, p + strlen("/MemoryExtents/"));
 }
 
+/* An all-zero Tag is no tag (cxl-fmd's convention) */
+static bool tag_is_zero(const uint8_t *tag)
+{
+	for (int i = 0; i < FMD_DC_TAG_LEN; i++) {
+		if (tag[i])
+			return false;
+	}
+	return true;
+}
+
 static void region_uri(const char *chassis_id, const char *dev_id, int ld_idx,
 		       uint8_t region_id, char *buf, size_t len)
 {
@@ -137,11 +147,14 @@ static void extent_uri(const char *chassis_id, const char *dev_id,
 }
 
 /*
- * Parse an ExtentList action parameter into an array of extents.
- * Returns the count, 0 if the parameter is absent, -1 on a bad link or
- * on an extent that is listed twice.
+ * Parse an ExtentList action parameter into an array of extents of host
+ * @host_id. Returns the count, 0 if the parameter is absent, -EINVAL on a
+ * bad link or on an extent that is listed twice, and -EXDEV on an extent
+ * of another host: an Extent List is in the DPA space of the host the
+ * request names (Section 9.13.3), and another host's extent, even at the
+ * same DPA, is not in it.
  */
-static int parse_extent_list(struct fmd_component *dev, json_t *root,
+static int parse_extent_list(struct fmd_component *dev, int host_id, json_t *root,
 			     struct fmd_dc_extent ***out)
 {
 	json_t *list = json_object_get(root, "ExtentList");
@@ -153,15 +166,15 @@ static int parse_extent_list(struct fmd_component *dev, json_t *root,
 	if (!list)
 		return 0;
 	if (!json_is_array(list))
-		return -1;
+		return -EINVAL;
 
 	n = json_array_size(list);
 	if (n == 0)
-		return -1;
+		return -EINVAL;
 
 	extents = calloc(n, sizeof(*extents));
 	if (!extents)
-		return -1;
+		return -EINVAL;
 
 	json_array_foreach(list, idx, item) {
 		json_t *link = json_is_object(item) ? json_object_get(item, "@odata.id") : NULL;
@@ -169,13 +182,17 @@ static int parse_extent_list(struct fmd_component *dev, json_t *root,
 		extents[idx] = find_extent_by_link(dev, link ? json_string_value(link) : NULL);
 		if (!extents[idx]) {
 			free(extents);
-			return -1;
+			return -EINVAL;
+		}
+		if (extents[idx]->host_id != host_id) {
+			free(extents);
+			return -EXDEV;
 		}
 		/* each extent once: it may be freed when it is released */
 		for (size_t prev = 0; prev < idx; prev++) {
 			if (extents[prev] == extents[idx]) {
 				free(extents);
-				return -1;
+				return -EINVAL;
 			}
 		}
 	}
@@ -183,6 +200,11 @@ static int parse_extent_list(struct fmd_component *dev, json_t *root,
 	*out = extents;
 	return (int)n;
 }
+
+#define EXTENT_LIST_MSG \
+	"ExtentList must be a non-empty array of distinct MemoryExtent links on this device"
+#define EXTENT_FOREIGN_MSG \
+	"An extent in ExtentList belongs to another logical device"
 
 /*
  * ============================================================================
@@ -441,23 +463,41 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 }
 
 /*
- * DELETE on an extent releases it from the host whose extent it is
- * (Initiate DC Release, Prescriptive, that one extent).
+ * DELETE on an extent releases it from the host whose extent it is, and
+ * from no other host (cxl-fmd's meaning of DELETE: DMTF does not say).
+ *
+ * "To remove a host's access to the shared extent, the FM issues Initiate
+ * Dynamic Capacity Release Request with Selection Policy=Tag-based with the
+ * Host ID associated with that host" (Section 7.6.7.6.6), and a release
+ * whose Extent List "covers only a portion of the capacity associated with
+ * the Tag" of sharable capacity is Invalid Input. So an extent with a tag
+ * in a Sharable region is released with the whole of what its host has of
+ * the tag, Tag-based: every extent of that host with the tag goes. Any
+ * other extent is released by itself, Prescriptive.
+ *
+ * A device that does not support Tag-based release is sent a Prescriptive
+ * list of every extent of the host with the tag, which covers the same
+ * capacity (cxl-fmd's choice).
  */
 static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_id,
 					  const char *dev_id, const char *ext_id,
 					  const char **msg)
 {
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
+	struct fmd_dcd_info *dcd;
 	struct fmd_dc_region *region;
-	struct fmd_dc_extent *ext;
-	bool sanitize;
-	int rc;
+	struct fmd_dc_extent *ext, **extents = NULL;
+	struct fmd_component *child;
+	uint8_t tag[FMD_DC_TAG_LEN];
+	uint64_t length = 0;
+	bool sanitize, sharable;
+	int host_id, n = 0, rc;
 
 	if (!dev) {
 		*msg = "Device is not a dynamic capacity device";
 		return -ENOENT;
 	}
+	dcd = fmd_memdev_dcd(dev);
 
 	ext = find_extent_by_rf_id(dev, ext_id);
 	if (!ext) {
@@ -465,11 +505,51 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		return -ENOENT;
 	}
 
-	region = fmd_dc_find_region(dev, ext->host_id, ext->region_id);
+	/* the release can free @ext: what is needed of it is copied */
+	host_id = ext->host_id;
+	memcpy(tag, ext->tag, FMD_DC_TAG_LEN);
+	region = fmd_dc_find_region(dev, host_id, ext->region_id);
 	sanitize = region ? region->sanitize_on_release : false;
+	sharable = region && (region->flags & FMD_DC_REGION_SHAREABLE) &&
+		   !tag_is_zero(tag);
 
-	rc = fmd_dc_release(ctx, dev, ext->host_id, FMD_DC_REL_POLICY_PRESCRIPTIVE,
-			    false, sanitize, 0, ext->tag, &ext, 1);
+	if (!sharable) {
+		rc = fmd_dc_release(ctx, dev, host_id, FMD_DC_REL_POLICY_PRESCRIPTIVE,
+				    false, sanitize, 0, tag, &ext, 1);
+		goto out;
+	}
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+		if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN)) {
+			length += e->len;
+			n++;
+		}
+	}
+
+	if (dcd->release_policies & fmd_dc_policy_cap_bit(true, FMD_DC_REL_POLICY_TAG_BASED)) {
+		rc = fmd_dc_release(ctx, dev, host_id, FMD_DC_REL_POLICY_TAG_BASED,
+				    false, sanitize, length, tag, NULL, 0);
+		goto out;
+	}
+
+	extents = calloc(n, sizeof(*extents));
+	if (!extents) {
+		*msg = "Dynamic capacity release failed";
+		return -ENOMEM;
+	}
+	n = 0;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+		if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
+			extents[n++] = e;
+	}
+	rc = fmd_dc_release(ctx, dev, host_id, FMD_DC_REL_POLICY_PRESCRIPTIVE,
+			    false, sanitize, 0, tag, extents, n);
+	free(extents);
+out:
 	if (rc) {
 		*msg = rc == -EAGAIN ? DC_RETRY_MSG :
 		       "Dynamic capacity release failed";
@@ -774,13 +854,28 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		have_tag = true;
 	}
 
-	ext_count = parse_extent_list(dev, root, &extents);
+	ext_count = parse_extent_list(dev, host_id, root, &extents);
 	if (ext_count < 0) {
 		json_decref(root);
-		*msg = "ExtentList must be a non-empty array of distinct MemoryExtent links on this device";
+		*msg = ext_count == -EXDEV ? EXTENT_FOREIGN_MSG : EXTENT_LIST_MSG;
 		return -EINVAL;
 	}
 	json_decref(root);
+
+	/*
+	 * A Prescriptive add names DPAs of the host's own DPA space: those
+	 * of an extent the host has are Invalid Extent List, "When the
+	 * Selection Policy is set to Prescriptive and any of the DPAs are
+	 * already accessible to the same LD" (Section 7.6.7.6.5), and those
+	 * of another host's extent are not of its DPA space. A MemoryExtent
+	 * is an extent some host has, so no ExtentList of links can name
+	 * capacity to add: refused here rather than sent (cxl-fmd's choice).
+	 */
+	if (policy == FMD_DC_POLICY_PRESCRIPTIVE && ext_count > 0) {
+		free(extents);
+		*msg = "An extent in ExtentList is already accessible to this logical device";
+		return -EINVAL;
+	}
 
 	/* Conditional parameter requirements per CXLLogicalDevice v1.4 */
 	switch (policy) {
@@ -916,10 +1011,10 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		have_tag = true;
 	}
 
-	ext_count = parse_extent_list(dev, root, &extents);
+	ext_count = parse_extent_list(dev, host_id, root, &extents);
 	if (ext_count < 0) {
 		json_decref(root);
-		*msg = "ExtentList must be a non-empty array of distinct MemoryExtent links on this device";
+		*msg = ext_count == -EXDEV ? EXTENT_FOREIGN_MSG : EXTENT_LIST_MSG;
 		return -EINVAL;
 	}
 	json_decref(root);

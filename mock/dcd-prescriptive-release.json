@@ -1,0 +1,66 @@
+{
+    "version": 1,
+    "id": "dcd_prescriptive_release",
+    "description": "A two-host MLD DCD that releases capacity Prescriptive only, with capacity both hosts share and host 0 has in two extents",
+
+    "_comment": [
+        "Supported Release Capacity Removal Policies (5600h, CXL r4.0 Table 7-65) has only Prescriptive: the device does no Tag-based release.",
+        "Tag ...d1 is shared by hosts 0 and 1 in region 0 (Sharable); host 0 has a second extent of it, Shared Extent Sequence 1."
+    ],
+
+    "devices": [
+        {
+            "id": "cxl_prel_mld0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d97",
+            "serial_number": "0x4443445052454c30",
+            "component_type": 3,
+            "ld_count": 2,
+            "max_ld_count": 4,
+            "identify_memory_device": {
+                "fw_revision": "3.2.0",
+                "total_capacity_mb": 8192,
+                "volatile_capacity_mb": 8192,
+                "persistent_capacity_mb": 0
+            },
+            "logical_devices": [
+                { "ld_id": 0, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 },
+                { "ld_id": 1, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 }
+            ],
+            "dcd": {
+                "num_hosts": 2,
+                "add_policies": ["Free", "Contiguous", "Prescriptive"],
+                "release_policies": ["Prescriptive"],
+                "max_extents": 64,
+                "max_tags": 16,
+                "regions": [
+                    {
+                        "region_id": 0,
+                        "base_mb": 8192,
+                        "region_len_mb": 4096,
+                        "block_size_mb": 256,
+                        "shareable": true,
+                        "hw_coherency": true,
+                        "hosts": [0, 1]
+                    }
+                ],
+                "extents": [
+                    {
+                        "start_mb": 8192,
+                        "len_mb": 1024,
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000d1",
+                        "shared_seq": 0,
+                        "hosts": [0, 1]
+                    },
+                    {
+                        "start_mb": 9216,
+                        "len_mb": 512,
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000d1",
+                        "shared_seq": 1,
+                        "host_id": 0
+                    }
+                ]
+            }
+        }
+    ]
+}
