@@ -659,10 +659,200 @@ json_t *fmd_redfish_fabric(struct fmd_ctx *ctx, const char *fabric_id)
 }
 
 /*
+ * Per-LD Endpoints (cxl-fmd's choice: Endpoint_v1 allows an Endpoint per
+ * logical device and does not require it).
+ *
+ * A host is bound to an SLD whole, and to an MLD one LD at a time: "If
+ * the bind target is a physical port connected to an MLD, then a
+ * corresponding LD-ID must also be specified" (CXL r4.0 Section
+ * 7.6.7.2.2), and "For a DSP above an MLD, there is a vPPB for each LD"
+ * (Table 7-93,
+ * HBR Switch Routing for CXL.mem). So the target Endpoint of an SLD is the
+ * device, Id the device's, and that of an MLD or a Multi-Headed device is
+ * each of its LDs, Id the LD's ("{dev}_ld{N}"); the device has none of
+ * its own.
+ *
+ * A head of a Multi-Headed device that presents an MLD is bound by an
+ * LD-ID "from 0 to n-1 relative to that head", which "The MH-MLD maps
+ * ... to the device-wide LD index in the MH-MLD's LD pool" (Section
+ * 2.5.1) by no rule the FM is told. Such a head has an Endpoint of its
+ * own ("{mhd}_head{H}"), EntityType Memory, which is what a binding of
+ * an LD of that head is shown to reach.
+ */
+
+/* A pool LD of a Multi-Headed device: the head it is mapped to, if any */
+static struct fmd_head *ld_head(const struct fmd_ld *ld)
+{
+	struct fmd_component *mhd = ld->base.parent;
+	struct fmd_component *child;
+
+	if (!mhd || mhd->type != FMD_COMPONENT_MHD || ld->binding_point_id == 0xFF)
+		return NULL;
+	fmd_for_each_child_type(mhd, child, FMD_COMPONENT_HEAD) {
+		if (fmd_to_head(child)->head_id == ld->binding_point_id)
+			return fmd_to_head(child);
+	}
+	return NULL;
+}
+
+/*
+ * The pool LD a head that is bound whole reaches: the one LD mapped to it.
+ * "In MH-SLDs, there is a 1:1 mapping between heads and LDs", and "A head
+ * with one LD mapped shall present itself as an SLD" (Section 2.5). NULL
+ * if the head presents an MLD, or is mapped to no LD or to more than one.
+ */
+static struct fmd_ld *head_whole_ld(const struct fmd_head *head)
+{
+	struct fmd_component *mhd = head->base.parent;
+	struct fmd_component *child;
+	struct fmd_ld *found = NULL;
+
+	if (!mhd || head->presentation == FMD_HEAD_MLD)
+		return NULL;
+	fmd_for_each_child_type(mhd, child, FMD_COMPONENT_LD) {
+		if (fmd_to_ld(child)->binding_point_id != head->head_id)
+			continue;
+		if (found)
+			return NULL;
+		found = fmd_to_ld(child);
+	}
+	return found;
+}
+
+/* Whether @comp has a target Endpoint of its own */
+static bool is_target_endpoint(const struct fmd_component *comp)
+{
+	if (!comp)
+		return false;
+	switch (comp->type) {
+	case FMD_COMPONENT_SLD:
+		return true;
+	case FMD_COMPONENT_LD:
+		return comp->parent && (comp->parent->type == FMD_COMPONENT_MLD ||
+					comp->parent->type == FMD_COMPONENT_MHD);
+	case FMD_COMPONENT_HEAD:
+		return fmd_to_head((struct fmd_component *)comp)->presentation ==
+		       FMD_HEAD_MLD;
+	default:
+		return false;
+	}
+}
+
+/*
+ * The target Endpoint a vPPB is bound to, NULL if none: it is not bound
+ * (Bound Port ID is "Valid only when vPPB[Start vPPB] Binding Status is
+ * 02h or 03h", Table 7-34), or what is on the port is not a memory
+ * device cxl-fmd knows.
+ *
+ *  - 02h, an SLD on the port: the SLD;
+ *  - 03h, an MLD on the port: its LD with the Bound LD ID;
+ *  - 02h, the port is a head of a Multi-Headed device that is bound
+ *    whole: the pool LD mapped to that head;
+ *  - 03h, the port is a head that presents an MLD: the head.
+ *
+ * Caller holds the topology read lock.
+ */
+static struct fmd_component *vppb_target(const struct fmd_vppb *vppb)
+{
+	struct fmd_port *port = vppb->port;
+	struct fmd_component *dev;
+
+	if (!port || (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
+		      vppb->binding_status != FMD_VPPB_BOUND_LD))
+		return NULL;
+
+	dev = port->base.first_child;
+	if (dev && dev->type == FMD_COMPONENT_SLD)
+		return vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ? dev : NULL;
+	if (dev && dev->type == FMD_COMPONENT_MLD)
+		return (vppb->binding_status == FMD_VPPB_BOUND_LD && vppb->ld &&
+			vppb->ld->base.parent == dev) ? &vppb->ld->base : NULL;
+	if (port->head) {
+		if (vppb->binding_status == FMD_VPPB_BOUND_LD)
+			return port->head->presentation == FMD_HEAD_MLD ?
+			       &port->head->base : NULL;
+		struct fmd_ld *ld = head_whole_ld(port->head);
+		return ld ? &ld->base : NULL;
+	}
+	return NULL;
+}
+
+/* Append to @arr the link to Endpoint @id unless @arr has it */
+static void append_endpoint_once(json_t *arr, const char *id)
+{
+	char uri[256];
+	size_t i;
+	json_t *v;
+
+	snprintf(uri, sizeof(uri), "/redfish/v1/Fabrics/CXL/Endpoints/%s", id);
+	json_array_foreach(arr, i, v) {
+		if (!strcmp(json_string_value(json_object_get(v, "@odata.id")), uri))
+			return;
+	}
+	json_array_append_new(arr, rf_link("%s", uri));
+}
+
+/*
+ * The target Endpoints of memory device @dev: the device for an SLD,
+ * each LD of an MLD or a Multi-Headed device. Caller holds the topology
+ * read lock.
+ */
+static void append_device_endpoints(json_t *arr, struct fmd_component *dev)
+{
+	struct fmd_component *by_id[256] = { NULL };
+	struct fmd_component *child;
+
+	if (dev->type == FMD_COMPONENT_SLD) {
+		append_endpoint_once(arr, dev->id);
+		return;
+	}
+	/* in LD-ID (pool index) order */
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
+		by_id[fmd_to_ld(child)->ld_id] = child;
+	for (size_t i = 0; i < 256; i++) {
+		if (by_id[i])
+			append_endpoint_once(arr, by_id[i]->id);
+	}
+}
+
+/*
+ * The target Endpoints at the other end of switch port @port: the SLD on
+ * it, each LD of the MLD on it, or for a head of a Multi-Headed device the
+ * head if it presents an MLD, and otherwise the pool LDs mapped to it.
+ * Caller holds the topology read lock.
+ */
+static void append_port_endpoints(json_t *arr, struct fmd_port *port)
+{
+	struct fmd_component *child;
+
+	fmd_for_each_child(&port->base, child) {
+		if (child->type == FMD_COMPONENT_SLD || child->type == FMD_COMPONENT_MLD)
+			append_device_endpoints(arr, child);
+	}
+	if (port->head && port->head->base.parent) {
+		if (port->head->presentation == FMD_HEAD_MLD) {
+			append_endpoint_once(arr, port->head->base.id);
+		} else {
+			struct fmd_component *by_id[256] = { NULL };
+
+			fmd_for_each_child_type(port->head->base.parent, child,
+						FMD_COMPONENT_LD) {
+				if (fmd_to_ld(child)->binding_point_id == port->head->head_id)
+					by_id[fmd_to_ld(child)->ld_id] = child;
+			}
+			for (size_t i = 0; i < 256; i++) {
+				if (by_id[i])
+					append_endpoint_once(arr, by_id[i]->id);
+			}
+		}
+	}
+}
+
+/*
  * Endpoints Collection - /redfish/v1/Fabrics/{fabric_id}/Endpoints
  *
- * Each SLD/MLD/MHD is represented as an Endpoint in the fabric.
- * Hosts are also endpoints (initiators).
+ * The target Endpoints, an SLD, an LD of an MLD or of a Multi-Headed
+ * device, a head that presents an MLD, and the hosts (initiators).
  */
 json_t *fmd_redfish_endpoints_collection(struct fmd_ctx *ctx, const char *fabric_id)
 {
@@ -679,15 +869,18 @@ json_t *fmd_redfish_endpoints_collection(struct fmd_ctx *ctx, const char *fabric
 
 	fmd_topology_rdlock(&ctx->topology);
 
-	/* Add SLDs, MLDs, MHDs, and Hosts as endpoints */
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SLD)
 		rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
 
-	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MLD)
-		rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_LD) {
+		if (is_target_endpoint(comp))
+			rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
+	}
 
-	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_MHD)
-		rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_HEAD) {
+		if (is_target_endpoint(comp))
+			rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
+	}
 
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_HOST)
 		rf_collection_add(&coll, "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
@@ -700,9 +893,9 @@ json_t *fmd_redfish_endpoints_collection(struct fmd_ctx *ctx, const char *fabric
 /*
  * Endpoint - /redfish/v1/Fabrics/{fabric_id}/Endpoints/{endpoint_id}
  *
- * SLD/MLD endpoints have EntityRole=Target (memory targets).
- * Host endpoints have EntityRole=Initiator (CPUs issuing memory requests).
- * Per OCP CMS Figure 7, endpoints link to switch ports via ConnectedPorts.
+ * Target Endpoints have EntityRole=Target, host Endpoints
+ * EntityRole=Initiator. Per OCP CMS Figure 7, endpoints link to switch
+ * ports via ConnectedPorts.
  */
 json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 			     const char *endpoint_id)
@@ -714,8 +907,8 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 	if (!comp)
 		return NULL;
 
-	/* Must be a memory device (SLD/MLD) or a host */
-	if (!fmd_is_memdev(comp) && comp->type != FMD_COMPONENT_HOST)
+	/* A target that has an Endpoint of its own, or a host */
+	if (!is_target_endpoint(comp) && comp->type != FMD_COMPONENT_HOST)
 		return NULL;
 
 	char uri[256];
@@ -783,31 +976,83 @@ host_done:
 	}
 
 	/*
-	 * Memory device endpoints (Targets) - SLD/MLD that respond to requests
+	 * Target Endpoints: an SLD, an LD of an MLD or of a Multi-Headed
+	 * device, or a head that presents an MLD.
 	 */
+	struct fmd_component *dev = comp;	/* the device it is on */
+	struct cxlmi_cmd_identify_rsp *identify;
+	struct fmd_port *port = NULL;		/* the switch port it is reached on */
+	const char *name;
+	const char *entity_type = "CXLDevice";
+	json_t *entity_link = NULL;
 	char vendor_str[16];
 	char device_str[16];
-	const char *name;
 
-	/* Get PCI IDs from device */
-	if (comp->type == FMD_COMPONENT_SLD) {
-		struct fmd_sld *sld = fmd_to_sld(comp);
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", sld->identify.vendor_id);
-		snprintf(device_str, sizeof(device_str), "0x%04X", sld->identify.device_id);
-		name = "CXL SLD Endpoint";
-	} else if (comp->type == FMD_COMPONENT_MLD) {
-		struct fmd_mld *mld = fmd_to_mld(comp);
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mld->identify.vendor_id);
-		snprintf(device_str, sizeof(device_str), "0x%04X", mld->identify.device_id);
-		name = "CXL MLD Endpoint";
-	} else if (comp->type == FMD_COMPONENT_MHD) {
-		struct fmd_mhd *mhd = fmd_to_mhd(comp);
-		snprintf(vendor_str, sizeof(vendor_str), "0x%04X", mhd->identify.vendor_id);
-		snprintf(device_str, sizeof(device_str), "0x%04X", mhd->identify.device_id);
-		name = "CXL MHD Endpoint";
-	} else {
+	fmd_topology_rdlock(&ctx->topology);
+
+	if (comp->type == FMD_COMPONENT_LD || comp->type == FMD_COMPONENT_HEAD)
+		dev = comp->parent;
+	if (!dev) {
+		fmd_topology_rdunlock(&ctx->topology);
 		return NULL;
 	}
+
+	if (dev->type == FMD_COMPONENT_SLD)
+		identify = &fmd_to_sld(dev)->identify;
+	else if (dev->type == FMD_COMPONENT_MLD)
+		identify = &fmd_to_mld(dev)->identify;
+	else
+		identify = &fmd_to_mhd(dev)->identify;
+	snprintf(vendor_str, sizeof(vendor_str), "0x%04X", identify->vendor_id);
+	snprintf(device_str, sizeof(device_str), "0x%04X", identify->device_id);
+
+	if (comp->type == FMD_COMPONENT_SLD) {
+		/*
+		 * An SLD is one logical device, LD 0 of its CXLLogicalDevices,
+		 * and what a host is bound to is that device whole (Bind vPPB,
+		 * CXL r4.0 Section 7.6.7.2.2). CXLDevice: "the entity this
+		 * endpoint represents is a CXL logical device. The
+		 * `EntityLink` property, if present, should be of type
+		 * `CXLLogicalDevice`" (Endpoint_v1). That a Type 3 target is a
+		 * CXLDevice is cxl-fmd's choice: DMTF names no EntityType for
+		 * it.
+		 */
+		name = "CXL SLD Endpoint";
+		entity_link = rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/0",
+				      dev->id, dev->id);
+	} else if (comp->type == FMD_COMPONENT_LD) {
+		/* An LD of an MLD, or a pool LD of a Multi-Headed device */
+		struct fmd_ld *ld = fmd_to_ld(comp);
+
+		name = "CXL Logical Device Endpoint";
+		entity_link = rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%u",
+				      dev->id, dev->id, ld->ld_id);
+		if (dev->type == FMD_COMPONENT_MHD) {
+			struct fmd_head *head = ld_head(ld);
+
+			port = head ? head->port : NULL;
+		}
+	} else {
+		/*
+		 * A head that presents an MLD: Memory, "the entity this
+		 * endpoint represents is a memory device" (Endpoint_v1). Which
+		 * pool LD each of its LD-IDs is, is the device's (Section
+		 * 2.5.1). No EntityLink: no resource is the head.
+		 */
+		name = "CXL Multi-Headed Device Head Endpoint";
+		entity_type = "Memory";
+		port = fmd_to_head(comp)->port;
+	}
+
+	if (dev->parent && dev->parent->type == FMD_COMPONENT_PORT)
+		port = fmd_to_port(dev->parent);
+
+	json_t *entity = json_pack("{s:s, s:s, s:{s:s, s:s}}",
+		"EntityType", entity_type,
+		"EntityRole", "Target",
+		"EntityPciId", "VendorId", vendor_str, "DeviceId", device_str);
+	if (entity_link)
+		json_object_set_new(entity, "EntityLink", entity_link);
 
 	json_t *result = json_pack(
 		"{"
@@ -816,7 +1061,7 @@ host_done:
 		"  s:s,"   /* Id */
 		"  s:s,"   /* Name */
 		"  s:s,"   /* EndpointProtocol */
-		"  s:[{s:s, s:s, s:{s:s, s:s}}],"  /* ConnectedEntities */
+		"  s:[o],"  /* ConnectedEntities */
 		"  s:o"    /* Status */
 		"}",
 		"@odata.id", uri,
@@ -824,77 +1069,52 @@ host_done:
 		"Id", endpoint_id,
 		"Name", name,
 		"EndpointProtocol", "CXL",
-		"ConnectedEntities",
-			"EntityType", "MemoryChunk",
-			"EntityRole", "Target",
-			"EntityPciId", "VendorId", vendor_str, "DeviceId", device_str,
+		"ConnectedEntities", entity,
 		"Status", rf_status("Enabled", "OK")
 	);
 
 	/*
-	 * An SLD is one logical device, LD 0 of its CXLLogicalDevices, and
-	 * what a host is bound to is that device whole (Bind vPPB, CXL r4.0
-	 * Section 7.6.7.2.2). CXLDevice: "the entity this endpoint represents
-	 * is a CXL logical device. The `EntityLink` property, if present,
-	 * should be of type `CXLLogicalDevice`" (Endpoint_v1). That a Type 3
-	 * target is a CXLDevice is cxl-fmd's choice: DMTF names no EntityType
-	 * for it.
+	 * Per OCP CMS Figure 7, endpoints connect to switch ports: the port
+	 * the device is on, or that of the head a pool LD is mapped to, and
+	 * Links.Zones, each VCS a vPPB of which is bound to this Endpoint.
 	 */
-	if (result && comp->type == FMD_COMPONENT_SLD) {
-		json_t *entity = json_array_get(json_object_get(result,
-						"ConnectedEntities"), 0);
+	if (result && port && port->base.parent &&
+	    port->base.parent->type == FMD_COMPONENT_SWITCH) {
+		struct fmd_switch *sw = fmd_to_switch(port->base.parent);
+		json_t *links = json_object();
+		json_t *zones = json_array();
+		struct fmd_component *sw_comp;
 
-		json_object_set_new(entity, "EntityType", json_string("CXLDevice"));
-		json_object_set_new(entity, "EntityLink",
-			rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/0",
-				comp->id, comp->id));
-	}
+		json_object_set_new(links, "ConnectedPorts",
+			json_pack("[o]", rf_link("/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
+						 sw->base.id, port->base.id)));
 
-	/*
-	 * Per OCP CMS Figure 7, endpoints connect to switch ports.
-	 * If this device is attached to a switch port, add Links.ConnectedPorts
-	 * and Links.Zones (the VCS(s) this endpoint is bound to).
-	 */
-	if (comp->parent && comp->parent->type == FMD_COMPONENT_PORT) {
-		struct fmd_port *port = fmd_to_port(comp->parent);
-		struct fmd_component *sw_comp = comp->parent->parent;
+		fmd_for_each_type(&ctx->topology, sw_comp, FMD_COMPONENT_SWITCH) {
+			struct fmd_switch *s = fmd_to_switch(sw_comp);
 
-		if (sw_comp && sw_comp->type == FMD_COMPONENT_SWITCH) {
-			struct fmd_switch *sw = fmd_to_switch(sw_comp);
-			json_t *links = json_object();
-			json_t *connected_ports = json_array();
-			json_t *zones = json_array();
+			for (int v = 0; v < s->num_vcs; v++) {
+				struct fmd_vcs *vcs = &s->vcs[v];
 
-			/* Add connected port */
-			json_array_append_new(connected_ports,
-				rf_link("/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
-					sw->base.id, port->base.id));
-
-			/* Find VCSs this endpoint is bound to */
-			for (int v = 0; v < sw->num_vcs; v++) {
-				struct fmd_vcs *vcs = &sw->vcs[v];
 				for (int p = 0; p < vcs->num_vppbs; p++) {
-					struct fmd_vppb *vppb = &vcs->vppbs[p];
-					if (vppb->port == port &&
-					    (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
-					     vppb->binding_status == FMD_VPPB_BOUND_LD)) {
-						json_array_append_new(zones,
-							rf_link("/redfish/v1/Fabrics/CXL/Zones/%s_vcs%d",
-								sw->base.id, vcs->vcs_id));
-						break; /* Only add each VCS once */
-					}
+					if (vppb_target(&vcs->vppbs[p]) != comp)
+						continue;
+					json_array_append_new(zones,
+						rf_link("/redfish/v1/Fabrics/CXL/Zones/%s_vcs%d",
+							s->base.id, vcs->vcs_id));
+					break; /* each VCS once */
 				}
 			}
-
-			json_object_set_new(links, "ConnectedPorts", connected_ports);
-			if (json_array_size(zones) > 0)
-				json_object_set_new(links, "Zones", zones);
-			else
-				json_decref(zones);
-
-			json_object_set_new(result, "Links", links);
 		}
+
+		if (json_array_size(zones) > 0)
+			json_object_set_new(links, "Zones", zones);
+		else
+			json_decref(zones);
+
+		json_object_set_new(result, "Links", links);
 	}
+
+	fmd_topology_rdunlock(&ctx->topology);
 
 	return result;
 }
@@ -962,7 +1182,6 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	if (conn) {
 		char uri[256];
 		char init_uri[256];
-		char target_uri[256];
 		char chunk_uri[256];
 		json_t *access_caps;
 
@@ -970,11 +1189,31 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			 "/redfish/v1/Fabrics/CXL/Connections/%s", conn->id);
 		snprintf(init_uri, sizeof(init_uri),
 			 "/redfish/v1/Fabrics/CXL/Endpoints/%s", conn->initiator_id);
-		snprintf(target_uri, sizeof(target_uri),
-			 "/redfish/v1/Fabrics/CXL/Endpoints/%s", conn->target_id);
 
 		/* Find chunk to get its full path */
 		struct fmd_mem_chunk *chunk = fmd_topology_find_chunk(&ctx->topology, conn->chunk_id);
+		struct fmd_component *target = fmd_topology_find(&ctx->topology, conn->target_id);
+		json_t *targets = json_array();
+
+		/*
+		 * The target Endpoint: the SLD, or for an MLD or a Multi-Headed
+		 * device the LD of the chunk, which its interleave set names;
+		 * failing that, each LD of the device.
+		 */
+		if (target) {
+			struct fmd_component *ld = NULL;
+
+			if (target->type != FMD_COMPONENT_SLD && chunk &&
+			    chunk->interleave_set_count > 0)
+				ld = fmd_topology_find(&ctx->topology,
+						       chunk->interleave_sets[0].memory_id);
+			fmd_topology_rdlock(&ctx->topology);
+			if (ld && ld->type == FMD_COMPONENT_LD && ld->parent == target)
+				append_endpoint_once(targets, ld->id);
+			else if (fmd_is_memdev(target))
+				append_device_endpoints(targets, target);
+			fmd_topology_rdunlock(&ctx->topology);
+		}
 		if (chunk && chunk->base.parent && chunk->base.parent->parent) {
 			snprintf(chunk_uri, sizeof(chunk_uri),
 				 "/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s",
@@ -1003,7 +1242,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			"  s:o,"   /* Status */
 			"  s:{"    /* Links */
 			"    s:[{s:s}],"  /* InitiatorEndpoints */
-			"    s:[{s:s}]"   /* TargetEndpoints */
+			"    s:o"   /* TargetEndpoints */
 			"  },"
 			"  s:[{s:{s:s}, s:o}]"  /* MemoryChunkInfo */
 			"}",
@@ -1017,7 +1256,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				    "Enabled", "OK"),
 			"Links",
 				"InitiatorEndpoints", "@odata.id", init_uri,
-				"TargetEndpoints", "@odata.id", target_uri,
+				"TargetEndpoints", targets,
 			"MemoryChunkInfo",
 				"MemoryChunk", "@odata.id", chunk_uri,
 				"AccessCapabilities", access_caps
@@ -1030,7 +1269,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		 * Deleting it unbinds the vPPB; the device and its memory are
 		 * not there to link to.
 		 */
-		if (result && !fmd_topology_find(&ctx->topology, conn->target_id)) {
+		if (result && !target) {
 			json_object_set_new(result, "Status", rf_status("Absent", "OK"));
 			json_object_del(json_object_get(result, "Links"),
 					"TargetEndpoints");
@@ -1048,24 +1287,20 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	if (!comp->parent || comp->parent->type != FMD_COMPONENT_PORT)
 		return NULL;
 
-	struct fmd_port *port = fmd_to_port(comp->parent);
 	struct fmd_component *sw = comp->parent->parent;
 	if (!sw || sw->type != FMD_COMPONENT_SWITCH)
 		return NULL;
 
 	char uri[256];
-	char endpoint_uri[256];
-	char port_uri[256];
+	json_t *targets = json_array();
 
 	snprintf(uri, sizeof(uri),
 		 "/redfish/v1/Fabrics/CXL/Connections/%s", connection_id);
-	snprintf(endpoint_uri, sizeof(endpoint_uri),
-		 "/redfish/v1/Fabrics/CXL/Endpoints/%s", comp->id);
-	snprintf(port_uri, sizeof(port_uri),
-		 "/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
-		 sw->id, port->base.id);
 
-	(void)port_uri;  /* Reserved for future use */
+	/* the SLD, or each LD of the MLD */
+	fmd_topology_rdlock(&ctx->topology);
+	append_device_endpoints(targets, comp);
+	fmd_topology_rdunlock(&ctx->topology);
 
 	const char *name = (comp->type == FMD_COMPONENT_SLD) ?
 		"CXL SLD Connection" : "CXL MLD Connection";
@@ -1073,7 +1308,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	/*
 	 * Build Connection with:
 	 * - ConnectionType: Memory (CXL memory device)
-	 * - Links.TargetEndpoints: the device endpoint
+	 * - Links.TargetEndpoints: the device's target endpoints
 	 * - MemoryChunkInfo could be added for detailed memory access info
 	 */
 	json_t *result = json_pack(
@@ -1085,7 +1320,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		"  s:s,"   /* ConnectionType */
 		"  s:o,"   /* Status */
 		"  s:{"    /* Links */
-		"    s:[{s:s}]"  /* TargetEndpoints */
+		"    s:o"  /* TargetEndpoints */
 		"  }"
 		"}",
 		"@odata.id", uri,
@@ -1095,7 +1330,7 @@ json_t *fmd_redfish_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		"ConnectionType", "Memory",
 		"Status", rf_status("Enabled", "OK"),
 		"Links",
-			"TargetEndpoints", "@odata.id", endpoint_uri
+			"TargetEndpoints", targets
 	);
 
 	return result;
@@ -1139,25 +1374,11 @@ json_t *fmd_redfish_zones_collection(struct fmd_ctx *ctx, const char *fabric_id)
 /*
  * Zone - /redfish/v1/Fabrics/{fabric_id}/Zones/{zone_id}
  *
- * A Zone represents a VCS and contains links to all endpoints (devices)
- * bound to that VCS via vPPBs.
+ * A Zone represents a VCS and contains links to its host and to each
+ * target Endpoint a vPPB of the VCS is bound to (see vppb_target()): an
+ * MLD whose LD 0 is bound to VCS 0 and LD 1 to VCS 1 is its LD 0 Endpoint
+ * in the one Zone and its LD 1 Endpoint in the other.
  */
-/*
- * The device a bound vPPB reaches: the device on its port, or the
- * Multi-Headed device one of whose heads is. NULL if it is not bound.
- */
-static struct fmd_component *zone_vppb_device(const struct fmd_vppb *vppb)
-{
-	if (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
-	    vppb->binding_status != FMD_VPPB_BOUND_LD)
-		return NULL;
-	if (vppb->port && vppb->port->base.first_child)
-		return vppb->port->base.first_child;
-	if (vppb->port && vppb->port->head)
-		return vppb->port->head->base.parent;
-	return NULL;
-}
-
 json_t *fmd_redfish_zone(struct fmd_ctx *ctx, const char *fabric_id,
 			 const char *zone_id)
 {
@@ -1224,23 +1445,12 @@ json_t *fmd_redfish_zone(struct fmd_ctx *ctx, const char *fabric_id,
 		}
 	}
 
-	/* Add device endpoints from bound vPPBs */
+	/* Add the target endpoints of bound vPPBs, each once */
 	for (int i = 0; i < vcs->num_vppbs; i++) {
-		struct fmd_component *dev = zone_vppb_device(&vcs->vppbs[i]);
-		bool listed = false;
+		struct fmd_component *target = vppb_target(&vcs->vppbs[i]);
 
-		if (!dev || !fmd_is_memdev(dev))
-			continue;
-
-		/*
-		 * Once: an MLD with two LDs bound to this VCS is one Endpoint,
-		 * reached through two vPPBs.
-		 */
-		for (int j = 0; j < i && !listed; j++)
-			listed = (zone_vppb_device(&vcs->vppbs[j]) == dev);
-		if (!listed)
-			json_array_append_new(endpoints,
-				rf_link("/redfish/v1/Fabrics/CXL/Endpoints/%s", dev->id));
+		if (target)
+			append_endpoint_once(endpoints, target->id);
 	}
 
 	fmd_topology_rdunlock(&ctx->topology);
@@ -1622,22 +1832,26 @@ json_t *fmd_redfish_port(struct fmd_ctx *ctx, const char *fabric_id,
 	else
 		json_decref(supported_modes);
 
-	/* A head of a Multi-Headed device: the endpoint is the device's */
-	if (port->head && port->head->base.parent)
-		json_object_set_new(result, "Links",
-			rf_links_array_single("AssociatedEndpoints",
-				"/redfish/v1/Fabrics/CXL/Endpoints/%s",
-				port->head->base.parent->id));
+	/*
+	 * The target Endpoints at the other end of the link: the SLD, each
+	 * LD of the MLD, or for a head of a Multi-Headed device the pool LD
+	 * mapped to it, or the head itself if it presents an MLD.
+	 */
+	json_t *associated = json_array();
 
-	/* Add link to connected device's Endpoint resource */
+	fmd_topology_rdlock(&ctx->topology);
+	append_port_endpoints(associated, port);
+	fmd_topology_rdunlock(&ctx->topology);
+	if (json_array_size(associated) > 0)
+		json_object_set_new(result, "Links",
+			json_pack("{s:o}", "AssociatedEndpoints", associated));
+	else
+		json_decref(associated);
+
 	struct fmd_component *dev_child;
 	fmd_for_each_child(&port->base, dev_child) {
 		if (dev_child->type == FMD_COMPONENT_SLD ||
 		    dev_child->type == FMD_COMPONENT_MLD) {
-			json_object_set_new(result, "Links",
-				rf_links_array_single("AssociatedEndpoints",
-					"/redfish/v1/Fabrics/CXL/Endpoints/%s",
-					dev_child->id));
 
 			/*
 			 * DSP0288 Table 2, Get LD Info: QoS Telemetry
@@ -1863,10 +2077,42 @@ json_t *fmd_redfish_vcs(struct fmd_ctx *ctx, const char *fabric_id,
 	);
 
 	/* Add Links to upstream port */
-	json_object_set_new(result, "Links",
-		rf_links_single("Port",
+	json_t *links = rf_links_single("Port",
 			"/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s_usp%d",
-			switch_id, switch_id, vcs->upstream_port_id));
+			switch_id, switch_id, vcs->upstream_port_id);
+
+	/*
+	 * Endpoints, "the endpoints for this Virtual CXL Switch"
+	 * (VirtualCXLSwitch_v1): its host, and each target Endpoint a vPPB
+	 * of it is bound to, each once, as in its Zone.
+	 */
+	json_t *endpoints = json_array();
+	struct fmd_component *child;
+
+	fmd_topology_rdlock(&ctx->topology);
+	if (ctx->topology.root) {
+		fmd_for_each_child_type(&ctx->topology.root->base, child,
+					FMD_COMPONENT_HOST) {
+			struct fmd_host *host = fmd_to_host(child);
+
+			if (!host->direct_attached && host->vcs_id == vcs->vcs_id &&
+			    !strcmp(host->switch_id, sw->base.id))
+				append_endpoint_once(endpoints, child->id);
+		}
+	}
+	for (int i = 0; i < vcs->num_vppbs; i++) {
+		struct fmd_component *target = vppb_target(&vcs->vppbs[i]);
+
+		if (target)
+			append_endpoint_once(endpoints, target->id);
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+
+	if (json_array_size(endpoints) > 0)
+		json_object_set_new(links, "Endpoints", endpoints);
+	else
+		json_decref(endpoints);
+	json_object_set_new(result, "Links", links);
 
 	return result;
 }
@@ -2043,19 +2289,35 @@ json_t *fmd_redfish_vppb(struct fmd_ctx *ctx, const char *fabric_id,
 	/* Add Links to bound port */
 	if (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
 	    vppb->binding_status == FMD_VPPB_BOUND_LD) {
+		struct fmd_component *target;
+		json_t *links;
+
 		if (vppb->port) {
 			/* Use resolved port's actual ID */
-			json_object_set_new(result, "Links",
-				rf_links_single("Port",
-					"/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
-					switch_id, vppb->port->base.id));
+			links = rf_links_single("Port",
+				"/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s",
+				switch_id, vppb->port->base.id);
 		} else {
 			/* Fallback: assume DSP if port not resolved */
-			json_object_set_new(result, "Links",
-				rf_links_single("Port",
-					"/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s_dsp%d",
-					switch_id, switch_id, vppb->bound_port_id));
+			links = rf_links_single("Port",
+				"/redfish/v1/Fabrics/CXL/Switches/%s/Ports/%s_dsp%d",
+				switch_id, switch_id, vppb->bound_port_id);
 		}
+
+		/*
+		 * Endpoints, "the endpoints associated with this vPPB"
+		 * (VirtualPCI2PCIBridge_v1): the target Endpoint it is bound
+		 * to (see vppb_target()).
+		 */
+		fmd_topology_rdlock(&ctx->topology);
+		target = vppb_target(vppb);
+		if (target)
+			json_object_set_new(links, "Endpoints",
+				json_pack("[o]", rf_link("/redfish/v1/Fabrics/CXL/Endpoints/%s",
+							 target->id)));
+		fmd_topology_rdunlock(&ctx->topology);
+
+		json_object_set_new(result, "Links", links);
 	}
 
 	/*
@@ -2816,6 +3078,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	uint64_t serial = 0;
 	bool has_qos = false;		/* an LD of an MLD has bandwidth fractions */
 	json_t *semantics;
+	char ep_id[FMD_MAX_ID_LEN];	/* its target Endpoint */
 
 	(void)snprintf(uri, sizeof(uri),
 		       "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s",
@@ -2832,6 +3095,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		media_status = sld->health.media_status;
 		qos_caps = sld->memdev.qos_telemetry_caps;
 		snprintf(name, sizeof(name), "CXL Logical Device 0");
+		snprintf(ep_id, sizeof(ep_id), "%s", comp->id);
 		semantics = build_sld_semantics_array(sld);
 	} else if (comp->type == FMD_COMPONENT_MLD) {
 		struct fmd_mld *mld = fmd_to_mld(comp);
@@ -2850,6 +3114,8 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 				}
 			}
 		}
+		if (ld)
+			snprintf(ep_id, sizeof(ep_id), "%s", ld->base.id);
 		fmd_topology_rdunlock(&ctx->topology);
 
 		if (!ld)
@@ -2885,6 +3151,8 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 				}
 			}
 		}
+		if (ld)
+			snprintf(ep_id, sizeof(ep_id), "%s", ld->base.id);
 		fmd_topology_rdunlock(&ctx->topology);
 
 		if (!ld)
@@ -2985,7 +3253,8 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 
 	/*
 	 * Add Links section per DMTF CXLLogicalDevice schema:
-	 * - Endpoints: fabric endpoint for this device
+	 * - Endpoints: the target Endpoint of this LD, the SLD's for an SLD
+	 *   and the LD's own for an LD of an MLD or a Multi-Headed device
 	 * - MemoryDomains: memory domain containing this LD
 	 * - MemoryChunks: memory chunks for this LD (only if provisioned)
 	 */
@@ -2993,8 +3262,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	char domain_uri[256];
 
 	snprintf(endpoint_uri, sizeof(endpoint_uri),
-		 "/redfish/v1/Fabrics/CXL/Endpoints/%s",
-		 chassis_id);
+		 "/redfish/v1/Fabrics/CXL/Endpoints/%s", ep_id);
 	snprintf(domain_uri, sizeof(domain_uri),
 		 "/redfish/v1/Chassis/%s/MemoryDomains/%s_domain0",
 		 chassis_id, chassis_id);
@@ -5486,6 +5754,8 @@ static uint16_t extract_ld_id_from_chunk(struct fmd_mem_chunk *chunk)
  *     chosen was bound by the time it was asked: try again
  * -12 the host's VCS has no unbound vPPB
  * -13 the chunk names no LD of the MLD, or one its port does not have
+ * -14 the target is a head that presents an MLD
+ * -15 the target is an LD, and the chunk is not on it
  * FMD_OP_STARTED: the switch binds in the background; *response is the Task
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
@@ -5582,8 +5852,28 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	if (!host)
 		return -3;
 
-	/* Validate target (device) exists */
+	/*
+	 * Validate target exists. It is a target Endpoint: an SLD, or an LD
+	 * of an MLD or of a Multi-Headed device, whose device is the target,
+	 * and the chunk has to be on that LD. The ID of an MLD or of a
+	 * Multi-Headed device, which have no Endpoint of their own, is still
+	 * taken, with the LD the chunk is on, for compatibility.
+	 */
 	struct fmd_component *target = fmd_topology_find(&ctx->topology, target_id);
+	struct fmd_component *target_ld = NULL;
+
+	/*
+	 * A head that presents an MLD: its LDs are bound by an LD-ID
+	 * relative to the head, which the device maps to a pool LD by no
+	 * rule the FM is told (CXL r4.0 Section 2.5.1).
+	 */
+	if (target && target->type == FMD_COMPONENT_HEAD)
+		return -14;
+	if (target && target->type == FMD_COMPONENT_LD) {
+		target_ld = target;
+		target = target->parent;
+		snprintf(target_id, sizeof(target_id), "%s", target ? target->id : "");
+	}
 	if (!target || !fmd_is_memdev(target))
 		return -4;
 
@@ -5591,6 +5881,13 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	struct fmd_mem_chunk *chunk = fmd_topology_find_chunk(&ctx->topology, chunk_id);
 	if (!chunk)
 		return -5;
+
+	if (target_ld && (chunk->interleave_set_count == 0 ||
+			  strcmp(chunk->interleave_sets[0].memory_id, target_ld->id))) {
+		fmd_warn(ctx, "Connection rejected: chunk %s is not on %s",
+			 chunk_id, target_ld->id);
+		return -15;
+	}
 
 	/*
 	 * For MHD (multi-headed devices), validate cross-head access:

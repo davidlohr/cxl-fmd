@@ -421,7 +421,7 @@ All error responses follow the Redfish error format with an `error` object conta
 | 201 Created | Resource created | POST to collections (MemoryChunks; Connections that need no bind, or whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
 | 202 Accepted | Started, not finished | POST and DELETE of a Connection when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; the task monitor while the task runs (see "Binds and unbinds in the background") |
 | 204 No Content | Success, no body | DELETE requests; the task monitor of an unbind once it has succeeded |
-| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection whose host and device are not on the same switch, whose host cannot reach the chunk's LD through its head, or whose chunk names no LD the MLD's port can bind; `ResetPPB` on a port that is not a DSP |
+| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection whose host and device are not on the same switch, whose host cannot reach the chunk's LD through its head, whose chunk names no LD the MLD's port can bind, whose target is an LD Endpoint and chunk is on another LD, or whose target is the Endpoint of a head that presents an MLD; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path |
 | 405 Method Not Allowed | Method not supported | Using unsupported HTTP method on endpoint |
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound to another host's VCS, or for a host whose VCS has no unbound vPPB |
@@ -591,8 +591,8 @@ CXL fabric topology (switches, ports, connections, zones).
 | `GET /redfish/v1/Fabrics/CXL/Switches/{sw}/VCSs/{vcs}` | Virtual CXL Switch |
 | `GET /redfish/v1/Fabrics/CXL/Switches/{sw}/VCSs/{vcs}/VPPBs` | vPPB Collection |
 | `GET /redfish/v1/Fabrics/CXL/Switches/{sw}/VCSs/{vcs}/VPPBs/{vppb}` | Virtual PCI-to-PCI Bridge |
-| `GET /redfish/v1/Fabrics/CXL/Endpoints` | Endpoint Collection (devices + hosts) |
-| `GET /redfish/v1/Fabrics/CXL/Endpoints/{ep}` | Fabric Endpoint (device or host) |
+| `GET /redfish/v1/Fabrics/CXL/Endpoints` | Endpoint Collection (SLDs, LDs, MH-MLD heads, hosts) |
+| `GET /redfish/v1/Fabrics/CXL/Endpoints/{ep}` | Fabric Endpoint (SLD, LD, MH-MLD head or host) |
 | `GET /redfish/v1/Fabrics/CXL/Connections` | Connection Collection |
 | `GET /redfish/v1/Fabrics/CXL/Connections/{conn}` | Connection (host-to-device binding) |
 | `POST /redfish/v1/Fabrics/CXL/Connections` | Create Connection (binds memory to host) |
@@ -605,17 +605,49 @@ CXL fabric topology (switches, ports, connections, zones).
 Fabric Endpoints represent entities that participate in CXL communication. There are two types:
 
 **Target Endpoints (Memory Devices)**
-- Represent SLD and MLD devices that provide CXL memory
-- `EntityType`: `CXLDevice` for an SLD, "the entity this endpoint
-  represents is a CXL logical device" (Endpoint_v1), with `EntityLink` to
-  its `CXLLogicalDevices/0`, the type Endpoint_v1 says it should link to.
-  DMTF names no EntityType for a CXL Type 3 target: this is cxl-fmd's
-  choice. The Endpoint of an MLD or a Multi-Headed device is the device,
-  and keeps `MemoryChunk` (a known gap)
+
+A host is bound to an SLD whole and to an MLD one LD at a time ("If the
+bind target is a physical port connected to an MLD, then a corresponding
+LD-ID must also be specified", CXL r4.0 Section 7.6.7.2.2). A target
+Endpoint is what a binding reaches, so there is one Endpoint per logical
+device. That is cxl-fmd's choice: Endpoint_v1 allows it and does not
+require it.
+
+- An SLD: Id the device's ID (unchanged)
+- An LD of an MLD, or a pool LD of a Multi-Headed device: Id the LD's,
+  `{dev}_ld{N}`, `N` its LD-ID or pool index. An MLD or a Multi-Headed
+  device has no Endpoint of its own
+- A head of a Multi-Headed device that presents an MLD: Id
+  `{mhd}_head{H}`, `EntityType` `Memory`, no `EntityLink`. Its LDs are
+  bound by an LD-ID "from 0 to n-1 relative to that head", which "The
+  MH-MLD maps ... to the device-wide LD index in the MH-MLD's LD pool"
+  (Section 2.5.1) by no rule the FM is told: a binding of one of them is
+  shown to reach the head, not a pool LD
+- `EntityType`: `CXLDevice` for an SLD or an LD, "the entity this
+  endpoint represents is a CXL logical device" (Endpoint_v1), with
+  `EntityLink` to its `CXLLogicalDevices/{N}` (`0` for an SLD), the type
+  Endpoint_v1 says it should link to. DMTF names no EntityType for a CXL
+  Type 3 target: this is cxl-fmd's choice
 - `EntityRole`: `Target` (responds to memory requests)
 - `EntityPciId`: Contains VendorId/DeviceId from device
-- `Links.ConnectedPorts`: Switch port the device connects to (if switch-attached)
-- `Links.Zones`: VCS(s) the device is bound to
+- `Links.ConnectedPorts`: Switch port the device connects to (if
+  switch-attached); for a pool LD, the port of the head it is mapped to
+- `Links.Zones`: each VCS a vPPB of which is bound to this Endpoint
+
+What a vPPB is bound to: an SLD for Binding Status 02h on its port, the LD
+with the Bound LD ID for 03h on an MLD's port, the pool LD mapped to the
+head for 02h on the port of a head that presents an SLD, and the head for
+03h on the port of a head that presents an MLD. The vPPB's
+`Links.Endpoints` is that Endpoint; a Port's `Links.AssociatedEndpoints`
+is each target Endpoint at the other end of its link; a
+`CXLLogicalDevice`'s `Links.Endpoints` is its own Endpoint; a
+`VirtualCXLSwitch`'s `Links.Endpoints` is its Zone's.
+
+`POST /redfish/v1/Fabrics/CXL/Connections` takes an LD Endpoint as the
+target, with a chunk of that LD (400 if the chunk is on another LD), and a
+head Endpoint is refused with 400. For compatibility, the ID of an MLD or
+of a Multi-Headed device, which have no Endpoint any more, is still taken
+as the target, with the LD the chunk is on.
 
 **Initiator Endpoints (Hosts)**
 - Represent host systems that issue CXL.mem requests
@@ -652,8 +684,9 @@ Zones represent Virtual CXL Switches (VCS) as access domains. Each Zone contains
 - Zone ID format: `{switch_id}_vcs{N}` (e.g., `cxl_switch_0_vcs0`)
 - `Links.Endpoints`: Array of all endpoints in this VCS:
   - Host endpoints (EntityRole=Initiator) connected via the VCS USP
-  - Device endpoints (EntityRole=Target) bound to the VCS via vPPBs, each
-    once: an MLD two of whose LDs are bound to the VCS is listed once
+  - Target endpoints (EntityRole=Target) bound to the VCS via vPPBs, each
+    once: an MLD whose LD 0 is bound to VCS 0 and LD 1 to VCS 1 is its
+    `{mld}_ld0` Endpoint in the one Zone and `{mld}_ld1` in the other
 - Bidirectional links: Both hosts and devices include `Links.Zones` back-references
 
 ### Actions
@@ -833,7 +866,7 @@ Content-Type: application/json
             {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/{host_id}"}
         ],
         "TargetEndpoints": [
-            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/{device_id}"}
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/{endpoint_id}"}
         ]
     },
     "MemoryChunkInfo": [{
@@ -850,7 +883,7 @@ Content-Type: application/json
 |----------|------|:--------:|-------------|
 | `ConnectionType` | string | No | Connection type, should be `"Memory"` |
 | `Links.InitiatorEndpoints` | array | Yes | Host endpoint(s) with `EntityRole: Initiator` |
-| `Links.TargetEndpoints` | array | Yes | Device endpoint(s) with `EntityRole: Target` |
+| `Links.TargetEndpoints` | array | Yes | Target endpoint: an SLD or an LD (`{dev}_ld{N}`, with a chunk of that LD); the ID of an MLD or a Multi-Headed device is still taken, for compatibility |
 | `MemoryChunkInfo` | array | Yes | Memory chunk(s) to bind |
 | `MemoryChunkInfo[].MemoryChunk` | object | Yes | Reference to the MemoryChunk |
 | `MemoryChunkInfo[].AccessCapabilities` | array | No | `["Read"]`, `["Write"]`, or `["Read", "Write"]` (default) |
@@ -1017,10 +1050,8 @@ In summary:
    binding made before cxl-fmd started, does not unbind (see "Binding").
 4. No Connection is made for a vPPB bound by someone other than cxl-fmd.
    The Connections cxl-fmd serves for each device have no
-   `InitiatorEndpoints`, whatever the device's vPPBs are bound to. The
-   `Endpoint` of an MLD or a Multi-Headed device has `EntityType`
-   `MemoryChunk`, and an MLD is one `Endpoint`, not one per LD (see
-   "Endpoints" and "Binding").
+   `InitiatorEndpoints`, whatever the device's vPPBs are bound to (see
+   "Binding").
 5. The security actions are served on `Memory`, not on
    `CXLLogicalDevice`, where DSP0288 1.3.0 and 1.4.0 put them (see
    "DSP0288 mappings").

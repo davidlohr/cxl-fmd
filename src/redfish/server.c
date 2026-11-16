@@ -1163,6 +1163,12 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -13)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The memory chunk names no logical device that the device's port can bind");
+		if (rc == -14)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The head presents an MLD: which pool LD each of its LD-IDs is, is not known (CXL r4.0 Section 2.5.1)");
+		if (rc == -15)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The memory chunk is not on the target logical device");
 		if (rc == -10)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The host and the device are not on the same switch");

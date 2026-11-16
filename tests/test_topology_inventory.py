@@ -6,6 +6,8 @@ Validates that cxl-fmd correctly discovers and represents CXL components
 in the Redfish API hierarchy per DMTF DSP0288 (CXL to Redfish Mapping).
 """
 
+from pathlib import Path
+
 import pytest
 
 
@@ -477,17 +479,86 @@ class TestMultiHostVCS:
         assert status == 200
         assert data["Members@odata.count"] >= 2
 
-    def test_zone_lists_each_endpoint_once(self, api_client):
-        """Two LDs of mld0 are bound to each VCS: mld0 is one Endpoint, and
-        each Zone links to it once."""
-        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Zones")
-        assert status == 200
-        for member in data["Members"]:
-            status, zone = api_client.get(member["@odata.id"])
+    EP = "/redfish/v1/Fabrics/CXL/Endpoints/"
+    ZONE = "/redfish/v1/Fabrics/CXL/Zones/"
+
+    def test_mld_split_zones_per_ld(self, api_client):
+        """LD0 and LD1 of mld0 are bound to VCS 0 and LD2 and LD3 to VCS 1:
+        each Zone has the Endpoints of the LDs its vPPBs' BoundLDId names,
+        each once, and an LD Endpoint's Links.Zones is the inverse."""
+        vcss = "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs"
+        expected = {"cxl_switch_0_vcs0": {"cxl_switch_0_host0", "dev0", "dev1",
+                                          "mld0_ld0", "mld0_ld1"},
+                    "cxl_switch_0_vcs1": {"cxl_switch_0_host1", "dev2",
+                                          "mld0_ld2", "mld0_ld3"}}
+        members = {}
+        for zone_id, want in expected.items():
+            status, zone = api_client.get(self.ZONE + zone_id)
             assert status == 200
             links = [ep["@odata.id"] for ep in zone["Links"]["Endpoints"]]
             assert len(links) == len(set(links)), links
-            assert "/redfish/v1/Fabrics/CXL/Endpoints/mld0" in links
+            assert {l.rsplit("/", 1)[1] for l in links} == want
+            members[zone_id] = want
+
+            # the LDs are the ones BoundLDId names
+            vcs = zone_id.rsplit("_vcs", 1)[1]
+            status, data = api_client.get("%s/%s/VPPBs" % (vcss, vcs))
+            bound = set()
+            for m in data["Members"]:
+                status, vppb = api_client.get(m["@odata.id"])
+                if vppb["BindingStatus"] == "BoundLD":
+                    bound.add("mld0_ld%d" % vppb["BoundLDId"])
+                    assert vppb["Links"]["Endpoints"] == [
+                        {"@odata.id": self.EP + "mld0_ld%d" % vppb["BoundLDId"]}]
+            assert bound == {e for e in want if e.startswith("mld0_ld")}
+
+        for ld in range(4):
+            status, ep = api_client.get(self.EP + "mld0_ld%d" % ld)
+            assert status == 200
+            zones = {z["@odata.id"].rsplit("/", 1)[1] for z in ep["Links"]["Zones"]}
+            assert zones == {z for z, m in members.items() if "mld0_ld%d" % ld in m}
+
+    def test_mld_has_no_device_endpoint(self, api_client):
+        """An MLD is bound one LD at a time: its Endpoints are its LDs'."""
+        status, _ = api_client.get(self.EP + "mld0")
+        assert status == 404
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints")
+        ids = {m["@odata.id"].rsplit("/", 1)[1] for m in data["Members"]}
+        assert {"mld0_ld0", "mld0_ld1", "mld0_ld2", "mld0_ld3"} <= ids
+        assert "mld0" not in ids
+
+    def test_ld_endpoint_is_a_cxl_device(self, api_client):
+        """An LD Endpoint is a CXLDevice linking to its CXLLogicalDevice,
+        whose Links.Endpoints links back to it, and is on the MLD's port."""
+        status, ep = api_client.get(self.EP + "mld0_ld2")
+        assert status == 200
+        entity = ep["ConnectedEntities"][0]
+        assert entity["EntityType"] == "CXLDevice"
+        assert entity["EntityRole"] == "Target"
+        ld_uri = "/redfish/v1/Chassis/mld0/PCIeDevices/mld0/CXLLogicalDevices/2"
+        assert entity["EntityLink"] == {"@odata.id": ld_uri}
+        assert ep["Links"]["ConnectedPorts"] == [
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/Ports/cxl_switch_0_dsp5"}]
+        status, ld = api_client.get(ld_uri)
+        assert status == 200
+        assert ld["Links"]["Endpoints"] == [{"@odata.id": self.EP + "mld0_ld2"}]
+
+    def test_mld_port_associates_each_ld(self, api_client):
+        status, port = api_client.get(
+            "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/Ports/cxl_switch_0_dsp5")
+        assert status == 200
+        assert port["Links"]["AssociatedEndpoints"] == [
+            {"@odata.id": self.EP + "mld0_ld%d" % ld} for ld in range(4)]
+
+    def test_vcs_links_its_endpoints(self, api_client):
+        """A VirtualCXLSwitch's Links.Endpoints are its Zone's."""
+        for vcs in (0, 1):
+            status, data = api_client.get(
+                "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs/%d" % vcs)
+            assert status == 200
+            status, zone = api_client.get(self.ZONE + "cxl_switch_0_vcs%d" % vcs)
+            assert sorted(e["@odata.id"] for e in data["Links"]["Endpoints"]) == \
+                sorted(e["@odata.id"] for e in zone["Links"]["Endpoints"])
 
     def test_mld_on_a_port_has_egress_congestion_on_the_port(self, api_client):
         """mld0 is on dsp5: Egress Port Congestion Supported is on the Port
@@ -808,3 +879,48 @@ def test_entitylinks_resolve(api_client, topology):
         else:
             assert entity["EntityRole"] == "Initiator"
     assert seen == set(ENTITY_LINK_TYPES), seen
+
+
+# =============================================================================
+# Every link served is served
+# =============================================================================
+
+def _links(value):
+    """Every @odata.id in a resource, but its own."""
+    if isinstance(value, dict):
+        for key, v in value.items():
+            if key == "@odata.id" and isinstance(v, str):
+                yield v
+            else:
+                yield from _links(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _links(v)
+
+
+ROOT = Path(__file__).resolve().parent.parent
+ALL_TOPOLOGIES = [
+    pytest.param(t, marks=pytest.mark.mock_topology(t), id=t.rsplit("/", 1)[1])
+    for t in sorted(str(p.relative_to(ROOT)) for p in ROOT.glob("mock/**/*.json"))]
+
+
+@pytest.mark.parametrize("topology", ALL_TOPOLOGIES)
+def test_all_links_resolve(api_client, topology):
+    """Walk the service from the root: every link a resource has (its
+    Connections, Zones, Endpoints, MemoryDomains, MemoryChunks...) is
+    served."""
+    seen, todo, broken = set(), ["/redfish/v1"], []
+    while todo:
+        uri = todo.pop()
+        if uri in seen:
+            continue
+        seen.add(uri)
+        status, data = api_client.get(uri)
+        if status != 200:
+            broken.append((uri, status))
+            continue
+        for link in _links(data):
+            link = link.split("#", 1)[0]
+            if link.startswith("/redfish/v1") and link not in seen:
+                todo.append(link)
+    assert not broken, broken

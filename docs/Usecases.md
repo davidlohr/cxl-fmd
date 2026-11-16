@@ -335,7 +335,8 @@ GET /redfish/v1/Fabrics/CXL/Zones/cxl_switch_0_vcs0
             {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host0"},
             {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/dev0"},
             {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/dev1"},
-            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld0"}
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld0_ld0"},
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mld0_ld1"}
         ]
     }
 }

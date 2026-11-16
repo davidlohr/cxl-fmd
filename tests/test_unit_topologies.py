@@ -464,6 +464,29 @@ class TestDirectMHSLDMemoryLifecycle:
 class TestDirectMHSLDConnections:
     """Connection tests for direct-attached MH-SLD."""
 
+    def test_pool_ld_endpoint_as_target(self, api_client):
+        """A pool LD's Endpoint is a target, with a chunk of that LD, and is
+        the Connection's TargetEndpoints; the device's ID still is, for
+        compatibility, and its target is the same LD Endpoint."""
+        ep = "/redfish/v1/Fabrics/CXL/Endpoints/"
+        status, data = api_client.get(
+            "/redfish/v1/Chassis/mhsld_0/MemoryDomains/mhsld_0_domain0/MemoryChunks")
+        chunk_uri = next(m["@odata.id"] for m in data["Members"] if "_ld0_" in m["@odata.id"])
+        for target in ("mhsld_0_ld0", "mhsld_0"):
+            status, data, _ = api_client.post(
+                "/redfish/v1/Fabrics/CXL/Connections",
+                {
+                    "ConnectionType": "Memory",
+                    "Links": {
+                        "InitiatorEndpoints": [{"@odata.id": ep + "host0"}],
+                        "TargetEndpoints": [{"@odata.id": ep + target}]
+                    },
+                    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
+                }
+            )
+            assert status == 201, target
+            assert data["Links"]["TargetEndpoints"] == [{"@odata.id": ep + "mhsld_0_ld0"}]
+
     def test_host0_connects_to_pool_ld0(self, api_client):
         """host0 can connect to pool LD 0 (head 0)."""
         status, data = api_client.get(
@@ -596,6 +619,47 @@ class TestDirectMHMLDMemoryLifecycle:
 @pytest.mark.mock_topology("mock/unit/unit-direct-mhmld.json")
 class TestDirectMHMLDConnections:
     """Connection tests for direct-attached MH-MLD."""
+
+    EP = "/redfish/v1/Fabrics/CXL/Endpoints/"
+
+    def test_endpoints_are_pool_lds_and_heads(self, api_client):
+        """Each pool LD has an Endpoint, and each head, which presents an
+        MLD, one of its own, EntityType Memory: which pool LD a head's LD-ID
+        is, the device keeps to itself (CXL r4.0 Section 2.5.1). The device
+        has none."""
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints")
+        ids = {m["@odata.id"].rsplit("/", 1)[1] for m in data["Members"]}
+        assert ids == {"host0", "host1", "mhmld_0_head0", "mhmld_0_head1",
+                       "mhmld_0_ld0", "mhmld_0_ld1", "mhmld_0_ld2", "mhmld_0_ld3"}
+        status, ep = api_client.get(self.EP + "mhmld_0_head1")
+        assert status == 200
+        entity = ep["ConnectedEntities"][0]
+        assert entity["EntityType"] == "Memory"
+        assert entity["EntityRole"] == "Target"
+        assert "EntityLink" not in entity
+        status, ep = api_client.get(self.EP + "mhmld_0_ld3")
+        assert status == 200
+        assert ep["ConnectedEntities"][0]["EntityLink"] == {
+            "@odata.id": "/redfish/v1/Chassis/mhmld_0/PCIeDevices/mhmld_0/CXLLogicalDevices/3"}
+        status, _ = api_client.get(self.EP + "mhmld_0")
+        assert status == 404
+
+    def test_head_endpoint_as_target_400(self, api_client):
+        status, data = api_client.get(
+            "/redfish/v1/Chassis/mhmld_0/MemoryDomains/mhmld_0_domain0/MemoryChunks")
+        chunk_uri = next(m["@odata.id"] for m in data["Members"] if "_ld0_" in m["@odata.id"])
+        status, data, _ = api_client.post(
+            "/redfish/v1/Fabrics/CXL/Connections",
+            {
+                "ConnectionType": "Memory",
+                "Links": {
+                    "InitiatorEndpoints": [{"@odata.id": self.EP + "host0"}],
+                    "TargetEndpoints": [{"@odata.id": self.EP + "mhmld_0_head0"}]
+                },
+                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
+            }
+        )
+        assert status == 400
 
     def test_host0_connects_to_pool_ld0(self, api_client):
         """host0 can connect to pool LD 0 (head 0)."""
@@ -885,6 +949,58 @@ class TestSwitchMLDConnections:
         assert status == 201
 
 
+    CHUNKS = "/redfish/v1/Chassis/mld_0/MemoryDomains/mld_0_domain0/MemoryChunks"
+    EP = "/redfish/v1/Fabrics/CXL/Endpoints/"
+
+    def _post(self, api_client, target, ld):
+        status, data = api_client.get("/redfish/v1/Systems")
+        host_id = data["Members"][0]["@odata.id"].split("/")[-1]
+        status, data = api_client.get(self.CHUNKS)
+        chunk_uri = next(m["@odata.id"] for m in data["Members"]
+                         if "_ld%d_" % ld in m["@odata.id"])
+        return api_client.post(
+            "/redfish/v1/Fabrics/CXL/Connections",
+            {
+                "ConnectionType": "Memory",
+                "Links": {
+                    "InitiatorEndpoints": [{"@odata.id": self.EP + host_id}],
+                    "TargetEndpoints": [{"@odata.id": self.EP + target}]
+                },
+                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunk_uri}}]
+            }
+        )
+
+    def test_old_form_targets_the_chunks_ld(self, api_client):
+        """The MLD's own ID, which has no Endpoint any more, is still taken
+        with a chunk, for compatibility: the Connection's target is the
+        Endpoint of the chunk's LD, which is served."""
+        status, _ = api_client.get(self.EP + "mld_0")
+        assert status == 404
+        status, data, _ = self._post(api_client, "mld_0", 1)
+        assert status == 201
+        assert data["Links"]["TargetEndpoints"] == [{"@odata.id": self.EP + "mld_0_ld1"}]
+        status, _ = api_client.get(data["Links"]["TargetEndpoints"][0]["@odata.id"])
+        assert status == 200
+
+    def test_ld_endpoint_as_target(self, api_client):
+        """An LD Endpoint is a target, with a chunk of that LD."""
+        status, data, _ = self._post(api_client, "mld_0_ld0", 0)
+        assert status == 201
+        assert data["Links"]["TargetEndpoints"] == [{"@odata.id": self.EP + "mld_0_ld0"}]
+
+    def test_ld_endpoint_with_a_chunk_of_another_ld_400(self, api_client):
+        status, _, _ = self._post(api_client, "mld_0_ld0", 1)
+        assert status == 400
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Connections")
+        assert all("conn" not in m["@odata.id"] for m in data["Members"])
+
+    def test_implicit_connection_targets_each_ld(self, api_client):
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Connections/mld_0")
+        assert status == 200
+        assert data["Links"]["TargetEndpoints"] == [
+            {"@odata.id": self.EP + "mld_0_ld%d" % ld} for ld in range(2)]
+
+
 # =============================================================================
 # 7. SWITCH-ATTACHED MH-SLD
 # =============================================================================
@@ -983,14 +1099,32 @@ class TestSwitchMHSLDConnections:
         ports = sorted(p["@odata.id"].rsplit("/", 1)[1]
                        for p in data["Links"]["ConnectedPCIePorts"])
         assert ports == ["switch_0_dsp2", "switch_0_dsp3"]
-        for port in ports:
+        for ld, port in enumerate(ports):
             status, data = api_client.get(
                 "/redfish/v1/Fabrics/CXL/Switches/switch_0/Ports/" + port)
             assert status == 200
-            # each head presents an SLD to the port it is on
+            # each head presents an SLD to the port it is on, and what is
+            # at the other end of the link is the pool LD mapped to it
             assert data["CXL"]["ConnectedDeviceType"] == "Type3SLD"
             assert data["Links"]["AssociatedEndpoints"] == [
-                {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0"}]
+                {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0_ld%d" % ld}]
+
+    def test_head_port_vppb_links_to_its_pool_ld(self, api_client):
+        """vPPB 1 of VCS 0 is bound to port 2, head 0's: its Endpoint is
+        pool LD 0, which is in Zone vcs0, and LD 1 is in no Zone."""
+        status, data = api_client.get(self.VCSS + "/0/VPPBs/1")
+        assert status == 200
+        assert data["Links"]["Endpoints"] == [
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0_ld0"}]
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0_ld0")
+        assert status == 200
+        assert data["Links"]["ConnectedPorts"] == [
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Switches/switch_0/Ports/switch_0_dsp2"}]
+        assert data["Links"]["Zones"] == [
+            {"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/switch_0_vcs0"}]
+        status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints/mhsld_0_ld1")
+        assert status == 200
+        assert "Zones" not in data["Links"]
 
     def test_host0_has_head0(self, api_client):
         """Port 2 is already bound to VCS 0: nothing more is bound."""
