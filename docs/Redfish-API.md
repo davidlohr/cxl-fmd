@@ -1111,10 +1111,24 @@ Content-Type: application/json
 |----------|------|:--------:|-------------|
 | `ConnectionType` | string | No | Not read; the Connection is `"Memory"` |
 | `Links.InitiatorEndpoints` | array | Yes | Exactly one: the host's Endpoint |
-| `Links.TargetEndpoints` | array | Yes | Exactly one: an SLD's Endpoint, or an LD's (`{dev}_ld{N}`). Accepted for compatibility: the ID of an MLD or a Multi-Headed device, which have no Endpoint, with `MemoryChunkInfo` naming the LD |
+| `Links.TargetEndpoints` | array | Yes | Exactly one: an SLD's Endpoint, or an LD's (`{dev}_ld{N}`). Accepted for compatibility: `/redfish/v1/Fabrics/CXL/Endpoints/{id}` with the ID of an MLD or a Multi-Headed device, which have no Endpoint, with `MemoryChunkInfo` naming the LD |
+| `Links.InitiatorEndpointGroups`, `Links.TargetEndpointGroups` | array | No | Not supported: a body with either is 400 |
 | `MemoryChunkInfo` | array | With an MLD or Multi-Headed device's ID | Chunks of the target; with an SLD or LD Endpoint it can be left out. It does not choose what is bound: a binding gives the whole SLD or LD |
 | `MemoryChunkInfo[].MemoryChunk` | object | Yes, in each entry | Reference to the MemoryChunk |
 | `MemoryChunkInfo[].AccessCapabilities` | array | No | `["Read", "Write"]` only: anything else is 400 |
+
+Every `@odata.id` is the URI the service serves the resource at: an
+Endpoint is `/redfish/v1/Fabrics/CXL/Endpoints/{id}`, and a chunk
+`/redfish/v1/Chassis/{device}/MemoryDomains/{domain}/MemoryChunks/{chunk}`,
+its own device and domain. Any other form (another path ending in the same
+ID, a relative URI, a trailing `/`) is 400, and so is the URI of the same
+chunk in a host's view, `/redfish/v1/Systems/{host}/MemoryDomains/{dom}/MemoryChunks/{chunk}`
+(cxl-fmd's choice: the Chassis URI is the chunk's own). An Endpoint or
+chunk URI of that form whose ID nothing has is 404. `InitiatorEndpoints` "shall not be present if
+`InitiatorEndpointGroups` is present", and `TargetEndpoints` likewise
+(Connection_v1); cxl-fmd serves no `EndpointGroup`, so a body with either
+`EndpointGroups` property is 400 (cxl-fmd's choice, rather than ignoring
+it).
 
 Each chunk named must be the target's, and the chunks of an MLD or a
 Multi-Headed device must all be on one LD (400 otherwise). The target is:
@@ -1659,6 +1673,9 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` with an `AddressRangeType` other than `PMEM` or `Volatile`, or not a string | `201`, as `PMEM` | `400` |
 | Chunk `POST` after a `DELETE` of a chunk of the domain | the ID of a chunk the domain still had, so that two chunks had one URI, a collection listed it twice, and a Connection's `MemoryChunkInfo` too | an ID that no chunk of the domain has had since cxl-fmd started, or discovered the device |
 | Chunk `POST` on a domain with chunks found at discovery (the `{device}_ld{N}_chunk` of an MLD or MHD) | `{domain}_chunk{N}`, N the number of chunks in the domain | `{domain}_chunk0` for the first, then 1, 2, ... |
+| Connection `POST` with a link that is not the URI the service serves the resource at, but ends in the ID of one (`/bogus/sld_0`, `/redfish/v1/Chassis/sld_1` as a target, a chunk of one device under another's Chassis, a relative URI) | `201`: the last segment was taken as the ID, whatever came before it | `400`, nothing bound |
+| Connection `POST` naming a chunk by its URI in a host's view, `/redfish/v1/Systems/{host}/MemoryDomains/{dom}/MemoryChunks/{chunk}` | taken, by its last segment | `400`: a chunk is named by its Chassis URI |
+| Connection `POST` with `InitiatorEndpointGroups` or `TargetEndpointGroups` | ignored: `201` from the Endpoints alone | `400`, nothing bound |
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
 
 Mock topologies and discovery:

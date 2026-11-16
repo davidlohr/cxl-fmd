@@ -5966,7 +5966,8 @@ static void test_conn_view_unresolved_mh_mld(void)
 			"mhd_head0\"}]}}",
 			"mhd_ld0\"}]}}",
 			("mhd\"}]}, \"MemoryChunkInfo\": [{\"MemoryChunk\": "
-			 "{\"@odata.id\": \"/x/mhd_ld1_chunk\"}}]}"),
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/mhd/MemoryDomains/"
+			 "mhd_domain0/MemoryChunks/mhd_ld1_chunk\"}}]}"),
 		};
 		char body[512];
 		json_t *resp = NULL;
@@ -5974,8 +5975,8 @@ static void test_conn_view_unresolved_mh_mld(void)
 		for (size_t i = 0; i < 3; i++) {
 			snprintf(body, sizeof(body),
 				 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
-				 "\"/e/sw_mh_host0\"}], \"TargetEndpoints\": [{\"@odata.id\": "
-				 "\"/e/%s", bodies[i]);
+				 "\"/redfish/v1/Fabrics/CXL/Endpoints/sw_mh_host0\"}], \"TargetEndpoints\": [{\"@odata.id\": "
+				 "\"/redfish/v1/Fabrics/CXL/Endpoints/%s", bodies[i]);
 			rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 			CHECK(rc == -14 && !resp, "POST %zu to a head that presents an MLD: %d",
 			      i, rc);
@@ -5987,8 +5988,8 @@ static void test_conn_view_unresolved_mh_mld(void)
 
 		snprintf(body, sizeof(body),
 			 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
-			 "\"/e/sw_mh_host0\"}], \"TargetEndpoints\": [{\"@odata.id\": "
-			 "\"/e/mhd_ld2\"}]}}");
+			 "\"/redfish/v1/Fabrics/CXL/Endpoints/sw_mh_host0\"}], \"TargetEndpoints\": [{\"@odata.id\": "
+			 "\"/redfish/v1/Fabrics/CXL/Endpoints/mhd_ld2\"}]}}");
 		rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 		CHECK(rc == FMD_CONN_EXISTS &&
 		      !strcmp(json_string_value(json_object_get(resp, "Id")),
@@ -6034,8 +6035,8 @@ static void test_post_delete_on_a_switch(void)
 		goto out;
 
 #define POST_LD(n) snprintf(body, sizeof(body), \
-	"{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/e/%s\"}], " \
-	"\"TargetEndpoints\": [{\"@odata.id\": \"/e/%.32s_port5_dev_ld%d\"}]}}", \
+	"{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], " \
+	"\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld%d\"}]}}", \
 	host->base.id, sw_id, n)
 
 	/* LD 0: the switch binds it in the background, to vPPB 1 */
@@ -6157,8 +6158,8 @@ static void test_chunk_guard(void)
 	/* bind LD 0 to vPPB 1 of VCS 2, in the background */
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	snprintf(body, sizeof(body),
-		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/e/%s\"}], "
-		 "\"TargetEndpoints\": [{\"@odata.id\": \"/e/%s_ld0\"}]}}",
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s_ld0\"}]}}",
 		 host->base.id, dev);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
@@ -6293,8 +6294,8 @@ static void test_force_unbind(void)
 	/* LD 0, bound by cxl-fmd in the background: Service once it is done */
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	snprintf(body, sizeof(body),
-		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/e/%s\"}], "
-		 "\"TargetEndpoints\": [{\"@odata.id\": \"/e/%.32s_port5_dev_ld0\"}]}}",
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld0\"}]}}",
 		 host->base.id, sw_id);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	json_decref(resp);

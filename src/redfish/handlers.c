@@ -748,6 +748,34 @@ json_t *fmd_redfish_fabric(struct fmd_ctx *ctx, const char *fabric_id)
  */
 
 /* Whether @comp has a target Endpoint of its own */
+/*
+ * The URIs Endpoints and memory chunks are served at. The GET handlers
+ * build them here, and a request's links are held to them (see
+ * resolve_endpoint() and resolve_chunk()). Each returns 0, or
+ * -ENAMETOOLONG if @len is too short for it.
+ */
+#define RF_ENDPOINTS "/redfish/v1/Fabrics/CXL/Endpoints/"
+#define RF_CHUNK_URI_LEN (sizeof("/redfish/v1/Chassis//MemoryDomains//MemoryChunks/") + \
+			  3 * FMD_MAX_ID_LEN)
+
+static int endpoint_uri(char *buf, size_t len, const char *id)
+{
+	return (size_t)snprintf(buf, len, RF_ENDPOINTS "%s", id) < len ? 0 : -ENAMETOOLONG;
+}
+
+/* A chunk is served under its device's Chassis, in its MemoryDomain */
+static int chunk_uri(char *buf, size_t len, const struct fmd_mem_chunk *chunk)
+{
+	const struct fmd_component *dom = chunk->base.parent;
+
+	if (!dom || !dom->parent)
+		return -ENOENT;
+	return (size_t)snprintf(buf, len,
+				"/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s",
+				dom->parent->id, dom->id, chunk->base.id) < len ?
+		0 : -ENAMETOOLONG;
+}
+
 static bool is_target_endpoint(const struct fmd_component *comp)
 {
 	if (!comp)
@@ -935,18 +963,16 @@ static void append_conn_lds(json_t *arr, const struct fmd_conn_view *v)
 
 static int chunk_info(const struct fmd_mem_chunk *chunk, void *arg)
 {
-	const struct fmd_component *dom = chunk->base.parent;
+	char uri[RF_CHUNK_URI_LEN];
 
-	if (!dom || !dom->parent)
+	if (chunk_uri(uri, sizeof(uri), chunk))
 		return 0;
 	/*
 	 * Read and Write: Bind vPPB has no field for how a host may use what
 	 * is bound (Table 7-35). Optimized is cxl-fmd's choice.
 	 */
 	json_array_append_new(arg, json_pack("{s:{s:s}, s:[s, s], s:s}",
-		"MemoryChunk", "@odata.id",
-			rf_uri(0, "/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s",
-			       dom->parent->id, dom->id, chunk->base.id),
+		"MemoryChunk", "@odata.id", uri,
 		"AccessCapabilities", "Read", "Write",
 		"AccessState", "Optimized"));
 	return 0;
@@ -1145,8 +1171,9 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 	if (!is_target_endpoint(comp) && comp->type != FMD_COMPONENT_HOST)
 		return NULL;
 
-	char uri[256];
-	snprintf(uri, sizeof(uri), "/redfish/v1/Fabrics/CXL/Endpoints/%s", endpoint_id);
+	char uri[sizeof(RF_ENDPOINTS) + FMD_MAX_ID_LEN];
+	if (endpoint_uri(uri, sizeof(uri), endpoint_id))
+		return NULL;
 
 	/*
 	 * Host endpoints (Initiators). What the FM knows of a host is the CXL
@@ -5886,24 +5913,30 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx,
  * target cannot choose the same vPPB.
  */
 
-/* The last segment of the @odata.id of link object @link, NULL if none */
-static const char *link_id(json_t *link)
-{
-	const char *uri = json_string_value(json_object_get(link, "@odata.id"));
-	const char *slash;
+/*
+ * Links in a request name a resource by the URI the service serves it at,
+ * and by nothing else: "This property shall contain an array of links to
+ * resources of type `Endpoint`" (Connection_v1, InitiatorEndpoints and
+ * TargetEndpoints), and "a link to a resource of type `MemoryChunk`"
+ * (MemoryChunk of MemoryChunkInfo). A URI whose last segment is the Id of
+ * a component, under any other path, names no such resource. The URIs are
+ * built by endpoint_uri() and chunk_uri(), which the GET handlers serve
+ * them by, so that what a request is held to cannot drift from what is
+ * served.
+ */
 
-	if (!uri || !uri[0])
-		return NULL;
-	slash = strrchr(uri, '/');
-	return slash ? slash + 1 : uri;
+/* The @odata.id of link object @link, NULL if it has none */
+static const char *link_uri(json_t *link)
+{
+	return json_string_value(json_object_get(link, "@odata.id"));
 }
 
 #define POST_MAX_CHUNKS 64
 
 struct post_request {
-	char initiator[FMD_MAX_ID_LEN];
-	char target[FMD_MAX_ID_LEN];
-	char chunks[POST_MAX_CHUNKS][FMD_MAX_ID_LEN];
+	struct fmd_host *host;
+	struct fmd_component *target;
+	struct fmd_mem_chunk *chunks[POST_MAX_CHUNKS];
 	int nchunks;
 	bool bad_access;	/* AccessCapabilities other than Read and Write */
 };
@@ -5913,14 +5946,87 @@ static const char *only_link(json_t *arr)
 {
 	if (!json_is_array(arr) || json_array_size(arr) != 1)
 		return NULL;
-	return link_id(json_array_get(arr, 0));
+	return link_uri(json_array_get(arr, 0));
 }
 
-static int parse_post(const char *body, size_t body_size, struct post_request *req)
+/*
+ * The component Endpoint link @uri names: 0 with *comp, NULL if no
+ * component has the Id, or -21 if @uri is not an Endpoint's URI. The
+ * component is not checked to have an Endpoint: the alias of an MLD or a
+ * Multi-Headed device, which have none, is matched by the caller, by its
+ * type.
+ */
+static int resolve_endpoint(struct fmd_ctx *ctx, const char *uri,
+			    struct fmd_component **comp)
+{
+	const size_t n = strlen(RF_ENDPOINTS);
+	char canon[sizeof(RF_ENDPOINTS) + FMD_MAX_ID_LEN];
+	const char *id;
+
+	if (!uri || strncmp(uri, RF_ENDPOINTS, n))
+		return -21;
+	id = uri + n;
+	if (!*id || strchr(id, '/') || endpoint_uri(canon, sizeof(canon), id) ||
+	    strcmp(canon, uri))
+		return -21;
+	*comp = fmd_topology_find(&ctx->topology, id);
+	return 0;
+}
+
+/*
+ * Whether @p, what follows "/redfish/v1/Chassis/" in a URI, is
+ * {a}/MemoryDomains/{b}/MemoryChunks/{c}, each segment not empty
+ */
+static bool chunk_uri_shape(const char *p)
+{
+	static const char *const sep[] = { "/MemoryDomains/", "/MemoryChunks/" };
+
+	for (size_t i = 0; i < 2; i++) {
+		const char *slash = strchr(p, '/');
+
+		if (!slash || slash == p || strncmp(slash, sep[i], strlen(sep[i])))
+			return false;
+		p = slash + strlen(sep[i]);
+	}
+	return *p && !strchr(p, '/');
+}
+
+/*
+ * The chunk link @uri names: 0 with *chunk, NULL if it is a chunk URI
+ * whose Id no chunk has, or -21 if @uri is not a chunk's URI: one under
+ * another Chassis or MemoryDomain than the chunk's is not, nor is the
+ * same chunk in a host's Systems view.
+ */
+static int resolve_chunk(struct fmd_ctx *ctx, const char *uri,
+			 struct fmd_mem_chunk **chunk)
+{
+	static const char prefix[] = "/redfish/v1/Chassis/";
+	char canon[RF_CHUNK_URI_LEN];
+	struct fmd_mem_chunk *c;
+
+	if (!uri || strncmp(uri, prefix, sizeof(prefix) - 1) ||
+	    !chunk_uri_shape(uri + sizeof(prefix) - 1))
+		return -21;
+	c = fmd_topology_find_chunk(&ctx->topology, strrchr(uri, '/') + 1);
+	if (c && (chunk_uri(canon, sizeof(canon), c) || strcmp(canon, uri)))
+		return -21;
+	*chunk = c;
+	return 0;
+}
+
+/*
+ * The body of a Connection POST, its links resolved. Returns 0, or as
+ * fmd_redfish_post_connection(): -2 a body that is not as below, -3 no
+ * host has the initiator's Id, -4 nothing has the target's, -5 no chunk
+ * has a chunk's, -21 a link that is not the URI of its resource, -22
+ * EndpointGroups.
+ */
+static int parse_post(struct fmd_ctx *ctx, const char *body, size_t body_size,
+		      struct post_request *req)
 {
 	json_t *root, *links, *info, *entry;
+	struct fmd_component *comp = NULL;
 	json_error_t error;
-	const char *id;
 	size_t i;
 	int rc = -2;
 
@@ -5932,26 +6038,65 @@ static int parse_post(const char *body, size_t body_size, struct post_request *r
 	if (!json_is_object(links))
 		goto out;
 
-	/* one initiator, the host, and one target */
-	id = only_link(json_object_get(links, "InitiatorEndpoints"));
-	if (!id || strlen(id) >= sizeof(req->initiator))
+	/*
+	 * InitiatorEndpoints "shall not be present if
+	 * `InitiatorEndpointGroups` is present", TargetEndpoints "if
+	 * `TargetEndpointGroups` is present" (Connection_v1), and cxl-fmd
+	 * serves no EndpointGroup: a body with either names nothing it can
+	 * bind (cxl-fmd's choice to refuse rather than ignore it).
+	 */
+	if (json_object_get(links, "InitiatorEndpointGroups") ||
+	    json_object_get(links, "TargetEndpointGroups")) {
+		rc = -22;
 		goto out;
-	strcpy(req->initiator, id);
-	id = only_link(json_object_get(links, "TargetEndpoints"));
-	if (!id || strlen(id) >= sizeof(req->target))
-		goto out;
-	strcpy(req->target, id);
+	}
 
+	/* one initiator, the host, and one target */
+	{
+		const char *init = only_link(json_object_get(links, "InitiatorEndpoints"));
+		const char *target = only_link(json_object_get(links, "TargetEndpoints"));
+
+		if (!init || !target)
+			goto out;
+		rc = resolve_endpoint(ctx, init, &comp);
+		if (rc)
+			goto out;
+		if (!comp || comp->type != FMD_COMPONENT_HOST) {
+			rc = -3;
+			goto out;
+		}
+		req->host = fmd_to_host(comp);
+		rc = resolve_endpoint(ctx, target, &req->target);
+		if (rc)
+			goto out;
+		if (!req->target) {
+			rc = -4;
+			goto out;
+		}
+	}
+
+	rc = -2;
 	info = json_object_get(root, "MemoryChunkInfo");
 	if (info && !json_is_array(info))
 		goto out;
 	json_array_foreach(info, i, entry) {
 		json_t *access = json_object_get(entry, "AccessCapabilities");
+		struct fmd_mem_chunk *chunk = NULL;
+		const char *uri = link_uri(json_object_get(entry, "MemoryChunk"));
 
-		id = link_id(json_object_get(entry, "MemoryChunk"));
-		if (!id || strlen(id) >= FMD_MAX_ID_LEN || req->nchunks == POST_MAX_CHUNKS)
+		if (!uri || req->nchunks == POST_MAX_CHUNKS) {
+			rc = -2;
 			goto out;
-		strcpy(req->chunks[req->nchunks++], id);
+		}
+		rc = resolve_chunk(ctx, uri, &chunk);
+		if (rc)
+			goto out;
+		if (!chunk) {
+			rc = -5;
+			goto out;
+		}
+		req->chunks[req->nchunks++] = chunk;
+		rc = -2;
 
 		/* a binding gives the whole of what it reaches, to read and write */
 		if (access) {
@@ -6161,9 +6306,12 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * body names one initiator, the host's Endpoint, and one target:
  *  - an SLD's or an LD's Endpoint, with or without MemoryChunkInfo, which
  *    then names chunks of that target;
- *  - accepted for compatibility: the ID of an MLD or of a Multi-Headed
- *    device, which have no Endpoint of their own, with MemoryChunkInfo
- *    whose chunks are all on one LD, which is the target.
+ *  - accepted for compatibility: Endpoints/{id} with the ID of an MLD or
+ *    of a Multi-Headed device, which have no Endpoint of their own (a GET
+ *    of it is 404), with MemoryChunkInfo whose chunks are all on one LD,
+ *    which is the target. It is matched by the component's type.
+ * Every link is the URI the service serves its resource at (see
+ * resolve_endpoint() and resolve_chunk()).
  * AccessCapabilities, if given, are Read and Write: a binding exposes the
  * whole of what it reaches, and Bind vPPB has no field for access (Table
  * 7-35).
@@ -6202,6 +6350,9 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * -18 the switch answered Invalid Input
  * -19 the chunks of an MLD or a Multi-Headed device are on several LDs
  * -20 AccessCapabilities other than Read and Write
+ * -21 a link that is not the URI the service serves its resource at
+ * -22 InitiatorEndpointGroups or TargetEndpointGroups
+ * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -22.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -6220,19 +6371,14 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	if (strcmp(fabric_id, "CXL") != 0)
 		return -1;
 
-	rc = parse_post(body, body_size, &req);
+	rc = parse_post(ctx, body, body_size, &req);
 	if (rc)
 		return rc;
 	if (req.bad_access)
 		return -20;
 
-	host = fmd_topology_find_host(&ctx->topology, req.initiator);
-	if (!host)
-		return -3;
-
-	comp = fmd_topology_find(&ctx->topology, req.target);
-	if (!comp)
-		return -4;
+	host = req.host;
+	comp = req.target;
 
 	/*
 	 * A head that presents an MLD: its LDs are bound by an LD-ID
@@ -6255,15 +6401,12 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 
 	/* each chunk named is the target's; an MLD's are on one LD */
 	for (int i = 0; i < req.nchunks; i++) {
-		struct fmd_mem_chunk *chunk = fmd_topology_find_chunk(&ctx->topology,
-								      req.chunks[i]);
+		struct fmd_mem_chunk *chunk = req.chunks[i];
 		const struct fmd_ld *cld;
 
-		if (!chunk)
-			return -5;
 		if (!chunk->base.parent || chunk->base.parent->parent != dev) {
 			fmd_warn(ctx, "Connection rejected: chunk %s is not %s's",
-				 req.chunks[i], dev->id);
+				 chunk->base.id, dev->id);
 			return -15;
 		}
 		if (dev->type == FMD_COMPONENT_SLD)
@@ -6271,7 +6414,7 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		cld = fmd_chunk_ld(dev, chunk);
 		if (!cld) {
 			fmd_warn(ctx, "Connection rejected: chunk %s names no LD of %s",
-				 req.chunks[i], dev->id);
+				 chunk->base.id, dev->id);
 			return -13;
 		}
 		if (ld && cld != ld)

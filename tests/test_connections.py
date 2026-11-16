@@ -219,6 +219,88 @@ class TestPostIdempotent:
                 "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/sld_0"}]}})
         assert status == 400
 
+    EP = "/redfish/v1/Fabrics/CXL/Endpoints/"
+    CH = "/redfish/v1/Chassis/"
+
+    def vppbs(self, api_client):
+        out = {}
+        for vcs in (0, 1):
+            status, coll = api_client.get(
+                f"/redfish/v1/Fabrics/CXL/Switches/switch_0/VCSs/{vcs}/VPPBs")
+            assert status == 200
+            for m in coll["Members"]:
+                out[m["@odata.id"]] = api_client.get(m["@odata.id"])[1]
+        return out
+
+    @pytest.mark.parametrize("initiator,target,chunks", [
+        # I: a target URI that is no URI of the service, with a valid last segment
+        ("switch_0_host0", "/bogus/sld_0", None),
+        # J: a Chassis, not an Endpoint
+        ("switch_0_host0", "/redfish/v1/Chassis/sld_1", None),
+        # K: an initiator under no Endpoint URI
+        ("/nothing/here/switch_0_host1", "mld_0_ld2", None),
+        # L: a chunk of mld_0's LD 3 under sld_1's domain
+        ("switch_0_host1", "mld_0_ld3",
+         ["/redfish/v1/Chassis/sld_1/MemoryDomains/sld_1_domain0/MemoryChunks/mld_0_ld3_chunk"]),
+        # the canonical URI with something after it
+        ("switch_0_host0", "/redfish/v1/Fabrics/CXL/Endpoints/sld_0/", None),
+        ("switch_0_host0", "/redfish/v1/Fabrics/CXL/Endpoints/sld_0/x", None),
+        # a relative one
+        ("switch_0_host0", "Endpoints/sld_0", None),
+        # the Systems view of a host, not its Endpoint
+        ("/redfish/v1/Systems/switch_0_host0", "sld_0", None),
+        # a chunk: with a trailing "/", as a Chassis, and in the Systems view
+        ("switch_0_host0", "sld_0",
+         ["/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks/sld_0_chunk0/"]),
+        ("switch_0_host0", "sld_0", ["/redfish/v1/Chassis/sld_0"]),
+        ("switch_0_host0", "sld_0",
+         ["/redfish/v1/Systems/switch_0_host0/MemoryDomains/d/MemoryChunks/sld_0_chunk0"]),
+    ], ids=["I-bogus-target", "J-chassis-target", "K-bogus-initiator",
+            "L-chunk-under-another-chassis", "trailing-slash", "trailing-segment",
+            "relative", "systems-initiator", "chunk-trailing-slash", "chunk-chassis",
+            "chunk-systems-view"])
+    def test_link_not_canonical_400(self, api_client, initiator, target, chunks):
+        """Each link is the URI the service serves the resource at (review
+        F04): "This property shall contain an array of links to resources
+        of type `Endpoint`" (Connection_v1). One whose last segment names
+        a resource, under another path, is a bad request, and nothing is
+        bound. A chunk is named by its Chassis URI only, not by the
+        Systems view of a host's MemoryDomain (cxl-fmd's choice)."""
+        def uri(x):
+            return x if x.startswith("/") or "/" in x else self.EP + x
+        body = {"Links": {"InitiatorEndpoints": [{"@odata.id": uri(initiator)}],
+                          "TargetEndpoints": [{"@odata.id": uri(target)}]}}
+        if chunks is not None:
+            body["MemoryChunkInfo"] = [{"MemoryChunk": {"@odata.id": c}} for c in chunks]
+        before = (api_client.get(CONNECTIONS), self.vppbs(api_client))
+        status, data, _ = api_client.post(CONNECTIONS, body)
+        assert status == 400, data
+        assert (api_client.get(CONNECTIONS), self.vppbs(api_client)) == before
+
+    @pytest.mark.parametrize("groups", [
+        {"TargetEndpointGroups": [{"@odata.id": "/redfish/v1/Fabrics/CXL/EndpointGroups/g"}]},
+        {"InitiatorEndpointGroups": [{"@odata.id": "/redfish/v1/Fabrics/CXL/EndpointGroups/g"}]},
+        {"TargetEndpointGroups": []},
+    ], ids=["target-groups", "initiator-groups", "empty-groups"])
+    def test_endpoint_groups_400(self, api_client, groups):
+        """TargetEndpoints "shall not be present if `TargetEndpointGroups`
+        is present", and InitiatorEndpoints likewise (Connection_v1);
+        cxl-fmd serves no EndpointGroup, so a body with either is a bad
+        request, and nothing is bound."""
+        body = {"Links": {"InitiatorEndpoints": [{"@odata.id": self.EP + "switch_0_host0"}],
+                          "TargetEndpoints": [{"@odata.id": self.EP + "sld_0"}]}}
+        body["Links"].update(groups)
+        before = (api_client.get(CONNECTIONS), self.vppbs(api_client))
+        status, data, _ = api_client.post(CONNECTIONS, body)
+        assert status == 400, data
+        assert (api_client.get(CONNECTIONS), self.vppbs(api_client)) == before
+
+    def test_canonical_links_201(self, api_client):
+        """The same requests with the URIs the service serves are taken."""
+        status, data, _ = post(api_client, "switch_0_host1", "mld_0_ld3",
+                               chunks_of(api_client, "mld_0", 3))
+        assert status == 201, data
+
     def test_patch_is_not_allowed(self, api_client):
         """Everything in a Connection is what the switch says (cxl-fmd's
         choice): 405, with Allow."""

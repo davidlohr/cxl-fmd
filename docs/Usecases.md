@@ -680,8 +680,8 @@ POST /Chassis/mhd_0/MemoryDomains/mhd_0_domain0/MemoryChunks
 POST /Fabrics/CXL/Connections
 {
     "Links": {
-        "InitiatorEndpoints": [{"@odata.id": "/Fabrics/CXL/Endpoints/hostA"}],
-        "TargetEndpoints": [{"@odata.id": "/Fabrics/CXL/Endpoints/mhd_0"}]
+        "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/hostA"}],
+        "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhd_0"}]
     },
     "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_0"}}]
 }
@@ -693,8 +693,8 @@ POST /Fabrics/CXL/Connections
 POST /Fabrics/CXL/Connections
 {
     "Links": {
-        "InitiatorEndpoints": [{"@odata.id": "/Fabrics/CXL/Endpoints/hostA"}],
-        "TargetEndpoints": [{"@odata.id": "/Fabrics/CXL/Endpoints/mhd_0"}]
+        "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/hostA"}],
+        "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhd_0"}]
     },
     "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_from_ld2"}}]
 }
