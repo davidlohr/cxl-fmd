@@ -4751,6 +4751,9 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
  *       MemoryChunkSizeMiB
  * -13 = cxl-fmd knows no route to the LD Pool CCI of the Multi-Headed
  *       device (fmd_mhd_pool_route()): nothing was sent
+ * -14 = Set LD Allocations had an outcome that could not be told, and the
+ *       LD could not be read back (fmd_ld_alloc_set()): the chunk is kept,
+ *       and no chunk of the device is changed until the LD is read
  * Every one of -2, -6 and -8 to -12 is answered before anything is changed
  * or sent.
  */
@@ -4859,17 +4862,43 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * For MLD: resize LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
 	 * In mock mode the LD-allocation calls change the mock's LDs, as a
-	 * device's would be (fmd_mld_set_ld_allocation() and
-	 * fmd_mhd_set_ld_allocation() send nothing then); an SLD's
-	 * partition is not changed.
+	 * device's would be (fmd_ld_alloc_set() sends nothing then); an
+	 * SLD's partition is not changed.
 	 */
 	{
+		uint64_t old = ld ? ld->memory_size : 0;
+
 		rc = 0;
 		if (chassis->type == FMD_COMPONENT_MLD ||
 		    chassis->type == FMD_COMPONENT_MHD) {
 			/* the LD grows by the chunk (checked above) */
-			rc = fmd_ld_alloc_set(ctx, chassis, ld,
-					      ld->memory_size + chunk->size);
+			rc = fmd_ld_alloc_set(ctx, chassis, ld, old + chunk->size);
+			if (rc == -EREMOTEIO) {
+				/*
+				 * Not known whether the LD grew: the chunk
+				 * stays, counted as allocated, until the LD
+				 * is read (fmd_ld_alloc_set()).
+				 */
+				ld->memory_size = old + chunk->size;
+				return -14;
+			}
+			if (!rc && ld->memory_size != old + chunk->size) {
+				/*
+				 * The LD has what the device says, not what
+				 * was asked: as it was, the chunk goes; any
+				 * other size, the domain is made what the LD
+				 * has (fmd_ld_domain_sync()), the new chunk
+				 * first. Either is a failure.
+				 */
+				fmd_warn(ctx, "%s: LD %u has %" PRIu64 " MB, not the %"
+					 PRIu64 " MB asked for", chassis->id, ld->ld_id,
+					 ld->memory_size >> 20, (old + chunk->size) >> 20);
+				if (ld->memory_size == old)
+					fmd_chunk_remove(&ctx->topology, chunk);
+				else
+					fmd_ld_domain_sync(ctx, chassis);
+				return -5;
+			}
 		} else if (chassis->type == FMD_COMPONENT_SLD) {
 			/*
 			 * Only volatile chunks change the partition: the total
@@ -4984,12 +5013,22 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return -6;		/* no LD Pool CCI known: nothing sent */
 	if (rc == -EINVAL || rc == -EOPNOTSUPP)
 		return -4;
+	if (rc == -EREMOTEIO)
+		return -8;		/* the chunk stays until the LD is read */
 	if (rc < 0)
 		return -3;
 
-	freed = ld->memory_size < before ? before - ld->memory_size : 0;
-	if (freed >= chunk->size)
+	if (ld->memory_size == before - chunk->size)
 		return 0;
+	if (ld->memory_size < before - chunk->size || ld->memory_size > before) {
+		/* more given back than asked, or the LD grew: as it is */
+		fmd_warn(ctx, "%s: LD %u has %" PRIu64 " MB, not the %" PRIu64
+			 " MB asked for", dev->id, ld->ld_id, ld->memory_size >> 20,
+			 (before - chunk->size) >> 20);
+		fmd_ld_domain_sync(ctx, dev);
+		return -3;
+	}
+	freed = before - ld->memory_size;
 	fmd_warn(ctx, "%s: LD %u gave back %" PRIu64 " MB of the %" PRIu64
 		 " MB of chunk %s", dev->id, ld->ld_id, freed >> 20,
 		 chunk->size >> 20, chunk->base.id);
@@ -5018,6 +5057,7 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
  *       device is not one whose allocation it changes, or no LD Pool CCI
  *       of its Multi-Headed device is known; nothing was sent
  *  -7 = the chunk's LD has less allocated than the chunk; nothing was sent
+ *  -8 = as -14 of fmd_redfish_post_memory_chunk(): the chunk is kept
  */
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				    const char *chassis_id,

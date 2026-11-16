@@ -2845,13 +2845,39 @@ static struct fmd_ld *dev_ld(struct fmd_component *dev, unsigned int id)
 	return NULL;
 }
 
+/*
+ * Get LD Allocations for @ld alone, on @ep through @ti: @ld takes what it
+ * says, and is known again. Returns 0 or the error of get_ld_allocations().
+ */
+static int read_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
+		   struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
+		   struct fmd_ld *ld)
+{
+	uint64_t bytes, range2;
+	uint8_t code = 0;
+	int rc;
+
+	rc = get_ld_allocations(ctx, dev, ep, ti, ld->ld_id, 1, &bytes, &range2, &code);
+	if (rc < 0)
+		return rc;
+	ld_alloc_set_granularity(dev, code);
+	ld->alloc_range2 = range2;
+	if (ld->memory_size != bytes)
+		fmd_info(ctx, "%s: LD %u has %" PRIu64 " MB allocated, not %" PRIu64
+			 " MB", dev->id, ld->ld_id, bytes >> 20, ld->memory_size >> 20);
+	ld->memory_size = bytes;
+	if (ld->alloc_unknown)
+		fmd_info(ctx, "%s: LD %u allocation known again", dev->id, ld->ld_id);
+	ld->alloc_unknown = false;
+	return 0;
+}
+
 int fmd_ld_alloc_refresh_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
 			    struct fmd_ld *ld)
 {
 	struct cxlmi_tunnel_info *ti, ti_buf;
 	struct cxlmi_endpoint *ep;
-	uint64_t bytes, range2;
-	uint8_t code = 0;
+	struct fmd_component *child;
 	int rc;
 
 	rc = ld_alloc_route(ctx, dev, &ep, &ti, &ti_buf);
@@ -2859,16 +2885,24 @@ int fmd_ld_alloc_refresh_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return 0;		/* a mock's LDs are what it says */
 	if (rc)
 		return rc;
-	rc = get_ld_allocations(ctx, dev, ep, ti, ld->ld_id, 1, &bytes, &range2, &code);
-	if (rc < 0)
-		return rc;
 
-	ld_alloc_set_granularity(dev, code);
-	ld->alloc_range2 = range2;
-	if (ld->memory_size != bytes)
-		fmd_info(ctx, "%s: LD %u has %" PRIu64 " MB allocated, not %" PRIu64
-			 " MB", dev->id, ld->ld_id, bytes >> 20, ld->memory_size >> 20);
-	ld->memory_size = bytes;
+	/*
+	 * An LD whose allocation is not known (fmd_ld_alloc_set()) has its
+	 * chunks counted as if the request was carried out: read before the
+	 * domain is made what the LDs have, or nothing is changed.
+	 */
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+		struct fmd_ld *other = fmd_to_ld(child);
+
+		if (other != ld && other->alloc_unknown) {
+			rc = read_ld(ctx, dev, ep, ti, other);
+			if (rc)
+				return rc;
+		}
+	}
+	rc = read_ld(ctx, dev, ep, ti, ld);
+	if (rc)
+		return rc;
 	return fmd_ld_domain_sync(ctx, dev);
 }
 
@@ -2924,8 +2958,34 @@ int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev)
 				 ld->memory_size >> 20);
 		ld->memory_size = bytes[i];
 		ld->alloc_range2 = range2[i];
+		ld->alloc_unknown = false;
 	}
+	/* one not read keeps what it had, unknown or not, for the next time */
 	return fmd_ld_domain_sync(ctx, dev);
+}
+
+/*
+ * Whether Set LD Allocations answered with a return code that says the
+ * command was not carried out. Invalid Payload Length is checked "prior to
+ * processing any command", and Unsupported Mailbox or CCI says it is "not
+ * supported on the mailbox or CCI it was issued on" (CXL r4.0 Table
+ * 8-208). Invalid Input, Unsupported and Retry Required are taken to
+ * change nothing (cxl-fmd's reading: Retry Required "was not completed",
+ * as Internal Error, but the one is a request to send it again, and the
+ * other is read back).
+ */
+static bool set_ld_refused(int rc)
+{
+	switch (rc) {
+	case CXLMI_RET_INPUT:
+	case CXLMI_RET_UNSUPPORTED:
+	case CXLMI_RET_RETRY:
+	case CXLMI_RET_PAYLOADLEN:
+	case CXLMI_RET_MBUNSUPPORTED:
+		return true;
+	default:
+		return false;
+	}
 }
 
 int fmd_ld_alloc_set(struct fmd_ctx *ctx, struct fmd_component *dev,
@@ -2975,27 +3035,40 @@ int fmd_ld_alloc_set(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 	rc = cxlmi_cmd_fmapi_set_ld_allocations(ep, ti, req, rsp);
 	free(req);
-	if (rc != 0 || rsp->number_ld < 1 || rsp->start_ld_id != ld->ld_id) {
-		fmd_warn(ctx, "%s: set LD %u allocation failed: %d", dev->id,
+	if (set_ld_refused(rc)) {
+		fmd_warn(ctx, "%s: set LD %u allocation refused: %d", dev->id,
 			 ld->ld_id, rc);
 		free(rsp);
 		return -EIO;
 	}
-
-	if (__builtin_add_overflow(rsp->ld_allocation_list[0].range_1_allocation_mult,
-				   rsp->ld_allocation_list[0].range_2_allocation_mult, &mult) ||
-	    __builtin_mul_overflow(mult, granularity, &mult)) {
-		fmd_warn(ctx, "%s: set LD %u allocation: a response past 64 bits",
-			 dev->id, ld->ld_id);
+	if (rc == 0 && rsp->number_ld >= 1 && rsp->start_ld_id == ld->ld_id &&
+	    !__builtin_add_overflow(rsp->ld_allocation_list[0].range_1_allocation_mult,
+				    rsp->ld_allocation_list[0].range_2_allocation_mult, &mult) &&
+	    !__builtin_mul_overflow(mult, granularity, &mult)) {
+		ld->memory_size = mult;
+		ld->alloc_range2 = rsp->ld_allocation_list[0].range_2_allocation_mult;
+		fmd_info(ctx, "%s: LD %u allocation set to %" PRIu64 " MB", dev->id,
+			 ld->ld_id, ld->memory_size >> 20);
 		free(rsp);
-		return -EIO;
+		return 0;
 	}
-	ld->memory_size = mult;
-	ld->alloc_range2 = rsp->ld_allocation_list[0].range_2_allocation_mult;
-	fmd_info(ctx, "%s: LD %u allocation set to %" PRIu64 " MB", dev->id,
-		 ld->ld_id, ld->memory_size >> 20);
 	free(rsp);
-	return 0;
+
+	/*
+	 * Neither a response that says what the LD has nor a refusal: an
+	 * error that does not say nothing was done, a response that could
+	 * not be read (libcxlmi returns -1 for one, as for a message that
+	 * was not sent or not answered), or a Success for another LD. What
+	 * the LD has is read back (cxl-fmd's choice).
+	 */
+	fmd_warn(ctx, "%s: set LD %u allocation: outcome not known (%d): read back",
+		 dev->id, ld->ld_id, rc);
+	if (!read_ld(ctx, dev, ep, ti, ld))
+		return 0;
+	fmd_err(ctx, "%s: LD %u allocation not known: its chunks are kept, and "
+		"none is changed until it is read", dev->id, ld->ld_id);
+	ld->alloc_unknown = true;
+	return -EREMOTEIO;
 }
 
 /*

@@ -673,6 +673,7 @@ struct fmd_ld {
 	/* From Get LD Allocations (5401h) */
 	uint64_t memory_size;
 	uint64_t alloc_range2;               /* Range 2 Allocation Multiplier */
+	bool alloc_unknown;                  /* see fmd_ld_alloc_set() */
 	uint64_t range_start;
 	uint64_t range_length;
 
@@ -2076,11 +2077,21 @@ int fmd_ld_alloc_refresh_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
  * Memory Granularity and Range 2 fmd_ld_alloc_refresh_ld() last read:
  * Range 2 is kept and Range 1 takes the rest. @ld is sized from the
  * response, which "reflect[s] the state of the LD allocations after the
- * command is processed" (CXL r4.0 Section 7.6.7.4.3). The chunks are not
- * changed. In a mock, @ld is given @size_bytes and nothing is sent.
+ * command is processed" (CXL r4.0 Section 7.6.7.4.3), whatever it says:
+ * the caller compares. The chunks are not changed. In a mock, @ld is given
+ * @size_bytes and nothing is sent.
+ *
+ * A return code that says nothing was done (Invalid Input, Unsupported,
+ * Retry Required, Invalid Payload Length, Unsupported Mailbox or CCI) is
+ * -EIO, @ld unchanged. Any other outcome (another error, a response that
+ * cannot be read or is for another LD) is read back with Get LD
+ * Allocations: 0 if that answers, @ld sized from it; if it does not, @ld
+ * is marked alloc_unknown, as fmd_ld_alloc_refresh_ld() reads it again
+ * before anything else of @dev is changed, and -EREMOTEIO returned.
+ *
  * Returns 0, -EINVAL if @size_bytes is not a whole number of granules or
  * is less than Range 2 (nothing sent), -EOPNOTSUPP if no LD Pool CCI is
- * known, or -EIO if the command failed or its response is not for @ld.
+ * known, -EIO, or -EREMOTEIO.
  */
 int fmd_ld_alloc_set(struct fmd_ctx *ctx, struct fmd_component *dev,
 		     struct fmd_ld *ld, uint64_t size_bytes);

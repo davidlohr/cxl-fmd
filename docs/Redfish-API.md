@@ -894,6 +894,24 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
 - **MHD**: the same, for a pool LD, on the LD Pool CCI (see "MHD Memory
   Model"); `501`, with nothing sent, when no LD Pool CCI is known.
 
+**An unclear Set LD Allocations** (chunk `POST` and `DELETE` of an MLD or
+MHD). Invalid Input, Unsupported, Retry Required, Invalid Payload Length
+and Unsupported Mailbox or CCI are taken to mean the command was not
+carried out: `500`, and the chunk is as it was. Any other outcome (another
+return code such as Internal Error, a response libcxlmi cannot read, which
+it reports as it reports a message not sent or not answered, or a Success
+for another LD) does not say what the LD has, and Get LD Allocations is
+sent to read it back (cxl-fmd's choice: the specification says only that a
+response's allocations "reflect the state of the LD allocations after the
+command is processed", Section 7.6.7.4.3). What it reads decides: the size
+asked for is `201` or `204`; the size the LD had is `500` with the chunk as
+it was; another size is `500` with the chunks of the LD made to add up to
+it. If the read back fails as well the outcome is not known: `500` with a
+message that says so, the chunk is kept (a `POST`'s counted as allocated),
+and the LD is fenced: the next chunk `POST` or `DELETE` of the device reads
+that LD first, and is `500` with nothing sent while it cannot be read. The
+`--rescan` timer reads it too. Fencing is kept in memory only.
+
 In mock mode (`--mock`) nothing is sent, and a chunk `POST` or `DELETE` of
 an MLD or MHD changes the mock LD's `MemorySizeMiB` as Set LD Allocations
 would a device's; a `"Volatile"` chunk of an SLD does not change the
@@ -1773,6 +1791,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of an MLD's or Multi-Headed device's `MemoryDomain`, chunks, or `CXLLogicalDevice` after another FM changed an LD allocation | what discovery found, until a restart | what Get LD Allocations says, from the next `--rescan` (a chunk's LD before its `POST` or `DELETE`): chunks are made, shrunk or removed so that each LD's add up to its allocation |
 | Chunk `POST` on hardware on an LD whose allocation another FM changed | Set LD Allocations for the size discovery found plus the chunk, which took from the LD what the other FM gave it | Get LD Allocations first: the LD's allocation now plus the chunk; `500`, nothing set, if it cannot be read |
 | Chunk `DELETE` on hardware of a chunk whose LD another FM took the memory of | Set LD Allocations for the size discovery found less the chunk | Get LD Allocations first: `404` if the chunk went with the memory, nothing set; `500` if it cannot be read |
+| Chunk `POST` or `DELETE` on hardware of an MLD or MHD whose Set LD Allocations answers Internal Error (or another code that is not Invalid Input, Unsupported, Retry Required, Invalid Payload Length or Unsupported Mailbox or CCI), a response that cannot be read, or a Success for another LD | `500`, the new chunk removed (`POST`) or kept (`DELETE`) with nothing read | Get LD Allocations reads the LD back: `201` or `204` if it has what was asked, `500` with the chunk as it was if it has what it had, `500` with its chunks made what it has otherwise. If that read fails too: `500` "Outcome unknown", the chunk kept, and no chunk of the device changed until the LD is read again |
 | Chunk `POST` on a bound LD, or Volatile chunk `POST` on a bound SLD, when the domain has no room | `409` "Insufficient capacity" | `409` "A Connection binds the logical device": the binding is checked first, before anything is sent |
 | Chunk `POST` on hardware on a pool LD of a Multi-Headed device | Get and Set LD Allocations sent to the endpoint that answered Get Multi-Headed Info with no tunnel, through a tunnel to the LD Pool CCI (Target Type 1) | sent to that endpoint with no tunnel; `501`, with nothing sent, if no LD Pool CCI is known |
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |

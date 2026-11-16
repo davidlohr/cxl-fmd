@@ -2102,7 +2102,7 @@ static void test_mib_out_of_range_sends_nothing(void)
 	struct fmd_mem_domain *domain;
 	struct fmd_component *dev;
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[256];
-	uint8_t alloc[4 + 16] = { 0 }, set[4] = { 0 };
+	uint8_t alloc[4 + 16] = { 0 }, set[4 + 16] = { 0 };
 	const char *msg = NULL;
 	int before = failures, rc, chunks;
 	unsigned int sent;
@@ -2139,6 +2139,7 @@ static void test_mib_out_of_range_sends_nothing(void)
 	put64(alloc + 4, 4);			/* Range 1 Allocation Multiplier */
 	answer(ep, 0x5401, alloc, sizeof(alloc));
 	set[0] = 1;				/* Number of LDs */
+	put64(set + 4, 5);			/* LD 0 as it is after */
 	answer(ep, 0x5402, set, sizeof(set));
 	snprintf(body, sizeof(body),
 		 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
@@ -6644,11 +6645,15 @@ static void test_mhd_chunk_delete(void)
 		goto out;
 	rem0 = domain->remaining;
 
-	/* Set LD Allocations fails: the chunk, the domain and the LD stay */
+	/*
+	 * Set LD Allocations fails, and the LD read back has what it had:
+	 * the chunk, the domain and the LD stay
+	 */
 	answer_get_ld(ep, 0, 4);
 	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 0, 4);
 	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
-	CHECK(rc == -3 && last_opcode(ep) == 0x5402 &&
+	CHECK(rc == -3 && last_opcode(ep) == 0x5401 &&
 	      fmd_topology_find_chunk(&ctx->topology, chunk) &&
 	      domain->remaining == rem0 && ld0->memory_size == 1ULL << 30,
 	      "DELETE answered Internal Error: %d", rc);
@@ -7181,6 +7186,207 @@ out:
 	report("allocations others made are read again", before);
 }
 
+/*
+ * An outcome of Set LD Allocations (5402h) that is not a refusal is read
+ * back with Get LD Allocations before a chunk is rolled back (review F06).
+ * The daemon took any error, a response it could not read, or a Success
+ * for another LD to mean nothing was done: it removed the new chunk, or
+ * kept the deleted one, with no read, though "The allocations provided in
+ * the response reflect the state of the LD allocations after the command
+ * is processed" (CXL r4.0 Section 7.6.7.4.3) and an error need not mean
+ * nothing changed. Each case on an MLD of 2 LDs of 1 GiB, of 10 GiB: a
+ * POST of 256 MiB on LD 0 (4 units to 5), a DELETE of its chunk; then a
+ * POST and DELETE on a pool LD of an MHD.
+ */
+static void test_set_ld_read_back(void)
+{
+	static const char post[] = "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": "
+		"[{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld%d\"}}]}";
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld_sized(ctx, 0xf06, 2, 0, 4, 10ULL << 30);
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[512], cid[FMD_MAX_ID_LEN + 32];
+	struct fmd_mem_domain *domain;
+	struct fmd_ld *ld0, *ld1;
+	int before = failures, rc, chunks, n;
+	unsigned int sent;
+	uint64_t rem;
+	json_t *resp = NULL;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf06);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	CHECK(domain && ld0 && ld1, "no domain %s or LDs", dom);
+	if (!domain || !ld0 || !ld1)
+		goto out;
+	snprintf(body, sizeof(body), post, id, id, 0);
+
+	/* Internal Error, and LD 0 read back as it was: rolled back, 500 */
+	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
+	rem = domain->remaining;
+	answer_get_ld(ep, 0, 4);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 0, 4);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && commands_sent(ep) == sent + 3 && last_opcode(ep) == 0x5401 &&
+	      fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK) == chunks &&
+	      domain->remaining == rem && ld0->memory_size == 1ULL << 30,
+	      "Internal Error, read back as it was: %d, %u sent, last %04xh", rc,
+	      commands_sent(ep) - sent, last_opcode(ep));
+	json_decref(resp);
+	resp = NULL;
+
+	/* Invalid Input: nothing was done, and nothing is read back */
+	answer_get_ld(ep, 0, 4);
+	answer_rc(ep, 0x5402, CXLMI_RET_INPUT);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x5402 &&
+	      fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK) == chunks,
+	      "Invalid Input: %d, %u sent", rc, commands_sent(ep) - sent);
+
+	/* Internal Error, and LD 0 read back grown: the chunk is made, 201 */
+	answer_get_ld(ep, 0, 4);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 0, 5);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == 0 && resp && ld0->memory_size == 5ULL << 28 &&
+	      domain->remaining == rem - (256ULL << 20) &&
+	      ld_chunks(domain, 0, &n) == 5ULL << 28,
+	      "Internal Error, read back grown: %d, LD 0 %" PRIu64 " MiB", rc,
+	      ld0->memory_size >> 20);
+	snprintf(cid, sizeof(cid), "%s", resp ? json_string_value(json_object_get(resp, "Id")) : "");
+	json_decref(resp);
+	resp = NULL;
+
+	/* a Success for LD 1, asked for LD 0: read back, as it was */
+	answer_get_ld(ep, 0, 5);
+	answer_set_ld(ep, 1, 6);
+	answer_get_ld(ep, 0, 5);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && last_opcode(ep) == 0x5401 && ld0->memory_size == 5ULL << 28 &&
+	      ld_chunks(domain, 0, &n) == 5ULL << 28 && ld1->memory_size == 1ULL << 30,
+	      "Success for LD 1: %d, last %04xh, LD 0 %" PRIu64 " MiB", rc,
+	      last_opcode(ep), ld0->memory_size >> 20);
+	json_decref(resp);
+	resp = NULL;
+
+	/* a Success libcxlmi cannot read (2 LDs for 1): read back, grown */
+	answer_get_ld(ep, 0, 5);
+	cxlmi_mock_set_response(ep, 0x54, 0x02, CXLMI_RET_SUCCESS,
+				(uint8_t[4 + 16]){ 2, 0, 0, 0, 6 }, 4 + 16);
+	answer_get_ld(ep, 0, 6);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == 0 && ld0->memory_size == 6ULL << 28 &&
+	      ld_chunks(domain, 0, &n) == 6ULL << 28,
+	      "unreadable Success, read back grown: %d, LD 0 %" PRIu64 " MiB", rc,
+	      ld0->memory_size >> 20);
+	json_decref(resp);
+	resp = NULL;
+
+	/* read back as neither: the domain is what LD 0 has (8 units), 500 */
+	answer_get_ld(ep, 0, 6);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 0, 8);
+	rem = domain->remaining;
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && ld0->memory_size == 2ULL << 30 &&
+	      ld_chunks(domain, 0, &n) == 2ULL << 30 && domain->remaining == rem - (512ULL << 20),
+	      "read back as neither: %d, LD 0 %" PRIu64 " MiB, chunks %" PRIu64 " MiB", rc,
+	      ld0->memory_size >> 20, ld_chunks(domain, 0, &n) >> 20);
+	json_decref(resp);
+	resp = NULL;
+
+	/*
+	 * Internal Error and no read back: outcome unknown, 500. The chunk
+	 * stays, counted allocated, and LD 0 is not known: a POST on LD 1
+	 * reads LD 0 first, and changes nothing while it cannot.
+	 */
+	answer_get_ld(ep, 0, 8);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
+	rem = domain->remaining;
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -14 && ld0->alloc_unknown &&
+	      fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK) == chunks + 1 &&
+	      domain->remaining == rem - (256ULL << 20),
+	      "no read back: %d, unknown %d", rc, ld0->alloc_unknown);
+	json_decref(resp);
+	resp = NULL;
+	snprintf(body, sizeof(body), post, id, id, 1);
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && commands_sent(ep) == sent + 1 && ld0->alloc_unknown &&
+	      ld1->memory_size == 1ULL << 30,
+	      "POST on LD 1 while LD 0 is not known: %d, %u sent", rc,
+	      commands_sent(ep) - sent);
+	/* LD 0 read as it was (8 units): its chunk goes, LD 1 grows */
+	answer_get_ld(ep, 0, 8);
+	answer_get_ld(ep, 1, 4);
+	answer_set_ld(ep, 1, 5);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == 0 && !ld0->alloc_unknown && ld_chunks(domain, 0, &n) == 2ULL << 30 &&
+	      ld1->memory_size == 5ULL << 28 && domain->remaining == rem - (256ULL << 20),
+	      "POST on LD 1 once LD 0 is read: %d, unknown %d, %" PRIu64 " MiB left",
+	      rc, ld0->alloc_unknown, domain->remaining >> 20);
+	json_decref(resp);
+	resp = NULL;
+
+	/* DELETE of the chunk made above: Internal Error, read back shrunk */
+	rem = domain->remaining;
+	answer_get_ld(ep, 0, 8);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 0, 7);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, cid);
+	CHECK(rc == 0 && !fmd_topology_find_chunk(&ctx->topology, cid) &&
+	      ld0->memory_size == 7ULL << 28 && domain->remaining == rem + (256ULL << 20),
+	      "DELETE, read back shrunk: %d", rc);
+
+	/* DELETE, Internal Error and no read back: kept, 500, LD 0 not known */
+	snprintf(cid, sizeof(cid), "%s_ld0_chunk", id);
+	rem = domain->remaining;
+	answer_get_ld(ep, 0, 7);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, cid);
+	CHECK(rc == -8 && fmd_topology_find_chunk(&ctx->topology, cid) &&
+	      ld0->alloc_unknown && domain->remaining == rem,
+	      "DELETE, no read back: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+
+	/* an MHD's pool LD 3 (16 units), on its LD Pool CCI: read back grown */
+	ctx = new_ctx();
+	ep = new_mhd_sized(ctx, 0xf07, 18ULL << 30);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf07);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 3);
+	snprintf(body, sizeof(body), post, id, id, 3);
+	answer_get_ld(ep, 3, 16);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 3, 17);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == 0 && ld0 && ld0->memory_size == 17ULL << 28,
+	      "MHD, read back grown: %d", rc);
+	snprintf(cid, sizeof(cid), "%s", resp ? json_string_value(json_object_get(resp, "Id")) : "");
+	json_decref(resp);
+	/* and its DELETE: Internal Error, read back shrunk, 204 */
+	answer_get_ld(ep, 3, 17);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_get_ld(ep, 3, 16);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, cid);
+	CHECK(rc == 0 && !fmd_topology_find_chunk(&ctx->topology, cid) && ld0 &&
+	      ld0->memory_size == 16ULL << 28, "MHD DELETE, read back shrunk: %d", rc);
+	fmd_ctx_free(ctx);
+	report("an unclear Set LD Allocations is read back", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -7265,6 +7471,7 @@ int main(void)
 	test_mld_chunk_delete_partial();
 	test_pool_capacity();
 	test_ld_alloc_refresh();
+	test_set_ld_read_back();
 	test_force_unbind();
 	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();

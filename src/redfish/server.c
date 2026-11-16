@@ -1145,6 +1145,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -13)
 			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
 					  "No LD Pool CCI of the Multi-Headed device is known: its allocations cannot be changed");
+		if (rc == -14)
+			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create memory chunk");
 	}
@@ -1458,6 +1461,9 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -7)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The logical device has less memory allocated than the chunk");
+		if (rc == -8)
+			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete memory chunk");
 	}
