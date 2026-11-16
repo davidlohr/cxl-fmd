@@ -5973,6 +5973,155 @@ out:
 	report("no chunk of a bound LD is changed", before);
 }
 
+/* Oem.Cxl.Origin of Connection @id as served, "" if it has none */
+static const char *conn_origin(struct fmd_ctx *ctx, const char *id, char *buf,
+			       size_t len)
+{
+	json_t *c = fmd_redfish_connection(ctx, "CXL", id);
+	const char *o = json_string_value(json_object_get(json_object_get(
+				json_object_get(c, "Oem"), "Cxl"), "Origin"));
+
+	snprintf(buf, len, "%s", o ? o : "");
+	json_decref(c);
+	return buf;
+}
+
+/*
+ * ForceUnbind sends Unbind vPPB with Unbind Option 2h, Simulate Surprise
+ * Hot-Remove (Table 7-36), on its own or while a DELETE's managed unbind
+ * (1h) is under way, which the task of that unbind then follows; a switch
+ * still running the first answers Busy, and nothing changes. Origin is
+ * "Service" for a binding this run made and "Discovered" for one it found.
+ */
+static void test_force_unbind(void)
+{
+	static const uint8_t ld0[3] = { 0x03, 5, 0 }, ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], body[512], c0[FMD_CONN_ID_LEN], c1[FMD_CONN_ID_LEN];
+	char origin[32];
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	json_t *resp = NULL, *c;
+	int before = failures, rc, task_id;
+	uint8_t pl[16];
+	uint16_t op;
+
+	/* LD 1 of the MLD on port 5 is bound to vPPB 2 of VCS 2 already */
+	answer_identify(ep, 0x5108, 0x00);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, ld1);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5108);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	host = sw ? vcs_host(ctx, sw_id, 2) : NULL;
+	CHECK(sw && host, "no switch or host of VCS 2");
+	if (!sw || !host)
+		goto out;
+	snprintf(c0, sizeof(c0), "%s_vcs2_vppb1_p5_ld0", sw_id);
+	snprintf(c1, sizeof(c1), "%s_vcs2_vppb2_p5_ld1", sw_id);
+
+	/* found bound: Discovered, and the action is offered */
+	c = fmd_redfish_connection(ctx, "CXL", c1);
+	CHECK(c && !strcmp(conn_origin(ctx, c1, origin, sizeof(origin)), "Discovered") &&
+	      strstr(json_string_value(json_object_get(json_object_get(json_object_get(
+			json_object_get(c, "Actions"), "Oem"), "#Cxl.ForceUnbind"), "target")),
+		     "/Connections/") &&
+	      strstr(json_string_value(json_object_get(json_object_get(json_object_get(
+			json_object_get(c, "Actions"), "Oem"), "#Cxl.ForceUnbind"), "target")),
+		     "/Actions/Oem/Cxl.ForceUnbind"),
+	      "%s as served: Origin %s", c1, origin);
+	json_decref(c);
+
+	/* LD 0, bound by cxl-fmd in the background: Service once it is done */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	snprintf(body, sizeof(body),
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/e/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/e/%.32s_port5_dev_ld0\"}]}}",
+		 host->base.id, sw_id);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	json_decref(resp);
+	resp = NULL;
+	answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, ld1);
+	fmd_tasks_poll(ctx);
+	CHECK(rc == FMD_OP_STARTED && conn_state(ctx, c0) == FMD_CONN_ENABLED &&
+	      !strcmp(conn_origin(ctx, c0, origin, sizeof(origin)), "Service") &&
+	      !strcmp(conn_origin(ctx, c1, origin, sizeof(origin)), "Discovered"),
+	      "after the bind: %d, %d, Origin %s", rc, conn_state(ctx, c0), origin);
+
+	/*
+	 * ForceUnbind of the discovered one: 5202h, option 2h. A success is
+	 * followed by a 5200h, so the payload is looked at on a failure.
+	 */
+	answer_rc(ep, 0x5202, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c1, &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == -2 && op == 0x5202 && pl[0] == 2 && pl[1] == 2 && pl[2] == 0x02 &&
+	      !ops_count(ctx),
+	      "ForceUnbind: %d, %04xh VCS %d vPPB %d option %d", rc, op, pl[0], pl[1], pl[2]);
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c1, &resp);
+	CHECK(rc == 0 && !resp && !ops_count(ctx), "ForceUnbind: %d", rc);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
+	fmd_vcs_refresh(ctx, sw);
+
+	/* DELETE of LD 0 goes on in the background, option 1h: Updating */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", c0, &resp);
+	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
+	json_decref(resp);
+	resp = NULL;
+	CHECK(rc == FMD_OP_STARTED && conn_state(ctx, c0) == FMD_CONN_UPDATING &&
+	      ops_count(ctx) == 1 && ctx->binding_ops->unbind_option == 1,
+	      "DELETE in the background: %d, %d", rc, conn_state(ctx, c0));
+
+	/* forced meanwhile: Busy, 503, and the managed unbind stands */
+	answer_rc(ep, 0x5202, CXLMI_RET_BUSY);
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c0, &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == -3 && !resp && op == 0x5202 && pl[2] == 0x02 && ops_count(ctx) == 1 &&
+	      ctx->binding_ops->unbind_option == 1,
+	      "ForceUnbind while the switch is busy: %d, option %d", rc, pl[2]);
+
+	/* taken: the same task, which the vPPB unbound ends */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c0, &resp);
+	CHECK(rc == FMD_OP_STARTED && resp &&
+	      atoi(json_string_value(json_object_get(resp, "Id"))) == task_id &&
+	      ops_count(ctx) == 1 && ctx->binding_ops->unbind_option == 2,
+	      "ForceUnbind of a managed unbind: %d", rc);
+	json_decref(resp);
+	resp = NULL;
+
+	/* forced already: 503, nothing sent */
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c0, &resp);
+	CHECK(rc == -3, "ForceUnbind twice: %d", rc);
+
+	task = fmd_task_find(ctx, task_id);
+	answer_bg_status(ep, false, 100, 0x5202, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_tasks_poll(ctx);
+	CHECK(task && task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      conn_state(ctx, c0) < 0,
+	      "after the forced unbind: task %d, Connection %d",
+	      task ? (int)task->state : -1, conn_state(ctx, c0));
+
+	/* a stale ID: nothing to force */
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c0, &resp);
+	CHECK(rc == -1, "ForceUnbind of an unbound vPPB: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("ForceUnbind is Unbind vPPB option 2h, and Origin", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -6049,6 +6198,7 @@ int main(void)
 	test_lost_task_frees_op();
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
+	test_force_unbind();
 	test_conn_view_prebound_sld_ld();
 	test_conn_view_skips_vppb0_disabled_nonmemory_pid();
 	test_conn_id_roundtrip_underscored_switch();

@@ -1010,6 +1010,22 @@ static json_t *conn_json(const struct fmd_conn_view *v)
 		json_object_set_new(result, "MemoryChunkInfo", chunks);
 	else
 		json_decref(chunks);
+
+	/*
+	 * A vPPB binding (cxl-fmd's Oem): Origin "Service" if this run of
+	 * cxl-fmd made it, else "Discovered". Advisory only, and lost on
+	 * restart: nothing the switch reports says who made a binding
+	 * (Table 7-34, Table 7-80). ForceUnbind unbinds it with Simulate
+	 * Surprise Hot-Remove.
+	 */
+	if (v->kind == FMD_CONN_SWITCH) {
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s}}", "Cxl",
+			"Origin", v->made_here ? "Service" : "Discovered"));
+		json_object_set_new(result, "Actions", json_pack("{s:{s:{s:s}}}",
+			"Oem", "#Cxl.ForceUnbind", "target",
+			rf_uri(0, "/redfish/v1/Fabrics/CXL/Connections/%s/Actions/Oem/Cxl.ForceUnbind",
+			       v->id)));
+	}
 	return result;
 }
 
@@ -6261,26 +6277,23 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 }
 
 /*
- * DELETE /redfish/v1/Fabrics/{fabricId}/Connections/{connectionId}
+ * Unbind the vPPB of Connection @connection_id with Unbind Option @option
+ * (Table 7-36), whoever bound it, the Connection Absent included. The
+ * switch is read first: an ID whose vPPB now holds something else is not
+ * found, and nothing is unbound.
  *
- * Unbind the vPPB, whoever bound it, the Connection Absent included, with
- * Unbind Option 1h, Simulate Managed Hot-Remove (Table 7-36). Option 0h,
- * waiting for the link to go down, is never sent: how it applies to an LD
- * the specification does not say. The switch is read first: an ID whose
- * vPPB now holds something else is not found, and nothing is unbound.
+ * While an unbind with Simulate Managed Hot-Remove is under way, one with
+ * Simulate Surprise Hot-Remove is still sent: "There is no requirement for
+ * the FM to force the unbind operation, but it can do so using the
+ * 'Simulate Surprise Hot-Remove' unbinding option in the Unbind vPPB
+ * command" (CXL r4.0 Section 7.6.6.7). If the switch takes it, the task of
+ * the unbind under way follows it to its end; if it is still running the
+ * first, it answers Busy, and the op is left as it was.
  *
- * Returns:
- *   0 unbound (204)
- *   FMD_OP_STARTED: the switch unbinds in the background; *response is the Task
- *  -1 not found, or no longer what the vPPB holds
- *  -2 the unbind failed
- *  -3 a bind or unbind of it is under way, or the switch is busy: try again
- *  -4 a direct-attached Connection: there is nothing to unbind
- *  -5 the switch answered Unsupported
- *  -6 the switch answered Invalid Input
+ * Returns as fmd_redfish_delete_connection().
  */
-int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
-				  const char *connection_id, json_t **response)
+static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
+			     enum fmd_unbind_option option, json_t **response)
 {
 	struct fmd_binding_op *op;
 	struct fmd_conn_view v;
@@ -6290,10 +6303,6 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	enum fmd_conn_kind kind;
 	bool busy;
 	int rc;
-
-	*response = NULL;
-	if (strcmp(fabric_id, "CXL") != 0)
-		return -1;
 
 	/* what the switch has now */
 	if (!fmd_conn_id_parse(connection_id, &key)) {
@@ -6316,35 +6325,54 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	/* a host's link to a device: no vPPB to unbind (cxl-fmd's choice) */
 	if (kind == FMD_CONN_DIRECT)
 		return -4;
-	/* the switch is still working on it: wait for that to end */
-	if (busy)
-		return -3;
 
 	sw = fmd_topology_find_switch(&ctx->topology, key.switch_id);
 	if (!sw)
 		return -1;
 
-	fmd_info(ctx, "Connection %s: unbinding vPPB %d of VCS %d", connection_id,
-		 key.vppb_id, key.vcs_id);
-	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND,
-				FMD_UNBIND_MANAGED_HOT_REMOVE, NULL);
-	if (!op)
-		return -2;
+	op = busy ? fmd_binding_op_find(ctx, key.switch_id, key.vcs_id, key.vppb_id) : NULL;
+	if (busy) {
+		/*
+		 * The switch is still working on it: wait for that to end,
+		 * unless a managed unbind is to be forced.
+		 */
+		if (!op || op->kind != FMD_BIND_OP_UNBIND ||
+		    option != FMD_UNBIND_SURPRISE_HOT_REMOVE ||
+		    op->unbind_option == FMD_UNBIND_SURPRISE_HOT_REMOVE)
+			return -3;
+		task = fmd_task_find(ctx, atoi(op->task_id));
+		if (!task)
+			return -3;
 
-	rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
-			     FMD_UNBIND_MANAGED_HOT_REMOVE);
-	if (rc == FMD_OP_STARTED) {
-		/* it stands, Updating, until the vPPB is unbound */
-		task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key,
-				      FMD_UNBIND_MANAGED_HOT_REMOVE);
-		if (!task) {
-			fmd_vcs_refresh(ctx, sw);
-			return -2;
+		fmd_info(ctx, "Connection %s: forcing the unbind of vPPB %d of VCS %d",
+			 connection_id, key.vppb_id, key.vcs_id);
+		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id, option);
+		if (rc == 0 || rc == FMD_OP_STARTED) {
+			/* the task under way sees the vPPB unbound */
+			op->unbind_option = option;
+			*response = fmd_redfish_task(ctx, task->id);
+			return FMD_OP_STARTED;
 		}
-		*response = fmd_redfish_task(ctx, task->id);
-		return FMD_OP_STARTED;
+	} else {
+		fmd_info(ctx, "Connection %s: unbinding vPPB %d of VCS %d (option %d)",
+			 connection_id, key.vppb_id, key.vcs_id, option);
+		op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, option, NULL);
+		if (!op)
+			return -2;
+
+		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id, option);
+		if (rc == FMD_OP_STARTED) {
+			/* it stands, Updating, until the vPPB is unbound */
+			task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, option);
+			if (!task) {
+				fmd_vcs_refresh(ctx, sw);
+				return -2;
+			}
+			*response = fmd_redfish_task(ctx, task->id);
+			return FMD_OP_STARTED;
+		}
+		fmd_binding_op_remove(ctx, op);
 	}
-	fmd_binding_op_remove(ctx, op);
 
 	switch (rc) {
 	case 0:
@@ -6361,4 +6389,56 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		fmd_err(ctx, "Connection %s: vPPB unbind failed: %d", connection_id, rc);
 		return -2;
 	}
+}
+
+/*
+ * DELETE /redfish/v1/Fabrics/{fabricId}/Connections/{connectionId}
+ *
+ * Unbind the vPPB, whoever bound it, the Connection Absent included, with
+ * Unbind Option 1h, Simulate Managed Hot-Remove (Table 7-36). Option 0h,
+ * waiting for the link to go down, is never sent: how it applies to an LD
+ * the specification does not say. The switch is read first: an ID whose
+ * vPPB now holds something else is not found, and nothing is unbound.
+ *
+ * Returns:
+ *   0 unbound (204)
+ *   FMD_OP_STARTED: the switch unbinds in the background; *response is the Task
+ *  -1 not found, or no longer what the vPPB holds
+ *  -2 the unbind failed
+ *  -3 a bind or unbind of it is under way, or the switch is busy: try again
+ *  -4 a direct-attached Connection: there is nothing to unbind
+ *  -5 the switch answered Unsupported
+ *  -6 the switch answered Invalid Input
+ */
+int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
+				  const char *connection_id, json_t **response)
+{
+	*response = NULL;
+	if (strcmp(fabric_id, "CXL") != 0)
+		return -1;
+	return unbind_connection(ctx, connection_id, FMD_UNBIND_MANAGED_HOT_REMOVE,
+				 response);
+}
+
+/*
+ * POST /redfish/v1/Fabrics/{fabricId}/Connections/{id}/Actions/Oem/Cxl.ForceUnbind
+ *
+ * Unbind the vPPB with Unbind Option 2h, Simulate Surprise Hot-Remove
+ * (Table 7-36), for a host that does not finish a managed hot-remove: the
+ * FM "can do so using the 'Simulate Surprise Hot-Remove' unbinding option"
+ * (CXL r4.0 Section 7.6.6.7). The specification gives no timeout for the
+ * host's handshake, so when to force is the client's to decide. The action
+ * and its name are cxl-fmd's (Connection_v1 has an Oem container for
+ * actions). Also taken while a DELETE's unbind is under way: see
+ * unbind_connection(). Returns as fmd_redfish_delete_connection(); -4 for a
+ * direct-attached Connection is answered 400, the action not being offered.
+ */
+int fmd_redfish_action_force_unbind(struct fmd_ctx *ctx, const char *fabric_id,
+				    const char *connection_id, json_t **response)
+{
+	*response = NULL;
+	if (strcmp(fabric_id, "CXL") != 0)
+		return -1;
+	return unbind_connection(ctx, connection_id, FMD_UNBIND_SURPRISE_HOT_REMOVE,
+				 response);
 }

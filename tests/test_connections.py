@@ -288,6 +288,71 @@ class TestConnectionErrors:
 
 
 # =============================================================================
+# ForceUnbind and Origin (cxl-fmd's Oem)
+# =============================================================================
+
+def force_unbind_target(conn):
+    return conn["Actions"]["Oem"]["#Cxl.ForceUnbind"]["target"]
+
+
+@pytest.mark.mock_topology("mock/switch-attached.json")
+class TestForceUnbind:
+    """#Cxl.ForceUnbind unbinds the vPPB with Unbind Option 2h, Simulate
+    Surprise Hot-Remove (CXL r4.0 Table 7-36), which the FM "can" use to
+    force an unbind (Section 7.6.6.7); DELETE uses 1h, Simulate Managed
+    Hot-Remove. Oem.Cxl.Origin says whether this run of cxl-fmd made the
+    binding: advisory, and lost on restart."""
+
+    def test_force_unbind_sends_option_2(self, api_client, cxl_fmd_daemon):
+        cid = "cxl_switch_0_vcs0_vppb2_p2"
+        status, conn = api_client.get(f"{CONNECTIONS}/{cid}")
+        assert status == 200
+        target = force_unbind_target(conn)
+        assert target == f"{CONNECTIONS}/{cid}/Actions/Oem/Cxl.ForceUnbind"
+        status, data, _ = api_client.post(target, {})
+        assert status == 204
+        assert api_client.get(f"{CONNECTIONS}/{cid}")[0] == 404
+        status, vppb = api_client.get(
+            "/redfish/v1/Fabrics/CXL/Switches/cxl_switch_0/VCSs/0/VPPBs/2")
+        assert vppb["BindingStatus"] == "Unbound"
+        assert "unbind vPPB 2 in VCS 0 (surprise hot-remove)" in cxl_fmd_daemon["output"]()
+        # nothing left to force
+        assert api_client.post(target, {})[0] == 404
+
+    def test_delete_sends_option_1(self, api_client, cxl_fmd_daemon):
+        assert api_client.delete(f"{CONNECTIONS}/cxl_switch_0_vcs0_vppb2_p2") == 204
+        assert "unbind vPPB 2 in VCS 0 (managed hot-remove)" in cxl_fmd_daemon["output"]()
+
+    def test_origin_discovered_then_service(self, api_client):
+        """vPPB 3 was bound before cxl-fmd started: Discovered. Bound
+        again by a POST: Service."""
+        cid = "cxl_switch_0_vcs0_vppb3_p3"
+        status, conn = api_client.get(f"{CONNECTIONS}/{cid}")
+        assert conn["Oem"] == {"Cxl": {"Origin": "Discovered"}}
+        assert api_client.delete(f"{CONNECTIONS}/{cid}") == 204
+        status, data, location = post(api_client, HOST0, "cxl_switch0_dev2")
+        assert status == 201 and data["Id"] == cid
+        assert data["Oem"] == {"Cxl": {"Origin": "Service"}}
+        assert api_client.get(f"{CONNECTIONS}/{cid}")[1]["Oem"]["Cxl"]["Origin"] == "Service"
+
+
+@pytest.mark.mock_topology("mock/unit/unit-direct-sld.json")
+class TestForceUnbindDirect:
+
+    def test_not_offered_on_a_direct_attached_connection(self, api_client):
+        """A direct-attached Connection has no vPPB to unbind: no action,
+        no Origin, and the action URI is 400."""
+        cid = "local_direct_sld_0"
+        status, conn = api_client.get(f"{CONNECTIONS}/{cid}")
+        assert status == 200
+        assert "Actions" not in conn and "Oem" not in conn
+        status, data, _ = api_client.post(
+            f"{CONNECTIONS}/{cid}/Actions/Oem/Cxl.ForceUnbind", {})
+        assert status == 400
+        assert api_client.get(f"{CONNECTIONS}/{cid}")[0] == 200
+
+
+# =============================================================================
 # Direct-Attached Connection Tests
 # =============================================================================
 

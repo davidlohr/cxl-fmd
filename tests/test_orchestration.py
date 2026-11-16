@@ -208,7 +208,9 @@ def test_restart_ids_stable(cxl_fmd_executable, tmp_path):
     """A Connection's ID is computed from the binding: the switch, VCS,
     vPPB, port and LD. A daemon started again on the switch as the bind left
     it serves the same Connection with the same ID, though it did not make
-    it, and the same MemoryDomain of the host."""
+    it, and the same MemoryDomain of the host. Its Oem.Cxl.Origin is
+    "Service" from the daemon that bound it and "Discovered" from the next:
+    who made a binding is not kept across a restart."""
     import json
     import subprocess
     import tempfile
@@ -234,6 +236,7 @@ def test_restart_ids_stable(cxl_fmd_executable, tmp_path):
     try:
         status, first = connect(client, "switch_0_host1", "mld_0", 1)
         assert status == 201
+        assert first["Oem"] == {"Cxl": {"Origin": "Service"}}
         table = bindings(client, "switch_0")
         domains = client.get("/redfish/v1/Systems/switch_0_host1/MemoryDomains")[1]["Members"]
     finally:
@@ -255,6 +258,7 @@ def test_restart_ids_stable(cxl_fmd_executable, tmp_path):
         assert status == 200
         assert again["Id"] == first["Id"] == "switch_0_vcs1_vppb1_p4_ld1"
         assert again["Links"] == first["Links"]
+        assert again["Oem"] == {"Cxl": {"Origin": "Discovered"}}
         assert client.get(CONNECTIONS)[1]["Members"] == [{"@odata.id": first["@odata.id"]}]
         assert client.get("/redfish/v1/Systems/switch_0_host1/MemoryDomains")[1]["Members"] == domains
     finally:

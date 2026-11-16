@@ -2290,6 +2290,8 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				json_t **response);
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				  const char *connection_id, json_t **response);
+int fmd_redfish_action_force_unbind(struct fmd_ctx *ctx, const char *fabric_id,
+				    const char *connection_id, json_t **response);
 
 /* Tasks: a bind or unbind in the background (src/tasks.c) */
 json_t *fmd_redfish_task_service(struct fmd_ctx *ctx);

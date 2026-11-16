@@ -1131,6 +1131,49 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 				  "Failed to create memory chunk");
 	}
 
+	/*
+	 * POST .../Connections/{conn}/Actions/Oem/Cxl.ForceUnbind: unbind
+	 * with Simulate Surprise Hot-Remove (cxl-fmd's Oem action). The body,
+	 * if any, is not read: the action has no parameters.
+	 */
+	if (match_route("/redfish/v1/Fabrics/{id}/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind",
+			norm_url, params, 8)) {
+		json_t *task = NULL;
+
+		rc = fmd_redfish_action_force_unbind(ctx, params[0], params[1], &task);
+		free_params(params, 8);
+		free(norm_url);
+
+		if (rc == FMD_OP_STARTED && task) {
+			char location[256];
+
+			snprintf(location, sizeof(location), "%s",
+				 json_string_value(json_object_get(task, "TaskMonitor")));
+			return send_json_response_with_location(conn, MHD_HTTP_ACCEPTED,
+								task, location);
+		}
+		json_decref(task);
+		if (rc == 0)
+			return send_no_content(conn);
+		if (rc == -1)
+			return send_error(conn, MHD_HTTP_NOT_FOUND,
+					  "Connection not found");
+		if (rc == -3)
+			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
+					  "The switch is carrying out another operation; try again");
+		if (rc == -4)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "ForceUnbind is offered only on a switch-attached connection");
+		if (rc == -5)
+			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
+					  "The switch does not support Unbind vPPB (Unsupported)");
+		if (rc == -6)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The switch refused the unbind as Invalid Input");
+		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+				  "Failed to unbind the connection");
+	}
+
 	/* POST /redfish/v1/Fabrics/{id}/Connections - create connection */
 	if (match_route("/redfish/v1/Fabrics/{id}/Connections", norm_url, params, 8)) {
 		json_t *response = NULL;

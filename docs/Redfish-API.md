@@ -357,8 +357,9 @@ DSP0288 maps none of these commands. The mapping is cxl-fmd's own:
 | Set Partition Info (4101h) | `MemoryChunks` | `POST` and `DELETE` of a `"Volatile"` chunk of an SLD (see "Memory Provisioning") |
 | Bind vPPB (5201h) | `Connection` | `POST /redfish/v1/Fabrics/CXL/Connections` |
 | Unbind vPPB (5202h) | `Connection` | `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}`, with Unbind Option 1h, Simulate Managed Hot-Remove |
+| Unbind vPPB (5202h) | `Connection` | `POST /redfish/v1/Fabrics/CXL/Connections/{id}/Actions/Oem/Cxl.ForceUnbind`, with Unbind Option 2h, Simulate Surprise Hot-Remove (cxl-fmd's Oem action) |
 
-Bind vPPB and Unbind vPPB have no actions: a `POST` to
+Bind vPPB has no action, and Unbind vPPB only the Oem `#Cxl.ForceUnbind`: a `POST` to
 `/redfish/v1/Fabrics/CXL/Connections` for a host on a switch binds a vPPB
 of the host's VCS, and a `DELETE` of the connection unbinds it (see
 "Memory Binding (Connections)").
@@ -381,6 +382,7 @@ Currently implemented write operations:
 - `DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}` - Delete Memory Chunk (Set LD Allocations / Set Partition Info)
 - `POST /redfish/v1/Fabrics/CXL/Connections` - Create Connection (Bind vPPB for switch-attached)
 - `DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}` - Delete Connection (Unbind vPPB for switch-attached)
+- `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` - Unbind vPPB, Simulate Surprise Hot-Remove (cxl-fmd's Oem action)
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}` - Set Timestamp
 - `PATCH /redfish/v1/Chassis/{id}/Memory/{mem}` - Set Partition Info
 - `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.ScanMedia` - Scan Media
@@ -597,6 +599,7 @@ CXL fabric topology (switches, ports, connections, zones).
 | `GET /redfish/v1/Fabrics/CXL/Connections/{conn}` | Connection (host-to-device binding) |
 | `POST /redfish/v1/Fabrics/CXL/Connections` | Create Connection (binds memory to host) |
 | `DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}` | Delete Connection (unbinds memory) |
+| `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` | Force the unbind (Simulate Surprise Hot-Remove) |
 | `GET /redfish/v1/Fabrics/CXL/Zones` | Zone Collection |
 | `GET /redfish/v1/Fabrics/CXL/Zones/{zone}` | Zone (VCS access domain) |
 
@@ -975,7 +978,41 @@ unbinds in the background (see "Binds and unbinds in the background").
 - The task follows the unbind for as long as the switch takes: no time
   limit is set, and the switch, which runs one background command at a
   time, answers every other bind and unbind Busy (503) until the host has
-  released the device (a known gap)
+  released the device (a known gap); `#Cxl.ForceUnbind` is the way out
+
+### Forcing an Unbind (Oem action)
+
+```http
+POST /redfish/v1/Fabrics/CXL/Connections/{conn_id}/Actions/Oem/Cxl.ForceUnbind
+```
+
+A switch-attached Connection offers it in `Actions.Oem["#Cxl.ForceUnbind"]`.
+It sends `Unbind vPPB (0x5202h)` with Unbind Option 2h, Simulate Surprise
+Hot-Remove (CXL r4.0 Table 7-36). "There is no requirement for the FM to
+force the unbind operation, but it can do so using the 'Simulate Surprise
+Hot-Remove' unbinding option in the Unbind vPPB command" (Section 7.6.6.7);
+the specification gives the host's handshake no timeout, so when to force
+is the client's decision. The action, its name and its target are
+cxl-fmd's (Connection_v1's `Actions` has an `Oem` container); it has no
+parameters, and a body, if any, is ignored.
+
+- `204 No Content` once unbound, `202 Accepted` with a `Task` when the
+  switch unbinds in the background, `404` for an ID whose vPPB no longer
+  holds it, `501` if the switch answers Unsupported.
+- While a `DELETE`'s managed unbind (option 1h) is under way, the action
+  still sends option 2h. If the switch takes it, the answer is `202` with
+  the task of that unbind, which ends when the vPPB is unbound; a switch
+  still running the first command answers Busy, and the action `503`,
+  leaving the managed unbind as it was. A bind under way, or an unbind
+  already forced, is `503`.
+- A direct-attached Connection has no vPPB to unbind: no action is
+  offered, and a `POST` to its action URI is `400`.
+
+`Oem.Cxl.Origin` of a switch-attached Connection is `"Service"` when this
+run of cxl-fmd made the binding and `"Discovered"` otherwise. It is
+advisory, never decides what a `DELETE` does, and is lost on restart:
+nothing the switch reports says who made a binding (Tables 7-34 and 7-80),
+so after a restart every binding is `"Discovered"`.
 
 ### Connection Lifecycle
 
