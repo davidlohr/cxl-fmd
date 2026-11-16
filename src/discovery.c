@@ -1459,11 +1459,16 @@ static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	 *
 	 * Each VCS represents a host connection via its USP (Upstream Switch Port).
 	 * Per OCP CMS model, hosts are represented as Systems with Fabric Endpoints.
+	 * A VCS that is not enabled has none: its USP ID is "Valid only when
+	 * the VCS is enabled" (Table 7-34), as for a mock switch.
 	 */
 	for (int vcs_idx = 0; vcs_idx < sw->num_vcs; vcs_idx++) {
 		struct fmd_vcs *vcs = &sw->vcs[vcs_idx];
 		char host_id[FMD_MAX_ID_LEN];
 		struct fmd_host *host;
+
+		if (vcs->state != 0x01)		/* VCS State 01h: Enabled */
+			continue;
 
 		snprintf(host_id, sizeof(host_id), "%.50s_host%d", sw->base.id, vcs->vcs_id);
 

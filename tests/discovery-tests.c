@@ -509,14 +509,15 @@ static void port_block(uint8_t *b, uint8_t port, uint8_t state, uint8_t mode,
  */
 static const uint8_t unbound[3] = { 0x00, 0x00, 0xff };
 
-static void answer_vcs(struct cxlmi_endpoint *ep, uint8_t vcs_id, uint8_t usp,
-		       const uint8_t *vppb1, const uint8_t *vppb2)
+static void answer_vcs_state(struct cxlmi_endpoint *ep, uint8_t vcs_id,
+			     uint8_t state, uint8_t usp,
+			     const uint8_t *vppb1, const uint8_t *vppb2)
 {
 	uint8_t pl[4 + 4 + 3 * 4] = { 0 }, *b = pl + 4;
 
 	pl[0] = 1;				/* Number of VCSs */
 	b[0] = vcs_id;				/* Virtual CXL Switch ID */
-	b[1] = 0x01;				/* VCS State: enabled */
+	b[1] = state;				/* VCS State: 00h, 01h enabled */
 	b[2] = usp;				/* USP ID */
 	b[3] = 3;				/* Number of vPPBs */
 	b[4] = 0x02;				/* vPPB 0: bound physical port */
@@ -525,6 +526,12 @@ static void answer_vcs(struct cxlmi_endpoint *ep, uint8_t vcs_id, uint8_t usp,
 	memcpy(b + 8, vppb1, 3);
 	memcpy(b + 12, vppb2, 3);
 	answer(ep, 0x5200, pl, sizeof(pl));
+}
+
+static void answer_vcs(struct cxlmi_endpoint *ep, uint8_t vcs_id, uint8_t usp,
+		       const uint8_t *vppb1, const uint8_t *vppb2)
+{
+	answer_vcs_state(ep, vcs_id, 0x01, usp, vppb1, vppb2);
 }
 
 /*
@@ -4812,6 +4819,45 @@ static void test_bound_pid_decode(void)
 	report("Bound PID of a vPPB", before);
 }
 
+/*
+ * A VCS that is not enabled has no host: its USP ID is "Valid only when the
+ * VCS is enabled" (Table 7-34). Its vPPBs are still read.
+ */
+static void test_disabled_vcs_has_no_host(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char id[FMD_MAX_ID_LEN], host[FMD_MAX_ID_LEN + 16];
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	int before = failures;
+
+	answer_identify(ep, 0x5102, 0x00);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs_state(ep, 2, 0x00, 1, unbound, unbound);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x5102);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (!sw)
+		goto out;
+	vcs = fmd_switch_find_vcs(sw, 2);
+	CHECK(sw->num_vcs == 2 && vcs && vcs->state == 0x00 &&
+	      vcs->num_vppbs == 3, "VCS 2, disabled, not read");
+	CHECK(ctx->topology.root->host_count == 1, "%d hosts",
+	      ctx->topology.root->host_count);
+	snprintf(host, sizeof(host), "%.50s_host0", id);
+	CHECK(fmd_topology_find_host(&ctx->topology, host), "no host of VCS 0");
+	snprintf(host, sizeof(host), "%.50s_host2", id);
+	CHECK(!fmd_topology_find_host(&ctx->topology, host),
+	      "a host for disabled VCS 2");
+out:
+	fmd_ctx_free(ctx);
+	report("a disabled VCS has no host", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -4883,6 +4929,7 @@ int main(void)
 	test_validate_usp_id();
 	test_bound_ld_sentinel();
 	test_bound_pid_decode();
+	test_disabled_vcs_has_no_host();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);
