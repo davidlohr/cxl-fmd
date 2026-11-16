@@ -1457,6 +1457,17 @@ struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 				uint8_t vppb_id, const char *connection_id);
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
+
+/*
+ * A bind or unbind of vPPB @vppb_id of VCS @vcs_id that the switch started
+ * for connection @connection_id, and that nothing follows any more: the
+ * switch is gone, does not answer, or no task could be made. The connection
+ * is no longer pending, and is what the vPPB, read again if @sw answers, now
+ * is. @sw may be NULL. fabric_lock held exclusively.
+ */
+void fmd_task_untracked(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			enum fmd_task_kind kind, uint8_t vcs_id,
+			uint8_t vppb_id, const char *connection_id);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
 void fmd_tasks_free(struct fmd_ctx *ctx);
 
@@ -1731,9 +1742,10 @@ void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
  * A Binding Change of a vPPB, from a Virtual CXL Switch Event Record: the
- * end of the bind or unbind a task is following. fabric_lock held.
+ * end of the bind or unbind a task is following. Returns false if no task
+ * is following that vPPB. fabric_lock held.
  */
-void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
+bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			      uint8_t vcs_id, uint8_t vppb_id, bool failed);
 
 /*

@@ -5920,8 +5920,14 @@ int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw,
 						      conn->vcs_id, conn->vppb_id,
 						      conn->id);
-				if (!task)
+				if (!task) {
+					/* nothing follows it: not pending */
+					fmd_task_untracked(ctx, sw, FMD_TASK_UNBIND,
+							   conn->vcs_id,
+							   conn->vppb_id,
+							   connection_id);
 					return -2;
+				}
 				*response = fmd_redfish_task(ctx, task->id);
 				return FMD_OP_STARTED;
 			}

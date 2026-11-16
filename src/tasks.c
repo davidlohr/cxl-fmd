@@ -168,7 +168,7 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
  * Warning Event Log" (Table 7-80). The record has no return code: that is
  * in Background Operation Status, if the switch has run nothing since.
  */
-void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
+bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			      uint8_t vcs_id, uint8_t vppb_id, bool failed)
 {
 	struct fmd_task *task;
@@ -189,8 +189,57 @@ void fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 				rc = CXLMI_RET_SUCCESS;
 		}
 		task_complete(ctx, task, sw, rc, failed);
-		return;
+		return true;
 	}
+	return false;
+}
+
+void fmd_task_untracked(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			enum fmd_task_kind kind, uint8_t vcs_id,
+			uint8_t vppb_id, const char *connection_id)
+{
+	struct fmd_connection *conn = fmd_connection_find(ctx, connection_id);
+	struct fmd_vppb *vppb = NULL;
+
+	if (conn) {
+		conn->pending = FMD_CONN_SETTLED;
+
+		/* what the switch has now, or what was last known */
+		if (sw) {
+			struct fmd_vcs *vcs;
+
+			fmd_vcs_refresh(ctx, sw);
+			vcs = fmd_switch_find_vcs(sw, vcs_id);
+			vppb = vcs ? fmd_vcs_find_vppb(vcs, vppb_id) : NULL;
+		}
+
+		if (kind == FMD_TASK_BIND) {
+			/*
+			 * Bound, or still binding: the host may have the
+			 * device, and deleting the connection unbinds it.
+			 * Unbound, or not known: the host was never given
+			 * it, as for a bind that failed.
+			 */
+			if (vppb && (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
+				     vppb->binding_status == FMD_VPPB_BOUND_LD ||
+				     vppb->binding_status == FMD_VPPB_BUSY)) {
+				conn->bound = true;
+			} else {
+				fmd_info(ctx, "Connection %s is gone: vPPB %d of "
+					 "VCS %d is not bound", conn->id, vppb_id,
+					 vcs_id);
+				fmd_connection_remove(ctx, conn);
+			}
+		} else if (vppb && vppb->binding_status == FMD_VPPB_UNBOUND) {
+			/* the unbind is done, whatever was told of it */
+			fmd_info(ctx, "Connection %s is gone: vPPB %d of VCS %d "
+				 "is unbound", conn->id, vppb_id, vcs_id);
+			fmd_connection_remove(ctx, conn);
+		}
+	}
+
+	if (sw)
+		fmd_switch_settle_connections(ctx, sw);
 }
 
 /* forget the oldest finished tasks beyond the number kept */
@@ -236,6 +285,8 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 		sw = fmd_topology_find_switch(&ctx->topology, task->switch_id);
 		if (!sw) {
 			task_finish(ctx, task, false, "The switch is gone");
+			fmd_task_untracked(ctx, NULL, task->kind, task->vcs_id,
+					   task->vppb_id, task->connection_id);
 			continue;
 		}
 
@@ -244,9 +295,12 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 				&percent, &rc);
 		if (status < 0) {
 			/* a switch that cannot be asked, several times over */
-			if (++task->failed_polls >= 5)
+			if (++task->failed_polls >= 5) {
 				task_finish(ctx, task, false, "The switch does not "
 					    "answer Background Operation Status");
+				fmd_task_untracked(ctx, sw, task->kind, task->vcs_id,
+						   task->vppb_id, task->connection_id);
+			}
 			continue;
 		}
 		task->failed_polls = 0;

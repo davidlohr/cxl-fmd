@@ -4858,6 +4858,185 @@ out:
 	report("a disabled VCS has no host", before);
 }
 
+/*
+ * A Binding Change that no task follows: a bind made by another FM,
+ * through another CCI, or by the switch. The VCSs are read again, and the
+ * vPPB is what the switch says.
+ */
+static void test_untracked_binding_change_refreshes(void)
+{
+	static const uint8_t port4[3] = { 0x02, 4, 0xff };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5104);
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	int before = failures;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x5104);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (!sw)
+		goto out;
+
+	/* vPPB 2 of VCS 0, now bound to port 4, in the Informational log */
+	answer_event(ep, virtual_switch_event, 0x21,
+		     (uint8_t[6]){ 0, 2, 0x00, 0x02, 4, 0xff }, 6);
+	answer_vcs(ep, 0, 0, port2, port4);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_switch_events_poll(ctx);
+
+	vcs = fmd_switch_find_vcs(sw, 0);
+	CHECK(vcs && vcs->vppbs[2].binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT &&
+	      vcs->vppbs[2].bound_port_id == 4,
+	      "vPPB 2 of VCS 0 after an untracked Binding Change: status %d",
+	      vcs ? (int)vcs->vppbs[2].binding_status : -1);
+	CHECK(last_opcode(ep) == 0x5200, "the VCSs were not read: last %04xh",
+	      last_opcode(ep));
+out:
+	fmd_ctx_free(ctx);
+	report("a Binding Change no task follows reads the VCSs", before);
+}
+
+/*
+ * A task that is lost: its switch is gone, or does not answer Background
+ * Operation Status five times. Its connection is no longer pending, and is
+ * what the vPPB is: a DELETE is not refused as busy any more.
+ */
+static void test_lost_task_clears_pending(void)
+{
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5105);
+	char id[FMD_MAX_ID_LEN], conn_id[FMD_MAX_ID_LEN];
+	struct fmd_connection *conn;
+	struct fmd_switch *sw;
+	struct fmd_task *task;
+	struct fmd_host *host;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x5105);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	host = sw ? vcs_host(ctx, id, 2) : NULL;
+	CHECK(sw && host, "no switch %s or host of VCS 2", id);
+	if (!sw || !host)
+		goto out;
+
+	/*
+	 * A bind of LD 1 of port 5 to vPPB 1 of VCS 2, and a switch that
+	 * then does not answer 0002h. On the fifth failed poll the VCSs are
+	 * read: the vPPB is bound.
+	 */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
+	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
+	conn = fmd_connection_create(ctx, host->base.id, "gone_device", "chunk", 0);
+	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 1, conn->id) : NULL;
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	conn->vcs_id = 2;
+	conn->vppb_id = 1;
+	conn->pending = FMD_CONN_BINDING;
+	snprintf(conn_id, sizeof(conn_id), "%s", conn->id);
+
+	rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
+	CHECK(rc == -3, "DELETE while binding: %d", rc);
+	for (int i = 0; i < 4; i++)
+		fmd_tasks_poll(ctx);
+	CHECK(task->state == FMD_TASK_RUNNING, "four failed polls ended the task");
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld1, unbound);
+	fmd_tasks_poll(ctx);
+	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d: %s",
+	      task->state, task->message);
+	conn = fmd_connection_find(ctx, conn_id);
+	CHECK(conn && conn->pending == FMD_CONN_SETTLED && conn->bound,
+	      "the connection of a bound vPPB, after its task is lost: %s",
+	      conn ? (conn->pending ? "pending" : "not bound") : "gone");
+
+	/*
+	 * It is deleted, and the vPPB the switch bound is unbound: the one
+	 * response queued, to 5202h, is taken.
+	 */
+	{
+		unsigned int taken, then;
+
+		cxlmi_mock_get_stats(ep, NULL, &then);
+		answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+		rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
+		cxlmi_mock_get_stats(ep, NULL, &taken);
+		CHECK(rc == 0 && taken - then == 1,
+		      "DELETE after the task was lost: %d, %u responses taken",
+		      rc, taken - then);
+	}
+	json_decref(resp);
+	resp = NULL;
+
+	/* a bind whose switch is gone: nothing says it is bound */
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	rc = fmd_vppb_bind(ctx, sw, 2, 2, 4, 0xffff);
+	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
+	conn = fmd_connection_create(ctx, host->base.id, "gone_device", "chunk", 0);
+	task = conn ? fmd_task_start(ctx, FMD_TASK_BIND, sw, 2, 2, conn->id) : NULL;
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	conn->pending = FMD_CONN_BINDING;
+	snprintf(conn_id, sizeof(conn_id), "%s", conn->id);
+	snprintf(task->switch_id, sizeof(task->switch_id), "no_such_switch");
+	fmd_tasks_poll(ctx);
+	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d", task->state);
+	CHECK(!fmd_connection_find(ctx, conn_id),
+	      "a connection is left pending by a task whose switch is gone");
+
+	/*
+	 * An unbind lost the same way, of a vPPB the switch then reads as
+	 * unbound: the connection is gone. One still bound stands.
+	 */
+	for (int unbinds = 0; unbinds < 2; unbinds++) {
+		bool done = unbinds == 0;
+
+		conn = fmd_connection_create(ctx, host->base.id, "gone_device",
+					     "chunk", 0);
+		task = conn ? fmd_task_start(ctx, FMD_TASK_UNBIND, sw, 2, 1,
+					     conn->id) : NULL;
+		CHECK(task, "no task");
+		if (!task)
+			goto out;
+		conn->vcs_id = 2;
+		conn->vppb_id = 1;
+		conn->bound = true;
+		conn->pending = FMD_CONN_UNBINDING;
+		snprintf(conn_id, sizeof(conn_id), "%s", conn->id);
+		for (int i = 0; i < 4; i++)
+			fmd_tasks_poll(ctx);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, done ? unbound : ld1, unbound);
+		fmd_tasks_poll(ctx);
+		CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d",
+		      task->state);
+		conn = fmd_connection_find(ctx, conn_id);
+		if (done) {
+			CHECK(!conn, "a connection stands after its vPPB was unbound");
+		} else {
+			CHECK(conn && conn->pending == FMD_CONN_SETTLED,
+			      "a connection stays pending after its unbind was lost");
+			answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+			rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
+			CHECK(rc != -3, "DELETE after the unbind was lost: %d", rc);
+			json_decref(resp);
+			resp = NULL;
+		}
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("a lost task leaves no connection pending", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -4930,6 +5109,8 @@ int main(void)
 	test_bound_ld_sentinel();
 	test_bound_pid_decode();
 	test_disabled_vcs_has_no_host();
+	test_untracked_binding_change_refreshes();
+	test_lost_task_clears_pending();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

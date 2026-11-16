@@ -883,6 +883,13 @@ the Percentage Complete of Background Operation Status (0002h), which the event
 loop reads until the operation is over; the return code there, and what the
 vPPB is afterwards, decide between `Completed` and `Exception`. A switch that
 finishes a bind before it answers is answered for with `201`, and no task.
+A task whose switch is gone, or does not answer Background Operation Status
+five times running, ends in `Exception`, and its connection is no longer
+`Starting` or `Updating`: it is what the vPPB is when read again (or as last
+read). After a lost bind, a vPPB that is bound or still busy keeps the
+connection, which a DELETE unbinds; an unbound one removes it. After a lost
+unbind, an unbound vPPB removes the connection, and a bound one leaves it
+standing.
 - Records binding info (`vcs_id`, `vppb_id`) in the connection
 
 **MHD Direct-Attached Validation:**
@@ -1048,10 +1055,14 @@ These are known gaps in what cxl-fmd does, not properties of a schema:
   its Dynamic Capacity Event Log are not kept (see "Where cxl-fmd puts CXL
   event records").
 - Of a Virtual CXL Switch Event Record (Table 7-80), only a Binding Change
-  is acted on, and only to end the task of a bind or unbind cxl-fmd started.
-  A Binding Change cxl-fmd did not ask for, such as the switch's own unbind
-  after an MLD's surprise removal, is seen when the switch is next read: on
-  the `--rescan` timer, or after a log overflowed.
+  is acted on. It ends the task of a bind or unbind cxl-fmd started; one
+  cxl-fmd did not ask for, such as the switch's own unbind after an MLD's
+  surprise removal, has the switch's VCSs read again (all of them, not only
+  the record's; the record's binding fields are not taken as they are).
+  Whether a switch records binds made by another FM or through another CCI
+  in logs this FM reads, the specification does not say: those are seen
+  when the switch is next read, on the `--rescan` timer, or after a log
+  overflowed.
 - The managed hot-removal of an MLD (Section 7.6.6.7) is not carried out:
   cxl-fmd does not act on a host's Attention Indicator, unbind the LDs, or
   set the MLD port's Attention LED.

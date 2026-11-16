@@ -17,8 +17,9 @@
  *    things when its binding has changed. "Successful bind and unbind
  *    operations generate events to the Informational Event Log. Failed bind
  *    and unbind operations generate events to the Warning Event Log." A
- *    Binding Change ends the task following that vPPB, if one is; nothing
- *    else in these records is acted on.
+ *    Binding Change ends the task following that vPPB, if one is; one that
+ *    no task follows has the VCSs read again. Nothing else in these
+ *    records is acted on.
  *
  * Not every removal gives a Physical Switch Event Record. Of a surprise
  * removal, "The switch notifies the FM ... by generating Virtual CXL Switch
@@ -63,6 +64,7 @@ struct switch_events {
 	uint8_t ports[32];	/* bit n: port n has changed */
 	int nports;
 	bool everything;	/* a log overflowed: records were lost */
+	bool bindings;		/* a Binding Change no task follows */
 	int records;
 };
 
@@ -96,10 +98,22 @@ static void handle_record(struct fmd_ctx *ctx, struct fmd_switch *sw, int log,
 		fmd_dbg(ctx, "%s: virtual switch event %d on vPPB %d of VCS %d, "
 			"binding status %d", sw->base.id, rec->data[2], vppb_id,
 			vcs_id, rec->data[3]);
-		/* 00h = Binding Change; a failed one is in the Warning log */
-		if (rec->data[2] == 0x00)
-			fmd_task_binding_changed(ctx, sw, vcs_id, vppb_id,
-						 log == EVENT_LOG_WARNING);
+		/*
+		 * 00h = Binding Change; a failed one is in the Warning log.
+		 * One that no task follows is a bind or unbind cxl-fmd did
+		 * not ask for: by another FM, through another CCI, or by
+		 * the switch. Its VCS is read again rather than taking the
+		 * record's binding fields (33h-35h) as they are (cxl-fmd's
+		 * choice).
+		 */
+		if (rec->data[2] == 0x00 &&
+		    !fmd_task_binding_changed(ctx, sw, vcs_id, vppb_id,
+					      log == EVENT_LOG_WARNING)) {
+			fmd_info(ctx, "%s: vPPB %d of VCS %d changed binding, "
+				 "and cxl-fmd did not ask for it", sw->base.id,
+				 vppb_id, vcs_id);
+			ev->bindings = true;
+		}
 		return;
 	}
 
@@ -157,8 +171,17 @@ static void switch_events(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		return;
 	}
 
-	if (!ev.nports)
+	if (!ev.nports) {
+		/*
+		 * Every VCS: there is no 5200h for one VCS that is cheaper
+		 * to keep apart, and another may have changed as well.
+		 */
+		if (ev.bindings) {
+			fmd_vcs_refresh(ctx, sw);
+			fmd_switch_settle_connections(ctx, sw);
+		}
 		return;
+	}
 	for (int id = 0; id < 256; id++) {
 		if (ev.ports[id / 8] & (1 << (id % 8)))
 			ids[n++] = id;
