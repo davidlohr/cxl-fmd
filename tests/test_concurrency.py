@@ -285,6 +285,177 @@ class TestManyAtOnce:
                 assert seen.setdefault(path, text) == text, path
 
 
+def connections(api_client):
+    """{id: State} of every Connection."""
+    status, data = api_client.get(CONNECTIONS)
+    assert status == 200
+    out = {}
+    for member in data["Members"]:
+        status, conn = api_client.get(member["@odata.id"])
+        assert status == 200
+        out[conn["Id"]] = conn["Status"]["State"]
+    return out
+
+
+def running_tasks(api_client):
+    status, tasks = api_client.get("/redfish/v1/TaskService/Tasks")
+    assert status == 200
+    states = []
+    for member in tasks["Members"]:
+        status, task = api_client.get(member["@odata.id"])
+        assert status == 200
+        states.append(task["TaskState"])
+    return [s for s in states if s not in ("Completed", "Exception", "Killed",
+                                            "Cancelled")]
+
+
+@pytest.mark.mock_topology("mock/large-fabric.json")
+class TestStress:
+    """Rounds of POSTs and DELETEs at once, of the same targets and of
+    different ones, by the host that has a target and by one that does not.
+    Whatever order fabric_lock puts them in, every bind and unbind is one
+    a serial order could have made: each 201 is one Bind vPPB (5201h) and
+    each 204 one Unbind vPPB (5202h), no LD and no vPPB is bound twice,
+    the Connections are the bindings, and no bind or unbind is left under
+    way. Run on the TSan build too."""
+
+    LDS = range(8, 16)          # a_mld_0's LDs on port 8 that start unbound
+    ROUNDS = 6
+
+    def test_rounds_of_posts_and_deletes(self, cxl_fmd_daemon, api_client):
+        base = api_client.base_url
+        chunks = {ld: chunk_of(api_client, "a_mld_0", ld) for ld in self.LDS}
+        owner = {ld: "switch_a_host%d" % (ld % 4) for ld in self.LDS}
+        other = {ld: "switch_a_host%d" % ((ld + 1) % 4) for ld in self.LDS}
+        before = bound(bindings(api_client, "switch_a"))
+        log = cxl_fmd_daemon["output"]
+
+        def post(ld, host):
+            return lambda: ("POST", ld, host, requests.post(
+                base + CONNECTIONS, json=body(base, host, "a_mld_0", chunks[ld]),
+                timeout=30))
+
+        def delete(ld, uri):
+            return lambda: ("DELETE", ld, None, requests.delete(base + uri, timeout=30))
+
+        held = {}               # ld: Connection URI, as the last round left it
+        for rnd in range(self.ROUNDS):
+            jobs = []
+            for ld in self.LDS:
+                if ld in held:
+                    # unbind it, twice; on alternate rounds ask for it
+                    # again in the same breath
+                    jobs += [delete(ld, held[ld])] * 2
+                    if (ld + rnd) % 2:
+                        jobs += [post(ld, owner[ld])] * 2
+                elif (ld + rnd) % 3:
+                    # three of the owner and one of a host that is not
+                    jobs += [post(ld, owner[ld])] * 3 + [post(ld, other[ld])]
+            binds = log().count("mock bind vPPB")
+            unbinds = log().count("mock unbind vPPB")
+            was = {ld for ld in self.LDS if ld in held}
+            results = together(jobs)
+
+            created = deleted = 0
+            winners = {}
+            for method, ld, host, response in results:
+                code = response.status_code
+                if method == "POST":
+                    assert code in (200, 201, 409), (rnd, ld, host, code, response.text)
+                    if code in (200, 201):
+                        winners.setdefault(ld, set()).add(host)
+                    created += code == 201
+                else:
+                    assert code in (204, 404), (rnd, ld, code, response.text)
+                    deleted += code == 204
+
+            # one 5201h per 201 and one 5202h per 204, none other
+            assert log().count("mock bind vPPB") - binds == created, rnd
+            assert log().count("mock unbind vPPB") - unbinds == deleted, rnd
+            # a target goes to one host in a round
+            assert all(len(hosts) == 1 for hosts in winners.values()), winners
+
+            now = bound(bindings(api_client, "switch_a"))
+            new = {k: v for k, v in now.items() if k not in before or before[k] != v}
+            lds = [v[2] for v in new.values()]
+            # every LD bound once, each on a vPPB of its own
+            assert len(lds) == len(set(lds)), new
+            assert all(v[:2] == ("BoundLD", 8) for v in new.values()), new
+            # a 201 binds and a 204 unbinds: what each LD is now adds up
+            per = {}
+            for method, ld, _, response in results:
+                per[ld] = per.get(ld, 0) + {201: 1, 204: -1}.get(response.status_code, 0)
+            for ld in self.LDS:
+                assert (ld in lds) - (ld in was) == per.get(ld, 0), (rnd, ld, per, lds)
+
+            # the Connections are those bindings, none still under way
+            conns = connections(api_client)
+            assert set(conns.values()) <= {"Enabled"}, conns
+            assert running_tasks(api_client) == []
+            held = {}
+            for (vcs, vppb), (_, port, ld) in new.items():
+                cid = "switch_a_vcs%s_vppb%s_p%d_ld%d" % (vcs, vppb, port, ld)
+                assert cid in conns, (cid, conns)
+                assert vcs == owner[ld][-1] or ld in winners, (vcs, ld)
+                held[ld] = CONNECTIONS + "/" + cid
+
+        # nothing was left behind: each target unbinds, and binds again
+        for ld, uri in held.items():
+            assert requests.delete(base + uri, timeout=30).status_code == 204
+        for ld in self.LDS:
+            response = requests.post(base + CONNECTIONS, timeout=30,
+                                     json=body(base, owner[ld], "a_mld_0", chunks[ld]))
+            assert response.status_code == 201, (ld, response.text)
+            assert requests.delete(base + response.headers["Location"],
+                                   timeout=30).status_code == 204
+        assert bound(bindings(api_client, "switch_a")) == before
+
+
+@pytest.mark.mock_topology("mock/background-bind.json")
+class TestStressInTheBackground:
+    """The same with a switch that binds and unbinds in the background, one
+    command at a time: while a bind or unbind of the target is under way,
+    every request for it finds that op; once it is over, nothing of it is
+    left."""
+
+    ROUNDS = 3
+
+    def test_rounds(self, cxl_fmd_daemon, api_client):
+        from test_tasks import wait_for
+
+        base = api_client.base_url
+        chunk = chunk_of(api_client, "sld_0")
+        log = cxl_fmd_daemon["output"]
+
+        def ask():
+            return ("POST", requests.post(
+                base + CONNECTIONS, timeout=30,
+                json=body(base, "switch_0_host0", "sld_0", chunk)))
+
+        for rnd in range(self.ROUNDS):
+            results = together([ask] * 8)
+            assert [r.status_code for _, r in results] == [202] * 8, rnd
+            monitors = {r.headers["Location"] for _, r in results}
+            assert len(monitors) == 1
+            done = wait_for(base, monitors.pop())
+            assert done.status_code == 201
+            uri = done.headers["Location"]
+            assert connections(api_client) == {uri.rsplit("/", 1)[1]: "Enabled"}
+
+            # unbind it eight times at once: one Unbind vPPB, the others
+            # find it under way (503), or gone (404) if it is over
+            results = together([lambda: ("DELETE", requests.delete(base + uri, timeout=30))] * 8)
+            codes = sorted(r.status_code for _, r in results)
+            assert codes.count(202) == 1 and set(codes) <= {202, 404, 503}, codes
+            monitor = next(r.headers["Location"] for _, r in results if r.status_code == 202)
+            assert wait_for(base, monitor).status_code in (200, 204)
+            assert requests.get(base + uri, timeout=30).status_code == 404
+            assert connections(api_client) == {}
+            assert running_tasks(api_client) == []
+
+            assert log().count("mock bind vPPB") == rnd + 1
+            assert log().count("mock unbind vPPB") == rnd + 1
+
 ROOT = Path(__file__).resolve().parent.parent
 
 

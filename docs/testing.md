@@ -260,7 +260,7 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_tasks.py` | Binds and unbinds in the background | 7 |
 | `test_hot_removal.py` | Devices pulled out of a switch port | 3 |
 | `test_event_logs.py` | Event records as log entries | 8 |
-| `test_concurrency.py` | Requests served on several threads | 22 |
+| `test_concurrency.py` | Requests served on several threads | 24 |
 | `test_memory_lifecycle.py` | Memory chunk CRUD operations | 20 |
 | `test_connections.py` | Connection management | 21 |
 | `test_cxl_business_rules.py` | CXL-specific rules (VCS, LD limits, health) | 34 |
@@ -272,7 +272,7 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_manpage.py` | The man page against `--help` | 5 |
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 83 |
 | `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 16 |
-| **Total** | | **648** |
+| **Total** | | **650** |
 
 ### Running Tests
 
@@ -590,7 +590,10 @@ The HTTP server serves requests on a pool of threads (`-N`, `--threads`,
 it brings dynamic capacity up to date, has it exclusively (`fabric_lock` in
 `struct fmd_ctx`). `tests/test_concurrency.py` sends requests at once, and
 under the TSan job a data race anywhere in the daemon fails the test that was
-running.
+running. Its `TestStress` and `TestStressInTheBackground` send rounds of
+POSTs and DELETEs of the same and of different targets at once, and check
+that each 201 sent one Bind vPPB and each 204 one Unbind vPPB, that no LD or
+vPPB is bound twice, and that no bind or unbind is left under way.
 
 To run what CI runs:
 
