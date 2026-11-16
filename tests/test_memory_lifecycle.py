@@ -611,10 +611,34 @@ class TestMHDChunkPlan:
     """The same for a pool LD of a Multi-Headed device."""
 
     def test_no_ld(self, api_client):
-        chunks = ("/redfish/v1/Chassis/cxl_mhsld_0/MemoryDomains/cxl_mhsld_0_domain0/"
-                  "MemoryChunks")
-        assert api_client.delete(chunks + "/cxl_mhsld_0_ld1_chunk") == 204
+        chunks = ("/redfish/v1/Chassis/cxl_mhd_partial/MemoryDomains/"
+                  "cxl_mhd_partial_domain0/MemoryChunks")
+        # pool LD 3 is mapped to no head
+        assert api_client.delete(chunks + "/cxl_mhd_partial_ld3_chunk") == 204
         before = unique_members(api_client, chunks)
         status, data, _ = api_client.post(chunks, {"MemoryChunkSizeMiB": 1024})
         assert status == 400, data
         assert unique_members(api_client, chunks) == before
+
+
+@pytest.mark.mock_topology("mock/mhd-device.json")
+class TestMHDChunkInUse:
+    """A chunk of a pool LD is not changed while the head the LD Map maps
+    the LD to has a host or a binding (review F03; cxl-fmd's choice). The
+    heads of cxl_mhsld_0 are attached to host0 and host1, whose
+    direct-attached Connections hold them: the DELETE was 204."""
+
+    def test_delete_409(self, api_client):
+        chunks = ("/redfish/v1/Chassis/cxl_mhsld_0/MemoryDomains/"
+                  "cxl_mhsld_0_domain0/MemoryChunks")
+        status, conn = api_client.get(
+            "/redfish/v1/Fabrics/CXL/Connections/host0_direct_cxl_mhsld_0_h0")
+        assert status == 200 and conn["Status"]["State"] == "Enabled"
+        assert api_client.delete(chunks + "/cxl_mhsld_0_ld0_chunk") == 409
+        assert api_client.get(chunks + "/cxl_mhsld_0_ld0_chunk")[0] == 200
+
+    def test_unmapped_ld_204(self, api_client):
+        chunks = ("/redfish/v1/Chassis/cxl_mhd_partial/MemoryDomains/"
+                  "cxl_mhd_partial_domain0/MemoryChunks")
+        assert api_client.delete(chunks + "/cxl_mhd_partial_ld0_chunk") == 409
+        assert api_client.delete(chunks + "/cxl_mhd_partial_ld2_chunk") == 204

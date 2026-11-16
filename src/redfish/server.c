@@ -1455,6 +1455,9 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -6)
 			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
 					  "cxl-fmd cannot give back the allocation of this memory chunk");
+		if (rc == -7)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "The logical device has less memory allocated than the chunk");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete memory chunk");
 	}

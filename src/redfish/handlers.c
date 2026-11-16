@@ -4394,10 +4394,13 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
  * Connection that exposes @chunk is a vPPB binding, not Absent, whose
  * chunks (fmd_conn_for_each_chunk()) include it. A direct-attached
  * Connection is none: it has no binding to undo, cannot be deleted, and
- * would keep the device's memory from ever being changed.
+ * would keep the device's memory from ever being changed. The exception
+ * is a pool LD of a Multi-Headed device, which any Connection of its head
+ * holds (see chunk_connected()).
  */
 struct chunk_user {
 	const struct fmd_mem_chunk *chunk;
+	const struct fmd_head *head;	/* of the chunk's pool LD, if any */
 	char id[FMD_CONN_ID_LEN];
 };
 
@@ -4410,21 +4413,39 @@ static int chunk_user_conn(const struct fmd_conn_view *v, void *arg)
 {
 	struct chunk_user *u = arg;
 
-	if (v->kind != FMD_CONN_SWITCH || v->state == FMD_CONN_ABSENT)
+	if (v->state == FMD_CONN_ABSENT)
 		return 0;
-	if (fmd_conn_for_each_chunk(v, chunk_is, u) != 1)
+	if (!(u->head && v->head == u->head) &&
+	    (v->kind != FMD_CONN_SWITCH || fmd_conn_for_each_chunk(v, chunk_is, u) != 1))
 		return 0;
 	snprintf(u->id, sizeof(u->id), "%s", v->id);
 	return 1;
 }
 
-/* Whether a Connection exposes @chunk, logged with its ID if one does */
+/*
+ * Whether a Connection exposes @chunk, logged with its ID if one does.
+ *
+ * A pool LD of a Multi-Headed device is exposed by any Connection of the
+ * head the LD Map maps it to (Table 7-61), direct-attached ones included,
+ * and Unresolved ones: which LD-ID of a head that presents an MLD a pool
+ * LD is, "The MH-MLD maps ... to the device-wide LD index in the MH-MLD's
+ * LD pool" (CXL r4.0 Section 2.5.1) by no rule the FM is told, so every
+ * pool LD of a head that has a host or a binding is taken to be in use
+ * (cxl-fmd's choice).
+ */
 static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chunk)
 {
 	struct chunk_user u = { .chunk = chunk };
+	const struct fmd_component *dev;
 	int rc;
 
 	fmd_topology_rdlock(&ctx->topology);
+	dev = chunk->base.parent ? chunk->base.parent->parent : NULL;
+	if (dev && dev->type == FMD_COMPONENT_MHD) {
+		const struct fmd_ld *ld = fmd_chunk_ld(dev, chunk);
+
+		u.head = ld ? fmd_ld_head(ld) : NULL;
+	}
 	rc = fmd_conn_for_each(ctx, chunk_user_conn, &u);
 	fmd_topology_rdunlock(&ctx->topology);
 	if (rc == 1)
@@ -4896,10 +4917,66 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 
 
 /*
+ * Give back the allocation of @chunk, of an MLD or a Multi-Headed device
+ * @dev: its LD's allocation less chunk->size (Set LD Allocations). "The
+ * allocations provided in the response reflect the state of the LD
+ * allocations after the command is processed" (CXL r4.0 Section
+ * 7.6.7.4.3), and the LD is sized from them: what the domain gets back is
+ * what the LD lost. A chunk of which the LD gave back less than all is
+ * kept, as large as what it did not, and -3 returned.
+ *
+ * Returns 0 for the chunk to be removed, or the code of
+ * fmd_redfish_delete_memory_chunk().
+ */
+static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
+			   struct fmd_mem_chunk *chunk)
+{
+	struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(dev, chunk);
+	struct fmd_mem_domain *domain = fmd_to_domain(chunk->base.parent);
+	uint64_t before, freed;
+	int rc;
+
+	if (!ld)
+		return -6;
+	before = ld->memory_size;
+	if (chunk->size > before) {
+		fmd_warn(ctx, "%s: LD %u has %" PRIu64 " MB allocated, less than "
+			 "chunk %s: refused", dev->id, ld->ld_id, before >> 20,
+			 chunk->base.id);
+		return -7;
+	}
+	if (dev->type == FMD_COMPONENT_MLD)
+		rc = fmd_mld_set_ld_allocation(ctx, fmd_to_mld(dev), ld->ld_id,
+					       before - chunk->size);
+	else
+		rc = fmd_mhd_set_ld_allocation(ctx, fmd_to_mhd(dev), ld->ld_id,
+					       before - chunk->size);
+	if (rc == -EOPNOTSUPP && dev->type == FMD_COMPONENT_MHD)
+		return -6;		/* no LD Pool CCI known: nothing sent */
+	if (rc == -EINVAL || rc == -EOPNOTSUPP)
+		return -4;
+	if (rc < 0)
+		return -3;
+
+	freed = ld->memory_size < before ? before - ld->memory_size : 0;
+	if (freed >= chunk->size)
+		return 0;
+	fmd_warn(ctx, "%s: LD %u gave back %" PRIu64 " MB of the %" PRIu64
+		 " MB of chunk %s", dev->id, ld->ld_id, freed >> 20,
+		 chunk->size >> 20, chunk->base.id);
+	fmd_topology_wrlock(&ctx->topology);
+	chunk->size -= freed;
+	domain->remaining += freed;
+	fmd_topology_wrunlock(&ctx->topology);
+	return -3;
+}
+
+/*
  * DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
  *
- * Remove a memory chunk from the domain. A chunk of an MLD gives back its
- * size, chunk->size, from the allocation of its backing LD.
+ * Remove a memory chunk from the domain. A chunk of an MLD or of a
+ * Multi-Headed device gives back its size, chunk->size, from the
+ * allocation of its backing LD (see chunk_give_back()).
  *
  * Returns:
  *   0 = success
@@ -4907,9 +4984,11 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
  *  -2 = chunk not in specified domain
  *  -3 = CCI command failed
  *  -4 = the device cannot be given the partition left
- *  -5 = a Connection, a vPPB binding, exposes the chunk
- *  -6 = cxl-fmd cannot give back the chunk's allocation: it has no LD, or
- *       its device is not one whose allocation it changes
+ *  -5 = a Connection exposes the chunk (see chunk_connected())
+ *  -6 = cxl-fmd cannot give back the chunk's allocation: it has no LD, its
+ *       device is not one whose allocation it changes, or no LD Pool CCI
+ *       of its Multi-Headed device is known; nothing was sent
+ *  -7 = the chunk's LD has less allocated than the chunk; nothing was sent
  */
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				    const char *chassis_id,
@@ -4940,21 +5019,17 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 
 	/*
 	 * Issue CCI command for hardware mode before removing from topology.
-	 * For MLD: decrease LD allocation via Set LD Allocations (5402h)
+	 * For MLD or MHD: decrease LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
 	 */
 	if (likely(!fmd_is_mock(ctx))) {
 		int rc = 0;
 
-		if (domain_parent->type == FMD_COMPONENT_MLD) {
-			struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(domain_parent, chunk);
-
-			if (!ld)
-				return -6;
-			rc = fmd_mld_set_ld_allocation(ctx, fmd_to_mld(domain_parent),
-						       ld->ld_id,
-						       ld->memory_size > chunk->size ?
-						       ld->memory_size - chunk->size : 0);
+		if (domain_parent->type == FMD_COMPONENT_MLD ||
+		    domain_parent->type == FMD_COMPONENT_MHD) {
+			rc = chunk_give_back(ctx, domain_parent, chunk);
+			if (rc)
+				return rc;
 		} else if (domain_parent->type == FMD_COMPONENT_SLD) {
 			/* Only volatile chunks change the partition */
 			if (strcmp(chunk->address_range_type, "Volatile") == 0) {

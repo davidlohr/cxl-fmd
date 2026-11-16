@@ -5993,6 +5993,16 @@ static void test_conn_view_unresolved_mh_mld(void)
 		json_decref(resp);
 	}
 
+	/*
+	 * Which LD-ID of head 0 pool LD 0 or 1 is, is not known: each is
+	 * taken to be in use while the head has a binding, Unresolved too.
+	 * The chunk of the head that presents an SLD is its Connection's.
+	 */
+	CHECK(fmd_redfish_delete_memory_chunk(ctx, "mhd", "mhd_domain0", "mhd_ld0_chunk") == -5 &&
+	      fmd_redfish_delete_memory_chunk(ctx, "mhd", "mhd_domain0", "mhd_ld1_chunk") == -5 &&
+	      fmd_redfish_delete_memory_chunk(ctx, "mhd", "mhd_domain0", "mhd_posted") == -5,
+	      "a chunk of a head with a binding was deleted");
+
 	fmd_ctx_free(ctx);
 	report("a binding to a head that presents an MLD is Unresolved", before);
 }
@@ -6578,6 +6588,182 @@ out:
 	report("a pool LD's allocation is changed on the LD Pool CCI", before);
 }
 
+/*
+ * A chunk DELETE of a Multi-Headed device gives back its allocation (review
+ * F03). It had no branch for an MHD: on hardware the chunk went and its
+ * size was counted free with nothing sent, so a later POST of 1 GiB on
+ * pool LD 0 asked for 2 GiB, more than the device has. Now Set LD
+ * Allocations shrinks the LD by the chunk, on the LD Pool CCI; a failure
+ * leaves everything as it was; and no chunk of a pool LD is changed while
+ * the head it is mapped to has a host (direct-attached here).
+ */
+static void test_mhd_chunk_delete(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mhd(ctx, 0xf03);
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], chunk[FMD_MAX_ID_LEN + 16];
+	char body[512];
+	struct cxlmi_tunnel_info ti;
+	struct fmd_mem_domain *domain;
+	struct fmd_head *head0 = NULL;
+	struct fmd_component *c;
+	struct fmd_host *host;
+	struct fmd_mhd *mhd;
+	struct fmd_ld *ld0;
+	uint8_t pl[64];
+	int before = failures, rc;
+	unsigned int sent;
+	uint64_t rem0;
+	json_t *resp = NULL;
+	uint16_t op;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf03);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	snprintf(chunk, sizeof(chunk), "%s_ld0_chunk", id);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	CHECK(mhd && domain && ld0 && fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "no MHD %s, domain, pool LD 0 or chunk %s", id, chunk);
+	if (!mhd || !domain || !ld0)
+		goto out;
+	rem0 = domain->remaining;
+
+	/* Set LD Allocations fails: the chunk, the domain and the LD stay */
+	answer_get_ld(ep, 0, 4);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == -3 && last_opcode(ep) == 0x5402 &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk) &&
+	      domain->remaining == rem0 && ld0->memory_size == 1ULL << 30,
+	      "DELETE answered Internal Error: %d", rc);
+
+	/* LD 0, 4 units of 256 MB, goes to 0, with no tunnel */
+	answer_get_ld(ep, 0, 4);
+	answer_set_ld(ep, 0, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	last_payload(ep, &op, pl, sizeof(pl));
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(rc == 0 && op == 0x5402 && pl[1] == 0 && get64(pl + 4) == 0 &&
+	      ti.level == 0 && !fmd_topology_find_chunk(&ctx->topology, chunk) &&
+	      domain->remaining == rem0 + (1ULL << 30) && ld0->memory_size == 0,
+	      "DELETE: %d, %04xh LD %u Range 1 %" PRIu64 ", tunnel level %d", rc,
+	      op, pl[1], get64(pl + 4), ti.level);
+
+	/* the 1 GiB is LD 0's again: 0 to 4 units, not 4 to 8 */
+	answer_get_ld(ep, 0, 0);
+	answer_set_ld(ep, 0, 4);
+	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": "
+		 "[{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}",
+		 id, id);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == 0 && op == 0x5402 && get64(pl + 4) == 4 &&
+	      domain->remaining == rem0 && ld0->memory_size == 1ULL << 30,
+	      "POST after the DELETE: %d, Range 1 %" PRIu64, rc, get64(pl + 4));
+	json_decref(resp);
+	resp = NULL;
+
+	/* head 0 (pool LDs 0 and 1) attached to a host: 409, nothing sent */
+	fmd_for_each_child_type(&mhd->base, c, FMD_COMPONENT_HEAD)
+		if (fmd_to_head(c)->head_id == 0)
+			head0 = fmd_to_head(c);
+	host = fmd_host_create("f03_host0");
+	CHECK(head0 && host, "no head 0 or host");
+	if (!head0 || !host)
+		goto out;
+	host->direct_attached = true;
+	fmd_topology_add(&ctx->topology, &host->base, NULL);
+	snprintf(head0->attached_host_id, sizeof(head0->attached_host_id), "%s",
+		 host->base.id);
+	snprintf(chunk, sizeof(chunk), "%s_ld1_chunk", id);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == -5 && commands_sent(ep) == sent &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "DELETE of a chunk of head 0: %d, %u sent", rc, commands_sent(ep) - sent);
+	domain->capacity += 1ULL << 30;		/* room: not why it is refused */
+	domain->remaining += 1ULL << 30;
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -7 && !resp && commands_sent(ep) == sent,
+	      "POST on a pool LD of head 0: %d, %u sent", rc, commands_sent(ep) - sent);
+	json_decref(resp);
+	resp = NULL;
+
+	/* LD 3 is mapped to no head: its chunk goes, 16 units to 0 */
+	snprintf(chunk, sizeof(chunk), "%s_ld3_chunk", id);
+	answer_get_ld(ep, 3, 16);
+	answer_set_ld(ep, 3, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == 0 && last_opcode(ep) == 0x5402 &&
+	      !fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "DELETE of the chunk of LD 3: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("a Multi-Headed device's chunk DELETE gives back its allocation", before);
+}
+
+/*
+ * A chunk DELETE gives the domain what the LD gave back, as Set LD
+ * Allocations answers it (review F03): a device that answers Success with
+ * the allocation unchanged, or shrunk by half the chunk, gave the domain
+ * the whole chunk before. Now the chunk keeps what was not given back.
+ */
+static void test_mld_chunk_delete_partial(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0xf3, 2, 0, 4);	/* 2 x 1 GiB */
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], chunk[FMD_MAX_ID_LEN + 16];
+	struct fmd_mem_domain *domain;
+	struct fmd_mem_chunk *c;
+	struct fmd_ld *ld;
+	int before = failures, rc;
+	uint64_t rem0;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf3);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	snprintf(chunk, sizeof(chunk), "%s_ld0_chunk", id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld = fmd_topology_find_ld(&ctx->topology, id, 0);
+	c = fmd_topology_find_chunk(&ctx->topology, chunk);
+	CHECK(domain && ld && c, "no domain, LD 0 or chunk %s", chunk);
+	if (!domain || !ld || !c)
+		goto out;
+	rem0 = domain->remaining;
+
+	/* Success, but LD 0 still has 4 units of 256 MB */
+	answer_get_ld(ep, 0, 4);
+	answer_set_ld(ep, 0, 4);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == -3 && fmd_topology_find_chunk(&ctx->topology, chunk) == c &&
+	      c->size == 1ULL << 30 && domain->remaining == rem0,
+	      "nothing given back: %d, domain %" PRIu64 " MB more", rc,
+	      (domain->remaining - rem0) >> 20);
+
+	/* Success, LD 0 down to 2 units: 512 MB back, the chunk keeps 512 */
+	answer_get_ld(ep, 0, 4);
+	answer_set_ld(ep, 0, 2);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == -3 && fmd_topology_find_chunk(&ctx->topology, chunk) == c &&
+	      c->size == 512ULL << 20 && domain->remaining == rem0 + (512ULL << 20) &&
+	      ld->memory_size == 512ULL << 20,
+	      "half given back: %d, chunk %" PRIu64 " MB, domain %" PRIu64 " MB more",
+	      rc, c->size >> 20, (domain->remaining - rem0) >> 20);
+
+	/* the rest: the chunk goes, and the domain has all of it back */
+	answer_get_ld(ep, 0, 2);
+	answer_set_ld(ep, 0, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == 0 && !fmd_topology_find_chunk(&ctx->topology, chunk) &&
+	      domain->remaining == rem0 + (1ULL << 30) && ld->memory_size == 0,
+	      "the rest: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("a chunk DELETE gives the domain what the LD gave back", before);
+}
+
 /* Oem.Cxl.Origin of Connection @id as served, "" if it has none */
 static const char *conn_origin(struct fmd_ctx *ctx, const char *id, char *buf,
 			       size_t len)
@@ -6807,6 +6993,8 @@ int main(void)
 	test_chunk_guard();
 	test_chunk_plan();
 	test_mhd_pool_route();
+	test_mhd_chunk_delete();
+	test_mld_chunk_delete_partial();
 	test_force_unbind();
 	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();

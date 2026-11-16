@@ -443,7 +443,7 @@ All error responses follow the Redfish error format with an `error` object conta
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | `PATCH` of a Connection (`Allow: GET, DELETE`); `DELETE` of a direct-attached Connection (`Allow: GET`) |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` |
 | 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none; a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
@@ -880,7 +880,15 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
 **Hardware Behavior:**
 - **MLD**: Issues `Set LD Allocations (0x5402h)` to decrease the allocation
   of the chunk's LD by the chunk's `MemoryChunkSizeMiB`, what its `POST`
-  added
+  added. The domain gets back what the LD gave back, as the response
+  gives the LD's allocation ("The allocations provided in the response
+  reflect the state of the LD allocations after the command is
+  processed", CXL r4.0 Section 7.6.7.4.3): if that is less than the
+  chunk, the chunk stays, with what was not given back, and the request
+  is `500`. An LD with less allocated than its chunk is `409`, with
+  nothing sent.
+- **MHD**: the same, for a pool LD, on the LD Pool CCI (see "MHD Memory
+  Model"); `501`, with nothing sent, when no LD Pool CCI is known.
 - **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
   the volatile capacity staged (or else active) less the chunk, staged for
   the next reset as on creation. A `"PMEM"` chunk sends no command.
@@ -893,6 +901,16 @@ partition of a bound SLD (Set Partition Info). Delete the Connection
 first. The CXL specification does not say whether an LD or SLD that is
 bound may be changed; refusing it is cxl-fmd's choice. Direct-attached
 Connections, which have no binding to undo, do not hold their chunks.
+
+The exception is a pool LD of a Multi-Headed device: no chunk of it is
+deleted or created while the head the LD Map maps it to (Table 7-61) has
+any Connection that is not Absent: a direct-attached host, or a vPPB
+binding, `Unresolved` ones included. Which LD-ID of a head that presents
+an MLD a pool LD is, is not known ("The MH-MLD maps the LD-IDs received
+at a head to the device-wide LD index in the MH-MLD's LD pool", Section
+2.5.1, by no rule the FM is told), so every pool LD mapped to a head that
+has a host or a binding is taken to be in use (cxl-fmd's choice). A pool
+LD mapped to no head can be changed.
 
 ### MLD Memory Model
 
@@ -1734,7 +1752,11 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` with an `InterleaveSets` that is not an array, an entry that is not an object, a `Memory` that is not a link object (a string), or a `Links.CXLLogicalDevices` that is not an array of links | ignored | `400` |
 | Chunk `POST` response on an MLD or MHD | `InterleaveSets` as the request gave it, `Links.CXLLogicalDevices` from the number after the first `_ld` of its `Memory` | one `InterleaveSets` entry, the LD's `Memory` URI with `MemoryLevel` 1, `OffsetMiB` 0 and the chunk's `SizeMiB`, and the LD's link; none for an SLD |
 | Chunk `DELETE` of an MLD chunk made with `InterleaveSets[0].SizeMiB` | the LD shrunk by that `SizeMiB` (not the size the `POST` added) | shrunk by the chunk's `MemoryChunkSizeMiB` |
-| Chunk `DELETE` on hardware of a chunk of a device that is not an MLD or SLD (a Multi-Headed device's) | `204`, nothing sent, and its size counted free in the domain | `501`, the chunk kept |
+| Chunk `DELETE` on hardware of an MLD's chunk that names no LD | `204`, nothing sent, and its size counted free in the domain | `501`, the chunk kept |
+| Chunk `DELETE` on hardware of a Multi-Headed device's chunk | `204`, nothing sent, and its size counted free in the domain (so a later `POST` grew the LD past the device) | Set LD Allocations for the pool LD, less the chunk: `204`; `500` if it fails, with the chunk kept |
+| Chunk `DELETE` or `POST` on a pool LD whose head has a Connection (a direct-attached host, or a vPPB binding, `Unresolved` too), in a mock too | `204` / `201` | `409`, nothing sent |
+| Chunk `DELETE` of an MLD's or MHD's chunk that Set LD Allocations answers Success for, with the LD shrunk by less than the chunk | `204`, the whole chunk counted free | `500`; the chunk stays, as large as what the LD did not give back, and the domain gets back what it did |
+| Chunk `DELETE` of a chunk larger than its LD's allocation | Set LD Allocations for an allocation of 0 | `409`, nothing sent |
 | Chunk `POST` on hardware on a pool LD of a Multi-Headed device | Get and Set LD Allocations sent to the endpoint that answered Get Multi-Headed Info with no tunnel, through a tunnel to the LD Pool CCI (Target Type 1) | sent to that endpoint with no tunnel; `501`, with nothing sent, if no LD Pool CCI is known |
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
 | `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |

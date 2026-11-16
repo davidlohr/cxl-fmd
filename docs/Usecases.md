@@ -667,7 +667,9 @@ Shared Pool: LD 13-20 on MLD 4-5 (burst capacity)
 
 **cxl-fmd Enforced Access Control**:
 ```bash
-# Host A provisions memory from its assigned LDs
+# Memory is provisioned on Head 0's LDs before Host A is attached to it:
+# while a head has a host or a binding, no chunk of an LD mapped to it is
+# made or deleted (409, cxl-fmd's choice; see Redfish-API.md "While bound")
 POST /Chassis/mhd_0/MemoryDomains/mhd_0_domain0/MemoryChunks
 {
     "MemoryChunkSizeMiB": 4096,
