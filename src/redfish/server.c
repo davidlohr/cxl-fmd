@@ -1136,6 +1136,12 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -7)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "A Connection binds the logical device: delete the Connection first");
+		if (rc == -11)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "Name exactly one LD of the device: InterleaveSets[0].Memory as the URI of its Memory, or Links.CXLLogicalDevices[0] as the URI of its CXLLogicalDevice");
+		if (rc == -12)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "An InterleaveSets entry sets no OffsetMiB, RegionId or MemoryLevel, and its SizeMiB is MemoryChunkSizeMiB");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create memory chunk");
 	}
@@ -1443,6 +1449,9 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -5)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "A Connection exposes the memory chunk: delete the Connection first");
+		if (rc == -6)
+			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
+					  "cxl-fmd cannot give back the allocation of this memory chunk");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete memory chunk");
 	}

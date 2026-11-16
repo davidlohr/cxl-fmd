@@ -449,8 +449,16 @@ class TestChunkSizeAndOffsetBounds:
 MLD_CHUNKS = "/redfish/v1/Chassis/cxl_mld_0/MemoryDomains/cxl_mld_0_domain0/MemoryChunks"
 
 
-def post_chunk(api_client, chunks, mib=1024):
-    status, data, location = api_client.post(chunks, {"MemoryChunkSizeMiB": mib})
+def ld_memory(chassis, ld):
+    """The URI of the Memory of LD @ld of @chassis, as a chunk POST names it."""
+    return {"@odata.id": f"/redfish/v1/Chassis/{chassis}/Memory/{chassis}_ld{ld}"}
+
+
+def post_chunk(api_client, chunks, mib=1024, memory=None):
+    body = {"MemoryChunkSizeMiB": mib}
+    if memory:
+        body["InterleaveSets"] = [{"Memory": memory}]
+    status, data, location = api_client.post(chunks, body)
     assert status == 201, data
     assert location == data["@odata.id"]
     return data["@odata.id"], data["AddressRangeOffsetMiB"]
@@ -505,14 +513,108 @@ class TestMLDChunkIdentity:
 
     def test_ids_unique_after_ld_chunk_delete(self, api_client):
         assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld0_chunk") == 204
-        a, _ = post_chunk(api_client, MLD_CHUNKS)
+        a, _ = post_chunk(api_client, MLD_CHUNKS, memory=ld_memory("cxl_mld_0", 0))
         # numbered from the domain's own counter, not from its chunks
         assert a == MLD_CHUNKS + "/cxl_mld_0_domain0_chunk0"
         assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld1_chunk") == 204
-        b, _ = post_chunk(api_client, MLD_CHUNKS)
+        b, _ = post_chunk(api_client, MLD_CHUNKS, memory=ld_memory("cxl_mld_0", 1))
         assert a != b
         assert unique_members(api_client, MLD_CHUNKS) == {
             a, b, MLD_CHUNKS + "/cxl_mld_0_ld2_chunk", MLD_CHUNKS + "/cxl_mld_0_ld3_chunk"}
         assert api_client.delete(a) == 204
         assert api_client.get(b)[0] == 200
         assert api_client.get(a)[0] == 404
+
+
+# =============================================================================
+# A chunk POST names one LD (review F02)
+# =============================================================================
+
+MLD_LD = "/redfish/v1/Chassis/cxl_mld_0/PCIeDevices/cxl_mld_0/CXLLogicalDevices"
+
+
+@pytest.mark.mock_topology("mock/mld-device.json")
+class TestChunkPlan:
+    """A chunk of an MLD grows the allocation of one LD, which Set LD
+    Allocations (5402h) sets with a Range 1 and a Range 2 multiplier and
+    nothing else (CXL r4.0 Table 7-49). The POST names that LD by its
+    Memory URI (InterleaveSets[0].Memory) or its CXLLogicalDevice URI
+    (Links.CXLLogicalDevices[0]); a request naming none, an LD the device
+    does not have, several, or asking for what 5402h cannot carry is 400,
+    and makes nothing. Each of these was 201."""
+
+    def refused(self, api_client, body):
+        # room for the chunk, which is not why it is refused
+        assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld1_chunk") == 204
+        before = unique_members(api_client, MLD_CHUNKS)
+        status, data, _ = api_client.post(MLD_CHUNKS, body)
+        assert status == 400, data
+        assert unique_members(api_client, MLD_CHUNKS) == before
+
+    def test_no_ld(self, api_client):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 1024})
+
+    def test_ld_the_device_does_not_have(self, api_client):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 1024, "InterleaveSets": [
+            {"Memory": ld_memory("cxl_mld_0", 9), "SizeMiB": 1024}]})
+        assert api_client.get(MLD_LD + "/9")[0] == 404
+
+    def test_two_entries(self, api_client):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 2048, "InterleaveSets": [
+            {"Memory": ld_memory("cxl_mld_0", 0), "SizeMiB": 1024},
+            {"Memory": ld_memory("cxl_mld_0", 1), "SizeMiB": 1024}]})
+
+    def test_size_mismatch(self, api_client):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 1024, "InterleaveSets": [
+            {"Memory": ld_memory("cxl_mld_0", 0), "SizeMiB": 4096}]})
+
+    @pytest.mark.parametrize("extra", [{"OffsetMiB": 1024}, {"RegionId": "r9"},
+                                       {"MemoryLevel": 3}])
+    def test_what_an_allocation_cannot_be(self, api_client, extra):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 1024, "InterleaveSets": [
+            dict({"Memory": ld_memory("cxl_mld_0", 0)}, **extra)]})
+
+    @pytest.mark.parametrize("ref", ["cxl_mld_0_ld0",
+                                     "/redfish/v1/Chassis/cxl_mld_0/Memory/cxl_mld_0_ld0/",
+                                     "/x/cxl_mld_0_ld0"])
+    def test_not_a_uri_of_its_memory(self, api_client, ref):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 1024, "InterleaveSets": [
+            {"Memory": {"@odata.id": ref}}]})
+
+    def test_memory_and_link_disagree(self, api_client):
+        self.refused(api_client, {"MemoryChunkSizeMiB": 1024,
+                                  "InterleaveSets": [{"Memory": ld_memory("cxl_mld_0", 0)}],
+                                  "Links": {"CXLLogicalDevices": [{"@odata.id": MLD_LD + "/1"}]}})
+
+    def test_by_its_cxl_logical_device(self, api_client):
+        """Links.CXLLogicalDevices alone names the LD; the chunk as served
+        links it, and so does the LD."""
+        assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld1_chunk") == 204
+        status, data, _ = api_client.post(MLD_CHUNKS, {
+            "MemoryChunkSizeMiB": 1024,
+            "Links": {"CXLLogicalDevices": [{"@odata.id": MLD_LD + "/1"}]}})
+        assert status == 201, data
+        assert data["Links"]["CXLLogicalDevices"] == [{"@odata.id": MLD_LD + "/1"}]
+        assert data["InterleaveSets"] == [{"Memory": ld_memory("cxl_mld_0", 1),
+                                           "MemoryLevel": 1, "OffsetMiB": 0,
+                                           "SizeMiB": 1024}]
+        status, chunk = api_client.get(data["@odata.id"])
+        assert status == 200
+        assert chunk["Links"]["CXLLogicalDevices"] == [{"@odata.id": MLD_LD + "/1"}]
+        status, ld = api_client.get(MLD_LD + "/1")
+        assert status == 200
+        assert {"@odata.id": data["@odata.id"]} in ld["Links"]["MemoryChunks"]
+
+
+@pytest.mark.mock_topology("mock/mhd-device.json")
+class TestMHDChunkPlan:
+    """The same for a pool LD of a Multi-Headed device."""
+
+    def test_no_ld(self, api_client):
+        chunks = ("/redfish/v1/Chassis/cxl_mhsld_0/MemoryDomains/cxl_mhsld_0_domain0/"
+                  "MemoryChunks")
+        assert api_client.delete(chunks + "/cxl_mhsld_0_ld1_chunk") == 204
+        before = unique_members(api_client, chunks)
+        status, data, _ = api_client.post(chunks, {"MemoryChunkSizeMiB": 1024})
+        assert status == 400, data
+        assert unique_members(api_client, chunks) == before

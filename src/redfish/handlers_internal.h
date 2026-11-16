@@ -131,42 +131,6 @@ static inline int parse_prefixed_id(const char *str, const char *prefix)
 }
 
 /*
- * Parse LD ID from Memory resource path (wrapper for compatibility).
- */
-static inline int parse_ld_id_from_memory_path(const char *memory_path)
-{
-	return parse_ld_id(memory_path);
-}
-
-/*
- * Validate InterleaveSets[0].Memory reference for MLD.
- * Checks that the Memory path references a valid LD in the specified chassis.
- * Returns LD ID on success, -1 on error.
- */
-static inline int validate_interleave_set_memory(struct fmd_ctx *ctx,
-						 const char *chassis_id,
-						 const char *memory_path)
-{
-	if (!ctx || !chassis_id || !memory_path)
-		return -1;
-
-	/* Check memory_path contains chassis_id */
-	if (!strstr(memory_path, chassis_id))
-		return -1;  /* Memory not in target chassis */
-
-	int ld_id = parse_ld_id_from_memory_path(memory_path);
-	if (ld_id < 0)
-		return -1;  /* Invalid Memory path format */
-
-	/* Verify LD exists */
-	struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology, chassis_id, ld_id);
-	if (!ld)
-		return -1;  /* LD not found */
-
-	return ld_id;
-}
-
-/*
  * Format CXL timestamp (nanoseconds since Unix epoch) as ISO 8601 DateTimeOffset.
  * Returns dynamically allocated string or NULL on error.
  * Caller must free the returned string.

@@ -692,6 +692,7 @@ struct fmd_mem_chunk *fmd_chunk_create(const char *id)
 
 	/* Default address range type */
 	strncpy(chunk->address_range_type, "PMEM", sizeof(chunk->address_range_type) - 1);
+	chunk->backing_ld = -1;		/* not LD 0 */
 
 	return chunk;
 }
@@ -777,8 +778,7 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	uint64_t size,
 	uint64_t offset,
 	const char *address_range_type,
-	struct fmd_interleave_set *interleave_sets,
-	int interleave_set_count)
+	int backing_ld)
 {
 	struct fmd_mem_chunk *chunk;
 	char chunk_id[FMD_MAX_ID_LEN];
@@ -822,14 +822,7 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 			sizeof(chunk->address_range_type) - 1);
 	}
 
-	/* Copy interleave sets */
-	if (interleave_sets && interleave_set_count > 0) {
-		chunk->interleaved = true;
-		chunk->interleave_set_count = (interleave_set_count > FMD_MAX_INTERLEAVE)
-			? FMD_MAX_INTERLEAVE : interleave_set_count;
-		memcpy(chunk->interleave_sets, interleave_sets,
-		       chunk->interleave_set_count * sizeof(struct fmd_interleave_set));
-	}
+	chunk->backing_ld = backing_ld;
 
 	/* Add to topology */
 	if (fmd_topology_add(topo, &chunk->base, &domain->base) < 0) {
@@ -1139,7 +1132,6 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
 
 	chunk->base_address = 0;
 	chunk->size = sld->memory_size;
-	chunk->interleaved = false;
 
 	if (sld->memdev.volatile_capacity > 0 && sld->memdev.persistent_capacity == 0)
 		strncpy(chunk->address_range_type, "Volatile",
@@ -1202,8 +1194,7 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
 
 		chunk->base_address = base_addr;
 		chunk->size = ld->memory_size;
-		chunk->interleaved = false;
-
+	
 		if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
 			strncpy(chunk->address_range_type, "Volatile",
 				sizeof(chunk->address_range_type) - 1);
@@ -1211,11 +1202,7 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
 			strncpy(chunk->address_range_type, "PMEM",
 				sizeof(chunk->address_range_type) - 1);
 
-		/* Set interleave sets to reference the LD's Memory resource */
-		chunk->interleave_set_count = 1;
-		strncpy(chunk->interleave_sets[0].memory_id, ld->base.id,
-			sizeof(chunk->interleave_sets[0].memory_id) - 1);
-		chunk->interleave_sets[0].size_mib = ld->memory_size / (1024ULL * 1024);
+		chunk->backing_ld = ld->ld_id;
 
 		rc = add_resource(ctx, &chunk->base, &domain->base);
 		if (rc)
@@ -1274,8 +1261,7 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 
 		chunk->base_address = base_addr;
 		chunk->size = ld->memory_size;
-		chunk->interleaved = false;
-
+	
 		if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
 			strncpy(chunk->address_range_type, "Volatile",
 				sizeof(chunk->address_range_type) - 1);
@@ -1283,11 +1269,7 @@ int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 			strncpy(chunk->address_range_type, "PMEM",
 				sizeof(chunk->address_range_type) - 1);
 
-		/* Set interleave sets to reference the LD's Memory resource */
-		chunk->interleave_set_count = 1;
-		strncpy(chunk->interleave_sets[0].memory_id, ld->base.id,
-			sizeof(chunk->interleave_sets[0].memory_id) - 1);
-		chunk->interleave_sets[0].size_mib = ld->memory_size / (1024ULL * 1024);
+		chunk->backing_ld = ld->ld_id;
 
 		rc = add_resource(ctx, &chunk->base, &domain->base);
 		if (rc)

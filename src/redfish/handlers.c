@@ -3376,8 +3376,8 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 
 	/*
 	 * Build MemoryChunks array - only include chunks for this specific LD.
-	 * For MLDs, filter by checking if chunk's interleave_sets reference this LD.
-	 * For SLDs, include all chunks (only one LD exists).
+	 * For an MLD or a Multi-Headed device, the chunks whose backing_ld it
+	 * is. For SLDs, include all chunks (only one LD exists).
 	 */
 	json_t *chunks_array = json_array();
 	fmd_topology_rdlock(&ctx->topology);
@@ -3394,13 +3394,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 					if (comp->type == FMD_COMPONENT_SLD) {
 						belongs_to_ld = true;
 					} else {
-						/* For MLD, check interleave_sets for LD reference */
-						for (int i = 0; i < chunk->interleave_set_count; i++) {
-							if (strcmp(chunk->interleave_sets[i].memory_id, ld_id) == 0) {
-								belongs_to_ld = true;
-								break;
-							}
-						}
+						belongs_to_ld = chunk->backing_ld == ld_idx;
 					}
 
 					if (belongs_to_ld) {
@@ -4305,15 +4299,8 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		size_mib = chunk->size / (1024ULL * 1024);
 		offset_mib = chunk->base_address / (1024ULL * 1024);
 		offset_known = chassis->type == FMD_COMPONENT_SLD;
-		int ld_idx = 0;
-
-		/* Extract LD index from chunk_id */
-		const char *ld_marker = strstr(chunk_id, "_ld");
-		if (ld_marker) {
-			ld_idx = safe_parse_int(ld_marker + 3);
-			if (ld_idx < 0)
-				return NULL;
-		}
+		/* an SLD's chunk is of its LD 0, any other of its backing LD */
+		int ld_idx = chassis->type == FMD_COMPONENT_SLD ? 0 : chunk->backing_ld;
 
 		if (chassis->type == FMD_COMPONENT_SLD) {
 			struct fmd_sld *sld = fmd_to_sld(chassis);
@@ -4344,10 +4331,11 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 			fmd_topology_rdunlock(&ctx->topology);
 		}
 
-		/* Link to this chassis's CXLLogicalDevice */
-		snprintf(ld_link_uri, sizeof(ld_link_uri),
-			 "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%d",
-			 chassis_id, chassis_id, ld_idx);
+		/* Link to this chassis's CXLLogicalDevice, if it has one */
+		if (ld_idx >= 0)
+			snprintf(ld_link_uri, sizeof(ld_link_uri),
+				 "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%d",
+				 chassis_id, chassis_id, ld_idx);
 	} else {
 		return NULL;
 	}
@@ -4446,17 +4434,265 @@ static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chu
 }
 
 /*
+ * The URIs an LD of a memory device is served at: its Memory resource
+ * (fmd_redfish_memory_collection()) and its CXLLogicalDevice. @ld is NULL
+ * for the one LD of an SLD. Each returns 0, or -ENAMETOOLONG if @len is
+ * too short for it.
+ */
+static int ld_memory_uri(char *buf, size_t len, const struct fmd_component *dev,
+			 const struct fmd_ld *ld)
+{
+	int n = ld ? snprintf(buf, len, "/redfish/v1/Chassis/%s/Memory/%s_ld%u",
+			      dev->id, dev->id, ld->ld_id)
+		   : snprintf(buf, len, "/redfish/v1/Chassis/%s/Memory/%s",
+			      dev->id, dev->id);
+
+	return n >= 0 && (size_t)n < len ? 0 : -ENAMETOOLONG;
+}
+
+static int ld_device_uri(char *buf, size_t len, const struct fmd_component *dev,
+			 const struct fmd_ld *ld)
+{
+	int n = snprintf(buf, len,
+			 "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%u",
+			 dev->id, dev->id, ld ? ld->ld_id : 0);
+
+	return n >= 0 && (size_t)n < len ? 0 : -ENAMETOOLONG;
+}
+
+#define RF_LD_URI_LEN (sizeof("/redfish/v1/Chassis//PCIeDevices//CXLLogicalDevices/") + \
+		       2 * FMD_MAX_ID_LEN + 8)
+
+/*
+ * The LD of @dev that @uri names: the URI of its Memory resource if
+ * @memory, else of its CXLLogicalDevice, exactly as they are served.
+ * Returns its LD-ID (0 for an SLD), or -1 if @uri is no such URI.
+ */
+static int resolve_ld(struct fmd_ctx *ctx, const struct fmd_component *dev,
+		      const char *uri, bool memory)
+{
+	char canon[RF_LD_URI_LEN];
+	struct fmd_component *child;
+	int found = -1;
+
+	if (dev->type == FMD_COMPONENT_SLD) {
+		if (memory ? ld_memory_uri(canon, sizeof(canon), dev, NULL)
+			   : ld_device_uri(canon, sizeof(canon), dev, NULL))
+			return -1;
+		return strcmp(canon, uri) ? -1 : 0;
+	}
+
+	fmd_topology_rdlock(&ctx->topology);
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+		const struct fmd_ld *ld = fmd_to_ld(child);
+
+		if (memory ? ld_memory_uri(canon, sizeof(canon), dev, ld)
+			   : ld_device_uri(canon, sizeof(canon), dev, ld))
+			continue;
+		if (!strcmp(canon, uri)) {
+			found = ld->ld_id;
+			break;
+		}
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+	return found;
+}
+
+/* The @odata.id of link @v, NULL if @v is not an object with one */
+static const char *link_odata_id(const json_t *v)
+{
+	return json_is_object(v) ?
+	       json_string_value(json_object_get(v, "@odata.id")) : NULL;
+}
+
+/*
+ * A chunk POST, checked before anything is created or sent: its size and
+ * offset in bytes, its type, and the LD whose allocation it grows.
+ */
+struct chunk_plan {
+	uint64_t size;
+	uint64_t offset;
+	bool offset_given;
+	char type[16];
+	int ld;				/* LD-ID or pool index, -1 for none */
+};
+
+/*
+ * Parse @root into @plan for a chunk of @dev. Returns 0, or the code
+ * fmd_redfish_post_memory_chunk() answers with (-2, -6 or -8 to -12).
+ *
+ * The LD is named as the URI of its Memory resource, InterleaveSets[0].
+ * Memory, or of its CXLLogicalDevice, Links.CXLLogicalDevices[0], or
+ * both if they name the same LD. Set LD Allocations (5402h) gives an LD
+ * "Range 1 Allocation Multiplier" and "Range 2 Allocation Multiplier"
+ * (CXL r4.0 Table 7-49), nothing else: a chunk grows one LD, so one
+ * InterleaveSets entry at most, whose SizeMiB is the chunk's, and whose
+ * OffsetMiB, RegionId and MemoryLevel are the defaults (0, none and 1:
+ * cxl-fmd's), which is all an allocation can be.
+ */
+static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev,
+			    json_t *root, struct chunk_plan *plan)
+{
+	json_t *type_j, *offset_j, *sets_j, *set = NULL, *size_j, *links_j, *lds_j;
+	const char *mem_uri = NULL, *ld_uri = NULL;
+	uint64_t set_size = 0, mib_bytes;
+	bool set_size_given = false;
+	int ld = -1;
+
+	memset(plan, 0, sizeof(*plan));
+	plan->ld = -1;
+	snprintf(plan->type, sizeof(plan->type), "PMEM");
+
+	/*
+	 * AddressRangeType (optional): PMEM or Volatile. Any other value,
+	 * Block included, which cxl-fmd cannot make, is a bad request rather
+	 * than a chunk of another type than the one asked for.
+	 */
+	type_j = json_object_get(root, "AddressRangeType");
+	if (type_j) {
+		const char *type_str = json_string_value(type_j);
+
+		if (!type_str || (strcmp(type_str, "PMEM") && strcmp(type_str, "Volatile")))
+			return -8;
+		snprintf(plan->type, sizeof(plan->type), "%s", type_str);
+	}
+
+	/* AddressRangeOffsetMiB (optional): auto-assigned if omitted */
+	offset_j = json_object_get(root, "AddressRangeOffsetMiB");
+	if (offset_j) {
+		if (rf_mib_to_bytes(offset_j, true, &plan->offset))
+			return -9;
+		plan->offset_given = true;
+	}
+
+	/* InterleaveSets (optional): one entry at most */
+	sets_j = json_object_get(root, "InterleaveSets");
+	if (sets_j) {
+		if (!json_is_array(sets_j) || json_array_size(sets_j) > 1)
+			return -11;
+		set = json_array_get(sets_j, 0);
+		if (set && !json_is_object(set))
+			return -11;
+	}
+	if (set) {
+		json_t *mem_j = json_object_get(set, "Memory");
+		json_t *v;
+
+		if (mem_j) {
+			mem_uri = link_odata_id(mem_j);
+			if (!mem_uri)
+				return -11;
+		}
+		v = json_object_get(set, "OffsetMiB");
+		if (v) {
+			if (rf_mib_to_bytes(v, true, &mib_bytes))
+				return -10;
+			if (mib_bytes)
+				return -12;
+		}
+		v = json_object_get(set, "SizeMiB");
+		if (v) {
+			if (rf_mib_to_bytes(v, true, &set_size))
+				return -10;
+			set_size_given = true;
+		}
+		v = json_object_get(set, "MemoryLevel");
+		if (v && (!json_is_integer(v) || json_integer_value(v) != 1))
+			return -12;
+		v = json_object_get(set, "RegionId");
+		if (v && !json_is_null(v) &&
+		    (!json_is_string(v) || json_string_length(v)))
+			return -12;
+	}
+
+	/*
+	 * MemoryChunkSizeMiB, > 0. If it is not given, InterleaveSets[0].
+	 * SizeMiB is used instead; if both are, they are the same.
+	 */
+	size_j = json_object_get(root, "MemoryChunkSizeMiB");
+	if (size_j) {
+		if (rf_mib_to_bytes(size_j, false, &plan->size))
+			return -10;
+		if (set_size_given && set_size != plan->size)
+			return -12;
+	} else if (set_size) {
+		plan->size = set_size;
+	} else {
+		return -2;
+	}
+
+	/* Links.CXLLogicalDevices (optional): one entry at most */
+	links_j = json_object_get(root, "Links");
+	lds_j = json_is_object(links_j) ? json_object_get(links_j, "CXLLogicalDevices") : NULL;
+	if (lds_j) {
+		if (!json_is_array(lds_j) || json_array_size(lds_j) > 1)
+			return -11;
+		if (json_array_size(lds_j)) {
+			ld_uri = link_odata_id(json_array_get(lds_j, 0));
+			if (!ld_uri)
+				return -11;
+		}
+	}
+
+	if (mem_uri) {
+		ld = resolve_ld(ctx, dev, mem_uri, true);
+		if (ld < 0)
+			return -11;
+	}
+	if (ld_uri) {
+		int n = resolve_ld(ctx, dev, ld_uri, false);
+
+		if (n < 0 || (mem_uri && n != ld))
+			return -11;
+		ld = n;
+	}
+
+	if (dev->type == FMD_COMPONENT_SLD)
+		return 0;		/* named or not, its one LD */
+	if (ld < 0)
+		return -11;		/* an MLD's or MHD's chunk grows an LD */
+	plan->ld = ld;
+
+	/*
+	 * The LD's size is a multiple of the Memory Granularity (Table
+	 * 7-48), as Get LD Info or Get LD Allocations last gave it (0 if
+	 * not known). Set LD Allocations itself is refused before it is
+	 * sent if Get LD Allocations then gives another one, or a Range 2
+	 * the size is short of (set_ld_allocation()).
+	 */
+	{
+		const struct fmd_ld *l = fmd_chunk_ld(dev, &(struct fmd_mem_chunk){
+						      .backing_ld = ld });
+		uint64_t gran = (uint64_t)(dev->type == FMD_COMPONENT_MLD ?
+				 fmd_to_mld((struct fmd_component *)dev)->memory_granularity :
+				 fmd_to_mhd((struct fmd_component *)dev)->memory_granularity) *
+				CXL_CAPACITY_UNIT;
+		uint64_t total;
+
+		if (!l || __builtin_add_overflow(l->memory_size, plan->size, &total) ||
+		    (gran && total % gran))
+			return -6;
+	}
+	return 0;
+}
+
+/*
  * POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks
  *
  * Create a new memory chunk in the specified domain.
  *
  * Request body:
  * {
- *   "MemoryChunkSizeMiB": 4096,        // required, > 0
+ *   "MemoryChunkSizeMiB": 4096,        // > 0; or InterleaveSets[0].SizeMiB
  *   "AddressRangeType": "PMEM",        // optional, "PMEM" or "Volatile"
  *   "AddressRangeOffsetMiB": 0,        // optional, auto-assigned if omitted
- *   "InterleaveSets": [...]            // optional
+ *   "InterleaveSets": [{"Memory": {"@odata.id": <the LD's Memory>}}],
+ *   "Links": {"CXLLogicalDevices": [{"@odata.id": <the LD>}]}
  * }
+ *
+ * A chunk of an MLD or a Multi-Headed device grows the allocation of one
+ * of its LDs, which the request names (see parse_chunk_plan()); one of an
+ * SLD is of its one LD.
  *
  * Sizes and offsets in MiB are integers from 0 to RF_MIB_MAX. A chunk lies
  * within its domain: an offset given is at most MemorySizeMiB less the
@@ -4477,8 +4713,14 @@ static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chu
  *       the chunk would not lie within the domain at it
  * -10 = a size or offset in MiB is not an integer of RF_MIB_MAX or less,
  *       or MemoryChunkSizeMiB is 0
- * Every one of -2 and -8 to -10 is answered before anything is changed or
- * sent.
+ * -11 = the request names no LD of the device (an MLD's or a Multi-Headed
+ *       device's chunk needs one), names one by anything but its URI, or
+ *       names several
+ * -12 = an InterleaveSets entry asks for what an allocation cannot be: an
+ *       OffsetMiB, RegionId or MemoryLevel, or a SizeMiB that is not
+ *       MemoryChunkSizeMiB
+ * Every one of -2, -6 and -8 to -12 is answered before anything is changed
+ * or sent.
  */
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -4490,21 +4732,17 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	struct fmd_component *chassis;
 	struct fmd_mem_domain *domain = NULL;
 	struct fmd_mem_chunk *chunk;
-	json_t *root = NULL;
+	struct chunk_plan plan;
+	json_t *root;
 	json_error_t error;
-	uint64_t size_bytes = 0, offset_bytes = 0, mib_bytes;
-	bool offset_given = false;
-	char addr_type[16] = "PMEM";
-	struct fmd_interleave_set interleave_sets[FMD_MAX_INTERLEAVE];
-	int interleave_count = 0;
-	char uri[512];
-	int bad = -2;
+	char uri[RF_CHUNK_URI_LEN], ld_uri[RF_LD_URI_LEN];
+	int rc;
 
 	*response = NULL;
 
 	/* Find chassis */
 	chassis = fmd_topology_find(&ctx->topology, chassis_id);
-	if (!chassis)
+	if (!chassis || !fmd_is_memdev(chassis))
 		return -1;
 
 	/* Find domain (use hash table lookup like GET handler) */
@@ -4520,112 +4758,10 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -2;
-
-	/*
-	 * AddressRangeType (optional): PMEM or Volatile. Any other value,
-	 * Block included, which cxl-fmd cannot make, is a bad request rather
-	 * than a chunk of another type than the one asked for.
-	 */
-	json_t *type_j = json_object_get(root, "AddressRangeType");
-	if (type_j) {
-		const char *type_str = json_string_value(type_j);
-
-		if (!type_str || (strcmp(type_str, "PMEM") && strcmp(type_str, "Volatile"))) {
-			bad = -8;
-			goto bad_request;
-		}
-		snprintf(addr_type, sizeof(addr_type), "%s", type_str);
-	}
-
-	/* AddressRangeOffsetMiB (optional): auto-assigned if omitted */
-	json_t *offset_j = json_object_get(root, "AddressRangeOffsetMiB");
-	if (offset_j) {
-		if (rf_mib_to_bytes(offset_j, true, &offset_bytes)) {
-			bad = -9;
-			goto bad_request;
-		}
-		offset_given = true;
-	}
-
-	/* Extract InterleaveSets (optional) */
-	json_t *interleave_j = json_object_get(root, "InterleaveSets");
-	if (interleave_j && json_is_array(interleave_j)) {
-		size_t idx;
-		json_t *set;
-
-		json_array_foreach(interleave_j, idx, set) {
-			if (interleave_count >= FMD_MAX_INTERLEAVE)
-				break;
-
-			struct fmd_interleave_set *is = &interleave_sets[interleave_count];
-			memset(is, 0, sizeof(*is));
-
-			/* Memory reference */
-			json_t *mem_j = json_object_get(set, "Memory");
-			if (mem_j && json_is_object(mem_j)) {
-				json_t *odata_j = json_object_get(mem_j, "@odata.id");
-				if (odata_j && json_is_string(odata_j)) {
-					strncpy(is->memory_id, json_string_value(odata_j),
-						sizeof(is->memory_id) - 1);
-				}
-			}
-
-			/* MemoryLevel */
-			json_t *level_j = json_object_get(set, "MemoryLevel");
-			is->memory_level = level_j && json_is_integer(level_j)
-				? (int)json_integer_value(level_j) : 1;
-
-			/* OffsetMiB */
-			json_t *set_offset_j = json_object_get(set, "OffsetMiB");
-			if (set_offset_j) {
-				if (rf_mib_to_bytes(set_offset_j, true, &mib_bytes)) {
-					bad = -10;
-					goto bad_request;
-				}
-				is->offset_mib = mib_bytes >> 20;
-			}
-
-			/* RegionId */
-			json_t *region_j = json_object_get(set, "RegionId");
-			if (region_j && json_is_string(region_j)) {
-				strncpy(is->region_id, json_string_value(region_j),
-					sizeof(is->region_id) - 1);
-			}
-
-			/* SizeMiB - size contributed by this interleave set entry */
-			json_t *size_mib_j = json_object_get(set, "SizeMiB");
-			if (size_mib_j) {
-				if (rf_mib_to_bytes(size_mib_j, true, &mib_bytes)) {
-					bad = -10;
-					goto bad_request;
-				}
-				is->size_mib = mib_bytes >> 20;
-			}
-
-			interleave_count++;
-		}
-	}
-
-	/*
-	 * Extract MemoryChunkSizeMiB, > 0.
-	 * If it is not given, InterleaveSets[0].SizeMiB is used instead.
-	 */
-	json_t *size_j = json_object_get(root, "MemoryChunkSizeMiB");
-	if (size_j) {
-		if (rf_mib_to_bytes(size_j, false, &size_bytes)) {
-			bad = -10;
-			goto bad_request;
-		}
-	} else if (interleave_count > 0 && interleave_sets[0].size_mib > 0) {
-		/* Derive size from InterleaveSets[0].SizeMiB */
-		size_bytes = interleave_sets[0].size_mib << 20;
-	} else {
-		/* Neither MemoryChunkSizeMiB nor InterleaveSets.SizeMiB provided */
-		goto bad_request;
-	}
-
+	rc = parse_chunk_plan(ctx, chassis, root, &plan);
 	json_decref(root);
-	root = NULL;
+	if (rc)
+		return rc;
 
 	/*
 	 * A chunk given an offset lies within its domain: AddressRangeOffsetMiB
@@ -4633,20 +4769,18 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * less its size (cxl-fmd's coordinate: nothing in CXL places an
 	 * allocation at an offset).
 	 */
-	if (offset_given && (offset_bytes > domain->capacity ||
-			     size_bytes > domain->capacity - offset_bytes))
+	if (plan.offset_given && (plan.offset > domain->capacity ||
+				  plan.size > domain->capacity - plan.offset))
 		return -9;
 
 	/* Check capacity */
-	if (size_bytes > domain->remaining)
+	if (plan.size > domain->remaining)
 		return -3;
 
 	/* Create chunk in domain */
-	chunk = fmd_chunk_create_in_domain(&ctx->topology, domain, size_bytes,
-					   offset_given ? offset_bytes : FMD_CHUNK_OFFSET_AUTO,
-					   addr_type,
-					   interleave_count > 0 ? interleave_sets : NULL,
-					   interleave_count);
+	chunk = fmd_chunk_create_in_domain(&ctx->topology, domain, plan.size,
+					   plan.offset_given ? plan.offset : FMD_CHUNK_OFFSET_AUTO,
+					   plan.type, plan.ld);
 	if (!chunk)
 		return -4;
 
@@ -4657,7 +4791,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * mock too, so that it answers as a device would.
 	 */
 	if ((chassis->type != FMD_COMPONENT_SLD ||
-	     !strcmp(addr_type, "Volatile")) && chunk_connected(ctx, chunk)) {
+	     !strcmp(plan.type, "Volatile")) && chunk_connected(ctx, chunk)) {
 		fmd_chunk_remove(&ctx->topology, chunk);
 		return -7;
 	}
@@ -4668,92 +4802,34 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * For SLD: adjust partition via Set Partition Info (4101h)
 	 */
 	if (likely(!fmd_is_mock(ctx))) {
-		int rc = 0;
+		struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(chassis, chunk);
 
+		rc = 0;
 		if (chassis->type == FMD_COMPONENT_MLD) {
-			struct fmd_mld *mld = fmd_to_mld(chassis);
-			int ld_id = -1;
-
-			/*
-			 * Get LD ID from InterleaveSets if provided.
-			 * This is the preferred method as it explicitly identifies the target LD.
-			 */
-			if (chunk->interleave_set_count > 0 &&
-			    chunk->interleave_sets[0].memory_id[0] != '\0') {
-				ld_id = validate_interleave_set_memory(ctx, chassis_id,
-								       chunk->interleave_sets[0].memory_id);
-			}
-
-			/* Fallback: parse LD ID from chunk ID (format: {mld_id}_ld{N}_chunk) */
-			if (ld_id < 0) {
-				const char *ld_str = strstr(chunk->base.id, "_ld");
-				if (ld_str)
-					ld_id = safe_parse_int(ld_str + 3);
-			}
-
-			if (ld_id >= 0) {
-				/* Find current LD size and add the new chunk size */
-				struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology,
-									 chassis_id, ld_id);
-				uint64_t new_size;
-
-				/* a size no 64 bits hold cannot be given */
-				if (__builtin_add_overflow(ld ? ld->memory_size : 0,
-							   size_bytes, &new_size))
-					rc = -EINVAL;
-				else
-					rc = fmd_mld_set_ld_allocation(ctx, mld, ld_id, new_size);
-			}
+			/* the LD grows by the chunk (checked in parse_chunk_plan()) */
+			rc = fmd_mld_set_ld_allocation(ctx, fmd_to_mld(chassis), ld->ld_id,
+						       ld->memory_size + chunk->size);
 		} else if (chassis->type == FMD_COMPONENT_SLD) {
 			/*
 			 * Only volatile chunks change the partition: the total
 			 * volatile capacity, as staged or else active, grows by
 			 * the chunk. Staged for the next reset, not at once.
 			 */
-			if (strcmp(addr_type, "Volatile") == 0) {
+			if (strcmp(plan.type, "Volatile") == 0) {
 				struct fmd_sld *sld = fmd_to_sld(chassis);
 				uint64_t new_volatile;
 
 				if (__builtin_add_overflow(CXL_TO_BYTES(
 						fmd_partition_next_volatile(&sld->partition)),
-						size_bytes, &new_volatile))
+						chunk->size, &new_volatile))
 					rc = -EINVAL;
 				else
 					rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
 			}
 		} else if (chassis->type == FMD_COMPONENT_MHD) {
-			struct fmd_mhd *mhd = fmd_to_mhd(chassis);
-			int pool_ld_id = -1;
-
-			/*
-			 * Get pool LD ID from InterleaveSets.
-			 * MHD uses pool-wide LD indices, not head-local IDs.
-			 */
-			if (chunk->interleave_set_count > 0 &&
-			    chunk->interleave_sets[0].memory_id[0] != '\0') {
-				pool_ld_id = validate_interleave_set_memory(ctx, chassis_id,
-									   chunk->interleave_sets[0].memory_id);
-			}
-
-			/* Fallback: parse LD ID from chunk ID */
-			if (pool_ld_id < 0) {
-				const char *ld_str = strstr(chunk->base.id, "_ld");
-				if (ld_str)
-					pool_ld_id = safe_parse_int(ld_str + 3);
-			}
-
-			if (pool_ld_id >= 0) {
-				/* Find current LD size and add the new chunk size */
-				struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology,
-									 chassis_id, pool_ld_id);
-				uint64_t new_size;
-
-				if (__builtin_add_overflow(ld ? ld->memory_size : 0,
-							   size_bytes, &new_size))
-					rc = -EINVAL;
-				else
-					rc = fmd_mhd_set_ld_allocation(ctx, mhd, pool_ld_id, new_size);
-			}
+			/* a pool index: MHD uses pool-wide LD indices */
+			rc = fmd_mhd_set_ld_allocation(ctx, fmd_to_mhd(chassis), ld->ld_id,
+						       ld->memory_size + chunk->size);
 		}
 
 		if (rc < 0) {
@@ -4767,9 +4843,8 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	}
 
 	/* Build response JSON */
-	snprintf(uri, sizeof(uri),
-		 "/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s",
-		 chassis_id, domain_id, chunk->base.id);
+	if (chunk_uri(uri, sizeof(uri), chunk))
+		uri[0] = '\0';
 
 	*response = json_pack(
 		"{"
@@ -4790,56 +4865,36 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		"AddressRangeType", chunk->address_range_type
 	);
 
-	/* Add InterleaveSets if present */
-	if (chunk->interleave_set_count > 0) {
-		json_t *sets = json_array();
-		for (int i = 0; i < chunk->interleave_set_count; i++) {
-			struct fmd_interleave_set *is = &chunk->interleave_sets[i];
-			json_t *set = json_pack(
-				"{s:{s:s}, s:i, s:I, s:s, s:I}",
-				"Memory", "@odata.id", is->memory_id,
-				"MemoryLevel", is->memory_level,
-				"OffsetMiB", (json_int_t)is->offset_mib,
-				"RegionId", is->region_id,
-				"SizeMiB", (json_int_t)is->size_mib
-			);
-			json_array_append_new(sets, set);
-		}
-		json_object_set_new(*response, "InterleaveSets", sets);
+	/*
+	 * The LD the chunk grows, for an MLD or MHD (a pool index for an
+	 * MHD), as its one InterleaveSets entry and Links.CXLLogicalDevices,
+	 * built from the chunk's backing_ld.
+	 */
+	{
+		const struct fmd_ld *ld = fmd_chunk_ld(chassis, chunk);
 
-		/*
-		 * Add Links.CXLLogicalDevices for MLD/MHD chunks.
-		 * Derived from InterleaveSets[0].Memory reference.
-		 * For MHD, ld_id is the pool index (device-wide).
-		 */
-		if (chassis->type == FMD_COMPONENT_MLD ||
-		    chassis->type == FMD_COMPONENT_MHD) {
-			int ld_id = parse_ld_id_from_memory_path(chunk->interleave_sets[0].memory_id);
-			if (ld_id >= 0) {
-				json_t *links = json_object();
-				json_t *cxl_lds = json_array();
-				json_array_append_new(cxl_lds,
-					rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%d",
-						chassis_id, chassis_id, ld_id));
-				json_object_set_new(links, "CXLLogicalDevices", cxl_lds);
-				json_object_set_new(links, "CXLLogicalDevices@odata.count", json_integer(1));
-				json_object_set_new(*response, "Links", links);
-			}
+		if (ld && !ld_memory_uri(uri, sizeof(uri), chassis, ld) &&
+		    !ld_device_uri(ld_uri, sizeof(ld_uri), chassis, ld)) {
+			json_object_set_new(*response, "InterleaveSets",
+				json_pack("[{s:{s:s}, s:i, s:i, s:I}]",
+					  "Memory", "@odata.id", uri,
+					  "MemoryLevel", 1,
+					  "OffsetMiB", 0,
+					  "SizeMiB", (json_int_t)(chunk->size >> 20)));
+			json_object_set_new(*response, "Links",
+				rf_links_array_single("CXLLogicalDevices", "%s", ld_uri));
 		}
 	}
 
 	return 0;
-
-bad_request:
-	json_decref(root);
-	return bad;
 }
 
 
 /*
  * DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
  *
- * Remove a memory chunk from the domain.
+ * Remove a memory chunk from the domain. A chunk of an MLD gives back its
+ * size, chunk->size, from the allocation of its backing LD.
  *
  * Returns:
  *   0 = success
@@ -4848,6 +4903,8 @@ bad_request:
  *  -3 = CCI command failed
  *  -4 = the device cannot be given the partition left
  *  -5 = a Connection, a vPPB binding, exposes the chunk
+ *  -6 = cxl-fmd cannot give back the chunk's allocation: it has no LD, or
+ *       its device is not one whose allocation it changes
  */
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				    const char *chassis_id,
@@ -4885,38 +4942,14 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 		int rc = 0;
 
 		if (domain_parent->type == FMD_COMPONENT_MLD) {
-			struct fmd_mld *mld = fmd_to_mld(domain_parent);
-			int ld_id = -1;
-			uint64_t size_to_remove = chunk->size;
+			struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(domain_parent, chunk);
 
-			/*
-			 * Get LD ID from stored InterleaveSets if available.
-			 * Also use stored size_mib if present.
-			 */
-			if (chunk->interleave_set_count > 0 &&
-			    chunk->interleave_sets[0].memory_id[0] != '\0') {
-				ld_id = parse_ld_id_from_memory_path(chunk->interleave_sets[0].memory_id);
-				if (chunk->interleave_sets[0].size_mib > 0)
-					size_to_remove = chunk->interleave_sets[0].size_mib * 1024ULL * 1024;
-			}
-
-			/* Fallback: parse LD ID from chunk ID */
-			if (ld_id < 0) {
-				const char *ld_str = strstr(chunk_id, "_ld");
-				if (ld_str)
-					ld_id = safe_parse_int(ld_str + 3);
-			}
-
-			if (ld_id >= 0) {
-				/* Find current LD size and subtract the chunk size */
-				struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology,
-									 chassis_id, ld_id);
-				uint64_t new_size = 0;
-				if (ld && ld->memory_size > size_to_remove)
-					new_size = ld->memory_size - size_to_remove;
-
-				rc = fmd_mld_set_ld_allocation(ctx, mld, ld_id, new_size);
-			}
+			if (!ld)
+				return -6;
+			rc = fmd_mld_set_ld_allocation(ctx, fmd_to_mld(domain_parent),
+						       ld->ld_id,
+						       ld->memory_size > chunk->size ?
+						       ld->memory_size - chunk->size : 0);
 		} else if (domain_parent->type == FMD_COMPONENT_SLD) {
 			/* Only volatile chunks change the partition */
 			if (strcmp(chunk->address_range_type, "Volatile") == 0) {
@@ -4928,6 +4961,9 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 					new_volatile = cur - chunk->size;
 				rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
 			}
+		} else {
+			/* nothing would be given back: refused, not 204 */
+			return -6;
 		}
 
 		/* a partition the device cannot be given, as for a POST */

@@ -440,13 +440,13 @@ All error responses follow the Redfish error format with an `error` object conta
 | 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
 | 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs (see "Binds and unbinds in the background") |
 | 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once; the task monitor of an unbind once it has succeeded |
-| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
+| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | `PATCH` of a Connection (`Allow: GET, DELETE`); `DELETE` of a direct-attached Connection (`Allow: GET`) |
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` |
-| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
+| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none; a chunk `DELETE` whose allocation cxl-fmd cannot give back; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
 | 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
@@ -778,35 +778,66 @@ Content-Type: application/json
 }
 ```
 
-**With InterleaveSets (preferred for MLD):**
+**On an MLD or a Multi-Headed device**, the chunk names its LD:
 ```http
 POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks
 Content-Type: application/json
 
 {
     "InterleaveSets": [{
-        "Memory": {"@odata.id": "/redfish/v1/Chassis/{id}/Memory/{ld}"},
+        "Memory": {"@odata.id": "/redfish/v1/Chassis/{id}/Memory/{id}_ld{N}"},
         "SizeMiB": 1024
     }]
+}
+```
+or
+```http
+{
+    "MemoryChunkSizeMiB": 1024,
+    "Links": {"CXLLogicalDevices": [
+        {"@odata.id": "/redfish/v1/Chassis/{id}/PCIeDevices/{id}/CXLLogicalDevices/{N}"}
+    ]}
 }
 ```
 
 **Request Body:**
 | Property | Type | Required | Description |
 |----------|------|:--------:|-------------|
-| `MemoryChunkSizeMiB` | integer | Conditional | Size of the chunk in MiB, greater than 0 (required unless InterleaveSets.SizeMiB provided) |
+| `MemoryChunkSizeMiB` | integer | Conditional | Size of the chunk in MiB, greater than 0 (required unless InterleaveSets[0].SizeMiB provided; if both are, they are equal) |
 | `AddressRangeType` | string | No | `"Volatile"` or `"PMEM"` (default: `"PMEM"`); any other value is `400` |
 | `AddressRangeOffsetMiB` | integer | No | Offset of the chunk in its domain, in MiB: from 0 to the domain's `MemorySizeMiB` less `MemoryChunkSizeMiB`. If omitted, the lowest offset where the chunk fits (first fit) |
-| `InterleaveSets` | array | No | Array of interleave set entries (see below) |
+| `InterleaveSets` | array | No | One entry at most (see below) |
+| `Links.CXLLogicalDevices` | array | No | One entry at most: the LD, by the URI of its `CXLLogicalDevice` |
 
 **InterleaveSets Entry:**
 | Property | Type | Description |
 |----------|------|-------------|
-| `Memory` | object | Reference to Memory resource (`{"@odata.id": "..."}`) |
-| `SizeMiB` | integer | Size contributed by this entry in MiB |
-| `MemoryLevel` | integer | Interleave level (default: 1) |
-| `OffsetMiB` | integer | Offset within the interleave set (default: 0) |
-| `RegionId` | string | Region identifier |
+| `Memory` | object | The LD, by the URI of its `Memory` (`{"@odata.id": "/redfish/v1/Chassis/{id}/Memory/{id}_ld{N}"}`, or `.../Memory/{id}` for an SLD) |
+| `SizeMiB` | integer | The chunk's size in MiB: `MemoryChunkSizeMiB`, if that is given too |
+| `MemoryLevel` | integer | 1, or absent |
+| `OffsetMiB` | integer | 0, or absent |
+| `RegionId` | string | Absent (or empty) |
+
+A chunk of an MLD, or of a Multi-Headed device's pool, grows the
+allocation of one LD (a pool LD for an MHD), and the request names it:
+`InterleaveSets[0].Memory` as the URI of its `Memory`,
+`Links.CXLLogicalDevices[0]` as the URI of its `CXLLogicalDevice`, or both
+if they name the same LD; exactly as cxl-fmd serves them. A request that
+names none, an LD the device does not have, another device's, or several,
+or that names one in another form (an LD's component ID, a URI with a
+trailing `/`, a path that ends in the LD's ID), is `400`. Set LD
+Allocations (5402h) gives an LD a "Range 1 Allocation Multiplier" and a
+"Range 2 Allocation Multiplier" (CXL r4.0 Table 7-49) and nothing else, so
+a request with more than one `InterleaveSets` entry, an `OffsetMiB` other
+than 0, a `MemoryLevel` other than 1, a `RegionId`, or a `SizeMiB` other
+than `MemoryChunkSizeMiB` is `400` too: an allocation cannot be any of
+these. An SLD's chunk is of its one LD; it may name it, and nothing else.
+The new size of the LD is a multiple of the domain's
+`MemoryChunkIncrementMiB` (the Memory Granularity, Table 7-48), or the
+request is `400`: checked before anything is made where cxl-fmd has the
+granularity (an MLD; a mock MHD), and on a hardware MHD, whose
+granularity discovery does not record, on Get LD Allocations before Set
+LD Allocations is sent.
 
 **Response:** Returns the created MemoryChunk resource with HTTP 201 Created.
 
@@ -818,7 +849,10 @@ cxl-fmd's coordinate within the domain: DSP0288 maps no CXL field to it,
 and no CXL command places an allocation at an offset, so it is never sent
 to a device. Nothing is changed or sent for a request refused with `400`.
 
-For MLD chunks, the response includes `Links.CXLLogicalDevices` referencing the target LD.
+For a chunk of an MLD or MHD, the response has `Links.CXLLogicalDevices`,
+the LD it grows, and one `InterleaveSets` entry, that LD's `Memory` with
+the chunk's `SizeMiB`; `GET` of the chunk has the same link, and the LD's
+`Links.MemoryChunks` lists the chunk.
 
 **Hardware Behavior:**
 - **MLD**: Issues `Set LD Allocations (0x5402h)` to increase the LD's memory allocation.
@@ -844,7 +878,9 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
 **Response:** HTTP 204 No Content on success.
 
 **Hardware Behavior:**
-- **MLD**: Issues `Set LD Allocations (0x5402h)` to decrease the LD's memory allocation
+- **MLD**: Issues `Set LD Allocations (0x5402h)` to decrease the allocation
+  of the chunk's LD by the chunk's `MemoryChunkSizeMiB`, what its `POST`
+  added
 - **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
   the volatile capacity staged (or else active) less the chunk, staged for
   the next reset as on creation. A `"PMEM"` chunk sends no command.
@@ -863,14 +899,20 @@ Connections, which have no binding to undo, do not hold their chunks.
 For Multi-Logical Devices (MLDs), the memory hierarchy is:
 - **MLD Device** → Chassis with `ChassisType: "Component"`
 - **Memory Domain** → One domain per MLD, represents the device's total capacity
-- **Memory Chunk** → One chunk per Logical Device (LD), 1:1 mapping
+- **Memory Chunk** → Part of the allocation of one LD: discovery makes one
+  per LD, its allocation, and each `POST` another on the LD it names
 - **Memory** → Individual LDs as memory resources
 
-For Phase 1 (direct-attached devices):
-- Each LD maps to exactly one chunk
-- InterleaveSets has a single entry identifying the target LD
-- POST resizes an existing LD's allocation
-- DELETE reduces the LD's allocation
+What a chunk is, is cxl-fmd's choice: DSP0288 maps Get LD Allocations to
+`MemoryChunkIncrementMiB` and an LD's `MemorySizeMiB` (Table 2), and no
+CXL command to a chunk `POST`. In cxl-fmd:
+- a chunk `POST` grows the allocation of the one LD it names (Set LD
+  Allocations), and a `DELETE` shrinks it by the chunk's size; an LD can
+  have several chunks;
+- a chunk is not a unit of access: a Connection binds a whole LD, and
+  exposes every chunk of it (its `MemoryChunkInfo`);
+- the chunk of an SLD is cxl-fmd's own division of the device: a `"PMEM"`
+  one sends nothing, a reservation in cxl-fmd's record only.
 
 Chunk IDs:
 
@@ -892,7 +934,9 @@ Chunk IDs:
 For Multi-Headed Devices (MHDs), the memory hierarchy is:
 - **MHD Device** → Chassis with `ChassisType: "Component"`
 - **Memory Domain** → One domain covering the entire LD Pool
-- **Memory Chunk** → One chunk per pool LD
+- **Memory Chunk** → Part of the allocation of one pool LD, as for an MLD:
+  discovery makes one per pool LD, and each `POST` another on the pool LD
+  it names
 - **Memory** → Individual pool LDs as memory resources
 - **CXLLogicalDevices** → Pool LDs indexed by pool index (0 to total_lds-1)
 
@@ -1671,6 +1715,19 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` with an `AddressRangeOffsetMiB` that is negative, not an integer, or puts any of the chunk past the domain's `MemorySizeMiB` | `201` (a negative or wrapped offset, or an offset past the end; one that was not an integer was ignored) | `400` |
 | Chunk `POST` with no `AddressRangeOffsetMiB` | placed after the chunk that ends last, even past the end of the domain | placed at the lowest offset where it fits, within the domain, or `409` |
 | Chunk `POST` with an `AddressRangeType` other than `PMEM` or `Volatile`, or not a string | `201`, as `PMEM` | `400` |
+| Chunk `POST` on an MLD or MHD that names no LD, an LD the device does not have, or another device's (no `InterleaveSets`, `.../Memory/{dev}_ld9`, `/redfish/v1/Chassis/other/Memory/other_ld0`) | `201`, and nothing sent: no LD's allocation grew | `400`, nothing made or sent |
+| Chunk `POST` naming its LD in another form than the URI of its `Memory` (the LD's component ID `{dev}_ld0`, `/not/a/redfish/uri/{dev}_ld1`) | `201`: the number after the first `_ld` taken, if the string had the Chassis ID in it | `400` |
+| Chunk `POST` naming its LD by the URI of its `Memory`, on a device whose ID is longer than the mock's (`cxl_{serial}` on hardware) | `201`, and nothing sent: the URI was cut to 63 characters, which lost the `_ld{N}` | Set LD Allocations for that LD |
+| Chunk `POST` with more than one `InterleaveSets` entry, or one with an `OffsetMiB` other than 0, a `RegionId`, a `MemoryLevel` other than 1, or a `SizeMiB` other than `MemoryChunkSizeMiB` | `201`: the first entry's LD grew by `MemoryChunkSizeMiB`, the rest of the request was echoed and not sent | `400` |
+| Chunk `POST` with `Links.CXLLogicalDevices` naming the LD | ignored | taken, as `InterleaveSets[0].Memory` is |
+| Chunk `POST` on an MLD or MHD whose new LD size is not a multiple of `MemoryChunkIncrementMiB` | `400` from hardware after Get LD Allocations, `201` in a mock | `400`, nothing sent, in a mock too; on a hardware MHD, whose Memory Granularity discovery does not record, still `400` after Get LD Allocations, before Set LD Allocations |
+| Chunk `POST` on an SLD with an `InterleaveSets[0].Memory` other than the SLD's own `Memory` URI, or a `Links.CXLLogicalDevices` other than its `CXLLogicalDevices/0` | ignored (`InterleaveSets` echoed in the `201`) | `400` |
+| Chunk `POST` with an `InterleaveSets` that is not an array, an entry that is not an object, a `Memory` that is not a link object (a string), or a `Links.CXLLogicalDevices` that is not an array of links | ignored | `400` |
+| Chunk `POST` response on an MLD or MHD | `InterleaveSets` as the request gave it, `Links.CXLLogicalDevices` from the number after the first `_ld` of its `Memory` | one `InterleaveSets` entry, the LD's `Memory` URI with `MemoryLevel` 1, `OffsetMiB` 0 and the chunk's `SizeMiB`, and the LD's link; none for an SLD |
+| Chunk `DELETE` of an MLD chunk made with `InterleaveSets[0].SizeMiB` | the LD shrunk by that `SizeMiB` (not the size the `POST` added) | shrunk by the chunk's `MemoryChunkSizeMiB` |
+| Chunk `DELETE` on hardware of a chunk of a device that is not an MLD or SLD (a Multi-Headed device's) | `204`, nothing sent, and its size counted free in the domain | `501`, the chunk kept |
+| `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
+| `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |
 | Chunk `POST` after a `DELETE` of a chunk of the domain | the ID of a chunk the domain still had, so that two chunks had one URI, a collection listed it twice, and a Connection's `MemoryChunkInfo` too | an ID that no chunk of the domain has had since cxl-fmd started, or discovered the device |
 | Chunk `POST` on a domain with chunks found at discovery (the `{device}_ld{N}_chunk` of an MLD or MHD) | `{domain}_chunk{N}`, N the number of chunks in the domain | `{domain}_chunk0` for the first, then 1, 2, ... |
 | Connection `POST` with a link that is not the URI the service serves the resource at, but ends in the ID of one (`/bogus/sld_0`, `/redfish/v1/Chassis/sld_1` as a target, a chunk of one device under another's Chassis, a relative URI) | `201`: the last segment was taken as the ID, whatever came before it | `400`, nothing bound |

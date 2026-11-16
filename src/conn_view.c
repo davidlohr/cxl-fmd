@@ -100,27 +100,6 @@ struct fmd_component *fmd_bind_target(const struct fmd_port *port, uint16_t ld_i
 	return NULL;
 }
 
-/* The number at the end of @s after its last "_ld", -1 if none */
-static int trailing_ld_number(const char *s, const char *end)
-{
-	const char *p, *found = NULL;
-	long n = 0;
-
-	for (p = s; (p = strstr(p, "_ld")) && p < end; p++)
-		found = p;
-	if (!found)
-		return -1;
-	p = found + 3;
-	if (p >= end || *p < '0' || *p > '9')
-		return -1;
-	for (; p < end && *p >= '0' && *p <= '9'; p++) {
-		n = n * 10 + (*p - '0');
-		if (n > 0xFFFF)
-			return -1;
-	}
-	return p == end ? (int)n : -1;
-}
-
 static const struct fmd_ld *find_ld(const struct fmd_component *dev, int ld_id)
 {
 	struct fmd_component *child;
@@ -137,52 +116,10 @@ static const struct fmd_ld *find_ld(const struct fmd_component *dev, int ld_id)
 const struct fmd_ld *fmd_chunk_ld(const struct fmd_component *dev,
 				  const struct fmd_mem_chunk *chunk)
 {
-	static const char lds[] = "/CXLLogicalDevices/";
-	struct fmd_component *child;
-	const char *mem, *p;
-	size_t len;
-	int n;
-
 	if (!dev || !chunk ||
 	    (dev->type != FMD_COMPONENT_MLD && dev->type != FMD_COMPONENT_MHD))
 		return NULL;
-
-	mem = chunk->interleave_set_count > 0 ? chunk->interleave_sets[0].memory_id : "";
-	if (mem[0]) {
-		/* the LD's component ID, as a chunk made with the device has */
-		fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
-			if (!strcmp(mem, child->id))
-				return fmd_to_ld(child);
-		}
-		/*
-		 * A URI, as a chunk made with POST has. It is cut to the
-		 * length of memory_id, which may leave no LD-ID in it.
-		 */
-		p = strstr(mem, lds);
-		if (p) {
-			char *end;
-			long v;
-
-			p += sizeof(lds) - 1;
-			if (*p >= '0' && *p <= '9') {
-				v = strtol(p, &end, 10);
-				if (*end == '\0')
-					return find_ld(dev, (int)v);
-			}
-		} else {
-			len = strlen(mem);
-			n = trailing_ld_number(mem, mem + len);
-			if (n >= 0)
-				return find_ld(dev, n);
-		}
-	}
-
-	/* "{dev}_ld{N}_chunk", as a chunk made with the device is named */
-	len = strlen(chunk->base.id);
-	if (len > 6 && !strcmp(chunk->base.id + len - 6, "_chunk"))
-		return find_ld(dev, trailing_ld_number(chunk->base.id,
-						       chunk->base.id + len - 6));
-	return NULL;
+	return find_ld(dev, chunk->backing_ld);
 }
 
 bool fmd_bind_key_eq(const struct fmd_bind_key *a, const struct fmd_bind_key *b)

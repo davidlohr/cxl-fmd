@@ -927,7 +927,8 @@ class TestMalformedIDs:
                     "InterleaveSets": [{"Memory": {"@odata.id": ref}}]
                 }
             )
-            assert status in [400, 404, 409], f"Expected error for ref {ref}, got {status}"
+            # none is the URI of an LD's Memory (review F02)
+            assert status == 400, f"Expected 400 for ref {ref}, got {status}"
 
 
 @pytest.mark.mock_topology("mock/unit/unit-switch-mld.json")

@@ -2108,7 +2108,8 @@ static void test_mib_out_of_range_sends_nothing(void)
 	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
 		snprintf(body, sizeof(body),
 			 "{\"MemoryChunkSizeMiB\": %s, \"InterleaveSets\": [{\"Memory\": "
-			 "{\"@odata.id\": \"%s_ld0\"}}]}", sizes[i], id);
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}",
+			 sizes[i], id, id);
 		sent = commands_sent(ep);
 		rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
 		CHECK(rc == -10 && !resp && commands_sent(ep) == sent &&
@@ -2129,7 +2130,7 @@ static void test_mib_out_of_range_sends_nothing(void)
 	answer(ep, 0x5402, set, sizeof(set));
 	snprintf(body, sizeof(body),
 		 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
-		 "{\"@odata.id\": \"%s_ld0\"}}]}", id);
+		 "{\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}", id, id);
 	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
 	CHECK(rc == 0 && last_opcode(ep) == 0x5402,
 	      "MemoryChunkSizeMiB 256: %d, last %04xh", rc, last_opcode(ep));
@@ -5305,10 +5306,10 @@ out:
  * Connections computed from the switch (src/conn_view.c). Helpers.
  */
 
-/* a chunk of @dev, in its domain (made if it has none), on LD @memory_id */
+/* a chunk of @dev, in its domain (made if it has none), of LD @ld (-1: none) */
 static struct fmd_mem_chunk *add_chunk(struct fmd_ctx *ctx,
 				       struct fmd_component *dev,
-				       const char *name, const char *memory_id)
+				       const char *name, int ld)
 {
 	struct fmd_component *dom = fmd_first_child_type(dev, FMD_COMPONENT_DOMAIN);
 	char id[FMD_MAX_ID_LEN];
@@ -5333,12 +5334,7 @@ static struct fmd_mem_chunk *add_chunk(struct fmd_ctx *ctx,
 		exit(1);
 	}
 	chunk->size = 256 << 20;
-	if (memory_id) {
-		chunk->interleave_set_count = 1;
-		snprintf(chunk->interleave_sets[0].memory_id,
-			 sizeof(chunk->interleave_sets[0].memory_id), "%s",
-			 memory_id);
-	}
+	chunk->backing_ld = ld;
 	fmd_topology_add(&ctx->topology, &chunk->base, dom);
 	return chunk;
 }
@@ -5471,12 +5467,12 @@ static void test_conn_view_prebound_sld_ld(void)
 	ld0 = &fmd_topology_find_ld(&ctx->topology, mld->id, 0)->base;
 	ld1c = &fmd_topology_find_ld(&ctx->topology, mld->id, 1)->base;
 
-	s0 = add_chunk(ctx, sld, "chunk0", NULL);
-	s1 = add_chunk(ctx, sld, "chunk1", NULL);
-	c0 = add_chunk(ctx, mld, "ld0_chunk", ld0->id);
-	c1 = add_chunk(ctx, mld, "ld1_chunk", ld1c->id);
-	/* named for LD 1, as a chunk made with the device is, no Memory */
-	c1uri = add_chunk(ctx, mld, "more_ld1_chunk", NULL);
+	s0 = add_chunk(ctx, sld, "chunk0", -1);
+	s1 = add_chunk(ctx, sld, "chunk1", -1);
+	c0 = add_chunk(ctx, mld, "ld0_chunk", fmd_to_ld(ld0)->ld_id);
+	c1 = add_chunk(ctx, mld, "ld1_chunk", fmd_to_ld(ld1c)->ld_id);
+	/* a second chunk of LD 1, as a POST makes one */
+	c1uri = add_chunk(ctx, mld, "more", 1);
 
 	l = list_conns(ctx);
 	CHECK(l.n == 2, "%d Connections, not 2", l.n);
@@ -5780,7 +5776,7 @@ static void test_conn_view_absent(void)
 	CHECK(sw && sld && port, "no switch, SLD or port 4");
 	if (!sw || !sld || !port)
 		goto out;
-	add_chunk(ctx, sld, "chunk0", NULL);
+	add_chunk(ctx, sld, "chunk0", -1);
 
 	snprintf(want, sizeof(want), "%s_vcs0_vppb2_p4", sw_id);
 	rc = fmd_conn_lookup(ctx, want, &v);
@@ -5858,11 +5854,10 @@ static void test_conn_view_unresolved_mh_mld(void)
 		lds[i]->binding_point_id = i < 2 ? 0 : 1;
 		fmd_topology_add(&ctx->topology, &lds[i]->base, &mhd->base);
 	}
-	add_chunk(ctx, &mhd->base, "ld0_chunk", "mhd_ld0");
-	add_chunk(ctx, &mhd->base, "ld1_chunk", "mhd_ld1");
-	/* as POST makes one: InterleaveSets[0].Memory is a URI */
-	chunk2 = add_chunk(ctx, &mhd->base, "posted",
-			   "/redfish/v1/Chassis/mhd/PCIeDevices/mhd/CXLLogicalDevices/2");
+	add_chunk(ctx, &mhd->base, "ld0_chunk", 0);
+	add_chunk(ctx, &mhd->base, "ld1_chunk", 1);
+	/* as POST makes one */
+	chunk2 = add_chunk(ctx, &mhd->base, "posted", 2);
 
 	/* an MLD on port 3 with LD 0 only */
 	mld = fmd_mld_create("mld3");
@@ -6193,7 +6188,7 @@ static void test_chunk_guard(void)
 	      "chunk DELETE of a bound LD: %d, last %04xh", rc, op);
 	snprintf(body, sizeof(body),
 		 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
-		 "{\"@odata.id\": \"%s_ld0\"}}]}", dev);
+		 "{\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}", dev, dev);
 	rc = fmd_redfish_post_memory_chunk(ctx, dev, dom, body, strlen(body), &resp);
 	op = last_opcode(ep);
 	CHECK(rc == -7 && !resp && op != 0x5401 && op != 0x5402,
@@ -6225,6 +6220,274 @@ static void test_chunk_guard(void)
 out:
 	fmd_ctx_free(ctx);
 	report("no chunk of a bound LD is changed", before);
+}
+
+/*
+ * Chunk POST plan (review F02). Get LD Allocations (5401h) and Set LD
+ * Allocations (5402h) answers for one LD: Range 1 @r1 units of 256 MB.
+ */
+static void answer_get_ld(struct cxlmi_endpoint *ep, uint8_t ld, uint64_t r1)
+{
+	uint8_t pl[4 + 16] = { 2, 0, ld, 1 };
+
+	put64(pl + 4, r1);
+	answer(ep, 0x5401, pl, sizeof(pl));
+}
+
+static void answer_set_ld(struct cxlmi_endpoint *ep, uint8_t ld, uint64_t r1)
+{
+	uint8_t pl[4 + 16] = { 1, ld };
+
+	put64(pl + 4, r1);
+	answer(ep, 0x5402, pl, sizeof(pl));
+}
+
+/* the @odata.id of member @key of @obj, or of its first array entry */
+static const char *odata_of(json_t *obj, const char *key)
+{
+	json_t *v = json_object_get(obj, key);
+
+	if (json_is_array(v))
+		v = json_array_get(v, 0);
+	return json_string_value(json_object_get(v, "@odata.id"));
+}
+
+/*
+ * A chunk POST on an MLD or a Multi-Headed device names exactly one of
+ * its LDs, by the URI of its Memory or of its CXLLogicalDevice, and asks
+ * for nothing Set LD Allocations cannot do; anything else is refused
+ * before anything is made or sent. Before, each of these was 201: the
+ * ones naming no LD with nothing sent (rc 0 kept when no LD was found),
+ * the canonical Memory URI of a device with a serial-derived Id too, as
+ * it was cut to 63 characters; a forged URI ending in "_ld1" grew LD 1,
+ * two entries grew LD 0 by both, and OffsetMiB, RegionId and MemoryLevel
+ * were echoed though not sent. A DELETE took off InterleaveSets[0].
+ * SizeMiB, not the size the POST added.
+ */
+static void test_chunk_plan(void)
+{
+	static const char *const refused[][2] = {
+		/* rc, body (%1$s the device's Id) */
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld9\"}}]}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"%1$s_ld0\"}}]}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/other/Memory/other_ld0\"}}]}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/not/a/redfish/uri/%1$s_ld1\"}}]}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0/\"}}]}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": ["
+			 "{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}, \"SizeMiB\": 512},"
+			 "{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld1\"}, \"SizeMiB\": 512}]}" },
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "\"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}]}" },
+		/* the Memory of LD 0, the CXLLogicalDevice of LD 1 */
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}}], "
+			 "\"Links\": {\"CXLLogicalDevices\": [{\"@odata.id\": "
+			 "\"/redfish/v1/Chassis/%1$s/PCIeDevices/%1$s/CXLLogicalDevices/1\"}]}}" },
+		/* a Memory URI given as a CXLLogicalDevice */
+		{ "-11", "{\"MemoryChunkSizeMiB\": 1024, \"Links\": {\"CXLLogicalDevices\": "
+			 "[{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}]}}" },
+		{ "-12", "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}, \"SizeMiB\": 1024}]}" },
+		{ "-12", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}, \"OffsetMiB\": 777}]}" },
+		{ "-12", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}, \"RegionId\": \"r9\"}]}" },
+		{ "-12", "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}, \"MemoryLevel\": 3}]}" },
+		/* not a multiple of the Memory Granularity, 256 MB */
+		{ "-6", "{\"MemoryChunkSizeMiB\": 100, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}}]}" },
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0xf02, 2, 0, 4);	/* 2 x 1 GiB */
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[1024], uri[256];
+	char chunk_id[FMD_MAX_ID_LEN];
+	struct fmd_mem_domain *domain;
+	struct fmd_ld *ld0, *ld1;
+	uint8_t pl[64], probe[8 + 1] = { 0 }, info[8 + 4] = { 0 };
+	uint8_t heads[4 + 2 * 9] = { 0 };
+	int before = failures, rc, chunks;
+	uint64_t rem0;
+	unsigned int sent;
+	json_t *resp = NULL, *j;
+	uint16_t op;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf02);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	CHECK(domain && ld0 && ld1, "no domain %s or LDs", dom);
+	if (!domain || !ld0 || !ld1)
+		goto out;
+	/* room for more: the domain has none at discovery (review F01) */
+	domain->capacity += 8ULL << 30;
+	domain->remaining += 8ULL << 30;
+	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
+
+	for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+		snprintf(body, sizeof(body), refused[i][1], id);
+		sent = commands_sent(ep);
+		rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+		CHECK(rc == atoi(refused[i][0]) && !resp && commands_sent(ep) == sent &&
+		      fmd_component_count_children(&domain->base,
+						   FMD_COMPONENT_CHUNK) == chunks &&
+		      ld0->memory_size == 1ULL << 30 && ld1->memory_size == 1ULL << 30,
+		      "%s: %d, not %s; %u commands sent", body, rc, refused[i][0],
+		      commands_sent(ep) - sent);
+		json_decref(resp);
+		resp = NULL;
+	}
+
+	/*
+	 * The Memory URI of LD 0, 71 characters: 5402h for LD 0, which goes
+	 * from 4 to 8 units; served with the URI whole, and LD 0's link.
+	 */
+	answer_get_ld(ep, 0, 4);
+	answer_set_ld(ep, 0, 8);
+	snprintf(uri, sizeof(uri), "/redfish/v1/Chassis/%s/Memory/%s_ld0", id, id);
+	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": "
+		 "[{\"Memory\": {\"@odata.id\": \"%s\"}}]}", uri);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == 0 && op == 0x5402 && pl[0] == 1 && pl[1] == 0 && get64(pl + 4) == 8 &&
+	      ld0->memory_size == 2ULL << 30,
+	      "%zu-character URI of LD 0: %d, %04xh LD %u Range 1 %" PRIu64,
+	      strlen(uri), rc, op, pl[1], get64(pl + 4));
+	j = json_array_get(json_object_get(resp, "InterleaveSets"), 0);
+	CHECK(resp && !strcmp(odata_of(j, "Memory") ? odata_of(j, "Memory") : "", uri),
+	      "InterleaveSets[0].Memory is not %s", uri);
+	snprintf(uri, sizeof(uri), "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/0",
+		 id, id);
+	j = json_object_get(resp, "Links");
+	CHECK(odata_of(j, "CXLLogicalDevices") &&
+	      !strcmp(odata_of(j, "CXLLogicalDevices"), uri), "Links: not LD 0");
+	json_decref(resp);
+	resp = NULL;
+
+	/*
+	 * LD 1 by its CXLLogicalDevice only: 5402h for LD 1. The chunk as
+	 * served is LD 1's, which links it (it said LD 0 before), and the
+	 * DELETE gives back what the POST added, no more.
+	 */
+	rem0 = domain->remaining;
+	answer_get_ld(ep, 1, 4);
+	answer_set_ld(ep, 1, 5);
+	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 256, \"Links\": "
+		 "{\"CXLLogicalDevices\": [{\"@odata.id\": "
+		 "\"/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/1\"}]}}", id, id);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == 0 && op == 0x5402 && pl[1] == 1 && get64(pl + 4) == 5 &&
+	      domain->remaining == rem0 - (256ULL << 20),
+	      "LD 1 by its CXLLogicalDevice: %d, %04xh LD %u Range 1 %" PRIu64,
+	      rc, op, pl[1], get64(pl + 4));
+	snprintf(chunk_id, sizeof(chunk_id), "%s",
+		 resp ? json_string_value(json_object_get(resp, "Id")) : "");
+	json_decref(resp);
+	resp = fmd_redfish_memory_chunk(ctx, id, dom, chunk_id);
+	snprintf(uri, sizeof(uri), "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/1",
+		 id, id);
+	j = json_object_get(resp, "Links");
+	CHECK(odata_of(j, "CXLLogicalDevices") &&
+	      !strcmp(odata_of(j, "CXLLogicalDevices"), uri),
+	      "GET %s: links %s", chunk_id,
+	      odata_of(j, "CXLLogicalDevices") ? odata_of(j, "CXLLogicalDevices") : "none");
+	json_decref(resp);
+	resp = fmd_redfish_cxl_logical_device(ctx, id, id, "1");
+	j = json_object_get(json_object_get(resp, "Links"), "MemoryChunks");
+	{
+		bool found = false;
+		size_t k;
+		json_t *m;
+
+		json_array_foreach(j, k, m)
+			found |= strstr(json_string_value(json_object_get(m, "@odata.id")),
+					chunk_id) != NULL;
+		CHECK(found, "LD 1 does not link %s", chunk_id);
+	}
+	json_decref(resp);
+	resp = NULL;
+
+	answer_get_ld(ep, 1, 5);
+	answer_set_ld(ep, 1, 4);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk_id);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == 0 && op == 0x5402 && pl[1] == 1 && get64(pl + 4) == 4 &&
+	      domain->remaining == rem0 && ld1->memory_size == 1ULL << 30,
+	      "DELETE %s: %d, %04xh LD %u Range 1 %" PRIu64, chunk_id, rc, op,
+	      pl[1], get64(pl + 4));
+
+	/* a chunk of an MLD with no LD gives nothing back: refused, kept */
+	{
+		char c0[FMD_MAX_ID_LEN + 16];
+		struct fmd_mem_chunk *c;
+
+		snprintf(c0, sizeof(c0), "%s_ld0_chunk", id);
+		c = fmd_topology_find_chunk(&ctx->topology, c0);
+		CHECK(c, "no chunk %s", c0);
+		if (c) {
+			c->backing_ld = -1;
+			rem0 = domain->remaining;
+			sent = commands_sent(ep);
+			rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, c0);
+			CHECK(rc == -6 && commands_sent(ep) == sent &&
+			      fmd_topology_find_chunk(&ctx->topology, c0) &&
+			      domain->remaining == rem0,
+			      "DELETE of a chunk with no LD: %d, %u sent", rc,
+			      commands_sent(ep) - sent);
+		}
+	}
+out:
+	fmd_ctx_free(ctx);
+
+	/* a Multi-Headed device's pool, 4 LDs, that names none, or LD 40 */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xe02, 0x03);
+	probe[0] = 4; probe[1] = 2; probe[5] = 1;
+	answer(ep, 0x5500, probe, sizeof(probe));
+	info[0] = 4; info[1] = 2; info[5] = 4;
+	info[8] = 1; info[9] = 1; info[10] = 2; info[11] = 0xff;
+	answer(ep, 0x5500, info, sizeof(info));
+	for (int i = 0; i < 4; i++)
+		answer_memdev_identify(ep, 4 * (i + 1), 4 * (i + 1), 0);
+	heads[0] = 2; heads[4] = 1; heads[4 + 6] = 4; heads[4 + 9] = 2;
+	answer(ep, 0x5501, heads, sizeof(heads));
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xe02);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	CHECK(domain, "no domain %s", dom);
+	if (domain) {
+		domain->capacity += 8ULL << 30;
+		domain->remaining += 8ULL << 30;
+		for (int i = 0; i < 2; i++) {
+			if (i)
+				snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, "
+					 "\"InterleaveSets\": [{\"Memory\": {\"@odata.id\": "
+					 "\"/redfish/v1/Chassis/%s/Memory/%s_ld40\"}}]}", id, id);
+			else
+				snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024}");
+			sent = commands_sent(ep);
+			rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body),
+							   &resp);
+			CHECK(rc == -11 && !resp && commands_sent(ep) == sent,
+			      "MHD %s: %d, %u commands sent", body, rc,
+			      commands_sent(ep) - sent);
+			json_decref(resp);
+			resp = NULL;
+		}
+	}
+	fmd_ctx_free(ctx);
+	report("a chunk POST names one LD, and asks for what 5402h can do", before);
 }
 
 /* Oem.Cxl.Origin of Connection @id as served, "" if it has none */
@@ -6454,6 +6717,7 @@ int main(void)
 	test_lost_task_frees_op();
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
+	test_chunk_plan();
 	test_force_unbind();
 	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();

@@ -119,7 +119,6 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  * Maximum Logical Devices per MLD
  */
 #define FMD_MAX_LD_COUNT 16
-#define FMD_MAX_INTERLEAVE 8    /* Max interleave sets per chunk */
 
 /*
  * Multi-Headed Device (MHD) limits. These are cxl-fmd's own: CXL r4.0 sets
@@ -848,17 +847,6 @@ struct fmd_mem_domain {
 };
 
 /*
- * Interleave Set - describes memory interleaving configuration
- */
-struct fmd_interleave_set {
-	char memory_id[FMD_MAX_ID_LEN];   /* Reference to Memory resource */
-	int memory_level;                  /* Interleave level (1-based) */
-	uint64_t offset_mib;               /* Offset within interleave set */
-	char region_id[32];                /* Region identifier */
-	uint64_t size_mib;                 /* Size contributed by this entry */
-};
-
-/*
  * Memory Chunk - allocated memory region
  *
  * Child of fmd_mem_domain.
@@ -868,10 +856,13 @@ struct fmd_mem_chunk {
 
 	uint64_t base_address;
 	uint64_t size;
-	bool interleaved;
 	char address_range_type[16];       /* "PMEM" or "Volatile" */
-	int interleave_set_count;
-	struct fmd_interleave_set interleave_sets[FMD_MAX_INTERLEAVE];
+	/*
+	 * The LD whose allocation the chunk is part of: an LD-ID of an MLD,
+	 * a pool index of a Multi-Headed device, -1 for none (an SLD's
+	 * chunk). Its URIs are built from it when served.
+	 */
+	int backing_ld;
 };
 
 
@@ -1427,7 +1418,7 @@ struct fmd_dc_extent *fmd_dc_extent_create(const char *id);
  * Create a memory chunk in a domain with full configuration. The chunk
  * lies within the domain: [offset, offset + size) within [0, capacity).
  * offset = FMD_CHUNK_OFFSET_AUTO places it at the lowest offset where it
- * fits (first fit).
+ * fits (first fit). @backing_ld is the chunk's backing_ld, -1 for none.
  * Returns NULL on error (insufficient capacity, out of the domain, overlap,
  * no free range of that size, etc.).
  */
@@ -1437,8 +1428,7 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	uint64_t size,
 	uint64_t offset,
 	const char *address_range_type,
-	struct fmd_interleave_set *interleave_sets,
-	int interleave_set_count);
+	int backing_ld);
 
 /*
  * Remove a memory chunk from its domain.
@@ -1484,9 +1474,7 @@ struct fmd_ld *fmd_head_whole_ld(const struct fmd_head *head);
 
 /*
  * The LD of @dev (an MLD or a Multi-Headed device) that chunk @chunk is
- * on, NULL if it names none: its InterleaveSets[0].Memory is the LD's
- * component ID, or a URI ending in CXLLogicalDevices/{N} or "_ld{N}", or
- * else the chunk's own ID ends in "_ld{N}_chunk".
+ * on, its backing_ld; NULL if it has none, or @dev has no such LD.
  */
 const struct fmd_ld *fmd_chunk_ld(const struct fmd_component *dev,
 				  const struct fmd_mem_chunk *chunk);
