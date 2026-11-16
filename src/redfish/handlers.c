@@ -722,7 +722,13 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 	snprintf(uri, sizeof(uri), "/redfish/v1/Fabrics/CXL/Endpoints/%s", endpoint_id);
 
 	/*
-	 * Host endpoints (Initiators) - represent CPUs that issue CXL.mem requests
+	 * Host endpoints (Initiators). What the FM knows of a host is the CXL
+	 * root port its Virtual Hierarchy starts at, "Everything from the CXL
+	 * RP down" (CXL r4.0 Table 1-1, VH), not a processor, and cxl-fmd
+	 * serves no Processor resource. RootComplex: "The `EntityLink`
+	 * property, if present, should be of type `ComputerSystem`"
+	 * (Endpoint_v1), which is the host's System. That a CXL host is a
+	 * RootComplex is cxl-fmd's choice: DMTF names no EntityType for it.
 	 */
 	if (comp->type == FMD_COMPONENT_HOST) {
 		struct fmd_host *host = fmd_to_host(comp);
@@ -733,7 +739,7 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 			"  s:s,"   /* Id */
 			"  s:s,"   /* Name */
 			"  s:s,"   /* EndpointProtocol */
-			"  s:[{s:s, s:s}],"  /* ConnectedEntities */
+			"  s:[{s:s, s:s, s:o}],"  /* ConnectedEntities */
 			"  s:o"    /* Status */
 			"}",
 			"@odata.id", uri,
@@ -742,8 +748,9 @@ json_t *fmd_redfish_endpoint(struct fmd_ctx *ctx, const char *fabric_id,
 			"Name", host->name,
 			"EndpointProtocol", "CXL",
 			"ConnectedEntities",
-				"EntityType", "Processor",
+				"EntityType", "RootComplex",
 				"EntityRole", "Initiator",
+				"EntityLink", rf_link("/redfish/v1/Systems/%s", host->base.id),
 			"Status", rf_status("Enabled", "OK")
 		);
 
@@ -823,6 +830,25 @@ host_done:
 			"EntityPciId", "VendorId", vendor_str, "DeviceId", device_str,
 		"Status", rf_status("Enabled", "OK")
 	);
+
+	/*
+	 * An SLD is one logical device, LD 0 of its CXLLogicalDevices, and
+	 * what a host is bound to is that device whole (Bind vPPB, CXL r4.0
+	 * Section 7.6.7.2.2). CXLDevice: "the entity this endpoint represents
+	 * is a CXL logical device. The `EntityLink` property, if present,
+	 * should be of type `CXLLogicalDevice`" (Endpoint_v1). That a Type 3
+	 * target is a CXLDevice is cxl-fmd's choice: DMTF names no EntityType
+	 * for it.
+	 */
+	if (result && comp->type == FMD_COMPONENT_SLD) {
+		json_t *entity = json_array_get(json_object_get(result,
+						"ConnectedEntities"), 0);
+
+		json_object_set_new(entity, "EntityType", json_string("CXLDevice"));
+		json_object_set_new(entity, "EntityLink",
+			rf_link("/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/0",
+				comp->id, comp->id));
+	}
 
 	/*
 	 * Per OCP CMS Figure 7, endpoints connect to switch ports.

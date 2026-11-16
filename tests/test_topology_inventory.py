@@ -381,11 +381,15 @@ class TestHostDiscovery:
         assert "ConnectedEntities" in data
         assert data["ConnectedEntities"][0]["EntityRole"] == "Initiator"
 
-    def test_host_endpoint_entity_type_processor(self, api_client):
-        """Verify host Endpoint has EntityType=Processor."""
+    def test_host_endpoint_entity_type_root_complex(self, api_client):
+        """A host is the CXL root port its VH starts at: RootComplex, whose
+        EntityLink "should be of type ComputerSystem" (Endpoint_v1), the
+        host's System. Not Processor: cxl-fmd serves no Processor."""
         status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host0")
         assert status == 200
-        assert data["ConnectedEntities"][0]["EntityType"] == "Processor"
+        entity = data["ConnectedEntities"][0]
+        assert entity["EntityType"] == "RootComplex"
+        assert entity["EntityLink"] == {"@odata.id": "/redfish/v1/Systems/cxl_switch_0_host0"}
 
 
 # =============================================================================
@@ -762,3 +766,45 @@ class TestMHDConnections:
             "/redfish/v1/Chassis/cxl_mhsld_0/PCIeDevices/cxl_mhsld_0/CXLLogicalDevices/5"
         )
         assert status == 404
+
+
+# =============================================================================
+# EntityLinks: each Endpoint links to what it represents
+# =============================================================================
+
+ENTITY_LINK_TYPES = {
+    "RootComplex": "#ComputerSystem.",
+    "CXLDevice": "#CXLLogicalDevice.",
+}
+
+
+@pytest.mark.parametrize("topology", [
+    pytest.param(t, marks=pytest.mark.mock_topology(t), id=t.rsplit("/", 1)[1])
+    for t in ("mock/single-sld.json", "mock/switch-attached.json",
+              "mock/multi-host-vcs.json", "mock/unit/unit-direct-sld.json",
+              "mock/unit/unit-switch-sld.json")])
+def test_entitylinks_resolve(api_client, topology):
+    """A host Endpoint is a RootComplex linking to its ComputerSystem and an
+    SLD Endpoint a CXLDevice linking to its CXLLogicalDevice (the type
+    Endpoint_v1 says the EntityLink of each should be), and the link is
+    served."""
+    status, data = api_client.get("/redfish/v1/Fabrics/CXL/Endpoints")
+    assert status == 200
+    seen = set()
+    for member in data["Members"]:
+        status, ep = api_client.get(member["@odata.id"])
+        assert status == 200, member
+        entity = ep["ConnectedEntities"][0]
+        kind = entity["EntityType"]
+        if kind not in ENTITY_LINK_TYPES:
+            continue
+        seen.add(kind)
+        status, target = api_client.get(entity["EntityLink"]["@odata.id"])
+        assert status == 200, entity
+        assert target["@odata.type"].startswith(ENTITY_LINK_TYPES[kind]), target["@odata.type"]
+        if kind == "CXLDevice":
+            assert entity["EntityRole"] == "Target"
+            assert "EntityPciId" in entity
+        else:
+            assert entity["EntityRole"] == "Initiator"
+    assert seen == set(ENTITY_LINK_TYPES), seen

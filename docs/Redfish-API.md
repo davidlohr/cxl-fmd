@@ -606,9 +606,12 @@ Fabric Endpoints represent entities that participate in CXL communication. There
 
 **Target Endpoints (Memory Devices)**
 - Represent SLD and MLD devices that provide CXL memory
-- `EntityType`: `MemoryChunk`. Endpoint_v1 says of it that "the entity
-  this endpoint represents is a memory chunk", and this Endpoint is the
-  device: cxl-fmd's choice, kept for now (a known gap)
+- `EntityType`: `CXLDevice` for an SLD, "the entity this endpoint
+  represents is a CXL logical device" (Endpoint_v1), with `EntityLink` to
+  its `CXLLogicalDevices/0`, the type Endpoint_v1 says it should link to.
+  DMTF names no EntityType for a CXL Type 3 target: this is cxl-fmd's
+  choice. The Endpoint of an MLD or a Multi-Headed device is the device,
+  and keeps `MemoryChunk` (a known gap)
 - `EntityRole`: `Target` (responds to memory requests)
 - `EntityPciId`: Contains VendorId/DeviceId from device
 - `Links.ConnectedPorts`: Switch port the device connects to (if switch-attached)
@@ -616,7 +619,13 @@ Fabric Endpoints represent entities that participate in CXL communication. There
 
 **Initiator Endpoints (Hosts)**
 - Represent host systems that issue CXL.mem requests
-- `EntityType`: `Processor`
+- `EntityType`: `RootComplex`, with `EntityLink` to the host's
+  `/redfish/v1/Systems/{host}`: Endpoint_v1 says the EntityLink of a
+  RootComplex "should be of type `ComputerSystem`". What the FM knows of a
+  host is the CXL root port its Virtual Hierarchy starts at, "Everything
+  from the CXL RP down" (CXL r4.0 Table 1-1, VH). DMTF names no EntityType
+  for a CXL host: this is cxl-fmd's choice. Not `Processor`: cxl-fmd serves
+  no Processor resource
 - `EntityRole`: `Initiator` (issues memory requests)
 - `Links.Zones`: VCS the host connects through (if switch-attached)
 
@@ -626,8 +635,9 @@ Example host endpoint:
     "@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/cxl_switch_0_host0",
     "EndpointProtocol": "CXL",
     "ConnectedEntities": [{
-        "EntityType": "Processor",
-        "EntityRole": "Initiator"
+        "EntityType": "RootComplex",
+        "EntityRole": "Initiator",
+        "EntityLink": {"@odata.id": "/redfish/v1/Systems/cxl_switch_0_host0"}
     }],
     "Links": {
         "Zones": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Zones/cxl_switch_0_vcs0"}]
@@ -1007,9 +1017,9 @@ In summary:
    binding made before cxl-fmd started, does not unbind (see "Binding").
 4. No Connection is made for a vPPB bound by someone other than cxl-fmd.
    The Connections cxl-fmd serves for each device have no
-   `InitiatorEndpoints`, whatever the device's vPPBs are bound to. A device
-   `Endpoint` has `EntityType` `MemoryChunk` and a host `Endpoint` has
-   `Processor`, and an MLD is one `Endpoint`, not one per LD (see
+   `InitiatorEndpoints`, whatever the device's vPPBs are bound to. The
+   `Endpoint` of an MLD or a Multi-Headed device has `EntityType`
+   `MemoryChunk`, and an MLD is one `Endpoint`, not one per LD (see
    "Endpoints" and "Binding").
 5. The security actions are served on `Memory`, not on
    `CXLLogicalDevice`, where DSP0288 1.3.0 and 1.4.0 put them (see
