@@ -577,3 +577,25 @@ def test_doubtful_topology_is_accepted(cxl_fmd_executable, tmp_path, base, chang
     rc, output = check(cxl_fmd_executable, path)
     assert rc == 0, f"refused a topology with {change.__name__}\n{output}"
     assert "doubtful topology: " in output and message in output, output
+
+
+# ---------------------------------------------------------------------------
+# Normalised on load: a warning, and the value the specification gives
+# ---------------------------------------------------------------------------
+
+def test_bound_ld_id_of_a_whole_port_is_ffh(cxl_fmd_executable, tmp_path):
+    """Bound LD ID is "Valid only when vPPB[Start vPPB] Binding Status is
+    03h; otherwise, the value is FFh" (Table 7-34). A bound_ld_id on a vPPB
+    that is not bound_ld is warned of and loaded as 255, so the topology
+    is still valid."""
+    t = json.loads((ROOT / "mock" / "multi-host-vcs.json").read_text())
+    entry = next(v for v in t["switches"][0]["vcs"][0]["vppbs"]
+                 if v["binding_status"] == "bound_physical_port" and v["vppb_id"])
+    entry["bound_ld_id"] = 3
+    path = tmp_path / "changed.json"
+    path.write_text(json.dumps(t))
+
+    rc, output = check(cxl_fmd_executable, path)
+    assert rc == 0, output
+    assert (f"vPPB {entry['vppb_id']} is bound_physical_port with bound_ld_id 3"
+            in output), output

@@ -4643,6 +4643,175 @@ static void test_validate_usp_id(void)
 	report("USP ID of a Downstream ES VCS and of a disabled VCS", before);
 }
 
+/*
+ * Bound LD ID: "Valid only when vPPB[Start vPPB] Binding Status is 03h;
+ * otherwise, the value is FFh" (Table 7-34). A switch that puts something
+ * else there for another status is read as FFh, and so are the vPPBs the
+ * mock binds and unbinds; the validator refuses any other.
+ */
+static void test_bound_ld_sentinel(void)
+{
+	static const uint8_t port2_junk[3] = { 0x02, 2, 0x07 };
+	static const uint8_t unbound_zero[3] = { 0x00, 0x00, 0x00 };
+	static const uint8_t busy[3] = { 0x01, 4, 0x00 };
+	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	struct fmd_switch *sw, *msw;
+	struct fmd_vcs *vcs;
+	char id[FMD_MAX_ID_LEN];
+	int before = failures, rc, invalid;
+
+	answer_identify(ep, 0x5100, 0x00);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	answer_vcs(ep, 0, 0, port2_junk, unbound_zero);
+	answer_vcs(ep, 2, 1, busy, ld1);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x5100);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	CHECK(sw, "no switch %s", id);
+	if (!sw)
+		goto out;
+
+	vcs = fmd_switch_find_vcs(sw, 0);
+	CHECK(vcs && vcs->num_vppbs == 3, "VCS 0");
+	if (vcs) {
+		CHECK(vcs->vppbs[0].bound_ld_id == 0xff,
+		      "USP vPPB (02h): Bound LD ID %d", vcs->vppbs[0].bound_ld_id);
+		CHECK(vcs->vppbs[1].binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT &&
+		      vcs->vppbs[1].bound_port_id == 2 &&
+		      vcs->vppbs[1].bound_ld_id == 0xff,
+		      "02h with 07h in Bound LD ID: port %d LD %d",
+		      vcs->vppbs[1].bound_port_id, vcs->vppbs[1].bound_ld_id);
+		CHECK(vcs->vppbs[2].binding_status == FMD_VPPB_UNBOUND &&
+		      vcs->vppbs[2].bound_ld_id == 0xff,
+		      "00h with 00h in Bound LD ID: LD %d",
+		      vcs->vppbs[2].bound_ld_id);
+	}
+	vcs = fmd_switch_find_vcs(sw, 2);
+	CHECK(vcs && vcs->num_vppbs == 3, "VCS 2");
+	if (vcs) {
+		/* Bound Port ID is valid only for 02h and 03h */
+		CHECK(vcs->vppbs[1].binding_status == FMD_VPPB_BUSY &&
+		      vcs->vppbs[1].bound_port_id == 0 &&
+		      vcs->vppbs[1].bound_ld_id == 0xff,
+		      "01h: port %d LD %d", vcs->vppbs[1].bound_port_id,
+		      vcs->vppbs[1].bound_ld_id);
+		CHECK(vcs->vppbs[2].binding_status == FMD_VPPB_BOUND_LD &&
+		      vcs->vppbs[2].bound_port_id == 5 &&
+		      vcs->vppbs[2].bound_ld_id == 1,
+		      "03h: port %d LD %d", vcs->vppbs[2].bound_port_id,
+		      vcs->vppbs[2].bound_ld_id);
+	}
+
+	/* a mock switch: what it binds as a whole and unbinds has LD FFh */
+	fmd_ctx_free(ctx);
+	ctx = new_ctx();
+	msw = fmd_switch_create("sw_sentinel");
+	if (!msw) {
+		printf("FAIL  cannot create a switch\n");
+		exit(1);
+	}
+	fmd_topology_add(&ctx->topology, &msw->base, NULL);
+	add_port(ctx, msw, 0, FMD_PORT_USP);
+	add_port(ctx, msw, 4, FMD_PORT_DSP);
+	msw->num_vcs = 1;
+	msw->vcs[0].vcs_id = 0;
+	msw->vcs[0].state = 0x01;
+	msw->vcs[0].upstream_port_id = 0;
+	msw->vcs[0].num_vppbs = 2;
+	msw->vcs[0].vppbs[0] = (struct fmd_vppb){
+		.vppb_id = 0, .binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 0, .bound_ld_id = 0xff };
+	msw->vcs[0].vppbs[1] = (struct fmd_vppb){
+		.vppb_id = 1, .binding_status = FMD_VPPB_UNBOUND,
+		.bound_ld_id = 0xff };
+
+	rc = fmd_vppb_bind(ctx, msw, 0, 1, 4, 0xffff);
+	CHECK(rc == 0 && msw->vcs[0].vppbs[1].binding_status ==
+	      FMD_VPPB_BOUND_PHYSICAL_PORT &&
+	      msw->vcs[0].vppbs[1].bound_ld_id == 0xff,
+	      "mock bind of a whole port: %d, LD %d", rc,
+	      msw->vcs[0].vppbs[1].bound_ld_id);
+	rc = fmd_vppb_unbind(ctx, msw, 0, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
+	CHECK(rc == 0 && msw->vcs[0].vppbs[1].binding_status == FMD_VPPB_UNBOUND &&
+	      msw->vcs[0].vppbs[1].bound_ld_id == 0xff,
+	      "mock unbind: %d, LD %d", rc, msw->vcs[0].vppbs[1].bound_ld_id);
+
+	/* in the background, too */
+	msw->mock_bind_time_ms = 1;
+	rc = fmd_vppb_bind(ctx, msw, 0, 1, 4, 0xffff);
+	CHECK(rc == FMD_OP_STARTED &&
+	      msw->vcs[0].vppbs[1].mock_next_ld_id == 0xff,
+	      "mock background bind: %d, next LD %d", rc,
+	      msw->vcs[0].vppbs[1].mock_next_ld_id);
+	msw->vcs[0].vppbs[1] = (struct fmd_vppb){
+		.vppb_id = 1, .binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 4, .bound_ld_id = 0xff };
+	rc = fmd_vppb_unbind(ctx, msw, 0, 1, FMD_UNBIND_MANAGED_HOT_REMOVE);
+	CHECK(rc == FMD_OP_STARTED &&
+	      msw->vcs[0].vppbs[1].mock_next_ld_id == 0xff,
+	      "mock background unbind: %d, next LD %d", rc,
+	      msw->vcs[0].vppbs[1].mock_next_ld_id);
+	msw->vcs[0].vppbs[1] = (struct fmd_vppb){
+		.vppb_id = 1, .binding_status = FMD_VPPB_BOUND_PHYSICAL_PORT,
+		.bound_port_id = 4, .bound_ld_id = 0xff };
+
+	/* the validator: any other Bound LD ID on a 02h vPPB is refused */
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 0, "%d rule(s) broken with LD FFh", invalid);
+	msw->vcs[0].vppbs[1].bound_ld_id = 3;
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 1, "%d rule(s) broken by Bound LD ID 3 on 02h", invalid);
+	msw->vcs[0].vppbs[1].binding_status = FMD_VPPB_UNBOUND;
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 1, "%d rule(s) broken by Bound LD ID 3 on 00h", invalid);
+out:
+	fmd_ctx_free(ctx);
+	report("Bound LD ID is FFh unless Bound LD", before);
+}
+
+/*
+ * Bound PID: "For PBR Switches when Binding Status is 04h: Bits[11:0]:
+ * vPPB[Start vPPB] Bound PID ... Bits[15:12]: Reserved." (Table 7-34). The
+ * two bytes at 5h are 34h F2h: PID 234h, and no port or LD.
+ */
+static void test_bound_pid_decode(void)
+{
+	static const uint8_t pid[3] = { 0x04, 0x34, 0xf2 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	char id[FMD_MAX_ID_LEN];
+	int before = failures;
+
+	answer_identify(ep, 0x5101, 0x00);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	answer_vcs(ep, 0, 0, pid, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x5101);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	vcs = sw ? fmd_switch_find_vcs(sw, 0) : NULL;
+	CHECK(vcs && vcs->num_vppbs == 3, "no VCS 0");
+	if (vcs) {
+		struct fmd_vppb *vppb = &vcs->vppbs[1];
+
+		CHECK(vppb->binding_status == FMD_VPPB_BOUND_PBR,
+		      "status %d", vppb->binding_status);
+		CHECK(vppb->bound_pbr_id == 0x234, "Bound PID %03xh",
+		      vppb->bound_pbr_id);
+		CHECK(vppb->bound_port_id == 0 && vppb->bound_ld_id == 0xff,
+		      "a Bound PID read as port %d LD %d", vppb->bound_port_id,
+		      vppb->bound_ld_id);
+	}
+	fmd_ctx_free(ctx);
+	report("Bound PID of a vPPB", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -4712,6 +4881,8 @@ int main(void)
 	test_mhd_past_limits(false);
 	test_not_ready();
 	test_validate_usp_id();
+	test_bound_ld_sentinel();
+	test_bound_pid_decode();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

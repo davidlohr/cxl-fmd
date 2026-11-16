@@ -887,6 +887,36 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 }
 
 /*
+ * The two bytes at 5h of a vPPB entry of Get Virtual CXL Switch Info, Table
+ * 7-34, read as its Binding Status says:
+ *  - 02h or 03h: "Bits[7:0]: vPPB[Start vPPB] Bound Port ID: Physical port
+ *    number of the bound port. Valid only when Binding Status is 02h or
+ *    03h."
+ *  - "Bits[15:8]: vPPB[Start vPPB] Bound LD ID: LD-ID of the LD that is
+ *    bound to the port from the MLD on an associated physical port. Valid
+ *    only when vPPB[Start vPPB] Binding Status is 03h; otherwise, the value
+ *    is FFh." It is kept as FFh for any other status, whatever the switch
+ *    put there.
+ *  - 04h, on a PBR switch: "Bits[11:0]: vPPB[Start vPPB] Bound PID: PID of
+ *    the bound vPPB ... Bits[15:12]: Reserved." The bytes are no port and no
+ *    LD then.
+ * A Bound Port ID that is not valid is kept as 0 (cxl-fmd's choice).
+ */
+static void decode_vppb_binding(struct fmd_vppb *vppb,
+				const struct cxlmi_cmd_fmapi_vppb_info *src)
+{
+	bool port_valid = src->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
+			  src->binding_status == FMD_VPPB_BOUND_LD;
+
+	vppb->bound_port_id = port_valid ? src->bound_port_id : 0;
+	vppb->bound_ld_id = src->binding_status == FMD_VPPB_BOUND_LD ?
+			    src->bound_ld_id : FMD_VPPB_NO_LD;
+	vppb->bound_pbr_id = src->binding_status == FMD_VPPB_BOUND_PBR ?
+			     (uint16_t)(src->bound_port_id |
+					(src->bound_ld_id & 0x0f) << 8) : 0;
+}
+
+/*
  * Get Virtual CXL Switch Info (5200h) for one VCS, CXL r4.0 Tables 7-32 to
  * 7-34. Returns 0 with @vcs filled in, -ENOENT if the switch says the VCS ID
  * is invalid, -EIO if it could not be asked.
@@ -959,8 +989,7 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 
 			vppb->vppb_id = got + i;
 			vppb->binding_status = src->binding_status;
-			vppb->bound_port_id = src->bound_port_id;
-			vppb->bound_ld_id = src->bound_ld_id;
+			decode_vppb_binding(vppb, src);
 		}
 		got += count;
 		if (count == 0)
@@ -2111,13 +2140,13 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			vppb->mock_next_status = (ld_id != 0xFFFF) ?
 				FMD_VPPB_BOUND_LD : FMD_VPPB_BOUND_PHYSICAL_PORT;
 			vppb->mock_next_port_id = port_id;
-			vppb->mock_next_ld_id = (ld_id != 0xFFFF) ? ld_id : 0;
+			vppb->mock_next_ld_id = (ld_id != 0xFFFF) ? ld_id : FMD_VPPB_NO_LD;
 			vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
 			return FMD_OP_STARTED;
 		}
 
 		vppb->bound_port_id = port_id;
-		vppb->bound_ld_id = (ld_id != 0xFFFF) ? ld_id : 0;
+		vppb->bound_ld_id = (ld_id != 0xFFFF) ? ld_id : FMD_VPPB_NO_LD;
 
 		if (ld_id != 0xFFFF)
 			vppb->binding_status = FMD_VPPB_BOUND_LD;
@@ -2246,14 +2275,14 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			vppb->binding_status = FMD_VPPB_BUSY;
 			vppb->mock_next_status = FMD_VPPB_UNBOUND;
 			vppb->mock_next_port_id = 0;
-			vppb->mock_next_ld_id = 0;
+			vppb->mock_next_ld_id = FMD_VPPB_NO_LD;
 			vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
 			return FMD_OP_STARTED;
 		}
 
 		vppb->binding_status = FMD_VPPB_UNBOUND;
 		vppb->bound_port_id = 0;
-		vppb->bound_ld_id = 0;
+		vppb->bound_ld_id = FMD_VPPB_NO_LD;
 		vppb->bound_pbr_id = 0;
 		vppb->port = NULL;
 		vppb->ld = NULL;

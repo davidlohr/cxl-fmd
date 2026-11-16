@@ -688,6 +688,19 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 						vppb->vppb_id);
 			}
 
+			/*
+			 * Bound LD ID: "Valid only when vPPB[Start vPPB]
+			 * Binding Status is 03h; otherwise, the value is FFh."
+			 * Discovery and the mock loader both store FFh, so
+			 * this is cxl-fmd's own state found inconsistent.
+			 */
+			if (vppb->binding_status != FMD_VPPB_BOUND_LD &&
+			    vppb->bound_ld_id != FMD_VPPB_NO_LD)
+				invalid(v, vcs_rule, "%s: vPPB %d of VCS %d has Binding "
+					"Status %d and Bound LD ID %d, not FFh",
+					sw->base.id, vppb->vppb_id, vcs->vcs_id,
+					vppb->binding_status, vppb->bound_ld_id);
+
 			if (vppb->binding_status != FMD_VPPB_BOUND_PHYSICAL_PORT &&
 			    vppb->binding_status != FMD_VPPB_BOUND_LD)
 				continue;

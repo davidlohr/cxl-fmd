@@ -784,7 +784,7 @@ Virtual PCI-to-PCI Bridges (vPPBs) bind physical ports/LDs to a VCS.
 | `vppb_id` | integer | array index | vPPB identifier (0 = USP, 1+ = DSP) |
 | `binding_status` | string | "unbound" | Binding status (see below) |
 | `bound_port_id` | integer | - | Physical port number being bound |
-| `bound_ld_id` | integer | - | Logical device ID for MLD bindings |
+| `bound_ld_id` | integer | 255 | LD-ID for `bound_ld`. Bound LD ID is "Valid only when vPPB[Start vPPB] Binding Status is 03h; otherwise, the value is FFh" (Table 7-34): any other value on a vPPB that is not `bound_ld` is warned of and loaded as 255 |
 | `bound_pbr_id` | integer | - | PBR route ID for PBR bindings |
 
 #### Binding Status Values

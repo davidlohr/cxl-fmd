@@ -1812,7 +1812,24 @@ static int parse_vcs_config(struct fmd_ctx *ctx, struct fmd_switch *sw,
 				vppb->binding_status = parse_binding_status(status);
 
 				vppb->bound_port_id = (uint8_t)json_int_or(jvppb, "bound_port_id", 0);
-				vppb->bound_ld_id = (uint8_t)json_int_or(jvppb, "bound_ld_id", 0);
+				/*
+				 * Bound LD ID is FFh unless the vPPB is bound
+				 * to an LD (Table 7-34): an absent one is FFh,
+				 * and any other on a vPPB that is not bound_ld
+				 * is warned of and made FFh.
+				 */
+				vppb->bound_ld_id = (uint8_t)json_int_or(jvppb, "bound_ld_id",
+									 FMD_VPPB_NO_LD);
+				if (vppb->binding_status != FMD_VPPB_BOUND_LD &&
+				    vppb->bound_ld_id != FMD_VPPB_NO_LD) {
+					fmd_warn(ctx, "mock topology: %s VCS %d vPPB %d is "
+						 "%s with bound_ld_id %d: Bound LD ID is "
+						 "FFh unless the vPPB is bound_ld (Table "
+						 "7-34), taken as 255", sw->base.id,
+						 vcs->vcs_id, vppb->vppb_id, status,
+						 vppb->bound_ld_id);
+					vppb->bound_ld_id = FMD_VPPB_NO_LD;
+				}
 				vppb->bound_pbr_id = (uint16_t)json_int_or(jvppb, "bound_pbr_id", 0);
 
 				vcs->num_vppbs++;
@@ -2440,7 +2457,7 @@ int fmd_mock_unplug_next(struct fmd_ctx *ctx)
 					continue;
 				vppb->binding_status = FMD_VPPB_UNBOUND;
 				vppb->bound_port_id = 0;
-				vppb->bound_ld_id = 0;
+				vppb->bound_ld_id = FMD_VPPB_NO_LD;
 				vppb->port = NULL;
 				vppb->ld = NULL;
 			}

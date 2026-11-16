@@ -396,6 +396,13 @@ enum fmd_vppb_binding_status {
 };
 
 /*
+ * Bound LD ID of a vPPB whose Binding Status is not 03h: "Valid only when
+ * vPPB[Start vPPB] Binding Status is 03h; otherwise, the value is FFh"
+ * (CXL r4.0 Table 7-34).
+ */
+#define FMD_VPPB_NO_LD   0xFF
+
+/*
  * vPPB Unbind Options (CXL r4.0 Section 7.6.7.2.3)
  */
 enum fmd_unbind_option {
@@ -417,7 +424,7 @@ struct fmd_vppb {
 
 	/* Binding target (interpretation depends on binding_status) */
 	uint8_t bound_port_id;       /* Physical port number */
-	uint8_t bound_ld_id;         /* LD ID within MLD (if BoundLD) */
+	uint8_t bound_ld_id;         /* LD ID within MLD if BoundLD, else FMD_VPPB_NO_LD */
 	uint16_t bound_pbr_id;       /* PBR ID (if BoundPID) */
 
 	/* Resolved references to physical components */
