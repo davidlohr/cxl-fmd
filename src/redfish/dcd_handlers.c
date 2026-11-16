@@ -394,8 +394,15 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 		"ExtentSizeMiB", (json_int_t)(ext->len / FMD_MIB),
 		"Tag", tag_str,
 		"SequenceNumber", (json_int_t)ext->shared_seq,
+		/*
+		 * Warning: the extent is in no region of its host, or is what
+		 * the host's last complete 5603h listed, the read after it
+		 * having failed.
+		 */
 		"Status", rf_status(ext->pending ? "Starting" : "Enabled",
-				    ext->region_id == FMD_DC_REGION_NONE ? "Warning" : "OK"));
+				    ext->region_id == FMD_DC_REGION_NONE ||
+				    fmd_dc_host_sync(dev, ext->host_id) == FMD_DC_SYNC_STALE ?
+				    "Warning" : "OK"));
 
 	/*
 	 * FMReferencedExtent: Flags Bit[0] "FM Holds Reference" of the tag's

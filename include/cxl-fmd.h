@@ -674,6 +674,11 @@ struct fmd_ld {
 	uint32_t dc_extents_available;
 	uint32_t dc_tags_supported;
 	uint32_t dc_tags_available;
+
+	/* The host's last Get DC Region Extent Lists (5603h) read, DCD only */
+	uint32_t dc_ext_gen;                 /* Extent List Generation Number */
+	uint8_t  dc_sync;                    /* enum fmd_dc_sync */
+	int      dc_sync_err;                /* why it is FMD_DC_SYNC_STALE */
 };
 
 
@@ -887,6 +892,17 @@ struct fmd_mem_chunk {
 #define FMD_DC_REGION_READ_ONLY     (1 << 6)
 
 /*
+ * Whether a host's extents are those of its last Get DC Region Extent
+ * Lists (5603h): never read, read, or kept from an earlier read after the
+ * last one failed.
+ */
+enum fmd_dc_sync {
+	FMD_DC_SYNC_NEVER = 0,
+	FMD_DC_SYNC_OK,
+	FMD_DC_SYNC_STALE,
+};
+
+/*
  * One Dynamic Capacity Tag Information entry of Dynamic Capacity List Tags
  * (5608h, Table 7-78): the bitmaps are kept as the device sent them, bit n
  * of byte n / 8 for LD n.
@@ -935,6 +951,11 @@ struct fmd_dcd_info {
 	uint32_t extents_available;
 	uint32_t tags_supported;
 	uint32_t tags_available;
+
+	/* Host 0's 5603h state for SLDs (MLD/MHD keep it on fmd_ld) */
+	uint32_t dc_ext_gen;
+	uint8_t  dc_sync;                   /* enum fmd_dc_sync */
+	int      dc_sync_err;
 
 	/* Dynamic Capacity List Tags (5608h); the mock builds its own */
 	struct fmd_dc_tags tags;
@@ -1908,6 +1929,9 @@ const struct fmd_dc_tag *fmd_dc_tag_find(struct fmd_component *dev,
 /* Mock only: hold, or drop, an FM reference on a tag */
 void fmd_dc_mock_ref_set(struct fmd_dcd_info *dcd, const uint8_t tag[FMD_DC_TAG_LEN],
 			 bool on);
+
+/* Whether a host's extents are those of its last 5603h (enum fmd_dc_sync) */
+enum fmd_dc_sync fmd_dc_host_sync(struct fmd_component *dev, int host_id);
 
 /* Component (SLD or LD) that owns the DC regions of a host */
 struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_id);

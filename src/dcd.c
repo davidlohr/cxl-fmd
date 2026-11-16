@@ -1382,13 +1382,70 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 	return 0;
 }
 
+/* A host's 5603h state: on the SLD's dcd for host 0, on the LD otherwise */
+static void dc_host_sync_ptrs(struct fmd_component *dev, int host_id, uint32_t **gen,
+			      uint8_t **sync, int **err)
+{
+	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	*gen = NULL;
+	if (owner && owner->type == FMD_COMPONENT_LD) {
+		struct fmd_ld *ld = fmd_to_ld(owner);
+
+		*gen = &ld->dc_ext_gen;
+		*sync = &ld->dc_sync;
+		*err = &ld->dc_sync_err;
+	} else if (owner && dcd) {
+		*gen = &dcd->dc_ext_gen;
+		*sync = &dcd->dc_sync;
+		*err = &dcd->dc_sync_err;
+	}
+}
+
+enum fmd_dc_sync fmd_dc_host_sync(struct fmd_component *dev, int host_id)
+{
+	uint32_t *gen;
+	uint8_t *sync;
+	int *err;
+
+	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err);
+	return gen ? (enum fmd_dc_sync)*sync : FMD_DC_SYNC_NEVER;
+}
+
+/* Record how a host's 5603h read went; @rc 0 is a read that completed */
+static void dc_host_synced(struct fmd_component *dev, int host_id, int rc,
+			   uint32_t generation)
+{
+	uint32_t *gen;
+	uint8_t *sync;
+	int *err;
+
+	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err);
+	if (!gen)
+		return;
+	if (rc) {
+		*sync = FMD_DC_SYNC_STALE;
+		*err = rc;
+	} else {
+		*gen = generation;
+		*sync = FMD_DC_SYNC_OK;
+		*err = 0;
+	}
+}
+
 /*
  * Bring the host's extents in line with 5603h, the "Extent list for the
- * specified host" (Table 7-71): new DPAs are added, the host's extents the
- * device no longer lists are dropped, and the rest are updated in place so
- * their identity, pending state and FM reference survive the refresh. The
- * extents of other hosts are not touched: "The DPA ranges exposed by the
- * device to each host are independent of one another" (Section 9.13.3).
+ * specified host" (Table 7-71). The list is read a page at a time, and from
+ * Starting Extent Index 0 again when the Extent List Generation Number, "a
+ * device-generated value that is used to indicate that the list has
+ * changed", changes on a later page. Only a list read to its end is used:
+ * new DPAs are added, the host's extents the device no longer lists are
+ * dropped, and the rest are updated in place so their identity survives the
+ * refresh. A read that fails leaves the host's extents as they were, marked
+ * stale. The extents of other hosts are not touched: "The DPA ranges
+ * exposed by the device to each host are independent of one another"
+ * (Section 9.13.3).
  */
 static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 			      struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
@@ -1397,8 +1454,8 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 	struct cxlmi_cmd_fmapi_get_dc_region_ext_list_req req;
 	struct cxlmi_cmd_fmapi_get_dc_region_ext_list_rsp *rsp;
 	struct fmd_component *child, *next;
-	uint64_t *seen = NULL;
-	uint32_t n_seen = 0, cap_seen = 0;
+	typeof(rsp->extents[0]) *list = NULL;
+	uint32_t n = 0, cap = 0;
 	uint32_t start = 0, generation = 0;
 	int retries = 0;
 	int rc = 0;
@@ -1429,58 +1486,61 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 		} else if (rsp->list_generation_num != generation) {
 			/* List changed underneath us: start over */
 			if (++retries > DC_LIST_RETRIES) {
+				fmd_warn(ctx, "%s: host %d DC extent list kept changing "
+					 "as it was read", dev->id, host_id);
 				rc = -EAGAIN;
 				goto out;
 			}
-			n_seen = 0;
+			n = 0;
 			start = 0;
 			continue;
 		}
 
-		if (n_seen + rsp->extents_returned > cap_seen) {
-			uint32_t ncap = 2 * (n_seen + rsp->extents_returned);
-			uint64_t *tmp = realloc(seen, ncap * sizeof(*seen));
+		if (n + rsp->extents_returned > cap) {
+			uint32_t ncap = 2 * (n + rsp->extents_returned);
+			typeof(list) tmp = realloc(list, ncap * sizeof(*list));
 
 			if (!tmp) {
 				rc = -ENOMEM;
 				goto out;
 			}
-			seen = tmp;
-			cap_seen = ncap;
+			list = tmp;
+			cap = ncap;
 		}
-
-		for (uint32_t i = 0; i < rsp->extents_returned; i++) {
-			uint64_t dpa = rsp->extents[i].start_dpa;
-			struct fmd_dc_extent *ext = fmd_dc_find_extent(dev, host_id, dpa);
-			struct fmd_dc_region *region = region_for_dpa(dev, host_id, dpa);
-			uint8_t rid = region ? region->region_id : FMD_DC_REGION_NONE;
-
-			if (!region)
-				fmd_warn(ctx, "%s: host %d extent at %#" PRIx64
-					 " is in none of its regions", dev->id,
-					 host_id, dpa);
-			if (!ext) {
-				ext = fmd_dc_extent_add(ctx, dev, host_id, dpa,
-							rsp->extents[i].len,
-							rsp->extents[i].tag,
-							rsp->extents[i].shared_seq, rid);
-				if (!ext) {
-					rc = -ENOMEM;
-					goto out;
-				}
-			} else {
-				ext->len = rsp->extents[i].len;
-				memcpy(ext->tag, rsp->extents[i].tag, FMD_DC_TAG_LEN);
-				ext->shared_seq = rsp->extents[i].shared_seq;
-				/* the regions were read again just before */
-				ext->region_id = rid;
-			}
-			seen[n_seen++] = dpa;
-		}
+		if (rsp->extents_returned)
+			memcpy(&list[n], rsp->extents,
+			       rsp->extents_returned * sizeof(*list));
+		n += rsp->extents_returned;
 
 		start += rsp->extents_returned;
 		if (rsp->extents_returned == 0 || start >= rsp->total_extents)
 			break;
+	}
+
+	for (uint32_t i = 0; i < n; i++) {
+		uint64_t dpa = list[i].start_dpa;
+		struct fmd_dc_extent *ext = fmd_dc_find_extent(dev, host_id, dpa);
+		struct fmd_dc_region *region = region_for_dpa(dev, host_id, dpa);
+		uint8_t rid = region ? region->region_id : FMD_DC_REGION_NONE;
+
+		if (!region)
+			fmd_warn(ctx, "%s: host %d extent at %#" PRIx64
+				 " is in none of its regions", dev->id,
+				 host_id, dpa);
+		if (!ext) {
+			ext = fmd_dc_extent_add(ctx, dev, host_id, dpa, list[i].len,
+						list[i].tag, list[i].shared_seq, rid);
+			if (!ext) {
+				rc = -ENOMEM;
+				goto out;
+			}
+		} else {
+			ext->len = list[i].len;
+			memcpy(ext->tag, list[i].tag, FMD_DC_TAG_LEN);
+			ext->shared_seq = list[i].shared_seq;
+			/* the regions were read again just before */
+			ext->region_id = rid;
+		}
 	}
 
 	/* Drop the host's extents the device no longer lists for it */
@@ -1494,14 +1554,15 @@ static int hw_refresh_extents(struct fmd_ctx *ctx, struct fmd_component *dev,
 		ext = fmd_to_dc_extent(child);
 		if (ext->host_id != host_id)
 			continue;
-		for (i = 0; i < n_seen && seen[i] != ext->start_dpa; i++)
+		for (i = 0; i < n && list[i].start_dpa != ext->start_dpa; i++)
 			;
-		if (i == n_seen)
+		if (i == n)
 			fmd_topology_remove(&ctx->topology, &ext->base);
 	}
 
 out:
-	free(seen);
+	dc_host_synced(dev, host_id, rc, generation);
+	free(list);
 	free(rsp);
 	return rc;
 }
@@ -1689,16 +1750,29 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 		n = dc_hosts(dev, hosts, FMD_DC_MAX_HOST_ID + 1);
 	}
 
+	/*
+	 * A host whose regions or extents could not be read keeps what it
+	 * had, marked stale, and the other hosts and the tag list are still
+	 * read: the first failure is returned (cxl-fmd's choice).
+	 */
 	for (int i = 0; i < n; i++) {
-		rc = hw_refresh_regions(ctx, dev, ep, ti, hosts[i]);
-		if (rc)
-			return rc;
-		rc = hw_refresh_extents(ctx, dev, ep, ti, hosts[i]);
-		if (rc)
-			return rc;
+		int r = hw_refresh_regions(ctx, dev, ep, ti, hosts[i]);
+
+		if (r)
+			dc_host_synced(dev, hosts[i], r, 0);
+		else
+			r = hw_refresh_extents(ctx, dev, ep, ti, hosts[i]);
+		if (r && !rc)
+			rc = r;
 	}
 
-	return hw_refresh_tags(ctx, dev, ep, ti);
+	{
+		int r = hw_refresh_tags(ctx, dev, ep, ti);
+
+		if (r && !rc)
+			rc = r;
+	}
+	return rc;
 }
 
 static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)

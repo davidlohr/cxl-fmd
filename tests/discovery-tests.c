@@ -2783,6 +2783,81 @@ out:
 }
 
 /*
+ * A host's 5603h that does not complete leaves its extents as the last one
+ * that did, marked stale, and the other hosts and 5608h are still read.
+ * Host 0's list changes on page 2 of every read, past the retries: its
+ * extent at 1 GiB is kept, stale, with Status.Health Warning; host 1 is
+ * refreshed, 5608h is sent last, and the refresh returns host 0's -EAGAIN.
+ */
+static void test_dc_list_stale_keeps_old(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xde, 2);
+	struct dc_ext old = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct dc_ext e[2] = {
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag_b, 0 },
+		{ (1ULL << 30) + (1ULL << 29), 1ULL << 28, dc_tag_b, 1 },
+	};
+	struct fmd_component *child;
+	struct fmd_ld *ld0;
+	char id[FMD_MAX_ID_LEN];
+	json_t *ext;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+	device_id(id, sizeof(id), 0xde);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+
+	rc = dc_refresh_host(ctx, ep, dev, 0, 1ULL << 30, 4, 0x08, &old, 1);
+	CHECK(rc == 0 && ld0 && ld0->dc_sync == FMD_DC_SYNC_OK && ld0->dc_ext_gen == 1,
+	      "host 0's first read: %d, sync %d", rc, ld0 ? ld0->dc_sync : -1);
+
+	/* every host, in the order the refresh takes them */
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+		answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+		if (fmd_to_ld(child)->ld_id == 1) {
+			answer_dc_extents(ep, 7, 0, 1, &e[0], 1);
+			continue;
+		}
+		for (int i = 0; i < 4; i++) {
+			answer_dc_extents(ep, 20 + 2 * i, 0, 2, &e[0], 1);
+			answer_dc_extents(ep, 21 + 2 * i, 1, 2, &e[1], 1);
+		}
+	}
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_refresh(ctx, dev, -1);
+
+	CHECK(rc == -EAGAIN, "the refresh returned %d, not host 0's -EAGAIN", rc);
+	CHECK(last_opcode(ep) == 0x5608, "the last command was %04xh, not 5608h",
+	      last_opcode(ep));
+	CHECK(fmd_dc_find_extent(dev, 0, old.dpa) && !fmd_dc_find_extent(dev, 0, e[0].dpa),
+	      "host 0's extents are not those of its last complete read");
+	CHECK(ld0 && ld0->dc_sync == FMD_DC_SYNC_STALE && ld0->dc_sync_err == -EAGAIN &&
+	      ld0->dc_ext_gen == 1, "host 0: sync %d, error %d, generation %u",
+	      ld0 ? ld0->dc_sync : -1, ld0 ? ld0->dc_sync_err : 0,
+	      ld0 ? ld0->dc_ext_gen : 0);
+	CHECK(fmd_dc_find_extent(dev, 1, e[0].dpa) &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK,
+	      "host 1 was not refreshed after host 0 failed");
+
+	ext = fmd_redfish_dc_memory_extent(ctx, id, id, "ext_0_40000000");
+	CHECK(ext && !strcmp(json_string_value(json_object_get(json_object_get(ext,
+	      "Status"), "Health")) ?: "", "Warning"),
+	      "a stale host's extent is not Health Warning");
+	json_decref(ext);
+	ext = fmd_redfish_dc_memory_extent(ctx, id, id, "ext_1_50000000");
+	CHECK(ext && !strcmp(json_string_value(json_object_get(json_object_get(ext,
+	      "Status"), "Health")) ?: "", "OK"),
+	      "host 1's extent is not Health OK");
+	json_decref(ext);
+out:
+	fmd_ctx_free(ctx);
+	report("a host whose extent list cannot be read", before);
+}
+
+/*
  * A bind in the background, to its end. The switch answers Bind vPPB with
  * Background Command Started; Background Operation Status (0002h, Table
  * 8-217) then says whether it is in progress (Bit[0]), how far it is
@@ -4112,13 +4187,15 @@ out:
 /*
  * A host's Add Capacity Response, cleared, then a Get Event Records that
  * fails: the host is still refreshed, as nothing will name it again. The
- * refresh starts with Get Host DC Region Configuration (5601h).
+ * refresh starts with Get Host DC Region Configuration (5601h); that it
+ * fails does not stop Dynamic Capacity List Tags (5608h).
  */
 static void test_dc_refresh_after_failed_read(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_mld(ctx, 0xe9, 2, 0, 4);
 	uint8_t info[0x54] = { 0 }, page[0x20 + 0x80] = { 0 };
+	unsigned int sent;
 	int before = failures;
 
 	info[0x00] = 2;
@@ -4139,9 +4216,12 @@ static void test_dc_refresh_after_failed_read(void)
 	answer(ep, 0x0100, page, sizeof(page));
 	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
 	answer_rc(ep, 0x0100, CXLMI_RET_INTERNAL);
+	sent = commands_sent(ep);
 	fmd_dcd_poll_events(ctx);
-	CHECK(last_opcode(ep) == 0x5601,
-	      "host 1 was not refreshed: last command %04xh", last_opcode(ep));
+	/* read, clear, read; then 5601h, which fails, and 5608h */
+	CHECK(last_opcode(ep) == 0x5608 && commands_sent(ep) - sent == 5,
+	      "host 1 was not refreshed: last command %04xh, %u commands",
+	      last_opcode(ep), commands_sent(ep) - sent);
 
 	fmd_ctx_free(ctx);
 	report("a DC refresh after a failed read", before);
@@ -4506,6 +4586,7 @@ int main(void)
 	test_dc_tags_generation_restart();
 	test_dc_tags_orphan();
 	test_dc_pending_unlisted();
+	test_dc_list_stale_keeps_old();
 	test_paging_ports();
 	test_paging_lds(false);
 	test_paging_lds(true);
