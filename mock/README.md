@@ -19,6 +19,7 @@ From the simplest to the largest. "Bound" is what the hosts already have;
 | `mld-device.json` | Four MLDs (3, 4, 4 and 16 LDs) and an SLD, no switch | LD inventory, LD allocations, granularity, QoS |
 | `mhd-device.json` | Four Multi-Headed devices, each head to a host of its own | MH-SLD, MH-MLD, heads of mixed presentation, pool LDs mapped to no head |
 | `dcd-device.json` | An SLD and an MLD with dynamic capacity, no switch | DC regions, extents, add and release, tags, a Sharable region |
+| `dcd-shared-perhost.json` | A three-host MLD with dynamic capacity whose hosts see its regions at different DPAs, no switch | Shared capacity at a different DPA on each host, the same DPA on two hosts, capacity only an FM reference keeps, an add no host has answered |
 | `switch-attached.json` | One switch, one host: five SLDs and an MLD, two ports empty | A single VCS |
 | `multi-host-vcs.json` | One switch, two hosts: three SLDs and an MLD, everything bound | Two VCSs sharing an MLD by LD |
 | `fm-boots-first.json` | One switch, two hosts: two SLDs, an MLD, an empty port, a PCIe device; **nothing bound** | Where an orchestrator starts (Section 7.2.1.2) |

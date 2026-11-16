@@ -965,6 +965,13 @@ struct fmd_dcd_info {
 	/* Mock only: the tags the FM holds a reference on (5606h) */
 	uint8_t (*mock_refs)[FMD_DC_TAG_LEN];
 	uint32_t n_mock_refs;
+	/*
+	 * Mock only: the file's "tags" entries, merged into every 5608h list
+	 * the mock builds; their Pending Reference Bitmap bits model adds a
+	 * device's 5603h does not list (cxl-fmd's mock, docs/mock-topology.md)
+	 */
+	struct fmd_dc_tag *mock_tags;
+	uint32_t n_mock_tags;
 };
 
 /*
@@ -1019,6 +1026,7 @@ struct fmd_dc_extent {
 struct fmd_dc_mock_hold {
 	uint8_t  tag[FMD_DC_TAG_LEN];
 	uint8_t  region_id;
+	uint16_t shared_seq;                /* given back by Enable Shared Access */
 	uint64_t phys;
 	uint64_t len;
 	struct fmd_dc_mock_hold *next;

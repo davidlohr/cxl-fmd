@@ -302,6 +302,47 @@ def shared_extent_in_a_region_that_is_not_sharable(t):
     extent["hosts"] = [0, 1]
 
 
+# dcd-shared-perhost.json: region 0 of host 0 at 8192 MB, host 1 at 16384 MB,
+# host 2 at 0 MB; tag ...c1 at offset 0 of it on hosts 0 and 1
+def perhost(t):
+    return t["devices"][0]["dcd"]
+
+
+def per_host_of_no_host(t):
+    perhost(t)["extents"][0]["per_host"][1]["host_id"] = 7
+
+
+def per_host_with_hosts(t):
+    perhost(t)["extents"][0]["hosts"] = [0]
+
+
+def host_base_of_no_host(t):
+    perhost(t)["regions"][2]["host_base_mb"] = {"5": 36864}
+
+
+def per_host_outside_its_hosts_region(t):
+    # 8192 MB is in host 0's region 0, and in none of host 1's
+    perhost(t)["extents"][0]["per_host"][1]["start_mb"] = 8192
+
+
+# Host 2's untagged extent moved to offset 0 of region 0, where tag ...c1 is
+def capacity_of_two_hosts_with_different_tags(t):
+    perhost(t)["extents"][2]["per_host"][0]["start_mb"] = 0
+
+
+# What the FM reference keeps moved onto tag ...c1's capacity
+def fm_held_capacity_on_a_hosts(t):
+    perhost(t)["extents"][3]["start_mb"] = 8192
+
+
+def extent_twice_on_a_host(t):
+    perhost(t)["extents"][1]["per_host"][1]["start_mb"] = 16384
+
+
+def tags_entry_pending_on_no_host(t):
+    perhost(t)["tags"][0]["pending_hosts"] = [3]
+
+
 BROKEN = [
     # (base topology, what to break, part of the message that names the rule)
     ("multi-host-vcs.json", port_bound_twice, "is bound to vPPB"),
@@ -353,6 +394,18 @@ BROKEN = [
     ("dcd-device.json", region_without_a_length, "no region_len_mb"),
     ("switch-dcd.json", shared_extent_in_a_region_that_is_not_sharable,
      "is not Sharable"),
+    ("dcd-shared-perhost.json", per_host_of_no_host, "host_id is not one of the 3 hosts"),
+    ("dcd-shared-perhost.json", per_host_with_hosts, "is given with hosts or host_id"),
+    ("dcd-shared-perhost.json", host_base_of_no_host, "\"5\" is not a host of the region"),
+    ("dcd-shared-perhost.json", per_host_outside_its_hosts_region,
+     "every region of host 1"),
+    ("dcd-shared-perhost.json", capacity_of_two_hosts_with_different_tags,
+     "they have different tags, or none"),
+    ("dcd-shared-perhost.json", fm_held_capacity_on_a_hosts,
+     "they have different tags, or none"),
+    ("dcd-shared-perhost.json", extent_twice_on_a_host, "already has an extent at 16384 MB"),
+    ("dcd-shared-perhost.json", tags_entry_pending_on_no_host,
+     "pending host 3 is not one of the 3 hosts"),
 ]
 
 

@@ -251,6 +251,7 @@ void fmd_dcd_info_free(struct fmd_dcd_info *dcd)
 		free(h);
 	}
 	free(dcd->mock_refs);
+	free(dcd->mock_tags);
 	free(dcd->tags.v);
 	free(dcd);
 }
@@ -440,10 +441,14 @@ struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_componen
  * ============================================================================
  *
  * The mock keeps one record per host extent, as a device's 5603h lists
- * them. Capacity two hosts share is one record on each, with the same Tag
- * and the same offset into the region ("phys", the mock's own notion of
- * where the capacity is). Capacity an FM reference keeps after every host
- * released it is a struct fmd_dc_mock_hold, not an extent.
+ * them. "The DCD controls which DPA range it assigns to each region for
+ * each host" (Section 9.13.3), and the mock lets a region's base differ
+ * from host to host. Where the capacity is, is the mock's own notion: its
+ * offset from the base of the region ("phys"), the same for every host.
+ * Capacity two hosts share is one record on each, with the same Tag and
+ * the same phys, at whatever DPA each host's base puts it. Capacity an FM
+ * reference keeps after every host released it is a struct
+ * fmd_dc_mock_hold, not an extent.
  */
 
 /* Flags of a region, through any host that sees it */
@@ -589,6 +594,24 @@ void fmd_dc_mock_retag(struct fmd_component *dev)
 		if (t)
 			t->fm_ref = true;
 	}
+	/*
+	 * The file's own bitmap bits, e.g. an add 5603h does not list yet.
+	 * Its FM references are in mock_refs: an entry with no bits is no
+	 * tag of its own, and goes when they do.
+	 */
+	for (uint32_t i = 0; i < dcd->n_mock_tags; i++) {
+		struct fmd_dc_tag *t;
+		bool any = false;
+
+		for (int b = 0; b < FMD_DC_LD_BITMAP_BYTES && !any; b++)
+			any = dcd->mock_tags[i].ref[b] || dcd->mock_tags[i].pend[b];
+		if (!any || !(t = mock_tag_row(dcd, dcd->mock_tags[i].tag)))
+			continue;
+		for (int b = 0; b < FMD_DC_LD_BITMAP_BYTES; b++) {
+			t->ref[b] |= dcd->mock_tags[i].ref[b];
+			t->pend[b] |= dcd->mock_tags[i].pend[b];
+		}
+	}
 
 	dcd->tags.validity = 0x03;
 	dcd->tags.known = true;
@@ -612,6 +635,7 @@ static void mock_extent_remove(struct fmd_ctx *ctx, struct fmd_component *dev,
 		if (hold) {
 			memcpy(hold->tag, ext->tag, FMD_DC_TAG_LEN);
 			hold->region_id = ext->region_id;
+			hold->shared_seq = ext->shared_seq;
 			hold->phys = extent_phys(dev, ext);
 			hold->len = ext->len;
 			hold->next = dcd->mock_orphans;
@@ -948,7 +972,7 @@ static int mock_share(struct fmd_ctx *ctx, struct fmd_component *dev, int host_i
 		    memcmp(hold->tag, tag, FMD_DC_TAG_LEN))
 			continue;
 		copy = fmd_dc_extent_add(ctx, dev, host_id, region->base_dpa + hold->phys,
-					 hold->len, tag, 0, region->region_id);
+					 hold->len, tag, hold->shared_seq, region->region_id);
 		if (!copy)
 			return -ENOMEM;
 	}
@@ -966,7 +990,7 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 	struct fmd_dc_region *region;
 	struct fmd_component *child;
 	struct fmd_dc_mock_hold *hold;
-	int matched = 0;
+	int matched = 0, held = 0;
 
 	switch (policy) {
 	case FMD_DC_POLICY_FREE:
@@ -1010,8 +1034,13 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 		 * Section 7.6.7.6.5: Enable Shared Access "shall also fail
 		 * with Invalid Input" "When the specified region is not
 		 * Sharable", "When the tagged capacity is already mapped to
-		 * any Host ID via a non-Sharable region" and "When the same
-		 * tagged capacity is currently accessible by the same LD".
+		 * any Host ID via a non-Sharable region", "When the tagged
+		 * capacity cannot be added to the requested region due to
+		 * device-imposed restrictions" and "When the same tagged
+		 * capacity is currently accessible by the same LD". The
+		 * mock's restriction is that the capacity is added in the
+		 * region number its holders have it in: phys is an offset
+		 * into that region.
 		 */
 		region = fmd_dc_find_region(dev, host_id, region_id);
 		if (!region)
@@ -1026,16 +1055,22 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 			if (!(extent_region_flags(dev, ext) & FMD_DC_REGION_SHAREABLE) ||
 			    ext->host_id == host_id)
 				return -EINVAL;
+			held++;
 			if (ext->region_id == region_id)
 				matched++;
 		}
 		for (hold = dcd->mock_orphans; hold; hold = hold->next) {
-			if (!memcmp(hold->tag, tag, FMD_DC_TAG_LEN) &&
-			    hold->region_id == region_id)
+			if (memcmp(hold->tag, tag, FMD_DC_TAG_LEN))
+				continue;
+			held++;
+			if (hold->region_id == region_id)
 				matched++;
 		}
-		if (!matched)
+		/* no capacity has the tag at all */
+		if (!held)
 			return -ENOENT;
+		if (!matched)
+			return -EINVAL;
 		return mock_share(ctx, dev, host_id, region, tag);
 
 	default:
@@ -1043,36 +1078,54 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 	}
 }
 
+/* Whether @ext is in a Sharable region of its own host and has a tag */
+static bool extent_sharable_tagged(struct fmd_component *dev, struct fmd_dc_extent *ext)
+{
+	return !dc_tag_is_zero(ext->tag) &&
+	       (extent_region_flags(dev, ext) & FMD_DC_REGION_SHAREABLE);
+}
+
 static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
-			   uint8_t policy, uint64_t length,
+			   uint8_t policy, bool forced, uint64_t length,
 			   const uint8_t tag[FMD_DC_TAG_LEN],
 			   struct fmd_dc_extent **extents, int ext_count)
 {
 	struct fmd_component *child, *next;
 	uint64_t remaining = length, held = 0;
+	bool sharable = false;
 
 	switch (policy) {
 	case FMD_DC_REL_POLICY_TAG_BASED:
 		/*
 		 * Release Length bytes carrying Tag. Length "Shall be > 0"
 		 * (Table 7-73), and more than the host holds with the tag is
-		 * Resources Exhausted (Section 7.6.7.6.6). An extent only
-		 * this host holds can be trimmed from the tail; a shared
-		 * extent is released whole, which is the mock's choice.
+		 * Resources Exhausted (Section 7.6.7.6.6). Of sharable
+		 * capacity, the host's access is removed with the whole of
+		 * it: Invalid Input "When the Tag represents sharable
+		 * capacity, and the Extent List covers only a portion of the
+		 * capacity associated with the Tag" (Section 7.6.7.6.6). That
+		 * a Length short of it is that portion is the mock's reading:
+		 * the sentence names the Extent List. Capacity in a region
+		 * that is not Sharable is trimmed from the tail.
 		 */
 		if (length == 0)
 			return -EINVAL;
 		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
 			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
 
-			if (ext->host_id == host_id &&
-			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) == 0)
-				held += ext->len;
+			if (ext->host_id != host_id ||
+			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
+				continue;
+			held += ext->len;
+			if (extent_sharable_tagged(dev, ext))
+				sharable = true;
 		}
 		if (!held)
 			return -ENOENT;
 		if (length > held)
 			return -ENOSPC;
+		if (sharable && length < held)
+			return -EINVAL;
 
 		for (child = dev->first_child; child && remaining; child = next) {
 			struct fmd_dc_extent *ext;
@@ -1085,12 +1138,12 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
 
-			if (remaining < ext->len && !extent_shared(dev, ext)) {
+			if (remaining < ext->len) {
 				ext->len -= remaining;
 				remaining = 0;
 				continue;
 			}
-			remaining = (ext->len >= remaining) ? 0 : remaining - ext->len;
+			remaining -= ext->len;
 
 			mock_extent_remove(ctx, dev, ext);
 		}
@@ -1100,8 +1153,40 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 		if (ext_count <= 0 || !extents)
 			return -EINVAL;
 		for (int i = 0; i < ext_count; i++) {
-			if (!extents[i] || extents[i]->host_id != host_id)
+			struct fmd_dc_extent *ext = extents[i];
+
+			if (!ext || ext->host_id != host_id)
 				return -ENOENT;
+			/*
+			 * Invalid Physical Address "if an extent in the Extent
+			 * List covers a nonexistent or pending ... DPA range
+			 * and the Forced Removal flag is not set" (Section
+			 * 7.6.7.6.6); with it, the device marks the Extent
+			 * Group "Dead", and the extent goes.
+			 */
+			if (ext->pending && !forced)
+				return -EINVAL;
+			/*
+			 * A list that covers only part of the host's capacity
+			 * of a sharable tag is Invalid Input (Section
+			 * 7.6.7.6.6), as it is a malformed list for the host's
+			 * own Release Dynamic Capacity (Section 8.2.10.9.9.4).
+			 */
+			if (!extent_sharable_tagged(dev, ext))
+				continue;
+			fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+				struct fmd_dc_extent *o = fmd_to_dc_extent(child);
+				bool listed = false;
+
+				if (o->host_id != host_id ||
+				    memcmp(o->tag, ext->tag, FMD_DC_TAG_LEN) ||
+				    !extent_sharable_tagged(dev, o))
+					continue;
+				for (int j = 0; j < ext_count && !listed; j++)
+					listed = extents[j] == o;
+				if (!listed)
+					return -EINVAL;
+			}
 		}
 		for (int i = 0; i < ext_count; i++) {
 			mock_extent_remove(ctx, dev, extents[i]);
@@ -2273,8 +2358,8 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 	}
 
 	if (unlikely(!dev_is_hw(dev))) {
-		int rc = mock_dc_release(ctx, dev, host_id, policy, length, tag,
-					 extents, ext_count);
+		int rc = mock_dc_release(ctx, dev, host_id, policy, forced, length,
+					 tag, extents, ext_count);
 
 		fmd_dc_mock_recount(dev);
 		fmd_dc_mock_retag(dev);

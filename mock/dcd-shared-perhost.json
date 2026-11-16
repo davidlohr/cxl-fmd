@@ -1,0 +1,123 @@
+{
+    "version": 1,
+    "id": "dcd_shared_perhost",
+    "description": "A three-host MLD DCD whose hosts see its regions at different DPAs: shared capacity at a different DPA on each host, the same DPA holding different capacity on two hosts, capacity only an FM reference keeps, and an add no host has answered",
+
+    "_comment": [
+        "The DPA ranges a DCD exposes to each host 'are independent of one another' (CXL r4.0 Section 9.13.3).",
+        "host_base_mb is the mock's means to give a host its own Region Base; each extent's per_host start_mb is in that host's DPA space.",
+        "Region 0 (Sharable): host 0 at 8192 MB, host 1 at 16384 MB, host 2 at 0 MB. Region 1 (not Sharable): hosts 0 and 1 at 24576 MB, host 2 at 8192 MB. Region 2 (Sharable): every host at 32768 MB.",
+        "Tag ...c1 is shared by hosts 0 and 1 at offset 0 of region 0, which is DPA 8192 MB on host 0 and 16384 MB on host 1.",
+        "Host 2 has an untagged extent at DPA 8192 MB as well, in its region 1: other capacity at the same DPA.",
+        "Tag ...c2 is shared by hosts 0 and 1, and host 1 has not answered the add (pending).",
+        "Tag ...c3 is held by no host, only by an FM reference (Section 7.6.7.6.7): it is no MemoryExtent.",
+        "Tag ...c4 has been offered to host 2, which has not answered, and is in no host's extent list: only the 5608h list has it."
+    ],
+
+    "devices": [
+        {
+            "id": "cxl_perhost_mld0",
+            "vendor_id": "0x8086",
+            "device_id": "0x0d97",
+            "serial_number": "0x4443445048303030",
+            "component_type": 3,
+            "ld_count": 3,
+            "max_ld_count": 4,
+            "identify_memory_device": {
+                "fw_revision": "3.2.0",
+                "total_capacity_mb": 12288,
+                "volatile_capacity_mb": 12288,
+                "persistent_capacity_mb": 0
+            },
+            "logical_devices": [
+                { "ld_id": 0, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 },
+                { "ld_id": 1, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 },
+                { "ld_id": 2, "memory_size_mb": 4096, "volatile_capacity_mb": 4096 }
+            ],
+            "dcd": {
+                "num_hosts": 3,
+                "add_policies": ["Free", "Contiguous", "Prescriptive"],
+                "release_policies": ["TagBased", "Prescriptive"],
+                "max_extents": 64,
+                "max_tags": 16,
+                "regions": [
+                    {
+                        "region_id": 0,
+                        "base_mb": 8192,
+                        "host_base_mb": { "1": 16384, "2": 0 },
+                        "region_len_mb": 4096,
+                        "block_size_mb": 256,
+                        "shareable": true,
+                        "hw_coherency": true,
+                        "hosts": [0, 1, 2]
+                    },
+                    {
+                        "region_id": 1,
+                        "base_mb": 24576,
+                        "host_base_mb": { "2": 8192 },
+                        "region_len_mb": 4096,
+                        "block_size_mb": 256,
+                        "hosts": [0, 1, 2]
+                    },
+                    {
+                        "region_id": 2,
+                        "base_mb": 32768,
+                        "region_len_mb": 4096,
+                        "block_size_mb": 256,
+                        "supported_block_sizes_mb": [256, 512],
+                        "shareable": true,
+                        "hosts": [0, 1, 2]
+                    }
+                ],
+                "extents": [
+                    {
+                        "_comment": "shared by hosts 0 and 1, each at its own DPA",
+                        "len_mb": 1024,
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000c1",
+                        "shared_seq": 0,
+                        "per_host": [
+                            { "host_id": 0, "start_mb": 8192 },
+                            { "host_id": 1, "start_mb": 16384 }
+                        ]
+                    },
+                    {
+                        "_comment": "shared by hosts 0 and 1; host 1 has not answered",
+                        "len_mb": 512,
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000c2",
+                        "shared_seq": 0,
+                        "per_host": [
+                            { "host_id": 0, "start_mb": 9216 },
+                            { "host_id": 1, "start_mb": 17408, "pending": true }
+                        ]
+                    },
+                    {
+                        "_comment": "host 2's own, untagged, at host 0's DPA of tag ...c1",
+                        "len_mb": 512,
+                        "per_host": [
+                            { "host_id": 2, "start_mb": 8192 }
+                        ]
+                    },
+                    {
+                        "_comment": "no host holds it; the FM reference keeps it, at offset 2048 MB of region 0",
+                        "start_mb": 10240,
+                        "len_mb": 512,
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000c3",
+                        "hosts": [],
+                        "fm_referenced": true
+                    }
+                ],
+                "tags": [
+                    {
+                        "_comment": "an add host 2 has not answered, which 5603h does not list",
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000c4",
+                        "pending_hosts": [2]
+                    },
+                    {
+                        "tag": "6f1a2c3e-0000-4000-8000-0000000000c2",
+                        "fm_referenced": true
+                    }
+                ]
+            }
+        }
+    ]
+}

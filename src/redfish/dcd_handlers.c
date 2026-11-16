@@ -385,14 +385,13 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 	fmd_dc_tag_to_str(ext->tag, tag_str, sizeof(tag_str));
 
 	result = json_pack(
-		"{s:s, s:s, s:s, s:s, s:I, s:I, s:s, s:I, s:o}",
+		"{s:s, s:s, s:s, s:s, s:I, s:I, s:I, s:o}",
 		"@odata.id", uri,
 		"@odata.type", "#MemoryExtent.v1_0_0.MemoryExtent",
 		"Id", ext_id,
 		"Name", "Dynamic Capacity Extent",
 		"ExtentOffsetMiB", (json_int_t)(ext->start_dpa / FMD_MIB),
 		"ExtentSizeMiB", (json_int_t)(ext->len / FMD_MIB),
-		"Tag", tag_str,
 		"SequenceNumber", (json_int_t)ext->shared_seq,
 		/*
 		 * Warning: the extent is in no region of its host, or is what
@@ -403,6 +402,10 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 				    ext->region_id == FMD_DC_REGION_NONE ||
 				    fmd_dc_host_sync(dev, ext->host_id) == FMD_DC_SYNC_STALE ?
 				    "Warning" : "OK"));
+
+	/* An extent with no tag (all zero, cxl-fmd's convention) has no Tag */
+	if (tag_str[0])
+		json_object_set_new(result, "Tag", json_string(tag_str));
 
 	/*
 	 * FMReferencedExtent: Flags Bit[0] "FM Holds Reference" of the tag's

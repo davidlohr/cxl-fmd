@@ -1008,6 +1008,228 @@ static void parse_host_set(const char *what, json_t *obj, int num_hosts,
 		set[h] = true;
 }
 
+/*
+ * A region's Region Base for each host in @hosts: "base_mb", or the host's
+ * entry in "host_base_mb": { "1": 40960 }. "The DCD controls which DPA
+ * range it assigns to each region for each host" (Section 9.13.3); that a
+ * base may differ from host to host while the Region Length, Decode Length
+ * and Block Size do not is the mock's choice.
+ */
+static void parse_host_bases(const char *what, json_t *obj,
+			     const bool hosts[FMD_DC_MAX_HOST_ID + 1], uint64_t def,
+			     uint64_t base[FMD_DC_MAX_HOST_ID + 1])
+{
+	const char *key;
+	json_t *v;
+
+	for (int h = 0; h <= FMD_DC_MAX_HOST_ID; h++)
+		base[h] = def;
+	if (!obj)
+		return;
+	if (!json_is_object(obj)) {
+		load_error("%s: host_base_mb is not an object", what);
+		return;
+	}
+	json_object_foreach(obj, key, v) {
+		char *end;
+		long h = strtol(key, &end, 10);
+		uint64_t mb;
+
+		if (end == key || *end || h < 0 || h > FMD_DC_MAX_HOST_ID || !hosts[h]) {
+			load_error("%s: host_base_mb: \"%s\" is not a host of the region",
+				   what, key);
+			continue;
+		}
+		if (json_number(v, "host_base_mb", false, UINT64_MAX / FMD_MIB, &mb))
+			base[h] = mb * FMD_MIB;
+	}
+}
+
+/*
+ * The region of host @h a DPA of that host's is in, bounded by its Region
+ * Length as the mock allocates within it; -1 for none.
+ */
+static int host_region_of(struct fmd_component *dev, int h, uint64_t dpa)
+{
+	for (int r = 0; r < FMD_MAX_DC_REGIONS; r++) {
+		struct fmd_dc_region *reg = fmd_dc_find_region(dev, h, (uint8_t)r);
+
+		if (reg && reg->region_len && dpa >= reg->base_dpa &&
+		    dpa - reg->base_dpa < reg->region_len)
+			return r;
+	}
+	return -1;
+}
+
+static void mock_record_add(struct fmd_ctx *ctx, struct fmd_component *dev,
+			    const char *what, int h, uint64_t dpa, uint64_t len,
+			    const uint8_t tag[FMD_DC_TAG_LEN], uint16_t seq,
+			    uint8_t rid, bool pending)
+{
+	struct fmd_dc_extent *ext;
+
+	if (fmd_dc_find_extent(dev, h, dpa)) {
+		load_error("%s: host %d already has an extent at %" PRIu64 " MB",
+			   what, h, (uint64_t)(dpa / FMD_MIB));
+		return;
+	}
+	ext = fmd_dc_extent_add(ctx, dev, h, dpa, len, tag, seq, rid);
+	if (!ext) {
+		load_error("%s: out of memory", what);
+		return;
+	}
+	ext->pending = pending;
+}
+
+/*
+ * "tags": [ { "tag": "<uuid>", "fm_referenced": true, "pending_hosts": [2] } ]
+ * Entries of the device's 5608h list besides those its extents give.
+ * "pending_hosts" sets bits of the Pending Reference Bitmap, "an LD for
+ * which the tagged capacity has been added with no host response yet"
+ * (Table 7-78), with no extent: a device whose 5603h does not list an add
+ * the host has not answered (that it does or does not, the specification
+ * does not say). That and "fm_referenced" with no extent are the mock's
+ * means to show what a device could report.
+ */
+static void parse_dc_tags(struct fmd_component *dev, struct fmd_dcd_info *dcd,
+			  json_t *arr)
+{
+	size_t idx;
+	json_t *item;
+
+	if (!arr)
+		return;
+	if (!json_is_array(arr)) {
+		load_error("%s: dcd tags is not a list", dev->id);
+		return;
+	}
+	free(dcd->mock_tags);
+	dcd->mock_tags = calloc(json_array_size(arr) ? json_array_size(arr) : 1,
+				sizeof(*dcd->mock_tags));
+	dcd->n_mock_tags = 0;
+	if (!dcd->mock_tags)
+		return;
+
+	json_array_foreach(arr, idx, item) {
+		struct fmd_dc_tag *t = &dcd->mock_tags[dcd->n_mock_tags];
+		const char *tag_str = json_str_or(item, "tag", "");
+		json_t *jpend = json_object_get(item, "pending_hosts");
+		size_t pidx;
+		json_t *v;
+
+		memset(t, 0, sizeof(*t));
+		if (fmd_dc_tag_from_str(tag_str, t->tag) < 0 ||
+		    !memcmp(t->tag, (uint8_t[FMD_DC_TAG_LEN]){0}, FMD_DC_TAG_LEN)) {
+			load_error("%s: dcd tag %zu: '%s' is not a tag", dev->id, idx,
+				   tag_str);
+			continue;
+		}
+		if (jpend && !json_is_array(jpend)) {
+			load_error("%s: dcd tag %zu: pending_hosts is not a list",
+				   dev->id, idx);
+			continue;
+		}
+		json_array_foreach(jpend, pidx, v) {
+			json_int_t h = json_is_integer(v) ? json_integer_value(v) : -1;
+
+			if (h < 0 || h >= dcd->num_hosts || h > FMD_DC_MAX_HOST_ID ||
+			    !fmd_dc_host_component(dev, (int)h)) {
+				load_error("%s: dcd tag %zu: pending host %" JSON_INTEGER_FORMAT
+					   " is not one of the %d hosts", dev->id, idx, h,
+					   dcd->num_hosts);
+				continue;
+			}
+			t->pend[h / 8] |= (uint8_t)(1 << (h % 8));
+		}
+		if (json_is_true(json_object_get(item, "fm_referenced")))
+			fmd_dc_mock_ref_set(dcd, t->tag, true);
+		dcd->n_mock_tags++;
+	}
+}
+
+/*
+ * The mock's capacity is an offset into a region ("phys"), the same for
+ * every host that has it. Two hosts, or a host and what an FM reference
+ * keeps, have the same capacity only as shared capacity: with the same
+ * Tag, "identical for all hosts sharing the same extent" (Table 8-230),
+ * in a Sharable region. Anything else is two things in one place, which
+ * the mock's device cannot have.
+ */
+struct mock_phys {
+	int host;			/* -1: what an FM reference keeps */
+	uint64_t dpa, phys, len;
+	const uint8_t *tag;
+	uint8_t rid, flags;
+};
+
+static void check_mock_phys(struct fmd_component *dev, struct fmd_dcd_info *dcd)
+{
+	static const uint8_t zero[FMD_DC_TAG_LEN];
+	struct fmd_component *child;
+	struct fmd_dc_mock_hold *hold;
+	struct mock_phys *v;
+	size_t n = 0;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT)
+		n++;
+	for (hold = dcd->mock_orphans; hold; hold = hold->next)
+		n++;
+	v = calloc(n ? n : 1, sizeof(*v));
+	if (!v)
+		return;
+
+	n = 0;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		struct fmd_dc_region *r = fmd_dc_find_region(dev, ext->host_id,
+							      ext->region_id);
+
+		if (!r)
+			continue;
+		v[n++] = (struct mock_phys){ ext->host_id, ext->start_dpa,
+					     ext->start_dpa - r->base_dpa, ext->len,
+					     ext->tag, ext->region_id, r->flags };
+	}
+	for (hold = dcd->mock_orphans; hold; hold = hold->next) {
+		uint8_t flags = 0;
+
+		for (int h = 0; h < dcd->num_hosts; h++) {
+			struct fmd_dc_region *r = fmd_dc_find_region(dev, h, hold->region_id);
+
+			if (r)
+				flags = r->flags;
+		}
+		v[n++] = (struct mock_phys){ -1, 0, hold->phys, hold->len, hold->tag,
+					     hold->region_id, flags };
+	}
+
+	for (size_t i = 0; i < n; i++) {
+		for (size_t j = i + 1; j < n; j++) {
+			struct mock_phys *a = &v[i], *b = &v[j];
+			bool same_tag;
+
+			/* one host's own overlaps are the validator's */
+			if (a->rid != b->rid || (a->host == b->host && a->host >= 0))
+				continue;
+			if (a->phys >= b->phys + b->len || b->phys >= a->phys + a->len)
+				continue;
+			same_tag = !memcmp(a->tag, b->tag, FMD_DC_TAG_LEN) &&
+				   memcmp(a->tag, zero, FMD_DC_TAG_LEN);
+			if (same_tag && (a->flags & FMD_DC_REGION_SHAREABLE))
+				continue;
+			load_error("%s: dcd: region %u capacity at offset %" PRIu64 " MB of "
+				   "host %d and at offset %" PRIu64 " MB of host %d (-1: "
+				   "what an FM reference keeps) is the same: %s",
+				   dev->id, a->rid,
+				   (uint64_t)(a->phys / FMD_MIB), a->host,
+				   (uint64_t)(b->phys / FMD_MIB), b->host,
+				   !same_tag ? "they have different tags, or none" :
+				   "the region is not Sharable");
+		}
+	}
+	free(v);
+}
+
 static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *dev)
 {
 	json_t *jdcd = json_object_get(jdev, "dcd");
@@ -1015,6 +1237,7 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 	struct fmd_component *child;
 	uint64_t region_base[FMD_MAX_DC_REGIONS] = {0};
 	uint64_t region_len[FMD_MAX_DC_REGIONS] = {0};
+	uint64_t host_base[FMD_DC_MAX_HOST_ID + 1];
 	bool hosts[FMD_DC_MAX_HOST_ID + 1];
 	char what[FMD_MAX_ID_LEN + 64];
 	uint32_t max_extents, max_tags;
@@ -1141,6 +1364,8 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 
 			snprintf(what, sizeof(what), "%s: dcd region %d", dev->id, rid);
 			parse_host_set(what, item, dcd->num_hosts, dcd->num_hosts, hosts);
+			parse_host_bases(what, json_object_get(item, "host_base_mb"), hosts,
+					 region_base[rid], host_base);
 			for (int h = 0; h < dcd->num_hosts; h++) {
 				struct fmd_component *owner;
 				struct fmd_dc_region *r;
@@ -1157,7 +1382,7 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 				r = fmd_dc_region_add(ctx, owner, (uint8_t)rid, (uint16_t)h);
 				if (!r)
 					continue;
-				r->base_dpa = region_base[rid];
+				r->base_dpa = host_base[h];
 				r->decode_len = decode_mb * FMD_MIB;
 				r->region_len = region_len[rid];
 				r->block_size = bs_mb * FMD_MIB;
@@ -1190,9 +1415,12 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 
 	/*
 	 * Extents: Get DC Region Extent Lists (5603h) + DC List Tags (5608h).
-	 * An entry of the file names its hosts: it is one extent of each, at
-	 * the same DPA. With no host at all, it is capacity an FM reference
-	 * keeps that no host holds.
+	 * An entry of the file is capacity: one extent of each host it names.
+	 * "hosts" or "host_id" put it at the same offset into the region of
+	 * each, "start_mb" being in the DPA space "base_mb" gives; "per_host"
+	 * gives each host's own "start_mb", in that host's DPA space. With no
+	 * host at all, it is capacity an FM reference keeps that no host
+	 * holds.
 	 */
 	arr = json_object_get(jdcd, "extents");
 	if (arr && json_is_array(arr)) {
@@ -1202,43 +1430,92 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			const char *tag_str = json_str_or(item, "tag", "");
 			bool pending = json_is_true(json_object_get(item, "pending"));
 			bool fm_ref = json_is_true(json_object_get(item, "fm_referenced"));
+			uint16_t seq = (uint16_t)json_int_or(item, "shared_seq", 0);
+			json_t *jper = json_object_get(item, "per_host");
 			uint8_t tag[FMD_DC_TAG_LEN];
 			int rid = -1, n_hosts = 0;
 
-			for (int r = 0; r < FMD_MAX_DC_REGIONS; r++) {
-				if (region_len[r] && dpa >= region_base[r] &&
-				    dpa < region_base[r] + region_len[r]) {
-					rid = r;
-					break;
+			snprintf(what, sizeof(what), "%s: dcd extent %zu", dev->id, idx);
+			if (fmd_dc_tag_from_str(tag_str, tag) < 0)
+				load_error("%s: invalid tag '%s'", what, tag_str);
+
+			if (jper) {
+				size_t pidx;
+				json_t *p;
+
+				if (!json_is_array(jper) || json_object_get(item, "hosts") ||
+				    json_object_get(item, "host_id")) {
+					load_error("%s: per_host is not a list, or is given "
+						   "with hosts or host_id", what);
+					continue;
+				}
+				json_array_foreach(jper, pidx, p) {
+					json_t *jh = json_object_get(p, "host_id");
+					json_int_t h = json_is_integer(jh) ? json_integer_value(jh) : -1;
+					uint64_t hdpa = json_uint_or(p, "start_mb", 0) * FMD_MIB;
+					uint64_t hlen = json_uint_or(p, "len_mb", len / FMD_MIB) * FMD_MIB;
+					json_t *jpend = json_object_get(p, "pending");
+					int hrid;
+
+					if (h < 0 || h >= dcd->num_hosts ||
+					    !fmd_dc_host_component(dev, (int)h)) {
+						load_error("%s: per_host %zu: host_id is not one of "
+							   "the %d hosts", what, pidx, dcd->num_hosts);
+						continue;
+					}
+					if (!json_object_get(p, "start_mb")) {
+						load_error("%s: per_host %zu: no start_mb", what, pidx);
+						continue;
+					}
+					hrid = host_region_of(dev, (int)h, hdpa);
+					if (hlen == 0 || hrid < 0) {
+						load_error("%s: per_host %zu: %" PRIu64 " MB is empty or "
+							   "is outside region base to base + length of "
+							   "every region of host %d", what, pidx,
+							   (uint64_t)(hdpa / FMD_MIB), (int)h);
+						continue;
+					}
+					n_hosts++;
+					mock_record_add(ctx, dev, what, (int)h, hdpa, hlen, tag,
+							(uint16_t)json_int_or(p, "shared_seq", seq),
+							(uint8_t)hrid,
+							jpend ? json_is_true(jpend) : pending);
+				}
+			} else {
+				for (int r = 0; r < FMD_MAX_DC_REGIONS; r++) {
+					if (region_len[r] && dpa >= region_base[r] &&
+					    dpa < region_base[r] + region_len[r]) {
+						rid = r;
+						break;
+					}
+				}
+				if (len == 0 || rid < 0) {
+					load_error("%s: %" PRIu64 " MB is empty or is outside region "
+						   "base to base + length of every region",
+						   what, (uint64_t)(dpa / FMD_MIB));
+					continue;
+				}
+
+				parse_host_set(what, item, dcd->num_hosts, 1, hosts);
+				for (int h = 0; h < dcd->num_hosts; h++) {
+					struct fmd_dc_region *r;
+
+					if (!hosts[h])
+						continue;
+					r = fmd_dc_find_region(dev, h, (uint8_t)rid);
+					if (!r) {
+						load_error("%s: host %d does not have region %d",
+							   what, h, rid);
+						continue;
+					}
+					n_hosts++;
+					/* the same offset into the host's region */
+					mock_record_add(ctx, dev, what, h,
+							r->base_dpa + (dpa - region_base[rid]), len,
+							tag, seq, (uint8_t)rid, pending);
 				}
 			}
-			if (len == 0 || rid < 0) {
-				load_error("%s: dcd extent at %" PRIu64 " MB is empty or is outside region base to base + length of every region",
-					   dev->id, (uint64_t)(dpa / FMD_MIB));
-				continue;
-			}
-
-			if (fmd_dc_tag_from_str(tag_str, tag) < 0)
-				load_error("%s: dcd extent at %" PRIu64 " MB: invalid tag '%s'",
-					   dev->id, (uint64_t)(dpa / FMD_MIB), tag_str);
-
-			snprintf(what, sizeof(what), "%s: dcd extent at %" PRIu64 " MB",
-				 dev->id, (uint64_t)(dpa / FMD_MIB));
-			parse_host_set(what, item, dcd->num_hosts, 1, hosts);
-			for (int h = 0; h < dcd->num_hosts; h++) {
-				struct fmd_dc_extent *ext;
-
-				if (!hosts[h])
-					continue;
-				n_hosts++;
-				ext = fmd_dc_extent_add(ctx, dev, h, dpa, len, tag,
-							(uint16_t)json_int_or(item, "shared_seq", 0),
-							(uint8_t)rid);
-				if (!ext)
-					continue;
-				ext->pending = pending;
-				n_extents++;
-			}
+			n_extents += n_hosts;
 
 			if (fm_ref)
 				fmd_dc_mock_ref_set(dcd, tag, true);
@@ -1250,11 +1527,23 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 						   "fm_referenced", what);
 					continue;
 				}
+				for (int r = 0; rid < 0 && r < FMD_MAX_DC_REGIONS; r++) {
+					if (region_len[r] && dpa >= region_base[r] &&
+					    dpa < region_base[r] + region_len[r])
+						rid = r;
+				}
+				if (len == 0 || rid < 0) {
+					load_error("%s: %" PRIu64 " MB is empty or is outside region "
+						   "base to base + length of every region",
+						   what, (uint64_t)(dpa / FMD_MIB));
+					continue;
+				}
 				hold = calloc(1, sizeof(*hold));
 				if (!hold)
 					continue;
 				memcpy(hold->tag, tag, FMD_DC_TAG_LEN);
 				hold->region_id = (uint8_t)rid;
+				hold->shared_seq = seq;
 				hold->phys = dpa - region_base[rid];
 				hold->len = len;
 				hold->next = dcd->mock_orphans;
@@ -1262,6 +1551,9 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			}
 		}
 	}
+	parse_dc_tags(dev, dcd, json_object_get(jdcd, "tags"));
+	check_mock_phys(dev, dcd);
+
 	/* Number of Available Extents and Tags, Section 9.13.3.3 */
 	fmd_dc_mock_recount(dev);
 	/* Dynamic Capacity List Tags (5608h) */
