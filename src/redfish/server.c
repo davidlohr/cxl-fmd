@@ -1142,6 +1142,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -12)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "An InterleaveSets entry sets no OffsetMiB, RegionId or MemoryLevel, and its SizeMiB is MemoryChunkSizeMiB");
+		if (rc == -13)
+			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
+					  "No LD Pool CCI of the Multi-Headed device is known: its allocations cannot be changed");
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create memory chunk");
 	}

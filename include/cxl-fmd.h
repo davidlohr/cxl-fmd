@@ -788,6 +788,12 @@ struct fmd_mhd {
 	/* Supported CCI commands bitmask */
 	uint64_t supported_cmds;
 
+	/*
+	 * base.ep is the LD Pool CCI: it answered Get Multi-Headed Info
+	 * (5500h) with no tunnel. See fmd_mhd_pool_route().
+	 */
+	bool pool_cci;
+
 	/* Multi-Head configuration (from Get MHD Info or identify) */
 	uint8_t num_heads;                   /* Number of heads (CXL ports) */
 	uint8_t max_heads;                   /* Maximum supported heads */
@@ -2015,9 +2021,17 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 			      uint8_t ld_id, uint64_t size_bytes);
 
 /*
+ * The route to the LD Pool CCI of @mhd: *@ep, through *@ti. Returns 0, or
+ * -EOPNOTSUPP if cxl-fmd knows of no CCI of @mhd that is its LD Pool CCI.
+ */
+int fmd_mhd_pool_route(const struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
+		       struct cxlmi_tunnel_info **ti);
+
+/*
  * Set LD allocation for an MHD via LD Pool CCI Set LD Allocations (5402h)
- * Uses pool LD index (not head-local LD-ID).
- * For mock mode, updates local state only. As fmd_mld_set_ld_allocation().
+ * Uses pool LD index (not head-local LD-ID), on fmd_mhd_pool_route().
+ * For mock mode, updates local state only. As fmd_mld_set_ld_allocation(),
+ * and -EOPNOTSUPP, with nothing sent, if the route is not known.
  */
 int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 			      uint8_t pool_ld_id, uint64_t size_bytes);

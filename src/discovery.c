@@ -607,6 +607,8 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 		free(mh_rsp);
 		return rc;
 	}
+	/* answered with no tunnel: see fmd_mhd_pool_route() */
+	mhd->pool_cci = true;
 
 	FMD_CCI_LIST_CLAMP(mh_rsp->ld_map_len, FMD_MAX_LD_POOL);
 
@@ -2772,18 +2774,40 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 
 
 /*
+ * The LD Pool CCI of a Multi-Headed device "may be exposed as an MCTP-based
+ * CCI or can be accessed via the Tunnel Management Command command through
+ * a head's Mailbox CCI" (CXL r4.0 Section 2.5), and the MHD command set
+ * "is required on the LD Pool CCI" (Section 7.6.7.5). An endpoint that
+ * answered Get Multi-Headed Info (5500h) with no tunnel is taken to be the
+ * LD Pool CCI, and is sent its commands with no tunnel: cxl-fmd's
+ * inference, as "required" does not say "only". Discovery reads the pool
+ * there (Get Multi-Headed Info, then each pool LD through it), so that
+ * commands that change the pool go where the pool was read. No other
+ * route is known: a head's Mailbox CCI is not discovered as one.
+ */
+int fmd_mhd_pool_route(const struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
+		       struct cxlmi_tunnel_info **ti)
+{
+	if (!mhd->pool_cci || !mhd->base.ep)
+		return -EOPNOTSUPP;
+	*ep = mhd->base.ep;
+	*ti = CXLMI_NO_TUNNEL;
+	return 0;
+}
+
+/*
  * Set LD allocation for an MHD via LD Pool CCI Set LD Allocations (5402h)
  *
- * MHD uses LD Pool CCI which is accessed via Tunnel Management command.
  * The pool_ld_id is the device-wide LD index (not head-local LD-ID).
  *
  * For mock mode, updates local state only.
- * For hardware mode, tunnels to LD Pool CCI and issues command.
+ * For hardware mode, sent on fmd_mhd_pool_route(), or not at all.
  */
 int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 			      uint8_t pool_ld_id, uint64_t size_bytes)
 {
 	struct cxlmi_endpoint *ep;
+	struct cxlmi_tunnel_info *ti;
 	struct fmd_ld *ld = NULL;
 	struct fmd_component *child;
 
@@ -2815,61 +2839,13 @@ int fmd_mhd_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		return 0;
 	}
 
-	/*
-	 * Hardware mode: select head endpoint for FM access.
-	 *
-	 * MHD LD Pool CCI is accessed by tunneling through a head's Mailbox CCI.
-	 * Each head has its own MCTP endpoint. We prefer:
-	 * 1. The head that the target LD is bound to (if bound)
-	 * 2. The first head with a valid endpoint
-	 * 3. Fall back to fabric's endpoint
-	 */
-	struct fmd_head *head = NULL;
-	struct fmd_component *hcomp;
-
-	/* If LD is bound to a head, prefer that head */
-	if (ld->binding_point_id != 0xFF) {
-		fmd_for_each_child(&mhd->base, hcomp) {
-			if (hcomp->type == FMD_COMPONENT_HEAD) {
-				struct fmd_head *h = fmd_to_head(hcomp);
-				if (h->head_id == ld->binding_point_id) {
-					head = h;
-					break;
-				}
-			}
-		}
+	if (fmd_mhd_pool_route(mhd, &ep, &ti)) {
+		fmd_warn(ctx, "%s: no LD Pool CCI known: pool LD %d not changed",
+			 mhd->base.id, pool_ld_id);
+		return -EOPNOTSUPP;
 	}
-
-	/* Otherwise find first head with an endpoint */
-	if (!head) {
-		fmd_for_each_child(&mhd->base, hcomp) {
-			if (hcomp->type == FMD_COMPONENT_HEAD) {
-				struct fmd_head *h = fmd_to_head(hcomp);
-				if (h->ep) {
-					head = h;
-					break;
-				}
-			}
-		}
-	}
-
-	/* Get endpoint from head, or fall back to the MHD's own */
-	ep = head && head->ep ? head->ep : mhd->base.ep;
-	if (!ep) {
-		fmd_warn(ctx, "%s: no endpoint for hardware mode", mhd->base.id);
-		return -1;
-	}
-
-	fmd_dbg(ctx, "%s: tunneling through head %d to LD Pool CCI",
-		mhd->base.id, head ? head->head_id : -1);
-
-	/*
-	 * Hardware mode: tunnel to LD Pool CCI and issue command.
-	 * The Tunnel Management Command with target_type=LD_POOL_CCI routes
-	 * the command to the device-wide LD Pool management interface.
-	 */
-	return set_ld_allocation(ctx, mhd->base.id, ep, CXLMI_TUNNEL_MHD, ld,
-				 pool_ld_id, size_bytes);
+	return set_ld_allocation(ctx, mhd->base.id, ep, ti, ld, pool_ld_id,
+				 size_bytes);
 }
 
 

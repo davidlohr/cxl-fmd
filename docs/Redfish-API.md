@@ -446,7 +446,7 @@ All error responses follow the Redfish error format with an `error` object conta
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` |
-| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none; a chunk `DELETE` whose allocation cxl-fmd cannot give back; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
+| 501 Not Implemented | Feature not implemented | PATCH on read-only resources; POST to a resource that takes none; a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
 | 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
@@ -956,7 +956,16 @@ FM Redfish view: all pool LDs 0-5 visible as CXLLogicalDevices/0 through /5
 ```
 
 **Hardware Behavior:**
-- POST uses LD Pool CCI `Set LD Allocations (0x5402h)` with pool index
+- POST uses LD Pool CCI `Set LD Allocations (0x5402h)` with pool index,
+  preceded by `Get LD Allocations (0x5401h)`. The LD Pool CCI "may be
+  exposed as an MCTP-based CCI or can be accessed via the Tunnel
+  Management Command command through a head's Mailbox CCI" (CXL r4.0
+  Section 2.5). cxl-fmd takes the endpoint that answered `Get
+  Multi-Headed Info (0x5500h)` with no tunnel, where it discovered the
+  device, to be the LD Pool CCI (its inference: the command set "is
+  required on the LD Pool CCI", Section 7.6.7.5, which does not say only
+  there), and sends both there with no tunnel. A device for which no LD
+  Pool CCI is known is sent nothing, and the request is `501`.
 - A head with one pool LD on a switch port is bound whole; a head that
   presents an MLD is not bound (see "Memory Binding (Connections)")
 
@@ -1726,6 +1735,7 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` response on an MLD or MHD | `InterleaveSets` as the request gave it, `Links.CXLLogicalDevices` from the number after the first `_ld` of its `Memory` | one `InterleaveSets` entry, the LD's `Memory` URI with `MemoryLevel` 1, `OffsetMiB` 0 and the chunk's `SizeMiB`, and the LD's link; none for an SLD |
 | Chunk `DELETE` of an MLD chunk made with `InterleaveSets[0].SizeMiB` | the LD shrunk by that `SizeMiB` (not the size the `POST` added) | shrunk by the chunk's `MemoryChunkSizeMiB` |
 | Chunk `DELETE` on hardware of a chunk of a device that is not an MLD or SLD (a Multi-Headed device's) | `204`, nothing sent, and its size counted free in the domain | `501`, the chunk kept |
+| Chunk `POST` on hardware on a pool LD of a Multi-Headed device | Get and Set LD Allocations sent to the endpoint that answered Get Multi-Headed Info with no tunnel, through a tunnel to the LD Pool CCI (Target Type 1) | sent to that endpoint with no tunnel; `501`, with nothing sent, if no LD Pool CCI is known |
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
 | `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |
 | Chunk `POST` after a `DELETE` of a chunk of the domain | the ID of a chunk the domain still had, so that two chunks had one URI, a collection listed it twice, and a Connection's `MemoryChunkInfo` too | an ID that no chunk of the domain has had since cxl-fmd started, or discovered the device |

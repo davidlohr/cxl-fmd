@@ -4719,6 +4719,8 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
  * -12 = an InterleaveSets entry asks for what an allocation cannot be: an
  *       OffsetMiB, RegionId or MemoryLevel, or a SizeMiB that is not
  *       MemoryChunkSizeMiB
+ * -13 = cxl-fmd knows no route to the LD Pool CCI of the Multi-Headed
+ *       device (fmd_mhd_pool_route()): nothing was sent
  * Every one of -2, -6 and -8 to -12 is answered before anything is changed
  * or sent.
  */
@@ -4835,6 +4837,9 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		if (rc < 0) {
 			/* Rollback topology change on CCI failure */
 			fmd_chunk_remove(&ctx->topology, chunk);
+			/* no route to the LD Pool CCI known: nothing was sent */
+			if (rc == -EOPNOTSUPP && chassis->type == FMD_COMPONENT_MHD)
+				return -13;
 			/* a size the device cannot be given */
 			if (rc == -EINVAL || rc == -EOPNOTSUPP)
 				return -6;

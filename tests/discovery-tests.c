@@ -6223,6 +6223,31 @@ out:
 }
 
 /*
+ * A Multi-Headed device on its own endpoint, which answers Get
+ * Multi-Headed Info (5500h) with no tunnel: 2 heads, 4 pool LDs of 1, 2, 3
+ * and 4 GiB, LD 0 and 1 mapped to head 0 (port 1), LD 2 to head 1 (port
+ * 2), LD 3 to none.
+ */
+static struct cxlmi_endpoint *new_mhd(struct fmd_ctx *ctx, uint64_t serial)
+{
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 4] = { 0 };
+	uint8_t heads[4 + 2 * 9] = { 0 };
+
+	answer_identify(ep, serial, 0x03);
+	probe[0] = 4; probe[1] = 2; probe[5] = 1;
+	answer(ep, 0x5500, probe, sizeof(probe));
+	info[0] = 4; info[1] = 2; info[5] = 4;
+	info[8] = 1; info[9] = 1; info[10] = 2; info[11] = 0xff;
+	answer(ep, 0x5500, info, sizeof(info));
+	for (int i = 0; i < 4; i++)
+		answer_memdev_identify(ep, 4 * (i + 1), 4 * (i + 1), 0);
+	heads[0] = 2; heads[4] = 1; heads[4 + 6] = 4; heads[4 + 9] = 2;
+	answer(ep, 0x5501, heads, sizeof(heads));
+	return ep;
+}
+
+/*
  * Chunk POST plan (review F02). Get LD Allocations (5401h) and Set LD
  * Allocations (5402h) answers for one LD: Range 1 @r1 units of 256 MB.
  */
@@ -6310,8 +6335,7 @@ static void test_chunk_plan(void)
 	char chunk_id[FMD_MAX_ID_LEN];
 	struct fmd_mem_domain *domain;
 	struct fmd_ld *ld0, *ld1;
-	uint8_t pl[64], probe[8 + 1] = { 0 }, info[8 + 4] = { 0 };
-	uint8_t heads[4 + 2 * 9] = { 0 };
+	uint8_t pl[64];
 	int before = failures, rc, chunks;
 	uint64_t rem0;
 	unsigned int sent;
@@ -6450,17 +6474,7 @@ out:
 
 	/* a Multi-Headed device's pool, 4 LDs, that names none, or LD 40 */
 	ctx = new_ctx();
-	ep = new_device(ctx);
-	answer_identify(ep, 0xe02, 0x03);
-	probe[0] = 4; probe[1] = 2; probe[5] = 1;
-	answer(ep, 0x5500, probe, sizeof(probe));
-	info[0] = 4; info[1] = 2; info[5] = 4;
-	info[8] = 1; info[9] = 1; info[10] = 2; info[11] = 0xff;
-	answer(ep, 0x5500, info, sizeof(info));
-	for (int i = 0; i < 4; i++)
-		answer_memdev_identify(ep, 4 * (i + 1), 4 * (i + 1), 0);
-	heads[0] = 2; heads[4] = 1; heads[4 + 6] = 4; heads[4 + 9] = 2;
-	answer(ep, 0x5501, heads, sizeof(heads));
+	ep = new_mhd(ctx, 0xe02);
 	fmd_discover(ctx);
 	device_id(id, sizeof(id), 0xe02);
 	snprintf(dom, sizeof(dom), "%s_domain0", id);
@@ -6488,6 +6502,80 @@ out:
 	}
 	fmd_ctx_free(ctx);
 	report("a chunk POST names one LD, and asks for what 5402h can do", before);
+}
+
+/*
+ * The allocation of a pool LD is changed on the endpoint that answered
+ * Get Multi-Headed Info with no tunnel, the LD Pool CCI as discovery takes
+ * it, with no tunnel (review F14). It went to that endpoint (or a head's,
+ * which is the same one) through a tunnel to the LD Pool CCI (Target Type
+ * 1), from the LD Pool CCI. When no LD Pool CCI is known, nothing is sent:
+ * 501 for a chunk POST.
+ */
+static void test_mhd_pool_route(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mhd(ctx, 0x14a);
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[512];
+	struct cxlmi_tunnel_info ti;
+	struct fmd_mem_domain *domain;
+	struct fmd_mhd *mhd;
+	struct fmd_ld *ld1;
+	int before = failures, rc, chunks;
+	unsigned int sent;
+	json_t *resp = NULL;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x14a);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	CHECK(mhd && domain && ld1, "no MHD %s, domain or pool LD 1", id);
+	if (!mhd || !domain || !ld1)
+		goto out;
+
+	/* Get LD Allocations, which answers for another LD: nothing more */
+	answer_get_ld(ep, 3, 4);
+	rc = fmd_mhd_set_ld_allocation(ctx, mhd, 0, 2ULL << 30);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(rc == -EIO && last_opcode(ep) == 0x5401 && ti.level == 0 && !ti.mhd,
+	      "5401h: %d, %04xh, level %d, LD Pool CCI %d", rc, last_opcode(ep),
+	      ti.level, ti.mhd);
+
+	/* a chunk of 1 GiB on pool LD 1, 8 to 12 units of 256 MB */
+	domain->capacity += 8ULL << 30;
+	domain->remaining += 8ULL << 30;
+	answer_get_ld(ep, 1, 8);
+	answer_set_ld(ep, 1, 12);
+	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": "
+		 "[{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld1\"}}]}",
+		 id, id);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(rc == 0 && last_opcode(ep) == 0x5402 && ti.level == 0 && !ti.mhd &&
+	      ld1->memory_size == 3ULL << 30,
+	      "chunk POST: %d, %04xh, level %d, LD Pool CCI %d", rc,
+	      last_opcode(ep), ti.level, ti.mhd);
+	json_decref(resp);
+	resp = NULL;
+
+	/* no LD Pool CCI known: nothing sent, 501 */
+	mhd->pool_cci = false;
+	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -13 && !resp && commands_sent(ep) == sent &&
+	      fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK) == chunks,
+	      "chunk POST with no LD Pool CCI: %d, %u sent", rc, commands_sent(ep) - sent);
+	json_decref(resp);
+	rc = fmd_mhd_set_ld_allocation(ctx, mhd, 1, 4ULL << 30);
+	CHECK(rc == -EOPNOTSUPP && commands_sent(ep) == sent && ld1->memory_size == 3ULL << 30,
+	      "allocation with no LD Pool CCI: %d, %u sent", rc,
+	      commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a pool LD's allocation is changed on the LD Pool CCI", before);
 }
 
 /* Oem.Cxl.Origin of Connection @id as served, "" if it has none */
@@ -6718,6 +6806,7 @@ int main(void)
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
 	test_chunk_plan();
+	test_mhd_pool_route();
 	test_force_unbind();
 	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();
