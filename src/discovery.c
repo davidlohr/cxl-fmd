@@ -378,7 +378,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	size_t rsp_size;
 	size_t bw_rsp_size;
 	uint64_t granularity = CXL_CAPACITY_UNIT; /* until 5401h says otherwise */
-	uint64_t ld_units[FMD_MAX_LD_COUNT];	/* allocation of each LD */
+	uint64_t ld_bytes[FMD_MAX_LD_COUNT];	/* allocation of each LD */
 	uint8_t nld, nalloc = 0;
 	int rc;
 	int i;
@@ -414,6 +414,15 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	mld->qos_telemetry_capability = ld_info.qos_telemetry_capability;
 	mld->memory_granularity = 1; /* 256 MB, until 5401h says otherwise */
 	mld->total_memory_ranges = 0; /* Not available in this response */
+
+	/*
+	 * Memory Size: "Total device memory capacity" (Table 7-46), what
+	 * the domain is, of which the LD allocations read below are part.
+	 * The table gives no unit: bytes is cxl-fmd's reading, as libcxlmi
+	 * passes the field on as it is. 0 tells nothing.
+	 */
+	mld->pool_capacity = ld_info.memory_size;
+	mld->pool_capacity_valid = ld_info.memory_size != 0;
 
 	/* Get LD Allocations (5401h) */
 	nld = mld->ld_count;
@@ -471,10 +480,22 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		FMD_CCI_LIST_CLAMP(alloc_rsp->ld_allocation_list_len, want);
 		if (alloc_rsp->ld_allocation_list_len == 0)
 			break;
-		for (i = 0; i < alloc_rsp->ld_allocation_list_len; i++)
-			ld_units[nalloc++] =
-				alloc_rsp->ld_allocation_list[i].range_1_allocation_mult +
-				alloc_rsp->ld_allocation_list[i].range_2_allocation_mult;
+		for (i = 0; i < alloc_rsp->ld_allocation_list_len; i++) {
+			struct cxlmi_cmd_fmapi_ld_allocations_list *a =
+				&alloc_rsp->ld_allocation_list[i];
+
+			/* 8-byte multipliers: a size past 64 bits is none */
+			if (__builtin_add_overflow(a->range_1_allocation_mult,
+						   a->range_2_allocation_mult,
+						   &ld_bytes[nalloc]) ||
+			    __builtin_mul_overflow(ld_bytes[nalloc], granularity,
+						   &ld_bytes[nalloc])) {
+				fmd_warn(ctx, "%s: LD %d allocation does not fit in "
+					 "64 bits: taken to be 0", mld->base.id, nalloc);
+				ld_bytes[nalloc] = 0;
+			}
+			nalloc++;
+		}
 	}
 	free(alloc_rsp);
 
@@ -544,7 +565,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 
 		/* Memory size from allocations */
 		if (i < nalloc)
-			ld->memory_size = ld_units[i] * granularity;
+			ld->memory_size = ld_bytes[i];
 
 		/* QoS from bandwidth responses */
 		if (alloc_bw && i < alloc_bw->number_ld)
@@ -609,6 +630,31 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	}
 	/* answered with no tunnel: see fmd_mhd_pool_route() */
 	mhd->pool_cci = true;
+
+	/*
+	 * Get LD Info (5400h) on the LD Pool CCI: its Memory Size is the
+	 * "Total device memory capacity" (Table 7-46), read as for an MLD.
+	 * Only the Multi-Headed command set is "required on the LD Pool CCI"
+	 * (Section 7.6.7.5); a device that does not answer has its domain
+	 * as large as the allocations of its pool LDs, which is no more than
+	 * what it has (cxl-fmd's choice).
+	 */
+	{
+		struct cxlmi_cmd_fmapi_get_ld_info_rsp ld_info = { 0 };
+		struct cxlmi_tunnel_info *ti;
+		struct cxlmi_endpoint *pool_ep;
+
+		if (!fmd_mhd_pool_route(mhd, &pool_ep, &ti) &&
+		    !cxlmi_cmd_fmapi_get_ld_info(pool_ep, ti, &ld_info) &&
+		    ld_info.memory_size) {
+			mhd->pool_capacity = ld_info.memory_size;
+			mhd->pool_capacity_valid = true;
+		} else {
+			fmd_warn(ctx, "%s: no Memory Size from Get LD Info on the "
+				 "LD Pool CCI: the domain is the pool LDs' "
+				 "allocations", mhd->base.id);
+		}
+	}
 
 	FMD_CCI_LIST_CLAMP(mh_rsp->ld_map_len, FMD_MAX_LD_POOL);
 

@@ -737,6 +737,15 @@ static struct fmd_mld *parse_mld(struct fmd_ctx *ctx, json_t *jdev,
 	mld->memory_granularity = (uint8_t)json_int_or(jdev, "memory_granularity", 1);
 	mld->qos_telemetry_capability = (uint8_t)json_int_or(jdev, "qos_telemetry_capability", 0);
 
+	/*
+	 * The device's Memory Size (Get LD Info, 5400h), which its domain
+	 * is: identify_memory_device.total_capacity_mb. Without it the
+	 * domain is as large as the LDs' allocations.
+	 */
+	obj = json_object_get(jdev, "identify_memory_device");
+	mld->pool_capacity = obj ? json_uint_or(obj, "total_capacity_mb", 0) * FMD_MIB : 0;
+	mld->pool_capacity_valid = mld->pool_capacity != 0;
+
 	/* Supported Commands (CEL) */
 	jcel = json_object_get(jdev, "cel_commands");
 	if (jcel && json_is_array(jcel)) {
@@ -929,6 +938,15 @@ static struct fmd_mhd *parse_mhd(struct fmd_ctx *ctx, json_t *jdev,
 	mhd->dynamic_capacity = json_is_true(json_object_get(jdev, "dynamic_capacity"));
 	mhd->memory_granularity = (uint8_t)json_int_or(jdev, "memory_granularity", 1);
 	mhd->qos_telemetry_capability = (uint8_t)json_int_or(jdev, "qos_telemetry_capability", 0);
+
+	/*
+	 * pool_capacity_mb: the Memory Size the LD Pool CCI answers Get LD
+	 * Info (5400h) with, which the domain is. Without it the domain is
+	 * as large as the pool LDs' allocations, as for a device that does
+	 * not answer.
+	 */
+	mhd->pool_capacity = json_uint_or(jdev, "pool_capacity_mb", 0) * FMD_MIB;
+	mhd->pool_capacity_valid = mhd->pool_capacity != 0;
 
 	/* Supported Commands (CEL) */
 	jcel = json_object_get(jdev, "cel_commands");

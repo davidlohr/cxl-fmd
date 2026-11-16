@@ -674,3 +674,101 @@ def test_mock_ld_size_follows_chunks(api_client, dev, give, grow):
     assert api_client.delete(uri) == 204
     assert ld_size(api_client, dev, grow) == grown
     assert given > 0
+
+
+# =============================================================================
+# A domain is the device's Memory Size (review F01)
+# =============================================================================
+
+def run_topology(cxl_fmd_executable, path):
+    """Serve @path; returns the process and a client of it."""
+    import subprocess
+    import tempfile
+
+    from conftest import RedfishClient, _find_free_port, _wait_for_service
+
+    port = _find_free_port()
+    log = tempfile.TemporaryFile()
+    proc = subprocess.Popen([str(cxl_fmd_executable), "--mock", str(path),
+                             "--port", str(port)],
+                            stdout=log, stderr=subprocess.STDOUT)
+    assert _wait_for_service(f"http://localhost:{port}/redfish/v1")
+    return proc, RedfishClient(f"http://localhost:{port}")
+
+
+def derived_topology(tmp_path, source, dev_id, change):
+    """mock/@source with device @dev_id changed by @change, in @tmp_path."""
+    import json
+
+    from conftest import PROJECT_ROOT
+
+    topology = json.loads((PROJECT_ROOT / "mock" / source).read_text())
+    change(next(d for d in topology["devices"] if d["id"] == dev_id))
+    path = tmp_path / source
+    path.write_text(json.dumps(topology))
+    return path
+
+
+@pytest.mark.parametrize("sizes,free", [((16384, 16384, 0, 0), 98304),
+                                        ((0, 0, 0, 0), 131072)])
+def test_mld_domain_is_memory_size(cxl_fmd_executable, tmp_path, sizes, free):
+    """cxl_mld_0 of mld-device.json, 128 GiB, with LDs of @sizes MiB: its
+    domain is 128 GiB, of which @free MiB is left. It was the sum of the LDs
+    with nothing left (a POST of 16 GiB was 409), and with no LD allocated
+    there was no domain (404). LDs with nothing allocated have no chunk."""
+    def change(dev):
+        for ld, mib in zip(dev["logical_devices"], sizes):
+            ld["memory_size_mb"] = mib
+
+    path = derived_topology(tmp_path, "mld-device.json", "cxl_mld_0", change)
+    proc, client = run_topology(cxl_fmd_executable, path)
+    try:
+        dom = "/redfish/v1/Chassis/cxl_mld_0/MemoryDomains/cxl_mld_0_domain0"
+        status, data = client.get(dom)
+        assert status == 200, data
+        assert data["MemorySizeMiB"] == 131072
+        status, data = client.get(dom + "/MemoryChunks")
+        assert status == 200
+        assert data["Members@odata.count"] == sum(1 for mib in sizes if mib)
+        for ld, mib in enumerate(sizes):
+            assert client.get(f"{dom}/MemoryChunks/cxl_mld_0_ld{ld}_chunk")[0] == \
+                (200 if mib else 404)
+        # all that is left, on LD 2, and then a granule (1 GiB) more is too much
+        status, data, _ = client.post(dom + "/MemoryChunks", {
+            "MemoryChunkSizeMiB": free, "InterleaveSets": [{"Memory": {
+                "@odata.id": "/redfish/v1/Chassis/cxl_mld_0/Memory/cxl_mld_0_ld2"}}]})
+        assert status == 201, data
+        status, data, _ = client.post(dom + "/MemoryChunks", {
+            "MemoryChunkSizeMiB": 1024, "InterleaveSets": [{"Memory": {
+                "@odata.id": "/redfish/v1/Chassis/cxl_mld_0/Memory/cxl_mld_0_ld3"}}]})
+        assert status == 409, data
+    finally:
+        proc.terminate()
+        assert proc.wait(timeout=10) == 0
+
+
+def test_mhd_domain_is_pool_capacity(cxl_fmd_executable, tmp_path):
+    """cxl_mhd_partial of mhd-device.json, 4 pool LDs of 8 GiB, with
+    pool_capacity_mb 40960: its domain is 40 GiB, of which 8 GiB is left
+    for pool LD 2, mapped to no head. Without the field it is the 32 GiB
+    of its LDs (test_mock_topologies)."""
+    def change(dev):
+        dev["pool_capacity_mb"] = 40960
+
+    path = derived_topology(tmp_path, "mhd-device.json", "cxl_mhd_partial", change)
+    proc, client = run_topology(cxl_fmd_executable, path)
+    try:
+        dom = "/redfish/v1/Chassis/cxl_mhd_partial/MemoryDomains/cxl_mhd_partial_domain0"
+        status, data = client.get(dom)
+        assert status == 200, data
+        assert data["MemorySizeMiB"] == 40960
+        body = {"MemoryChunkSizeMiB": 8192, "InterleaveSets": [{"Memory": {
+            "@odata.id": "/redfish/v1/Chassis/cxl_mhd_partial/Memory/cxl_mhd_partial_ld2"}}]}
+        status, data, _ = client.post(dom + "/MemoryChunks", body)
+        assert status == 201, data
+        body["MemoryChunkSizeMiB"] = 256
+        status, data, _ = client.post(dom + "/MemoryChunks", body)
+        assert status == 409, data
+    finally:
+        proc.terminate()
+        assert proc.wait(timeout=10) == 0

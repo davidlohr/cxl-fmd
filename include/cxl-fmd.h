@@ -606,6 +606,15 @@ struct fmd_mld {
 	uint8_t qos_telemetry_capability;    /* Bit 0: Egress Port Backpressure */
 	uint16_t total_memory_ranges;
 
+	/*
+	 * Get LD Info (5400h) Memory Size, "Total device memory capacity"
+	 * (CXL r4.0 Table 7-46), in bytes (cxl-fmd's reading: the table
+	 * gives no unit). Not valid if not read, or 0: the domain is then
+	 * as large as the LDs' allocations (fmd_create_mld_memory_resources()).
+	 */
+	uint64_t pool_capacity;
+	bool pool_capacity_valid;
+
 	/* QoS Control (5403h) response data */
 	struct {
 		bool enabled;                           /* Egress Port Congestion Enable */
@@ -803,6 +812,14 @@ struct fmd_mhd {
 	uint8_t total_lds;                   /* Total LDs in pool */
 	uint8_t max_lds;                     /* Maximum pool size */
 	uint8_t memory_granularity;          /* 256MB units */
+
+	/*
+	 * Get LD Info (5400h) Memory Size on the LD Pool CCI, as for an MLD
+	 * (struct fmd_mld). Not valid if the LD Pool CCI does not answer it:
+	 * nothing requires it to (cxl-fmd's reading of Section 7.6.7.5).
+	 */
+	uint64_t pool_capacity;
+	bool pool_capacity_valid;
 
 	/* QoS capability */
 	uint8_t qos_telemetry_capability;    /* Bit 0: Egress Port Backpressure */

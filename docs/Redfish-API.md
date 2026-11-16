@@ -765,6 +765,8 @@ Memory provisioning for CXL devices is performed through the MemoryChunks collec
 
 **Provisioning Model:** During discovery, cxl-fmd queries existing LD allocations from the device and creates MemoryChunks for already-allocated memory. The remaining (unallocated) capacity is tracked in the MemoryDomain but not represented as chunks until explicitly provisioned via POST. DELETE returns capacity back to the available pool.
 
+**Domain size of an MLD or Multi-Headed device:** the domain's `MemorySizeMiB` is the Memory Size of Get LD Info (5400h), "Total device memory capacity" (CXL r4.0 Table 7-46), and what is left for a `POST` is that less the allocations of the LDs (Get LD Allocations, 5401h). Table 7-46 gives the field no unit: cxl-fmd reads it as bytes. A Multi-Headed device is sent Get LD Info on its LD Pool CCI, which need not support it (only the Multi-Headed command set "is required on the LD Pool CCI", Section 7.6.7.5); if it does not answer, its domain is the sum of the allocations of its pool LDs, with nothing left (cxl-fmd's choice). A device that reports more allocated than its Memory Size has a domain as large as its allocations, with nothing left, and a warning is logged (cxl-fmd's choice). A device with nothing allocated has a domain, with no chunks; an LD with nothing allocated has no chunk. There is no property for what is left: a `POST` larger than it is `409`.
+
 ### Creating Memory Chunks (POST)
 
 **Basic request:**
@@ -1763,6 +1765,9 @@ Changes from the fixes of the external design review (branch
 | Chunk `DELETE` of an MLD's or MHD's chunk that Set LD Allocations answers Success for, with the LD shrunk by less than the chunk | `204`, the whole chunk counted free | `500`; the chunk stays, as large as what the LD did not give back, and the domain gets back what it did |
 | Chunk `DELETE` of a chunk larger than its LD's allocation | Set LD Allocations for an allocation of 0 | `409`, nothing sent |
 | Chunk `POST` or `DELETE` of an MLD or MHD in a mock | the LD's `MemorySizeMiB` unchanged | grown or shrunk by the chunk, as on a device |
+| `GET` of the `MemoryDomain` of an MLD, or of a Multi-Headed device whose LD Pool CCI answers Get LD Info | `MemorySizeMiB` the sum of the LDs' allocations, with nothing left, so a chunk `POST` was `409` until a chunk was deleted | the device's Memory Size (Get LD Info); a `POST` of up to what the LDs have not been allocated is made. In a mock, an MLD's is `identify_memory_device.total_capacity_mb` (every shipped one is the sum of its LDs) and a Multi-Headed device's the new `pool_capacity_mb` |
+| `GET` of the `MemoryDomains` of an MLD or Multi-Headed device none of whose LDs has memory allocated | no domain (an empty collection; `404` for the domain and a chunk `POST`) | its domain, with no chunks |
+| `GET` of the chunk of an LD with no memory allocated (`{dev}_ld{N}_chunk`) | `200`, `MemoryChunkSizeMiB` 0 | `404`: there is no such chunk |
 | Chunk `POST` on hardware on a pool LD of a Multi-Headed device | Get and Set LD Allocations sent to the endpoint that answered Get Multi-Headed Info with no tunnel, through a tunnel to the LD Pool CCI (Target Type 1) | sent to that endpoint with no tunnel; `501`, with nothing sent, if no LD Pool CCI is known |
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
 | `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |

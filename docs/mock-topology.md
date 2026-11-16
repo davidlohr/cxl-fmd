@@ -135,7 +135,7 @@ The `identify_memory_device` object contains fields returned by the CXL Identify
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `fw_revision` | string | "0.0.0" | Firmware revision string (max 16 chars) |
-| `total_capacity_mb` | integer | 0 | Total device capacity in MiB |
+| `total_capacity_mb` | integer | 0 | Total device capacity in MiB. For an MLD it is also the Memory Size of Get LD Info (5400h), which the MemoryDomain is; LD allocations are part of it. Without it, or at 0, the domain is the sum of the LD allocations |
 | `volatile_capacity_mb` | integer | 0 | Volatile memory capacity in MiB |
 | `persistent_capacity_mb` | integer | 0 | Persistent memory capacity in MiB |
 | `partition_align_mb` | integer | 256 | Partition alignment in MiB |
@@ -1260,6 +1260,7 @@ A Multi-Headed Device (MHD) has multiple CXL upstream ports (heads), allowing mu
 | `ld_pool` | array | [] | LD pool configuration |
 | `dynamic_capacity` | boolean | false | Supports dynamic capacity |
 | `memory_granularity` | integer | 1 | Memory granularity (256MB units) |
+| `pool_capacity_mb` | integer | sum of `ld_pool` sizes | The Memory Size the LD Pool CCI answers Get LD Info (5400h) with, which the MemoryDomain is. Without it the domain is the sum of the pool LD allocations, as for a device that does not answer 5400h there |
 | `qos_telemetry_capability` | integer | 0 | QoS telemetry capability bitmask |
 | `qos_control` | object | - | QoS control settings (see QoS Control section) |
 | `qos_status` | object | - | QoS status metrics (see QoS Status section) |

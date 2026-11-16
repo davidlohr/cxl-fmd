@@ -1151,50 +1151,98 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	return 0;
 }
 
-int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
+/*
+ * The capacity of the domain of an MLD or Multi-Headed device @dev, and
+ * what its LDs have allocated of it. The capacity is the device's Memory
+ * Size (Get LD Info, struct fmd_mld and fmd_mhd), or if it is not known
+ * the sum of the allocations, which is no more than what the device has
+ * (cxl-fmd's choice). Allocations larger than the Memory Size, which the
+ * device should not report, are taken to be what it has: the domain is
+ * then as large as they are, with nothing left (cxl-fmd's choice).
+ * Returns 0, or -EOVERFLOW if the allocations do not add up in 64 bits.
+ */
+static int ld_pool_sizes(struct fmd_ctx *ctx, struct fmd_component *dev,
+			 uint64_t *capacity, uint64_t *allocated)
+{
+	struct fmd_component *child;
+	uint64_t pool;
+	bool valid;
+
+	*allocated = 0;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+		if (__builtin_add_overflow(*allocated, fmd_to_ld(child)->memory_size,
+					   allocated)) {
+			fmd_warn(ctx, "%s: LD allocations add up to more than "
+				 "64 bits", dev->id);
+			return -EOVERFLOW;
+		}
+	}
+
+	if (dev->type == FMD_COMPONENT_MLD) {
+		pool = fmd_to_mld(dev)->pool_capacity;
+		valid = fmd_to_mld(dev)->pool_capacity_valid;
+	} else {
+		pool = fmd_to_mhd(dev)->pool_capacity;
+		valid = fmd_to_mhd(dev)->pool_capacity_valid;
+	}
+	*capacity = valid ? pool : *allocated;
+	if (*allocated > *capacity) {
+		fmd_warn(ctx, "%s: LDs have %" PRIu64 " MiB allocated, more than "
+			 "the Memory Size of %" PRIu64 " MiB: the domain is taken "
+			 "to be what they have", dev->id, *allocated >> 20,
+			 *capacity >> 20);
+		*capacity = *allocated;
+	}
+	return 0;
+}
+
+/*
+ * The domain of an MLD or Multi-Headed device @dev, whose capacity is
+ * ld_pool_sizes()', and a chunk for each LD that has memory allocated, of
+ * that allocation: a domain of which nothing is allocated has none.
+ */
+static int create_ld_memory_resources(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct fmd_mem_domain *domain;
 	struct fmd_component *child;
-	uint64_t total_size = 0;
-	uint64_t base_addr = 0;
+	uint64_t capacity, allocated, base_addr = 0;
 	char id[128];
-	int rc;
+	int rc, nchunks = 0;
 
-	/* Sum up all LD memory sizes */
-	fmd_for_each_child_type(&mld->base, child, FMD_COMPONENT_LD) {
-		struct fmd_ld *ld = fmd_to_ld(child);
-		total_size += ld->memory_size;
-	}
-
-	if (total_size == 0)
+	if (ld_pool_sizes(ctx, dev, &capacity, &allocated))
+		return 0;		/* no domain: nothing can be told of it */
+	if (capacity == 0)
 		return 0;
 
-	/* Create domain (MLD = MemoryDomain per OCP model) */
-	(void)snprintf(id, sizeof(id), "%.50s_domain0", mld->base.id);
+	/* Create domain (MLD or MHD = MemoryDomain per OCP model) */
+	(void)snprintf(id, sizeof(id), "%.50s_domain0", dev->id);
 	domain = fmd_domain_create(id);
 	if (!domain)
 		return -1;
 
-	domain->capacity = total_size;
-	domain->remaining = total_size;
+	domain->capacity = capacity;
+	domain->remaining = capacity;
 
-	rc = add_resource(ctx, &domain->base, &mld->base);
+	rc = add_resource(ctx, &domain->base, dev);
 	if (rc)
 		return rc;
 
-	/* Create one chunk per LD (each LD = MemoryChunk per OCP model) */
-	fmd_for_each_child_type(&mld->base, child, FMD_COMPONENT_LD) {
+	/* a chunk per LD with an allocation (each LD = MemoryChunk per OCP model) */
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
 		struct fmd_ld *ld = fmd_to_ld(child);
 		struct fmd_mem_chunk *chunk;
 
-		(void)snprintf(id, sizeof(id), "%.50s_ld%u_chunk", mld->base.id, ld->ld_id);
+		if (!ld->memory_size)
+			continue;
+
+		(void)snprintf(id, sizeof(id), "%.50s_ld%u_chunk", dev->id, ld->ld_id);
 		chunk = fmd_chunk_create(id);
 		if (!chunk)
 			return -1;
 
 		chunk->base_address = base_addr;
 		chunk->size = ld->memory_size;
-	
+
 		if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
 			strncpy(chunk->address_range_type, "Volatile",
 				sizeof(chunk->address_range_type) - 1);
@@ -1207,81 +1255,25 @@ int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		rc = add_resource(ctx, &chunk->base, &domain->base);
 		if (rc)
 			return rc;
-		domain->remaining -= chunk->size;
+		domain->remaining -= chunk->size;	/* allocated <= capacity */
+		nchunks++;
 
 		base_addr += ld->memory_size;
 	}
 
-	fmd_dbg(ctx, "%s: created domain and %d chunks (%" PRIu64 " MB total)",
-		mld->base.id, mld->ld_count, (uint64_t)(total_size / (1024ULL * 1024)));
+	fmd_dbg(ctx, "%s: created domain of %" PRIu64 " MB and %d chunks (%" PRIu64
+		" MB)", dev->id, capacity >> 20, nchunks, allocated >> 20);
 
 	return 0;
 }
 
+int fmd_create_mld_memory_resources(struct fmd_ctx *ctx, struct fmd_mld *mld)
+{
+	return create_ld_memory_resources(ctx, &mld->base);
+}
+
 int fmd_create_mhd_memory_resources(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 {
-	struct fmd_mem_domain *domain;
-	struct fmd_component *child;
-	uint64_t total_size = 0;
-	uint64_t base_addr = 0;
-	char id[128];
-	int rc;
-
-	/* Sum up all LD pool memory sizes */
-	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD) {
-		struct fmd_ld *ld = fmd_to_ld(child);
-		total_size += ld->memory_size;
-	}
-
-	if (total_size == 0)
-		return 0;
-
-	/* Create domain (MHD = MemoryDomain per OCP model) */
-	(void)snprintf(id, sizeof(id), "%.50s_domain0", mhd->base.id);
-	domain = fmd_domain_create(id);
-	if (!domain)
-		return -1;
-
-	domain->capacity = total_size;
-	domain->remaining = total_size;
-
-	rc = add_resource(ctx, &domain->base, &mhd->base);
-	if (rc)
-		return rc;
-
-	/* Create one chunk per LD in the pool */
-	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD) {
-		struct fmd_ld *ld = fmd_to_ld(child);
-		struct fmd_mem_chunk *chunk;
-
-		(void)snprintf(id, sizeof(id), "%.50s_ld%u_chunk", mhd->base.id, ld->ld_id);
-		chunk = fmd_chunk_create(id);
-		if (!chunk)
-			return -1;
-
-		chunk->base_address = base_addr;
-		chunk->size = ld->memory_size;
-	
-		if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
-			strncpy(chunk->address_range_type, "Volatile",
-				sizeof(chunk->address_range_type) - 1);
-		else
-			strncpy(chunk->address_range_type, "PMEM",
-				sizeof(chunk->address_range_type) - 1);
-
-		chunk->backing_ld = ld->ld_id;
-
-		rc = add_resource(ctx, &chunk->base, &domain->base);
-		if (rc)
-			return rc;
-		domain->remaining -= chunk->size;
-
-		base_addr += ld->memory_size;
-	}
-
-	fmd_dbg(ctx, "%s: created domain and %d chunks (%" PRIu64 " MB total)",
-		mhd->base.id, mhd->total_lds, (uint64_t)(total_size / (1024ULL * 1024)));
-
-	return 0;
+	return create_ld_memory_resources(ctx, &mhd->base);
 }
 

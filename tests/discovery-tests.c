@@ -229,20 +229,32 @@ static void answer_ld_allocations(struct cxlmi_endpoint *ep, uint8_t nr,
 	}
 }
 
-/* a directly attached MLD with @nr LDs of @mult allocation units each */
-static struct cxlmi_endpoint *new_mld(struct fmd_ctx *ctx, uint64_t serial,
-				      uint8_t nr, uint8_t granularity,
-				      uint64_t mult)
+/*
+ * A directly attached MLD with @nr LDs of @mult allocation units each, of
+ * a Memory Size (Get LD Info) of @memory_size bytes.
+ */
+static struct cxlmi_endpoint *new_mld_sized(struct fmd_ctx *ctx, uint64_t serial,
+					    uint8_t nr, uint8_t granularity,
+					    uint64_t mult, uint64_t memory_size)
 {
 	struct cxlmi_endpoint *ep = new_device(ctx);
 
 	answer_identify(ep, serial, 0x03);
 	/* asked twice: to tell an MLD from an SLD, then to discover the MLD */
-	answer_ld_info(ep, (uint64_t)nr * mult << 28, nr);
-	answer_ld_info(ep, (uint64_t)nr * mult << 28, nr);
+	answer_ld_info(ep, memory_size, nr);
+	answer_ld_info(ep, memory_size, nr);
 	answer_ld_allocations(ep, nr, granularity, mult);
 
 	return ep;
+}
+
+/* as new_mld_sized(), all of whose Memory Size the LDs have */
+static struct cxlmi_endpoint *new_mld(struct fmd_ctx *ctx, uint64_t serial,
+				      uint8_t nr, uint8_t granularity,
+				      uint64_t mult)
+{
+	return new_mld_sized(ctx, serial, nr, granularity, mult,
+			     (uint64_t)nr * mult * (256ULL << 20 << granularity));
 }
 
 /*
@@ -2083,7 +2095,9 @@ static void test_mib_out_of_range_sends_nothing(void)
 	static const char *const sizes[] = { "17592186044672", "17592186044416",
 					     "-1", "0" };
 	struct fmd_ctx *ctx = new_ctx();
-	struct cxlmi_endpoint *ep = new_mld(ctx, 0x1170, 2, 0, 4);
+	/* 2 x 1 GiB, of 2.25 GiB: room for a chunk of 256 MiB */
+	struct cxlmi_endpoint *ep = new_mld_sized(ctx, 0x1170, 2, 0, 4,
+						  (2ULL << 30) + (256ULL << 20));
 	struct fmd_mem_domain *domain;
 	struct fmd_component *dev;
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[256];
@@ -2100,9 +2114,6 @@ static void test_mib_out_of_range_sends_nothing(void)
 	CHECK(domain, "no domain %s", dom);
 	if (!domain)
 		goto dcd;
-	/* room for 256 MiB more */
-	domain->capacity += 256ULL << 20;
-	domain->remaining += 256ULL << 20;
 	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
 
 	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
@@ -6139,14 +6150,14 @@ static void test_chunk_guard(void)
 	char sw_id[FMD_MAX_ID_LEN], dev[FMD_MAX_ID_LEN + 16], dom[FMD_MAX_ID_LEN + 32];
 	char chunk[FMD_MAX_ID_LEN + 32], body[512], cid[FMD_CONN_ID_LEN];
 	uint8_t alloc[4 + 16] = { 0 }, set[4 + 16] = { 0 };
-	struct fmd_mem_domain *domain;
 	struct fmd_switch *sw;
 	struct fmd_host *host;
 	json_t *resp = NULL;
 	int before = failures, rc, task_id;
 	uint16_t op;
 
-	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	/* 2 x 1 GiB, of 2.25 GiB: room for a chunk of 256 MiB */
+	answer_ld_info(ep, (2ULL << 30) + (256ULL << 20), 2);
 	answer_ld_allocations(ep, 2, 0, 4);
 	fmd_discover(ctx);
 	device_id(sw_id, sizeof(sw_id), 0x5107);
@@ -6186,11 +6197,6 @@ static void test_chunk_guard(void)
 	      conn_state(ctx, cid), task_id);
 
 	/* bound: DELETE and POST on LD 0 are 409, with nothing sent */
-	domain = fmd_topology_find_domain(&ctx->topology, dom);
-	if (domain) {		/* room for another chunk */
-		domain->capacity += 256ULL << 20;
-		domain->remaining += 256ULL << 20;
-	}
 	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
 	op = last_opcode(ep);
 	CHECK(rc == -5 && op != 0x5401 && op != 0x5402 &&
@@ -6238,7 +6244,12 @@ out:
  * and 4 GiB, LD 0 and 1 mapped to head 0 (port 1), LD 2 to head 1 (port
  * 2), LD 3 to none.
  */
-static struct cxlmi_endpoint *new_mhd(struct fmd_ctx *ctx, uint64_t serial)
+/*
+ * An MHD of 4 pool LDs of 1 to 4 GiB, whose LD Pool CCI answers Get LD
+ * Info with Memory Size @memory_size, or not at all if it is 0.
+ */
+static struct cxlmi_endpoint *new_mhd_sized(struct fmd_ctx *ctx, uint64_t serial,
+					    uint64_t memory_size)
 {
 	struct cxlmi_endpoint *ep = new_device(ctx);
 	uint8_t probe[8 + 1] = { 0 }, info[8 + 4] = { 0 };
@@ -6254,7 +6265,14 @@ static struct cxlmi_endpoint *new_mhd(struct fmd_ctx *ctx, uint64_t serial)
 		answer_memdev_identify(ep, 4 * (i + 1), 4 * (i + 1), 0);
 	heads[0] = 2; heads[4] = 1; heads[4 + 6] = 4; heads[4 + 9] = 2;
 	answer(ep, 0x5501, heads, sizeof(heads));
+	if (memory_size)
+		answer_ld_info(ep, memory_size, 4);
 	return ep;
+}
+
+static struct cxlmi_endpoint *new_mhd(struct fmd_ctx *ctx, uint64_t serial)
+{
+	return new_mhd_sized(ctx, serial, 0);
 }
 
 /*
@@ -6340,7 +6358,8 @@ static void test_chunk_plan(void)
 			 "{\"@odata.id\": \"/redfish/v1/Chassis/%1$s/Memory/%1$s_ld0\"}}]}" },
 	};
 	struct fmd_ctx *ctx = new_ctx();
-	struct cxlmi_endpoint *ep = new_mld(ctx, 0xf02, 2, 0, 4);	/* 2 x 1 GiB */
+	/* 2 x 1 GiB, of 10 GiB */
+	struct cxlmi_endpoint *ep = new_mld_sized(ctx, 0xf02, 2, 0, 4, 10ULL << 30);
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[1024], uri[256];
 	char chunk_id[FMD_MAX_ID_LEN];
 	struct fmd_mem_domain *domain;
@@ -6361,9 +6380,6 @@ static void test_chunk_plan(void)
 	CHECK(domain && ld0 && ld1, "no domain %s or LDs", dom);
 	if (!domain || !ld0 || !ld1)
 		goto out;
-	/* room for more: the domain has none at discovery (review F01) */
-	domain->capacity += 8ULL << 30;
-	domain->remaining += 8ULL << 30;
 	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
 
 	for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
@@ -6484,15 +6500,13 @@ out:
 
 	/* a Multi-Headed device's pool, 4 LDs, that names none, or LD 40 */
 	ctx = new_ctx();
-	ep = new_mhd(ctx, 0xe02);
+	ep = new_mhd_sized(ctx, 0xe02, 18ULL << 30);
 	fmd_discover(ctx);
 	device_id(id, sizeof(id), 0xe02);
 	snprintf(dom, sizeof(dom), "%s_domain0", id);
 	domain = fmd_topology_find_domain(&ctx->topology, dom);
 	CHECK(domain, "no domain %s", dom);
 	if (domain) {
-		domain->capacity += 8ULL << 30;
-		domain->remaining += 8ULL << 30;
 		for (int i = 0; i < 2; i++) {
 			if (i)
 				snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, "
@@ -6525,7 +6539,7 @@ out:
 static void test_mhd_pool_route(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
-	struct cxlmi_endpoint *ep = new_mhd(ctx, 0x14a);
+	struct cxlmi_endpoint *ep = new_mhd_sized(ctx, 0x14a, 18ULL << 30);
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[512];
 	struct cxlmi_tunnel_info ti;
 	struct fmd_mem_domain *domain;
@@ -6554,8 +6568,6 @@ static void test_mhd_pool_route(void)
 	      ti.level, ti.mhd);
 
 	/* a chunk of 1 GiB on pool LD 1, 8 to 12 units of 256 MB */
-	domain->capacity += 8ULL << 30;
-	domain->remaining += 8ULL << 30;
 	answer_get_ld(ep, 1, 8);
 	answer_set_ld(ep, 1, 12);
 	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": "
@@ -6600,7 +6612,8 @@ out:
 static void test_mhd_chunk_delete(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
-	struct cxlmi_endpoint *ep = new_mhd(ctx, 0xf03);
+	/* 10 GiB in the pool LDs, of 11 GiB */
+	struct cxlmi_endpoint *ep = new_mhd_sized(ctx, 0xf03, 11ULL << 30);
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], chunk[FMD_MAX_ID_LEN + 16];
 	char body[512];
 	struct cxlmi_tunnel_info ti;
@@ -6683,8 +6696,6 @@ static void test_mhd_chunk_delete(void)
 	CHECK(rc == -5 && commands_sent(ep) == sent &&
 	      fmd_topology_find_chunk(&ctx->topology, chunk),
 	      "DELETE of a chunk of head 0: %d, %u sent", rc, commands_sent(ep) - sent);
-	domain->capacity += 1ULL << 30;		/* room: not why it is refused */
-	domain->remaining += 1ULL << 30;
 	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
 	CHECK(rc == -7 && !resp && commands_sent(ep) == sent,
 	      "POST on a pool LD of head 0: %d, %u sent", rc, commands_sent(ep) - sent);
@@ -6913,6 +6924,109 @@ out:
 	report("ForceUnbind is Unbind vPPB option 2h, and Origin", before);
 }
 
+/* the domain of device @serial, and how many chunks it has */
+static struct fmd_mem_domain *dev_domain(struct fmd_ctx *ctx, uint64_t serial,
+					 int *chunks)
+{
+	char id[FMD_MAX_ID_LEN], did[FMD_MAX_ID_LEN + 16];
+	struct fmd_mem_domain *d;
+
+	device_id(id, sizeof(id), serial);
+	snprintf(did, sizeof(did), "%s_domain0", id);
+	d = fmd_topology_find_domain(&ctx->topology, did);
+	*chunks = d ? fmd_component_count_children(&d->base, FMD_COMPONENT_CHUNK) : -1;
+	return d;
+}
+
+/*
+ * A MemoryDomain of an MLD or MHD is the device's Memory Size, "Total
+ * device memory capacity" (Get LD Info, Table 7-46), and what its LDs have
+ * not been allocated of it is left (review F01). It was the sum of the
+ * allocations, all of it taken: an MLD of 128 GiB with 2 LDs of 16 GiB had
+ * a domain of 32 GiB with nothing left, and one with nothing allocated had
+ * no domain at all.
+ */
+static void test_pool_capacity(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct fmd_mem_domain *d;
+	int before = failures, chunks;
+	uint8_t pl[4 + 2 * 16] = { 2, 2, 0, 1 };
+
+	/* 128 GiB, 2 LDs enabled of 4, 16 GiB each (16 units of 1 GB) */
+	new_mld_sized(ctx, 0xf01, 2, 2, 16, 128ULL << 30);
+	/* 128 GiB, 4 LDs, nothing allocated */
+	new_mld_sized(ctx, 0xf02, 4, 2, 0, 128ULL << 30);
+	/* 1 GiB of Memory Size, less than the 32 GiB its LDs have */
+	new_mld_sized(ctx, 0xf03, 2, 2, 16, 1ULL << 30);
+	/* MHDs of 10 GiB in pool LDs, with Get LD Info of 64 GiB, or none */
+	new_mhd_sized(ctx, 0xf04, 64ULL << 30);
+	new_mhd(ctx, 0xf05);
+	fmd_discover(ctx);
+
+	d = dev_domain(ctx, 0xf01, &chunks);
+	CHECK(d && d->capacity == 128ULL << 30 && d->remaining == 96ULL << 30 &&
+	      chunks == 2, "128 GiB, 32 GiB allocated: capacity %" PRIu64
+	      " MiB, remaining %" PRIu64 " MiB, %d chunks",
+	      d ? d->capacity >> 20 : 0, d ? d->remaining >> 20 : 0, chunks);
+	d = dev_domain(ctx, 0xf02, &chunks);
+	CHECK(d && d->capacity == 128ULL << 30 && d->remaining == 128ULL << 30 &&
+	      chunks == 0, "128 GiB, nothing allocated: %s, remaining %" PRIu64
+	      " MiB, %d chunks", d ? "a domain" : "no domain",
+	      d ? d->remaining >> 20 : 0, chunks);
+	d = dev_domain(ctx, 0xf03, &chunks);
+	CHECK(d && d->capacity == 32ULL << 30 && d->remaining == 0 && chunks == 2,
+	      "Memory Size below the allocations: capacity %" PRIu64 " MiB, "
+	      "remaining %" PRIu64 " MiB", d ? d->capacity >> 20 : 0,
+	      d ? d->remaining >> 20 : 0);
+	d = dev_domain(ctx, 0xf04, &chunks);
+	CHECK(d && d->capacity == 64ULL << 30 && d->remaining == 54ULL << 30 &&
+	      chunks == 4, "MHD with Get LD Info: capacity %" PRIu64 " MiB, "
+	      "remaining %" PRIu64 " MiB", d ? d->capacity >> 20 : 0,
+	      d ? d->remaining >> 20 : 0);
+	d = dev_domain(ctx, 0xf05, &chunks);
+	CHECK(d && d->capacity == 10ULL << 30 && d->remaining == 0 && chunks == 4,
+	      "MHD with no Get LD Info: capacity %" PRIu64 " MiB, remaining %"
+	      PRIu64 " MiB", d ? d->capacity >> 20 : 0, d ? d->remaining >> 20 : 0);
+	fmd_ctx_free(ctx);
+
+	/*
+	 * Allocation multipliers past 64 bits, as a sum of the two ranges or
+	 * times the granularity: LD 0 of Range 1 FFFF..FFh and Range 2 2,
+	 * LD 1 of 2^34 + 1 units of 1 GB. Each wrapped to 1 GiB.
+	 */
+	ctx = new_ctx();
+	{
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_ld *ld;
+		char id[FMD_MAX_ID_LEN];
+
+		answer_identify(ep, 0xf06, 0x03);
+		answer_ld_info(ep, 128ULL << 30, 2);
+		answer_ld_info(ep, 128ULL << 30, 2);
+		put64(pl + 4, UINT64_MAX);
+		put64(pl + 12, 2);
+		answer(ep, 0x5401, pl, 4 + 16);
+		pl[2] = 1;
+		put64(pl + 4, (1ULL << 34) + 1);
+		put64(pl + 12, 0);
+		answer(ep, 0x5401, pl, 4 + 16);
+		fmd_discover(ctx);
+		device_id(id, sizeof(id), 0xf06);
+		for (int i = 0; i < 2; i++) {
+			ld = fmd_topology_find_ld(&ctx->topology, id, i);
+			CHECK(ld && ld->memory_size == 0, "LD %d past 64 bits: %" PRIu64
+			      " bytes", i, ld ? ld->memory_size : 0);
+		}
+		d = dev_domain(ctx, 0xf06, &chunks);
+		CHECK(d && d->remaining == 128ULL << 30 && chunks == 0,
+		      "domain of LDs past 64 bits: remaining %" PRIu64 " MiB, %d chunks",
+		      d ? d->remaining >> 20 : 0, chunks);
+	}
+	fmd_ctx_free(ctx);
+	report("a domain is the device's Memory Size, less what its LDs have", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -6995,6 +7109,7 @@ int main(void)
 	test_mhd_pool_route();
 	test_mhd_chunk_delete();
 	test_mld_chunk_delete_partial();
+	test_pool_capacity();
 	test_force_unbind();
 	test_validate_bindings();
 	test_conn_view_prebound_sld_ld();
