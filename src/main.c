@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <errno.h>
@@ -15,21 +16,28 @@
 #include "cxl-fmd.h"
 #include "mock.h"
 
-static volatile sig_atomic_t g_running = 1;
+/*
+ * Set by signal handlers, read by the main loop. A signal is taken by any
+ * thread that does not block it, an HTTP server thread as well, so these
+ * are atomics, which are lock-free and safe in a handler, rather than
+ * volatile sig_atomic_t, which is only for a handler on the same thread.
+ */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "a signal handler needs lock-free atomics");
+static atomic_int g_running = 1;
 
 /* SIGUSR1 in mock mode: pull out the next device of the topology's list */
-static volatile sig_atomic_t g_unplug;
+static atomic_uint g_unplug;
 
 static void unplug_handler(int sig)
 {
 	(void)sig;
-	g_unplug++;
+	atomic_fetch_add(&g_unplug, 1);
 }
 
 static void signal_handler(int sig)
 {
 	(void)sig;
-	g_running = 0;
+	atomic_store(&g_running, 0);
 }
 
 static void print_usage(const char *prog)
@@ -357,13 +365,13 @@ int main(int argc, char *argv[])
 	if (mock_path)
 		signal(SIGUSR1, unplug_handler);
 
-	while (g_running && ctx->running) {
-		static sig_atomic_t unplugged;
+	while (atomic_load(&g_running) && ctx->running) {
+		static unsigned int unplugged;
 
 		fmd_events_poll(ctx, fmd_tasks_running(ctx) ? 100 : 1000);
 		fmd_tasks_poll(ctx);
 
-		for (; unplugged != g_unplug; unplugged++) {
+		for (; unplugged != atomic_load(&g_unplug); unplugged++) {
 			if (fmd_mock_unplug_next(ctx) < 0)
 				fmd_warn(ctx, "mock: there is no device left to unplug");
 		}
