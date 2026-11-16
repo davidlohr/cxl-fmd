@@ -5821,8 +5821,8 @@ static void test_conn_view_unresolved_mh_mld(void)
 		static const char *const bodies[] = {
 			"mhd_head0\"}]}}",
 			"mhd_ld0\"}]}}",
-			"mhd\"}]}, \"MemoryChunkInfo\": [{\"MemoryChunk\": "
-				"{\"@odata.id\": \"/x/mhd_ld1_chunk\"}}]}",
+			("mhd\"}]}, \"MemoryChunkInfo\": [{\"MemoryChunk\": "
+			 "{\"@odata.id\": \"/x/mhd_ld1_chunk\"}}]}"),
 		};
 		char body[512];
 		json_t *resp = NULL;
