@@ -41,6 +41,25 @@ static void invalid(struct validation *v, const char *rule, const char *fmt, ...
 	v->errors++;
 }
 
+/*
+ * What the specification does not forbid but a device would hardly report:
+ * logged, and the topology is still valid.
+ */
+static void doubtful(struct validation *v, const char *rule, const char *fmt, ...)
+	__attribute__((format(printf, 3, 4)));
+
+static void doubtful(struct validation *v, const char *rule, const char *fmt, ...)
+{
+	char msg[256];
+	va_list ap;
+
+	va_start(ap, fmt);
+	(void)vsnprintf(msg, sizeof(msg), fmt, ap);
+	va_end(ap);
+
+	fmd_warn(v->ctx, "doubtful topology: %s [%s]", msg, rule);
+}
+
 #define MB256 CXL_CAPACITY_UNIT
 #define VCS_ENABLED 0x01	/* VCS State 01h, Table 7-34 */
 
@@ -117,6 +136,140 @@ static bool tag_is_zero(const uint8_t *tag)
 	static const uint8_t zero[FMD_DC_TAG_LEN];
 
 	return memcmp(tag, zero, FMD_DC_TAG_LEN) == 0;
+}
+
+/* Flags of the region an extent is in, as its own host sees it; 0 for none */
+static uint8_t extent_flags(struct fmd_component *dev, struct fmd_dc_extent *ext)
+{
+	struct fmd_dc_region *r = ext->region_id == FMD_DC_REGION_NONE ? NULL :
+				  fmd_dc_find_region(dev, ext->host_id, ext->region_id);
+
+	return r ? r->flags : 0;
+}
+
+/*
+ * The Tag and Shared Extent Sequence of each extent (Table 8-230). The
+ * Extent List is one host's: "n is the number of extents" is taken to be
+ * the host's extents of the tag, which is cxl-fmd's reading.
+ */
+static void check_dc_sharing(struct validation *v, struct fmd_component *dev)
+{
+	static const char rule[] = "Dynamic Capacity Extent, Table 8-230";
+	struct fmd_component *child, *other;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		uint8_t flags = extent_flags(dev, ext);
+		unsigned int n = 0;
+		bool dup = false;
+
+		if (ext->region_id == FMD_DC_REGION_NONE ||
+		    !fmd_dc_find_region(dev, ext->host_id, ext->region_id))
+			continue;	/* refused above */
+
+		/* "For extents that describe non-shareable regions, this field shall be 0." */
+		if (!(flags & FMD_DC_REGION_SHAREABLE)) {
+			if (ext->shared_seq)
+				invalid(v, rule, "%s: extent at %#" PRIx64 " of host %d has "
+					"Shared Extent Sequence %u in region %d, which is not "
+					"Sharable", dev->id, ext->start_dpa, ext->host_id,
+					ext->shared_seq, ext->region_id);
+			continue;
+		}
+
+		/*
+		 * "Within sharable regions, all extents targeting the same
+		 * range this field is required": a sharable extent without one
+		 * is not shared, which the specification does not forbid.
+		 */
+		if (tag_is_zero(ext->tag)) {
+			doubtful(v, rule, "%s: extent at %#" PRIx64 " of host %d in "
+				 "Sharable region %d has no tag", dev->id,
+				 ext->start_dpa, ext->host_id, ext->region_id);
+			continue;
+		}
+
+		fmd_for_each_child_type(dev, other, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *o = fmd_to_dc_extent(other);
+
+			if (memcmp(o->tag, ext->tag, FMD_DC_TAG_LEN) ||
+			    !(extent_flags(dev, o) & FMD_DC_REGION_SHAREABLE))
+				continue;
+			if (o->host_id == ext->host_id) {
+				n++;
+				if (o != ext && o->shared_seq == ext->shared_seq)
+					dup = true;
+			} else if (o->host_id > ext->host_id &&
+				   o->shared_seq == ext->shared_seq && o->len != ext->len) {
+				/*
+				 * "The Shared Extent Sequence is used so that
+				 * the same offsets reach the same data accessed
+				 * by all hosts": that the same sequence is the
+				 * same length on each host is cxl-fmd's
+				 * inference from it.
+				 */
+				doubtful(v, rule, "%s: the extents of host %d at %#" PRIx64
+					 " and of host %d at %#" PRIx64 " have the same Tag "
+					 "and Shared Extent Sequence %u, and lengths %#"
+					 PRIx64 " and %#" PRIx64, dev->id, ext->host_id,
+					 ext->start_dpa, o->host_id, o->start_dpa,
+					 ext->shared_seq, ext->len, o->len);
+			}
+		}
+
+		/*
+		 * "For extents describing shareable regions this field shall
+		 * be within the range of 0 to n-1 where n is the number of
+		 * extents, with each value appearing only once."
+		 */
+		if (ext->shared_seq >= n || dup)
+			invalid(v, rule, "%s: extent at %#" PRIx64 " of host %d has "
+				"Shared Extent Sequence %u, which is not one of 0 to %u "
+				"once each for its %u extents of the tag", dev->id,
+				ext->start_dpa, ext->host_id, ext->shared_seq, n - 1, n);
+	}
+}
+
+/*
+ * The device's Dynamic Capacity List Tags (5608h). "When the tagged
+ * capacity has been released from all hosts, if the FM does not hold a
+ * reference, ... the tag no longer exists" (Section 9.13.3.2, in an
+ * example sequence): an entry with no LD in either bitmap and no FM
+ * reference is a tag that should be gone. The bitmaps reach LD 255 only
+ * ("bit[7] of the last byte represents LD 255", Table 7-78).
+ */
+static void check_dc_tags(struct validation *v, struct fmd_component *dev,
+			  struct fmd_dcd_info *dcd)
+{
+	static const char rule[] = "Dynamic Capacity List Tags, Table 7-78";
+	struct fmd_component *child;
+
+	if (!dcd->tags.known)
+		return;
+
+	for (uint32_t i = 0; i < dcd->tags.n; i++) {
+		const struct fmd_dc_tag *t = &dcd->tags.v[i];
+		bool any = t->fm_ref;
+		char str[40];
+
+		for (int b = 0; b < FMD_DC_LD_BITMAP_BYTES && !any; b++)
+			any = ((dcd->tags.validity & 0x01) && t->ref[b]) ||
+			      ((dcd->tags.validity & 0x02) && t->pend[b]);
+		if (any || (dcd->tags.validity & 0x03) != 0x03)
+			continue;
+		fmd_dc_tag_to_str(t->tag, str, sizeof(str));
+		doubtful(v, rule, "%s: tag %s has no LD and no FM reference",
+			 dev->id, str);
+	}
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+		if (ext->host_id > FMD_DC_MAX_HOST_ID)
+			doubtful(v, rule, "%s: host %d of the extent at %#" PRIx64
+				 " is past LD 255, which the tag bitmaps cannot name",
+				 dev->id, ext->host_id, ext->start_dpa);
+	}
 }
 
 static void check_dcd(struct validation *v, struct fmd_component *dev)
@@ -241,6 +394,9 @@ static void check_dcd(struct validation *v, struct fmd_component *dev)
 					o->start_dpa, h);
 		}
 	}
+
+	check_dc_sharing(v, dev);
+	check_dc_tags(v, dev, dcd);
 }
 
 static void check_sld(struct validation *v, struct fmd_sld *sld)

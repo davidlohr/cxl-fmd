@@ -343,6 +343,35 @@ def tags_entry_pending_on_no_host(t):
     perhost(t)["tags"][0]["pending_hosts"] = [3]
 
 
+# The rules of the Shared Extent Sequence, Table 8-230
+def seq_in_a_region_that_is_not_sharable(t):
+    dcd(t)["extents"][0]["shared_seq"] = 1
+
+
+def seq_twice_on_a_host(t):
+    # host 0 has tag ...c1 a second time, at offset 3072 MB: sequence 0 again
+    perhost(t)["extents"].append({
+        "len_mb": 256, "tag": "6f1a2c3e-0000-4000-8000-0000000000c1", "shared_seq": 0,
+        "per_host": [{"host_id": 0, "start_mb": 8192 + 3072}]})
+
+
+def seq_past_the_extents(t):
+    perhost(t)["extents"][0]["shared_seq"] = 1
+
+
+# switch-dcd.json: host 1's tag of region 1 (not Sharable) given to host 0
+# too, at another offset, so that only the validator sees it
+def unsharable_tag_on_two_hosts(t):
+    extent = t["devices"][0]["dcd"]["extents"][1]
+    del extent["hosts"]
+    extent["per_host"] = [{"host_id": 1, "start_mb": 24576},
+                          {"host_id": 0, "start_mb": 24576 + 1024}]
+
+
+def host_base_not_256mb(t):
+    perhost(t)["regions"][2]["host_base_mb"] = {"2": 32768 + 100}
+
+
 BROKEN = [
     # (base topology, what to break, part of the message that names the rule)
     ("multi-host-vcs.json", port_bound_twice, "is bound to vPPB"),
@@ -406,6 +435,15 @@ BROKEN = [
     ("dcd-shared-perhost.json", extent_twice_on_a_host, "already has an extent at 16384 MB"),
     ("dcd-shared-perhost.json", tags_entry_pending_on_no_host,
      "pending host 3 is not one of the 3 hosts"),
+    ("dcd-device.json", seq_in_a_region_that_is_not_sharable,
+     "has Shared Extent Sequence 1 in region 0, which is not Sharable"),
+    ("dcd-shared-perhost.json", seq_twice_on_a_host,
+     "which is not one of 0 to 1 once each for its 2 extents of the tag"),
+    ("dcd-shared-perhost.json", seq_past_the_extents,
+     "which is not one of 0 to 0 once each for its 1 extents of the tag"),
+    ("switch-dcd.json", unsharable_tag_on_two_hosts, "and region 1 is not Sharable"),
+    ("dcd-shared-perhost.json", host_base_not_256mb,
+     "host 2 region 2 base 0x806400000 is not aligned to 256 MB"),
 ]
 
 
@@ -455,12 +493,20 @@ def region_with_no_length(t):
         {"region_id": 2, "base_mb": 65536, "region_len_mb": 0, "block_size_mb": 0})
 
 
+# dcd-shared-perhost.json: host 2's extent at host 0's DPA of tag ...c1 is
+# other capacity, with a tag of its own: the DPAs of two hosts are not one
+# space (Section 9.13.3)
+def same_dpa_two_hosts_different_tags(t):
+    perhost(t)["extents"][2]["tag"] = "6f1a2c3e-0000-4000-8000-0000000000d0"
+
+
 ACCEPTED = [
     # (base topology, what to change)
     ("multi-host-vcs.json", disabled_vcs_with_a_stale_usp),
     ("multi-host-vcs.json", device_on_a_port_that_is_down),
     ("unit/unit-switch-mhsld.json", head_on_a_port_that_is_down),
     ("dcd-device.json", region_with_no_length),
+    ("dcd-shared-perhost.json", same_dpa_two_hosts_different_tags),
 ]
 
 
@@ -492,3 +538,42 @@ def test_broken_topology_does_not_serve(cxl_fmd_executable, tmp_path):
                           capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0
     assert "is not a valid CXL topology" in proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Doubtful, and still valid: a warning, and the topology loads
+# ---------------------------------------------------------------------------
+
+# "Within sharable regions ... this field is required" (Table 8-230)
+def sharable_extent_without_a_tag(t):
+    perhost(t)["extents"].append({"len_mb": 256, "per_host": [
+        {"host_id": 0, "start_mb": 32768}]})
+
+
+# the same Tag and sequence, of another length on host 1
+def shared_sequence_of_two_lengths(t):
+    perhost(t)["extents"][1]["per_host"][1]["len_mb"] = 256
+
+
+DOUBTFUL = [
+    ("dcd-shared-perhost.json", sharable_extent_without_a_tag,
+     "in Sharable region 2 has no tag"),
+    ("dcd-shared-perhost.json", shared_sequence_of_two_lengths,
+     "and Shared Extent Sequence 0, and lengths 0x20000000 and 0x10000000"),
+]
+
+
+@pytest.mark.parametrize("base,change,message", DOUBTFUL,
+                         ids=[d[1].__name__ for d in DOUBTFUL])
+def test_doubtful_topology_is_accepted(cxl_fmd_executable, tmp_path, base, change, message):
+    topology = json.loads((ROOT / "mock" / base).read_text())
+    changed = copy.deepcopy(topology)
+    change(changed)
+    assert changed != topology, "the case changes nothing"
+
+    path = tmp_path / "changed.json"
+    path.write_text(json.dumps(changed))
+
+    rc, output = check(cxl_fmd_executable, path)
+    assert rc == 0, f"refused a topology with {change.__name__}\n{output}"
+    assert "doubtful topology: " in output and message in output, output
