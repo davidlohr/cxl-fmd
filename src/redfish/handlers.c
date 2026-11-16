@@ -4823,8 +4823,12 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * Issue CCI command for hardware mode.
 	 * For MLD: resize LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
+	 * In mock mode the LD-allocation calls change the mock's LDs, as a
+	 * device's would be (fmd_mld_set_ld_allocation() and
+	 * fmd_mhd_set_ld_allocation() send nothing then); an SLD's
+	 * partition is not changed.
 	 */
-	if (likely(!fmd_is_mock(ctx))) {
+	{
 		struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(chassis, chunk);
 
 		rc = 0;
@@ -4838,7 +4842,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 			 * volatile capacity, as staged or else active, grows by
 			 * the chunk. Staged for the next reset, not at once.
 			 */
-			if (strcmp(plan.type, "Volatile") == 0) {
+			if (strcmp(plan.type, "Volatile") == 0 && likely(!fmd_is_mock(ctx))) {
 				struct fmd_sld *sld = fmd_to_sld(chassis);
 				uint64_t new_volatile;
 
@@ -5021,8 +5025,10 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 	 * Issue CCI command for hardware mode before removing from topology.
 	 * For MLD or MHD: decrease LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
+	 * In mock mode, as for a POST: the mock's LDs change, not an SLD's
+	 * partition.
 	 */
-	if (likely(!fmd_is_mock(ctx))) {
+	{
 		int rc = 0;
 
 		if (domain_parent->type == FMD_COMPONENT_MLD ||
@@ -5032,7 +5038,8 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				return rc;
 		} else if (domain_parent->type == FMD_COMPONENT_SLD) {
 			/* Only volatile chunks change the partition */
-			if (strcmp(chunk->address_range_type, "Volatile") == 0) {
+			if (strcmp(chunk->address_range_type, "Volatile") == 0 &&
+			    likely(!fmd_is_mock(ctx))) {
 				struct fmd_sld *sld = fmd_to_sld(domain_parent);
 				uint64_t cur = CXL_TO_BYTES(
 					fmd_partition_next_volatile(&sld->partition));

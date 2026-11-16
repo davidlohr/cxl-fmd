@@ -642,3 +642,35 @@ class TestMHDChunkInUse:
                   "cxl_mhd_partial_domain0/MemoryChunks")
         assert api_client.delete(chunks + "/cxl_mhd_partial_ld0_chunk") == 409
         assert api_client.delete(chunks + "/cxl_mhd_partial_ld2_chunk") == 204
+
+
+# =============================================================================
+# Mock LD allocations follow chunks (review F02, F03)
+# =============================================================================
+
+def ld_size(api_client, dev, ld):
+    status, data = api_client.get(
+        f"/redfish/v1/Chassis/{dev}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}")
+    assert status == 200, data
+    return data["MemorySizeMiB"]
+
+
+@pytest.mark.parametrize("dev,give,grow", [
+    pytest.param("cxl_mld_0", 1, 0, marks=pytest.mark.mock_topology("mock/mld-device.json")),
+    pytest.param("cxl_mhd_partial", 3, 2, marks=pytest.mark.mock_topology("mock/mhd-device.json")),
+])
+def test_mock_ld_size_follows_chunks(api_client, dev, give, grow):
+    """In a mock, a chunk POST grows its LD's MemorySizeMiB and its DELETE
+    shrinks it again, as Set LD Allocations does to a device's: the mock
+    left the LDs as they were. LD @give's chunk is deleted for room, and
+    a chunk of 1 GiB made on LD @grow."""
+    chunks = f"/redfish/v1/Chassis/{dev}/MemoryDomains/{dev}_domain0/MemoryChunks"
+    given = ld_size(api_client, dev, give)
+    grown = ld_size(api_client, dev, grow)
+    assert api_client.delete(f"{chunks}/{dev}_ld{give}_chunk") == 204
+    assert ld_size(api_client, dev, give) == 0
+    uri, _ = post_chunk(api_client, chunks, 1024, ld_memory(dev, grow))
+    assert ld_size(api_client, dev, grow) == grown + 1024
+    assert api_client.delete(uri) == 204
+    assert ld_size(api_client, dev, grow) == grown
+    assert given > 0

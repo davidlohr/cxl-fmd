@@ -889,6 +889,11 @@ DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}
   nothing sent.
 - **MHD**: the same, for a pool LD, on the LD Pool CCI (see "MHD Memory
   Model"); `501`, with nothing sent, when no LD Pool CCI is known.
+
+In mock mode (`--mock`) nothing is sent, and a chunk `POST` or `DELETE` of
+an MLD or MHD changes the mock LD's `MemorySizeMiB` as Set LD Allocations
+would a device's; a `"Volatile"` chunk of an SLD does not change the
+mock's partition.
 - **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
   the volatile capacity staged (or else active) less the chunk, staged for
   the next reset as on creation. A `"PMEM"` chunk sends no command.
@@ -1757,6 +1762,7 @@ Changes from the fixes of the external design review (branch
 | Chunk `DELETE` or `POST` on a pool LD whose head has a Connection (a direct-attached host, or a vPPB binding, `Unresolved` too), in a mock too | `204` / `201` | `409`, nothing sent |
 | Chunk `DELETE` of an MLD's or MHD's chunk that Set LD Allocations answers Success for, with the LD shrunk by less than the chunk | `204`, the whole chunk counted free | `500`; the chunk stays, as large as what the LD did not give back, and the domain gets back what it did |
 | Chunk `DELETE` of a chunk larger than its LD's allocation | Set LD Allocations for an allocation of 0 | `409`, nothing sent |
+| Chunk `POST` or `DELETE` of an MLD or MHD in a mock | the LD's `MemorySizeMiB` unchanged | grown or shrunk by the chunk, as on a device |
 | Chunk `POST` on hardware on a pool LD of a Multi-Headed device | Get and Set LD Allocations sent to the endpoint that answered Get Multi-Headed Info with no tunnel, through a tunnel to the LD Pool CCI (Target Type 1) | sent to that endpoint with no tunnel; `501`, with nothing sent, if no LD Pool CCI is known |
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
 | `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |
