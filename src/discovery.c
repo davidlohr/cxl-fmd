@@ -1995,6 +1995,83 @@ static bool mock_bg_busy(struct fmd_switch *sw)
 	return false;
 }
 
+void fmd_mock_binding_record(struct fmd_switch *sw, int which, uint8_t vcs_id,
+			     const struct fmd_vppb *vppb)
+{
+	struct cxlmi_event_record rec = { 0 };
+	struct timespec ts;
+
+	fmd_event_record_kind_from_name("virtual_switch", rec.uuid);
+	rec.length = 0x80;
+	rec.flags[0] = (uint8_t)which;		/* Event Record Severity */
+	rec.handle = (uint16_t)(0x8000 | ++sw->mock_record_handle);
+	clock_gettime(CLOCK_REALTIME, &ts);
+	rec.timestamp = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+	rec.data[0] = vcs_id;			/* 30h VCS ID */
+	rec.data[1] = vppb->vppb_id;		/* 31h vPPB ID */
+	rec.data[2] = 0x00;			/* 32h Event Type: Binding Change */
+	rec.data[3] = vppb->binding_status;	/* 33h vPPB Binding Status */
+	rec.data[4] = vppb->bound_port_id;	/* 34h vPPB Port ID */
+	rec.data[5] = vppb->bound_ld_id;	/* 35h vPPB LD ID */
+	fmd_log_add(&sw->base, which, &rec);
+}
+
+/*
+ * Mock: how the mock switch answers a Bind vPPB or Unbind vPPB
+ * (@opcode) of @vppb, given its "bind_result" or "unbind_result":
+ *  - busy: Busy, at once, as a switch running another background command
+ *    does; unsupported: Unsupported, at once. Each is then what the same
+ *    return code from a switch is.
+ *  - invalid_input, internal_error: Background Command Started. When it is
+ *    over the vPPB is as it was, a Binding Change goes to the Warning log
+ *    ("Failed bind and unbind operations generate events to the Warning
+ *    Event Log", Table 7-80), and Background Operation Status has the
+ *    return code. Even with no bind_time_ms: the outcome is in 0002h.
+ *  - success, with bind_time_ms: Background Command Started, and the vPPB
+ *    becomes @next, @port, @ld when it is over.
+ * Returns FMD_OP_STARTED, -EAGAIN or -EIO, or 0 for a success at once, which
+ * the caller makes.
+ */
+static int mock_bg_start(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			 struct fmd_vppb *vppb, uint16_t opcode,
+			 enum fmd_vppb_binding_status next, uint8_t port,
+			 uint8_t ld)
+{
+	uint16_t result = opcode == 0x5201 ? sw->mock_bind_result :
+					     sw->mock_unbind_result;
+	const char *what = opcode == 0x5201 ? "bind" : "unbind";
+
+	if (result == CXLMI_RET_BUSY) {
+		fmd_warn(ctx, "%s: mock %s vPPB: the switch is busy", sw->base.id,
+			 what);
+		return -EAGAIN;
+	}
+	if (result == CXLMI_RET_UNSUPPORTED) {
+		fmd_err(ctx, "%s: mock %s vPPB failed: %d (%s)", sw->base.id,
+			what, result, cxlmi_cmd_retcode_tostr(result));
+		return -EIO;
+	}
+	if (result == CXLMI_RET_SUCCESS && !sw->mock_bind_time_ms)
+		return 0;
+	if (mock_bg_busy(sw))
+		return -EAGAIN;
+
+	if (result != CXLMI_RET_SUCCESS) {
+		/* it fails: the vPPB stays what it is */
+		next = vppb->binding_status;
+		port = vppb->bound_port_id;
+		ld = vppb->bound_ld_id;
+	}
+	vppb->binding_status = FMD_VPPB_BUSY;
+	vppb->mock_next_status = next;
+	vppb->mock_next_port_id = port;
+	vppb->mock_next_ld_id = ld;
+	vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
+	sw->mock_bg_opcode = opcode;
+	sw->mock_bg_rc = result;
+	return FMD_OP_STARTED;
+}
+
 /*
  * The vPPB that a bind target is already bound to, NULL if it is unused.
  *
@@ -2137,18 +2214,12 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			 sw->base.id, vppb_id, vcs_id, port_id,
 			 ld_id != 0xFFFF ? " (MLD)" : "");
 
-		/* in the background, as a switch does it */
-		if (sw->mock_bind_time_ms) {
-			if (mock_bg_busy(sw))
-				return -EAGAIN;
-			vppb->binding_status = FMD_VPPB_BUSY;
-			vppb->mock_next_status = (ld_id != 0xFFFF) ?
-				FMD_VPPB_BOUND_LD : FMD_VPPB_BOUND_PHYSICAL_PORT;
-			vppb->mock_next_port_id = port_id;
-			vppb->mock_next_ld_id = (ld_id != 0xFFFF) ? ld_id : FMD_VPPB_NO_LD;
-			vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
-			return FMD_OP_STARTED;
-		}
+		/* in the background, as a switch does it, or refused */
+		rc = mock_bg_start(ctx, sw, vppb, 0x5201, (ld_id != 0xFFFF) ?
+				   FMD_VPPB_BOUND_LD : FMD_VPPB_BOUND_PHYSICAL_PORT,
+				   port_id, (ld_id != 0xFFFF) ? ld_id : FMD_VPPB_NO_LD);
+		if (rc)
+			return rc;
 
 		vppb->bound_port_id = port_id;
 		vppb->bound_ld_id = (ld_id != 0xFFFF) ? ld_id : FMD_VPPB_NO_LD;
@@ -2274,16 +2345,10 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		fmd_info(ctx, "%s: mock unbind vPPB %d in VCS %d (%s hot-remove)",
 			 sw->base.id, vppb_id, vcs_id, option_str);
 
-		if (sw->mock_bind_time_ms) {
-			if (mock_bg_busy(sw))
-				return -EAGAIN;
-			vppb->binding_status = FMD_VPPB_BUSY;
-			vppb->mock_next_status = FMD_VPPB_UNBOUND;
-			vppb->mock_next_port_id = 0;
-			vppb->mock_next_ld_id = FMD_VPPB_NO_LD;
-			vppb->mock_done_ms = mono_ms() + sw->mock_bind_time_ms;
-			return FMD_OP_STARTED;
-		}
+		rc = mock_bg_start(ctx, sw, vppb, 0x5202, FMD_VPPB_UNBOUND, 0,
+				   FMD_VPPB_NO_LD);
+		if (rc)
+			return rc;
 
 		vppb->binding_status = FMD_VPPB_UNBOUND;
 		vppb->bound_port_id = 0;
@@ -2363,10 +2428,19 @@ int fmd_switch_bg_status(struct fmd_ctx *ctx, struct fmd_switch *sw,
 				vppb->binding_status = vppb->mock_next_status;
 				vppb->bound_port_id = vppb->mock_next_port_id;
 				vppb->bound_ld_id = vppb->mock_next_ld_id;
-				vppb->bound_pbr_id = 0;
+				if (vppb->binding_status != FMD_VPPB_BOUND_PBR)
+					vppb->bound_pbr_id = 0;
 				vppb->mock_done_ms = 0;
+				/* "Failed bind and unbind operations generate
+				 * events to the Warning Event Log" */
+				if (sw->mock_bg_rc != CXLMI_RET_SUCCESS)
+					fmd_mock_binding_record(sw, 1, sw->vcs[v].vcs_id,
+								vppb);
 			}
 		}
+		/* the return code of the last command run in the background */
+		if (sw->mock_bg_opcode == opcode)
+			*rc = sw->mock_bg_rc;
 		if (running) {
 			*percent = 50;
 			return 1;

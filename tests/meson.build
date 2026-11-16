@@ -165,6 +165,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # The mock switch's bind and unbind outcomes, and binds made elsewhere
+    test(
+        'mock-bindings',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_mock_bindings.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Devices pulled out of a switch port
     test(
         'hot-removal',

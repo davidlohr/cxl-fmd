@@ -34,6 +34,15 @@ static void unplug_handler(int sig)
 	atomic_fetch_add(&g_unplug, 1);
 }
 
+/* SIGUSR2 in mock mode: make the next bind or unbind of the "external" list */
+static atomic_uint g_external;
+
+static void external_handler(int sig)
+{
+	(void)sig;
+	atomic_fetch_add(&g_external, 1);
+}
+
 static void signal_handler(int sig)
 {
 	(void)sig;
@@ -362,11 +371,13 @@ int main(int argc, char *argv[])
 	 * and follow the binds and unbinds the switches have under way, more
 	 * often while there are any.
 	 */
-	if (mock_path)
+	if (mock_path) {
 		signal(SIGUSR1, unplug_handler);
+		signal(SIGUSR2, external_handler);
+	}
 
 	while (atomic_load(&g_running) && ctx->running) {
-		static unsigned int unplugged;
+		static unsigned int unplugged, externals;
 
 		fmd_events_poll(ctx, fmd_tasks_running(ctx) ? 100 : 1000);
 		fmd_tasks_poll(ctx);
@@ -374,6 +385,11 @@ int main(int argc, char *argv[])
 		for (; unplugged != atomic_load(&g_unplug); unplugged++) {
 			if (fmd_mock_unplug_next(ctx) < 0)
 				fmd_warn(ctx, "mock: there is no device left to unplug");
+		}
+		for (; externals != atomic_load(&g_external); externals++) {
+			if (fmd_mock_external_next(ctx) < 0)
+				fmd_warn(ctx, "mock: there is no external bind or "
+					 "unbind left");
 		}
 	}
 

@@ -78,6 +78,24 @@ struct fmd_mock_fabric {
 	char (*unplug)[FMD_MAX_ID_LEN];
 	int unplug_count;
 	int unplug_next;
+
+	/*
+	 * Binds and unbinds made outside cxl-fmd, in order: one each time
+	 * the daemon is sent SIGUSR2 (see fmd_mock_external_next()).
+	 */
+	struct fmd_mock_external *external;
+	int external_count;
+	int external_next;
+};
+
+struct fmd_mock_external {
+	char switch_id[FMD_MAX_ID_LEN];
+	uint8_t vcs_id;
+	uint8_t vppb_id;
+	bool bind;                   /* else unbind */
+	uint8_t port_id;
+	uint16_t ld_id;              /* FFFFh: the whole port */
+	bool emit_event;
 };
 
 /*
@@ -100,6 +118,13 @@ void fmd_mock_free(struct fmd_mock_fabric *fabric);
  * port. Returns 0, or -1 if there is none left. Takes fabric_lock.
  */
 int fmd_mock_unplug_next(struct fmd_ctx *ctx);
+
+/*
+ * Make the next bind or unbind of the topology's "external" list, as one
+ * made by another FM or through another CCI. Returns 0, or -1 if there is
+ * none left. Takes fabric_lock.
+ */
+int fmd_mock_external_next(struct fmd_ctx *ctx);
 
 /*
  * Discover devices from mock topology

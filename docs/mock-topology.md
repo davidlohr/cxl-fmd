@@ -718,6 +718,8 @@ Switches define the fabric topology for switch-attached devices.
 | `upstream_port` | integer | 0 | Upstream port number |
 | `max_vcs` | integer | 8 | Maximum VCS supported |
 | `bind_time_ms` | integer | 0 | How long the switch takes over a bind or unbind, which it then does in the background, one at a time, as a switch does. 0: done at once |
+| `bind_result` | string | "success" | What the switch answers Bind vPPB (5201h) with: see *Bind and Unbind Outcomes* |
+| `unbind_result` | string | "success" | What the switch answers Unbind vPPB (5202h) with: see *Bind and Unbind Outcomes* |
 | `ports` | array | [] | Port configuration array |
 | `vcs` | array | [] | VCS configuration array |
 
@@ -841,6 +843,55 @@ it does when a switch reports it: see *When a Device Is Removed* in
 Each entry is an SLD or an MLD on a switch port, named once: only a switch
 reports a device that is pulled out. A signal with nothing left to pull out
 is logged and changes nothing. Outside mock mode, `SIGUSR1` is not handled.
+
+## Bind and Unbind Outcomes
+
+`bind_result` and `unbind_result` of a switch are the return codes (CXL r4.0
+Table 8-208) the mock switch gives Bind vPPB and Unbind vPPB. Any other value
+is an error.
+
+| Value | What the switch does |
+|-------|----------------------|
+| `success` | Binds or unbinds: at once, or in the background with `bind_time_ms` |
+| `invalid_input`, `internal_error` | Background Command Started, even with no `bind_time_ms`. When it is over, the vPPB is as it was, a Virtual CXL Switch Event Record (Binding Change) goes to its Warning log ("Failed bind and unbind operations generate events to the Warning Event Log", Table 7-80), and Background Operation Status (0002h) has the return code |
+| `busy` | Busy, at once, as a switch that runs another background command does; the vPPB does not change |
+| `unsupported` | Unsupported, at once; the vPPB does not change |
+
+A successful bind or unbind keeps no record: that is a limit of the mock.
+
+## Binds and Unbinds Made Elsewhere
+
+A topology can list binds and unbinds made outside cxl-fmd, as by another
+Fabric Manager or through another CCI. Each time the daemon is sent
+`SIGUSR2`, the next one is made:
+
+```json
+"external": [
+    { "switch": "switch_0", "vcs": 1, "vppb": 2, "action": "bind", "port": 3 },
+    { "switch": "switch_0", "vcs": 1, "vppb": 3, "action": "bind", "port": 4,
+      "ld": 1, "emit_event": false },
+    { "switch": "switch_0", "vcs": 1, "vppb": 2, "action": "unbind" }
+]
+```
+
+```bash
+kill -USR2 $(pidof cxl-fmd)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `switch` | string | **Required** | A switch of the topology |
+| `vcs`, `vppb` | integer | 0 | The VCS ID and vPPB ID. vPPB 0 is the upstream port's, and is refused |
+| `action` | string | **Required** | `bind` or `unbind` |
+| `port` | integer | **Required** for `bind` | The physical port bound |
+| `ld` | integer | - | The LD-ID, for a port with an MLD only, as Bind vPPB's LD ID is (Table 7-35) |
+| `emit_event` | boolean | true | Keep a Binding Change in the switch's Informational log ("Successful bind and unbind operations generate events to the Informational Event Log", Table 7-80), and act on it as on one read from a switch. `false` changes the vPPB and nothing else: whether a switch records a bind made elsewhere in a log this FM reads, the specification does not say |
+
+The vPPB is changed whatever it is now; nothing checks that the port or LD is
+not bound elsewhere, so an entry can make a table a switch would not. One
+for a vPPB the mock switch is binding or unbinding is logged and not made. A
+signal with nothing left is logged and changes nothing. Outside mock mode,
+`SIGUSR2` is not handled.
 
 ## Event Records
 

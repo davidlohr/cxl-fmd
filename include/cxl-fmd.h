@@ -495,6 +495,19 @@ struct fmd_switch {
 	 * which it then does in the background as a switch does. 0: at once.
 	 */
 	unsigned int mock_bind_time_ms;
+
+	/*
+	 * Mock only: the return code the mock switch gives Bind vPPB and
+	 * Unbind vPPB (CXLMI_RET_*: Success, Invalid Input, Internal Error,
+	 * Busy or Unsupported), and the opcode and return code of the last
+	 * one it ran in the background, which Background Operation Status
+	 * reports.
+	 */
+	uint16_t mock_bind_result;
+	uint16_t mock_unbind_result;
+	uint16_t mock_bg_opcode;
+	uint16_t mock_bg_rc;
+	uint16_t mock_record_handle;
 };
 
 /*
@@ -1726,6 +1739,14 @@ void fmd_dc_log_overflowed(struct fmd_component *dev, uint16_t count,
 			   uint64_t first_ns, uint64_t last_ns);
 int fmd_device_logs_poll(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep);
 int fmd_event_record_kind_from_name(const char *name, uint8_t uuid[16]);
+
+/*
+ * Mock: keep a Virtual CXL Switch Event Record (Table 7-80), Binding
+ * Change, of vPPB @vppb of VCS @vcs_id in log @which of a mock switch, as
+ * its state now is.
+ */
+void fmd_mock_binding_record(struct fmd_switch *sw, int which, uint8_t vcs_id,
+			     const struct fmd_vppb *vppb);
 
 json_t *fmd_redfish_ld_log(struct fmd_ctx *ctx, const char *chassis_id,
 			   const char *pcie_id, const char *ld_id,

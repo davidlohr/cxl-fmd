@@ -432,6 +432,109 @@ static void parse_unplug(struct fmd_ctx *ctx, struct fmd_mock_fabric *fabric,
 }
 
 /*
+ * "external": binds and unbinds made by someone other than cxl-fmd, one
+ * each time the daemon is sent SIGUSR2, in order:
+ *
+ *   "external": [ { "switch": "switch_0", "vcs": 0, "vppb": 3,
+ *                   "action": "bind", "port": 4, "ld": 1,
+ *                   "emit_event": true } ]
+ *
+ * "action" is "bind" or "unbind"; a bind names "port", and "ld" for an MLD
+ * port only, as Bind vPPB does (Table 7-35). "emit_event" (default true)
+ * keeps a Binding Change in the switch's Informational log and acts on it
+ * as on one read from a switch; false changes the table and nothing else,
+ * the case where no record reaches this FM.
+ */
+static void parse_external(struct fmd_ctx *ctx, struct fmd_mock_fabric *fabric,
+			   json_t *list)
+{
+	json_t *item;
+	size_t idx;
+
+	if (!list)
+		return;
+	if (!json_is_array(list)) {
+		load_error("external is not a list");
+		return;
+	}
+	fabric->external = calloc(json_array_size(list) ? json_array_size(list) : 1,
+				  sizeof(*fabric->external));
+	if (!fabric->external) {
+		load_error("external: out of memory");
+		return;
+	}
+
+	json_array_foreach(list, idx, item) {
+		struct fmd_mock_external *e = &fabric->external[fabric->external_count];
+		const char *sw_id = json_str_or(item, "switch", NULL);
+		const char *action = json_str_or(item, "action", NULL);
+		struct fmd_switch *sw = sw_id ?
+			fmd_topology_find_switch(&ctx->topology, sw_id) : NULL;
+		struct fmd_vcs *vcs;
+		struct fmd_port *port;
+		json_t *jemit;
+
+		if (!json_is_object(item) || !sw) {
+			load_error("external %zu: no switch %s", idx,
+				   sw_id ? sw_id : "named");
+			continue;
+		}
+		e->vcs_id = (uint8_t)json_int_or(item, "vcs", 0);
+		e->vppb_id = (uint8_t)json_int_or(item, "vppb", 0);
+		vcs = fmd_switch_find_vcs(sw, e->vcs_id);
+		if (!vcs || !fmd_vcs_find_vppb(vcs, e->vppb_id)) {
+			load_error("external %zu: %s has no vPPB %d in VCS %d", idx,
+				   sw_id, e->vppb_id, e->vcs_id);
+			continue;
+		}
+		/* vPPB 0 is the USP's */
+		if (e->vppb_id == 0) {
+			load_error("external %zu: vPPB 0 is the upstream port's", idx);
+			continue;
+		}
+		if (!action || (strcmp(action, "bind") && strcmp(action, "unbind"))) {
+			load_error("external %zu: action is not bind or unbind", idx);
+			continue;
+		}
+		e->bind = !strcmp(action, "bind");
+		e->port_id = 0;
+		e->ld_id = 0xFFFF;
+		if (e->bind) {
+			if (!json_object_get(item, "port")) {
+				load_error("external %zu: a bind names a port", idx);
+				continue;
+			}
+			e->port_id = (uint8_t)json_int_or(item, "port", 0);
+			port = fmd_topology_find_port(&ctx->topology, sw_id, e->port_id);
+			if (!port) {
+				load_error("external %zu: %s has no port %d", idx,
+					   sw_id, e->port_id);
+				continue;
+			}
+			/* LD ID: the LD-ID of an MLD port, FFFFh otherwise */
+			if (json_object_get(item, "ld"))
+				e->ld_id = (uint16_t)json_int_or(item, "ld", 0);
+			if ((port->conn_dev_type == FMD_CONN_MLD) != (e->ld_id != 0xFFFF)) {
+				load_error("external %zu: port %d %s, and ld is the "
+					   "LD-ID of an MLD port only (Table 7-35)",
+					   idx, e->port_id,
+					   port->conn_dev_type == FMD_CONN_MLD ?
+					   "has an MLD" : "has no MLD");
+				continue;
+			}
+		}
+		jemit = json_object_get(item, "emit_event");
+		if (jemit && !json_is_boolean(jemit)) {
+			load_error("external %zu: emit_event is not true or false", idx);
+			continue;
+		}
+		e->emit_event = !jemit || json_is_true(jemit);
+		snprintf(e->switch_id, sizeof(e->switch_id), "%s", sw_id);
+		fabric->external_count++;
+	}
+}
+
+/*
  * Parse supported commands from CEL array
  */
 static uint64_t parse_cel_commands(json_t *jcel)
@@ -1747,6 +1850,34 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 
 /*
+ * "bind_result", "unbind_result": what the mock switch answers Bind vPPB
+ * and Unbind vPPB with (see mock_bg_start() in src/discovery.c). The return
+ * codes are those of Table 8-208.
+ */
+static uint16_t parse_bind_result(json_t *jsw, const char *key)
+{
+	static const struct {
+		const char *name;
+		uint16_t rc;
+	} results[] = {
+		{ "success", CXLMI_RET_SUCCESS },
+		{ "invalid_input", CXLMI_RET_INPUT },
+		{ "internal_error", CXLMI_RET_INTERNAL },
+		{ "busy", CXLMI_RET_BUSY },
+		{ "unsupported", CXLMI_RET_UNSUPPORTED },
+	};
+	const char *str = json_str_or(jsw, key, "success");
+
+	for (size_t i = 0; i < sizeof(results) / sizeof(results[0]); i++) {
+		if (!strcmp(str, results[i].name))
+			return results[i].rc;
+	}
+	load_error("%s \"%s\" is not success, invalid_input, internal_error, "
+		   "busy or unsupported", key, str);
+	return CXLMI_RET_SUCCESS;
+}
+
+/*
  * Parse vPPB binding status from string
  */
 static enum fmd_vppb_binding_status parse_binding_status(const char *str)
@@ -1871,6 +2002,8 @@ static int parse_switch(struct fmd_ctx *ctx, json_t *jsw, json_t *devices)
 	sw->max_vcs = (uint8_t)json_int_or(jsw, "max_vcs", 8);
 	/* binds and unbinds in the background, as a switch does them */
 	sw->mock_bind_time_ms = (unsigned int)json_uint_or(jsw, "bind_time_ms", 0);
+	sw->mock_bind_result = parse_bind_result(jsw, "bind_result");
+	sw->mock_unbind_result = parse_bind_result(jsw, "unbind_result");
 
 	fmd_topology_add(&ctx->topology, &sw->base, NULL);
 
@@ -2354,6 +2487,7 @@ int fmd_mock_load(struct fmd_ctx *ctx, const char *path)
 	}
 
 	parse_unplug(ctx, fabric, json_object_get(root, "unplug"));
+	parse_external(ctx, fabric, json_object_get(root, "external"));
 
 	/* a device on a switch or port that is not there was never added */
 	if (devices && json_is_array(devices)) {
@@ -2404,6 +2538,7 @@ void fmd_mock_free(struct fmd_mock_fabric *fabric)
 
 	/* The topology tree owns all components now */
 	free(fabric->unplug);
+	free(fabric->external);
 	free(fabric);
 }
 
@@ -2472,6 +2607,69 @@ int fmd_mock_unplug_next(struct fmd_ctx *ctx)
 
 	fmd_switch_port_device_removed(ctx, sw, port, dev);
 	fmd_switch_settle_connections(ctx, sw);
+
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+	return 0;
+}
+
+/*
+ * A bind or unbind made outside cxl-fmd: the next of the topology's
+ * "external" list. The switch's table changes with no task. With
+ * emit_event, the switch records a Binding Change, as "Successful bind and
+ * unbind operations generate events to the Informational Event Log" (Table
+ * 7-80), and it is acted on as one read from a switch's log.
+ */
+int fmd_mock_external_next(struct fmd_ctx *ctx)
+{
+	struct fmd_mock_fabric *fabric = ctx->mock_fabric;
+	struct fmd_mock_external *e;
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	struct fmd_vppb *vppb;
+
+	if (!fabric || fabric->external_next >= fabric->external_count)
+		return -1;
+	e = &fabric->external[fabric->external_next++];
+
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+	sw = fmd_topology_find_switch(&ctx->topology, e->switch_id);
+	vcs = sw ? fmd_switch_find_vcs(sw, e->vcs_id) : NULL;
+	vppb = vcs ? fmd_vcs_find_vppb(vcs, e->vppb_id) : NULL;
+	if (!vppb || vppb->mock_done_ms) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		fmd_warn(ctx, "mock: external %s of vPPB %d of VCS %d of %s not "
+			 "made: %s", e->bind ? "bind" : "unbind", e->vppb_id,
+			 e->vcs_id, e->switch_id,
+			 vppb ? "the switch is binding or unbinding it" :
+				"it is not there");
+		return 0;
+	}
+
+	if (e->bind) {
+		vppb->binding_status = e->ld_id != 0xFFFF ?
+			FMD_VPPB_BOUND_LD : FMD_VPPB_BOUND_PHYSICAL_PORT;
+		vppb->bound_port_id = e->port_id;
+		vppb->bound_ld_id = e->ld_id != 0xFFFF ? (uint8_t)e->ld_id :
+							 FMD_VPPB_NO_LD;
+	} else {
+		vppb->binding_status = FMD_VPPB_UNBOUND;
+		vppb->bound_port_id = 0;
+		vppb->bound_ld_id = FMD_VPPB_NO_LD;
+		vppb->port = NULL;
+		vppb->ld = NULL;
+	}
+	vppb->bound_pbr_id = 0;
+	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
+	fmd_info(ctx, "mock: vPPB %d of VCS %d of %s %s outside cxl-fmd%s",
+		 e->vppb_id, e->vcs_id, sw->base.id,
+		 e->bind ? "bound" : "unbound",
+		 e->emit_event ? "" : ", with no event record");
+
+	if (e->emit_event) {
+		fmd_mock_binding_record(sw, 0, e->vcs_id, vppb);
+		if (!fmd_task_binding_changed(ctx, sw, e->vcs_id, e->vppb_id, false))
+			fmd_switch_settle_connections(ctx, sw);
+	}
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 	return 0;
