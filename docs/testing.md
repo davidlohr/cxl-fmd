@@ -267,14 +267,14 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_error_handling.py` | Error responses (404, 400, 409) | 31 |
 | `test_fuzzing.py` | Input fuzzing and boundary tests | 28 |
 | `test_adversarial.py` | Security and adversarial tests | 59 |
-| `test_dcd.py` | Dynamic capacity | 89 |
+| `test_dcd.py` | Dynamic capacity, and the tasks of an add or a release | 109 |
 | `test_mock_topologies.py` | The mock topologies, and the checker refusing invalid ones | 97 |
 | `test_manpage.py` | The man page against `--help` | 5 |
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 83 |
 | `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 16 |
 | `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
 | `test_oem_schema.py` | Every `Oem.Cxl` object and Oem action against cxl-fmd's Oem schema `Cxl_v1.xml` | 7 |
-| **Total** | | **677** |
+| **Total** | | **697** |
 
 ### Running Tests
 
