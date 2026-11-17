@@ -590,6 +590,15 @@ The write operations on a `Connection`, which no DSP0288 rule maps (see
 - `DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}` - Unbind vPPB, Simulate Managed Hot-Remove (switch-attached only)
 - `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` - Unbind vPPB, Simulate Surprise Hot-Remove (cxl-fmd's Oem action)
 
+A `POST` to `.../MemoryChunks/Members` or `/redfish/v1/Fabrics/CXL/Connections/Members`
+is the same request as one to the collection, and is answered the same:
+"Submitting a POST request to a resource collection is equivalent to
+submitting the same request to the Members property of that resource
+collection. Services that support the addition of Members to a resource
+collection shall support both forms." (DSP0266 1.25.0 Section 7.9). The
+`Members` of a collection that takes no `POST`, and a `GET` of any
+`Members`, are `404`.
+
 ### Headers
 
 Every response, errors included, has `OData-Version: 4.0` ("OData version
@@ -2655,6 +2664,7 @@ Changes from the fixes of the external design review (branch
 | `GET` answered `200` | no `Allow` header | `Allow`, the methods the resource takes, as its `405` lists them (see "Headers") |
 | `GET` of a resource answered `200` | no `Link` header | `Link: <http://redfish.dmtf.org/schemas/v1/{type}.json>; rel=describedby`, the JSON Schema of its `@odata.type` (see "Headers") |
 | A request with an `OData-Version` other than `4.0` (`4.1`) | served as if it had none | `412`, `HeaderInvalid`, nothing done (see "Headers") |
+| `POST` to the `Members` of a `MemoryChunks` collection of a Chassis or of the Connections | `404` | as a `POST` to the collection (see "HTTP Method Mapping") |
 
 Mock topologies, discovery and start-up:
 

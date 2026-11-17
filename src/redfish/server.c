@@ -2377,6 +2377,29 @@ static bool send_unsupported_query(struct MHD_Connection *conn,
 }
 
 /*
+ * The collection a POST to @url creates in, if @url is the Members of one
+ * that takes a POST: "Submitting a POST request to a resource collection
+ * is equivalent to submitting the same request to the Members property of
+ * that resource collection. Services that support the addition of Members
+ * to a resource collection shall support both forms." (DSP0266 1.25.0
+ * Section 7.9). Allocated; NULL if @url is not such a Members.
+ */
+static char *members_collection(const char *url)
+{
+	char *norm_url = normalize_url(url);
+	size_t len = norm_url ? strlen(norm_url) : 0;
+	const size_t suffix = strlen("/Members");
+
+	if (len > suffix && !strcmp(norm_url + len - suffix, "/Members")) {
+		norm_url[len - suffix] = '\0';
+		if (matches_any(post_routes, ROUTES(post_routes), norm_url))
+			return norm_url;
+	}
+	free(norm_url);
+	return NULL;
+}
+
+/*
  * A request whose OData-Version is not 4.0: "Services shall reject
  * requests that specify an unsupported OData version. If a service
  * encounters an unsupported OData version, it should reject the request
@@ -2504,6 +2527,12 @@ static enum MHD_Result handle_request(void *cls,
 		return result;
 	}
 
+	/* a POST to the Members of a collection is one to the collection */
+	char *collection = strcmp(method, "POST") ? NULL : members_collection(url);
+
+	if (collection)
+		url = collection;
+
 	pthread_rwlock_wrlock(&ctx->fabric_lock);
 	if (send_precondition_failed(ctx, conn, method, url, &result))
 		;
@@ -2521,6 +2550,7 @@ static enum MHD_Result handle_request(void *cls,
 	else
 		result = send_method_not_allowed(ctx, conn, method, url);
 	pthread_rwlock_unlock(&ctx->fabric_lock);
+	free(collection);
 
 	return result;
 }

@@ -513,3 +513,55 @@ class TestODataVersion:
         odata_version_refused(requests.patch(base + memory, headers=h, timeout=30,
                                              json={"CXLDevice": {"Timestamp": 1}}), "4.1")
         assert api_client.get(memory)[1] == before
+
+
+# POST to Members (review F18.6, the DMTF Redfish-Protocol-Validator's
+# REQ_POST_CREATE_TO_MEMBERS_PROP)
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestPostToMembers:
+    """
+    "Submitting a POST request to a resource collection is equivalent to
+    submitting the same request to the Members property of that resource
+    collection. Services that support the addition of Members to a
+    resource collection shall support both forms." (DSP0266 1.25.0 Section
+    7.9). It was 404.
+    """
+
+    def test_chunk(self, api_client):
+        base = api_client.base_url
+        chunk = api_client.get(SLD_CHUNKS)[1]["Members"][0]["@odata.id"]
+        assert api_client.delete(chunk) == 204
+        for uri in (SLD_CHUNKS + "/Members", SLD_CHUNKS + "/Members/"):
+            precondition_failed(requests.post(base + uri, json={"MemoryChunkSizeMiB": 256},
+                                              headers={"If-Match": "*"}, timeout=30))
+        assert api_client.get(SLD_CHUNKS)[1]["Members"] == []
+        created = requests.post(base + SLD_CHUNKS + "/Members",
+                                json={"MemoryChunkSizeMiB": 256}, timeout=30)
+        assert created.status_code == 201, created.text
+        location = created.headers["Location"]
+        assert location.startswith(SLD_CHUNKS + "/")
+        assert api_client.get(SLD_CHUNKS)[1]["Members"] == [{"@odata.id": location}]
+        assert api_client.get(location)[1]["MemoryChunkSizeMiB"] == 256
+
+    def test_collection_that_takes_no_post(self, api_client):
+        """Only a collection that takes a POST has Members to POST to"""
+        for uri in (CHASSIS + "/Members", "/redfish/v1/Members",
+                    SLD_CHUNKS + "/Members/x"):
+            assert requests.post(api_client.base_url + uri, json={},
+                                 timeout=30).status_code == 404
+        # a GET of Members is not a resource
+        assert api_client.get(SLD_CHUNKS + "/Members")[0] == 404
+
+
+@pytest.mark.mock_topology("mock/fm-boots-first.json")
+def test_post_connection_to_members(api_client):
+    response = requests.post(api_client.base_url + CONNECTIONS + "/Members", timeout=30, json={
+        "ConnectionType": "Memory",
+        "Links": {
+            "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
+            "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/sld_0"}]},
+        "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id":
+            CHASSIS + "/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks/sld_0_chunk0"}}]})
+    assert response.status_code == 201, response.text
+    assert response.headers["Location"].startswith(CONNECTIONS + "/")
+    assert api_client.get(CONNECTIONS)[1]["Members@odata.count"] == 1
