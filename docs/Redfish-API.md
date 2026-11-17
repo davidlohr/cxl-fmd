@@ -691,7 +691,9 @@ derived from `Resource.OemObject`:
 |----------|-------------------------|------------|
 | `MemoryDomain` of a host (`/redfish/v1/Systems/{id}/MemoryDomains/{dom}`) | `#Cxl.v1_0_0.MemoryDomain` | `HostState` |
 | `Connection` | `#Cxl.v1_0_0.Connection` | `Origin` |
-| `PCIeDevice` of a DCD | `#Cxl.v1_0_0.PCIeDevice` | `DynamicCapacityTags` (see [DCD-FM-API.md](DCD-FM-API.md)) |
+| `PCIeDevice` of a DCD | `#Cxl.v1_0_0.PCIeDevice` | `DynamicCapacity` (sizes in bytes) and `DynamicCapacityTags` (see [DCD-FM-API.md](DCD-FM-API.md)) |
+| `MemoryRegion` of a DCD | `#Cxl.v1_0_0.MemoryRegion` | `RegionBaseOffsetBytes`, `RegionSizeBytes`, `BlockSizeBytes` |
+| `MemoryExtent` | `#Cxl.v1_0_0.MemoryExtent` | `ExtentOffsetBytes`, `ExtentSizeBytes` |
 
 The action `#Cxl.ForceUnbind` of a switch-attached `Connection` is the
 `ForceUnbind` action of the `Cxl` namespace, bound to
@@ -2420,6 +2422,7 @@ Changes from the fixes of the external design review (branch
 | A mock topology's `health_info.additional_status` | ignored, though mock-topology.md listed it | read, for an SLD and for an LD in its own `health_info` |
 | `GET` of any resource with `Oem.Cxl` (a host's `MemoryDomain`, a `Connection`, a DCD's `PCIeDevice`) | `Oem.Cxl` with no `@odata.type`, and no schema for it | `@odata.type` `#Cxl.v1_0_0.MemoryDomain`, `#Cxl.v1_0_0.Connection` or `#Cxl.v1_0_0.PCIeDevice`, the types of cxl-fmd's Oem schema (see "Oem schema") |
 | `GET /redfish/v1/$metadata`; `GET /redfish/v1/Schemas/Cxl_v1.xml` | no reference to an Oem schema; `404` | a reference to `/redfish/v1/Schemas/Cxl_v1.xml`, which is served |
+| `GET` of a DCD's `PCIeDevice`, `MemoryRegion` or `MemoryExtent` | sizes and offsets only in whole MiB, rounded down: a 64 KiB block size `BlockSizeMiB` 0 and not in `MemoryBlockSizesSupported`, two 64 KiB extents both `ExtentOffsetMiB` 1024, `ExtentSizeMiB` 0 | the same, and each in bytes in `Oem.Cxl` (`TotalDynamicCapacityBytes`, `BlockSizeBytes`, `RegionBaseOffsetBytes`, `RegionSizeBytes`, `ExtentOffsetBytes`, `ExtentSizeBytes`; see DCD-FM-API.md, Comment 3) |
 
 Mock topologies and discovery:
 

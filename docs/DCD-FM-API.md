@@ -148,10 +148,22 @@ deprecated since `MemoryRegion v1.1.0` and are not emitted.
 Redfish uses MiB throughout, and cxl-fmd multiplies by 2^20. A Free or
 Contiguous add whose Length is not a multiple of the region's block size is
 refused with `400 Bad Request` before anything is sent, in the mock and on
-hardware; nothing is rounded. Sizes are shown in whole MiB, so a block size
-below 1 MiB (Table 7-65 allows any power of two from 2^6 bytes) is not
-listed in `MemoryBlockSizesSupported`, shows as `BlockSizeMiB` 0, and cannot
-be chosen with PATCH: a known limitation.
+hardware; nothing is rounded. The DMTF properties are whole MiB, so a
+block size below 1 MiB (Table 7-65 allows any power of two from 2^6 bytes)
+is not listed in `MemoryBlockSizesSupported`, shows as `BlockSizeMiB` 0,
+and cannot be chosen with PATCH (a known limitation), and an extent's or
+region's offset or size that is not whole MiB is rounded down. Each of
+them is therefore given in bytes too, in cxl-fmd's Oem (its Oem schema,
+`Cxl_v1.xml`; review F12):
+
+| Resource | MiB property | `Oem.Cxl` property, bytes |
+|----------|--------------|---------------------------|
+| `PCIeDevice` | `CXLDevice/DynamicCapacity/TotalDynamicCapacityMiB` | `DynamicCapacity/TotalDynamicCapacityBytes` |
+| `PCIeDevice` | `CXLDevice/DynamicCapacity/MemoryBlockSizesSupported[]/BlockSizeMiB` (1 MiB and up) | `DynamicCapacity/MemoryBlockSizesSupported[]/BlockSizeBytes` (every bit of the mask) |
+| `MemoryRegion` | `RegionBaseOffsetMiB`, `RegionSizeMiB`, `BlockSizeMiB` | `RegionBaseOffsetBytes`, `RegionSizeBytes`, `BlockSizeBytes` |
+| `MemoryExtent` | `ExtentOffsetMiB`, `ExtentSizeMiB` | `ExtentOffsetBytes`, `ExtentSizeBytes` |
+
+`MemorySizeMiB` of a `CXLLogicalDevice` has none.
 
 Errors are a Redfish error object whose `code` is always
 `Base.1.24.GeneralError`, whose `message` says what was wrong, and whose
@@ -192,14 +204,22 @@ choice.
 **Comment 4:** DMTF has no resource for a tag, and no property for the LDs
 that have accepted a tag or been offered it. cxl-fmd shows the device's
 5608h list on the `PCIeDevice` of a DCD, as
-`Oem/Cxl/DynamicCapacityTags`. The view and its names are cxl-fmd's
-choice. Its type, `#Cxl.v1_0_0.PCIeDevice`, is in cxl-fmd's Oem schema,
+`Oem/Cxl/DynamicCapacityTags` (next to `DynamicCapacity`, the sizes of
+Comment 3 in bytes). The view and its names are cxl-fmd's choice. Its type, `#Cxl.v1_0_0.PCIeDevice`, is in cxl-fmd's Oem schema,
 `Cxl_v1.xml` (see "Oem schema" in [Redfish-API.md](Redfish-API.md)).
 
 ```json
 "Oem": {
   "Cxl": {
     "@odata.type": "#Cxl.v1_0_0.PCIeDevice",
+    "DynamicCapacity": {
+      "TotalDynamicCapacityBytes": 12884901888,
+      "MemoryBlockSizesSupported": [
+        { "RegionNumber": 0, "BlockSizeBytes": [268435456] },
+        { "RegionNumber": 1, "BlockSizeBytes": [268435456] },
+        { "RegionNumber": 2, "BlockSizeBytes": [268435456, 536870912] }
+      ]
+    },
     "DynamicCapacityTags": {
       "TagsKnown": true,
       "Generation": 7,

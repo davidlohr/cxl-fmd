@@ -14,6 +14,9 @@
   <edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/csd01/complete/vocabularies/Org.OData.Core.V1.xml">
     <edmx:Include Namespace="Org.OData.Core.V1" Alias="OData"/>
   </edmx:Reference>
+  <edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/csd01/complete/vocabularies/Org.OData.Measures.V1.xml">
+    <edmx:Include Namespace="Org.OData.Measures.V1" Alias="Measures"/>
+  </edmx:Reference>
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/RedfishExtensions_v1.xml">
     <edmx:Include Namespace="RedfishExtensions.v1_0_0" Alias="Redfish"/>
   </edmx:Reference>
@@ -91,9 +94,89 @@
         <Annotation Term="OData.AdditionalProperties" Bool="false"/>
         <Annotation Term="OData.Description" String="cxl-fmd's properties of a CXL device."/>
         <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a PCIe device that is a CXL dynamic capacity device."/>
+        <Property Name="DynamicCapacity" Type="Cxl.v1_0_0.DynamicCapacity" Nullable="false">
+          <Annotation Term="OData.Description" String="The sizes of CXLDevice/DynamicCapacity, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain, in bytes, the sizes Get DCD Info (5600h, CXL r4.0 Table 7-65) reports, which CXLDevice/DynamicCapacity gives in whole MiB."/>
+        </Property>
         <Property Name="DynamicCapacityTags" Type="Cxl.v1_0_0.DynamicCapacityTags" Nullable="false">
           <Annotation Term="OData.Description" String="The tags of the dynamic capacity of the device, from Dynamic Capacity List Tags (5608h)."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain the tag list the device reported in Dynamic Capacity List Tags (5608h, CXL r4.0 Table 7-78)."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="DynamicCapacity">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="The sizes of a dynamic capacity device, in bytes."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the sizes Get DCD Info reports, in bytes."/>
+        <Property Name="TotalDynamicCapacityBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Total Dynamic Capacity of the device, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Total Dynamic Capacity field of Get DCD Info, in bytes."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="MemoryBlockSizesSupported" Type="Collection(Cxl.v1_0_0.MemoryBlockSizes)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The block sizes each region supports, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain one entry for each region the device reports, with every block size its Supported Block Size Mask has."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="MemoryBlockSizes">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="The block sizes a region supports."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the block sizes one region supports."/>
+        <Property Name="RegionNumber" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The region number."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the number of the dynamic capacity region."/>
+        </Property>
+        <Property Name="BlockSizeBytes" Type="Collection(Edm.Int64)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The block sizes the region supports, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain 2 to the power n for each bit n set in the region's Supported Block Size Mask, in increasing order."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="MemoryRegion" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a dynamic capacity region."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain, in bytes, the sizes and offset of a dynamic capacity region that the MemoryRegion properties give in whole MiB."/>
+        <Property Name="RegionBaseOffsetBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Region Base of the region, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Region Base the host's Get Host DC Region Configuration (5601h) reports, in bytes."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="RegionSizeBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Region Length of the region, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Region Length that Get Host DC Region Configuration reports, the usable length of the region, in bytes."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="BlockSizeBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The configured block size of the region, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Region Block Size that Get Host DC Region Configuration reports, in bytes."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="MemoryExtent" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a dynamic capacity extent."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain, in bytes, the offset and size of a dynamic capacity extent that ExtentOffsetMiB and ExtentSizeMiB give in whole MiB."/>
+        <Property Name="ExtentOffsetBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Starting DPA of the extent, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Starting DPA of the extent (CXL r4.0 Table 8-230)."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="ExtentSizeBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Length of the extent, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Length of the extent (CXL r4.0 Table 8-230)."/>
+          <Annotation Term="Measures.Unit" String="By"/>
         </Property>
       </ComplexType>
 

@@ -151,7 +151,8 @@ def crawl(base):
 
 @pytest.mark.parametrize("topology, expected", [
     ("mock/dcd-device.json", {"Cxl.v1_0_0.PCIeDevice", "Cxl.v1_0_0.Connection",
-                              "Cxl.v1_0_0.MemoryDomain"}),
+                              "Cxl.v1_0_0.MemoryDomain", "Cxl.v1_0_0.MemoryRegion",
+                              "Cxl.v1_0_0.MemoryExtent"}),
     ("mock/event-logs.json", {"Cxl.v1_0_0.Connection", "Cxl.v1_0_0.MemoryDomain",
                               "#Cxl.ForceUnbind"}),
     ("mock/mhd-device.json", {"Cxl.v1_0_0.Connection", "Cxl.v1_0_0.MemoryDomain"}),

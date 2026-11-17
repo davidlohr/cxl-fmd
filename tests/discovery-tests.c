@@ -3670,6 +3670,115 @@ static const uint8_t dc_tag_c[16] = {
 #define DC_EXT_FIELDS_LEN (sizeof(struct fmd_dc_extent) - offsetof(struct fmd_dc_extent, host_id))
 
 /*
+ * Sizes and offsets of a DCD in bytes, cxl-fmd's Oem: a block can be 2^6
+ * bytes ("bit n being set indicates that block size 2^n is supported.
+ * Bits[5:0] and bits[63:52] shall be 0", CXL r4.0 Table 7-65), and the
+ * MiB properties round down. A region of 64 KiB blocks had BlockSizeMiB
+ * 0 and BlockSizeMiB [] in MemoryBlockSizesSupported, and two 64 KiB
+ * extents ExtentOffsetMiB 1024 and ExtentSizeMiB 0 both. Review F12
+ * claims 4 and 5 (its cases c and d).
+ */
+static void test_dc_exact_bytes(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mld(ctx, 0xf3, 1, 0, 4);
+	uint8_t info[0x54] = { 0 };
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_component *dev;
+	int before = failures;
+	json_t *j, *oem, *want;
+
+	info[0x00] = 1;					/* Number of Hosts */
+	info[0x01] = 2;					/* Number of Regions */
+	put16(info + 0x04, 0x07);
+	put16(info + 0x08, 0x03);
+	put64(info + 0x0c, 8);				/* 8 x 256 MB */
+	put64(info + 0x14, (1ULL << 16) | (1ULL << 20));	/* region 0: 64 KiB, 1 MiB */
+	put64(info + 0x1c, (1ULL << 16));			/* region 1: 64 KiB only */
+	answer(ep, 0x5600, info, sizeof(info));
+	fmd_discover(ctx);
+	cxlmi_mock_clear_responses(ep);
+	device_id(id, sizeof(id), 0xf3);
+	dev = fmd_topology_find(&ctx->topology, id);
+	CHECK(dev && fmd_memdev_dcd(dev), "no DCD");
+	if (!dev || !fmd_memdev_dcd(dev))
+		goto out;
+
+	/* c: every block size of the mask, in bytes */
+	j = fmd_redfish_dc_tags_oem(ctx, dev, id, id);
+	oem = json_object_get(json_object_get(j, "Cxl"), "DynamicCapacity");
+	want = json_pack("{s:I, s:[{s:i, s:[I, I]}, {s:i, s:[I]}]}",
+			 "TotalDynamicCapacityBytes", (json_int_t)(8ULL << 28),
+			 "MemoryBlockSizesSupported",
+			 "RegionNumber", 0, "BlockSizeBytes", (json_int_t)1 << 16, (json_int_t)1 << 20,
+			 "RegionNumber", 1, "BlockSizeBytes", (json_int_t)1 << 16);
+	CHECK(oem && json_equal(oem, want), "Oem DynamicCapacity");
+	CHECK(!strcmp(json_string_value(json_object_get(json_object_get(j, "Cxl"),
+							 "@odata.type")) ?: "",
+		      "#Cxl.v1_0_0.PCIeDevice"), "its @odata.type");
+	json_decref(want);
+	json_decref(j);
+
+	/* d: a region of 64 KiB blocks, two 64 KiB extents in it */
+	{
+		uint8_t pl[0x04 + 2 * 0x28 + 0x10] = { 0 };
+		uint8_t *r1 = pl + 0x04 + 0x28, *tail = pl + 0x04 + 2 * 0x28;
+		struct dc_ext e[2] = {
+			{ 1ULL << 30, 1ULL << 16, dc_tag, 0 },
+			{ (1ULL << 30) + (1ULL << 16), 1ULL << 16, dc_tag_b, 0 },
+		};
+
+		pl[0x02] = 2;
+		pl[0x03] = 2;
+		put64(r1 + 0x00, 1ULL << 30);		/* Region Base */
+		put64(r1 + 0x08, 4);			/* Decode Length, 256 MB units */
+		put64(r1 + 0x10, (1ULL << 30) + (1ULL << 16));	/* Region Length */
+		put64(r1 + 0x18, 1ULL << 16);		/* 64 KiB blocks */
+		put16(tail + 0x00, 64);
+		put16(tail + 0x04, 62);
+		put16(tail + 0x08, 16);
+		put16(tail + 0x0c, 15);
+		answer(ep, 0x5601, pl, sizeof(pl));
+		answer_dc_extents(ep, 1, 0, 2, e, 2);
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+		CHECK(fmd_dcd_refresh(ctx, dev, 0) == 0, "the refresh");
+	}
+	j = fmd_redfish_dc_memory_region(ctx, id, id, "0", "1");
+	oem = json_object_get(json_object_get(j, "Oem"), "Cxl");
+	want = json_pack("{s:s, s:I, s:I, s:I}", "@odata.type", "#Cxl.v1_0_0.MemoryRegion",
+			 "RegionBaseOffsetBytes", (json_int_t)1 << 30,
+			 "RegionSizeBytes", (json_int_t)((1ULL << 30) + (1ULL << 16)),
+			 "BlockSizeBytes", (json_int_t)1 << 16);
+	CHECK(oem && json_equal(oem, want), "region Oem");
+	CHECK(json_integer_value(json_object_get(j, "BlockSizeMiB")) == 0,
+	      "BlockSizeMiB of a region of 64 KiB blocks");
+	json_decref(want);
+	json_decref(j);
+
+	for (int i = 0; i < 2; i++) {
+		char xid[32];
+		uint64_t dpa = (1ULL << 30) + (uint64_t)i * (1ULL << 16);
+
+		snprintf(xid, sizeof(xid), "ext_0_%" PRIx64, dpa);
+		j = fmd_redfish_dc_memory_extent(ctx, id, id, xid);
+		oem = json_object_get(json_object_get(j, "Oem"), "Cxl");
+		want = json_pack("{s:s, s:I, s:I}", "@odata.type", "#Cxl.v1_0_0.MemoryExtent",
+				 "ExtentOffsetBytes", (json_int_t)dpa,
+				 "ExtentSizeBytes", (json_int_t)1 << 16);
+		CHECK(j && oem && json_equal(oem, want), "extent %s Oem", xid);
+		/* the MiB properties of both are the same */
+		CHECK(json_integer_value(json_object_get(j, "ExtentOffsetMiB")) == 1024 &&
+		      json_integer_value(json_object_get(j, "ExtentSizeMiB")) == 0,
+		      "extent %s MiB properties", xid);
+		json_decref(want);
+		json_decref(j);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("DC sizes and offsets in bytes", before);
+}
+
+/*
  * 5603h returns the "Extent list for the specified host" (Table 7-71), and
  * "The DPA ranges exposed by the device to each host are independent of
  * one another" (Section 9.13.3): host 0 and host 1 can both list DPA 1 GiB,
@@ -11209,6 +11318,7 @@ int main(void)
 	test_unsupported_query_oom_server();
 	test_dc_reserved_fields();
 	test_dc_same_dpa_two_hosts();
+	test_dc_exact_bytes();
 	test_dc_region_per_host();
 	test_dc_extent_in_decode_tail();
 	test_dc_prescriptive_release_payload();

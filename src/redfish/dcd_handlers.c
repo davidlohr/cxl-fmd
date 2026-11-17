@@ -348,6 +348,37 @@ static json_t *ld_bitmap_array(const uint8_t *bm)
 	return arr;
 }
 
+/*
+ * Oem/Cxl/DynamicCapacity of a PCIeDevice: what CXLDevice/DynamicCapacity
+ * gives in MiB, in bytes. Region 0 Supported Block Size Mask: "Each bit
+ * indicates a power of 2 supported block size, where bit n being set
+ * indicates that block size 2^n is supported. Bits[5:0] and bits[63:52]
+ * shall be 0" (CXL r4.0 Table 7-65, and the other regions "As defined in
+ * Region 0"): a block can be 64 bytes, which BlockSizeMiB, an integer of
+ * MiB, cannot say. BlockSizeBytes lists every size the mask has, in
+ * bytes; TotalDynamicCapacityBytes is Total Dynamic Capacity, in bytes.
+ * Review F12 (claims 4 and 5); the properties are cxl-fmd's.
+ */
+static json_t *dc_bytes_oem(const struct fmd_dcd_info *dcd)
+{
+	json_t *blocks = json_array();
+
+	for (int r = 0; r < dcd->num_regions && r < FMD_MAX_DC_REGIONS; r++) {
+		json_t *sizes = json_array();
+
+		for (int n = 0; n < 63; n++) {
+			if (dcd->blk_sz_mask[r] & (1ULL << n))
+				json_array_append_new(sizes, json_integer((json_int_t)(1ULL << n)));
+		}
+		json_array_append_new(blocks, json_pack("{s:i, s:o}",
+			"RegionNumber", r,
+			"BlockSizeBytes", sizes));
+	}
+	return json_pack("{s:I, s:o}",
+		"TotalDynamicCapacityBytes", (json_int_t)dcd->total_dc_capacity,
+		"MemoryBlockSizesSupported", blocks);
+}
+
 static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev,
 				  const char *chassis_id, const char *dev_id)
 {
@@ -395,17 +426,19 @@ static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev
 		json_object_set_new(view, "Tags", tags);
 	else
 		json_decref(tags);
-	return json_pack("{s:{s:s, s:o}}", "Cxl",
+	return json_pack("{s:{s:s, s:o, s:o}}", "Cxl",
 			 "@odata.type", "#Cxl.v1_0_0.PCIeDevice",
+			 "DynamicCapacity", dc_bytes_oem(dcd),
 			 "DynamicCapacityTags", view);
 }
 
 /*
- * PCIeDevice Oem/Cxl/DynamicCapacityTags: the device's tag list, from Get
- * DC Region Tag List (5608h, Table 7-78). DMTF has no resource for a tag,
- * nor for the LDs that have accepted or been offered its capacity, and
- * DSP0288 maps no Dynamic Capacity command: this view, its names and its
- * having no schema are cxl-fmd's.
+ * PCIeDevice Oem/Cxl: DynamicCapacity, sizes in bytes (dc_bytes_oem()),
+ * and DynamicCapacityTags, the device's tag list, from Dynamic Capacity
+ * List Tags (5608h, Table 7-78). DMTF has no resource for a tag, nor for
+ * the LDs that have accepted or been offered its capacity, and DSP0288
+ * maps no Dynamic Capacity command: this view and its names are cxl-fmd's,
+ * described by its Oem schema (schema/oem/csdl/Cxl_v1.xml).
  *
  * A tag is listed as the device lists it, which a MemoryExtent cannot show
  * of capacity no host's Extent List has: capacity only an FM reference
@@ -576,6 +609,19 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 	/* An extent with no tag (all zero, cxl-fmd's convention) has no Tag */
 	if (tag_str[0])
 		json_object_set_new(result, "Tag", json_string(tag_str));
+
+	/*
+	 * Starting DPA and Length in bytes (cxl-fmd's Oem): the Length is
+	 * "Always a multiple of the configured Region Block Size" and the
+	 * Starting DPA "Always aligned to" it (CXL r4.0 Table 8-230), and a
+	 * block can be less than 1 MiB (Table 7-65), so ExtentOffsetMiB and
+	 * ExtentSizeMiB, integers of MiB, round down.
+	 * Review F12 claim 5.
+	 */
+	json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:I, s:I}}", "Cxl",
+		"@odata.type", "#Cxl.v1_0_0.MemoryExtent",
+		"ExtentOffsetBytes", (json_int_t)ext->start_dpa,
+		"ExtentSizeBytes", (json_int_t)ext->len));
 
 	/*
 	 * FMReferencedExtent: Flags Bit[0] "FM Holds Reference" of the tag's
@@ -843,6 +889,19 @@ static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_
 				    fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags) ||
 				    fmd_dc_sync_behind(fmd_dc_host_sync(dev, host_id)) ?
 				    "Warning" : "OK"));
+
+	/*
+	 * Region Base, Length and Block Size in bytes (cxl-fmd's Oem): a
+	 * block size can be 2^6 bytes (Table 7-65), so the MiB properties,
+	 * integers, round down, a block size under 1 MiB to 0. Review F12
+	 * claims 4 and 5.
+	 */
+	if (result)
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:I, s:I, s:I}}", "Cxl",
+			"@odata.type", "#Cxl.v1_0_0.MemoryRegion",
+			"RegionBaseOffsetBytes", (json_int_t)region->base_dpa,
+			"RegionSizeBytes", (json_int_t)region->region_len,
+			"BlockSizeBytes", (json_int_t)region->block_size));
 
 	fmd_topology_rdunlock(&ctx->topology);
 	return result;

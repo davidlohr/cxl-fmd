@@ -772,6 +772,53 @@ class TestCXLReferenceDCMemory:
 
 
 # =============================================================================
+# Sizes and offsets in bytes (cxl-fmd's Oem; review F12 claims 4 and 5)
+# =============================================================================
+
+MIB = 1 << 20
+
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+class TestExactBytes:
+    """Every MiB property of a DCD has its value in bytes in Oem.Cxl. In
+    the mock all are whole MiB, so they agree; discovery-tests.c
+    test_dc_exact_bytes has a device of 64 KiB blocks, where they do not."""
+
+    def test_pcie_device(self, api_client):
+        status, data = api_client.get(SLD)
+        assert status == 200
+        dyn = data["CXLDevice"]["DynamicCapacity"]
+        oem = data["Oem"]["Cxl"]["DynamicCapacity"]
+        assert oem["TotalDynamicCapacityBytes"] == dyn["TotalDynamicCapacityMiB"] * MIB
+        assert [r["RegionNumber"] for r in oem["MemoryBlockSizesSupported"]] == \
+            [r["RegionNumber"] for r in dyn["MemoryBlockSizesSupported"]]
+        for mib, by in zip(dyn["MemoryBlockSizesSupported"], oem["MemoryBlockSizesSupported"]):
+            assert [b * MIB for b in mib["BlockSizeMiB"]] == \
+                [b for b in by["BlockSizeBytes"] if b >= MIB]
+
+    def test_regions_and_extents(self, api_client):
+        status, data = api_client.get(SLD_LD0 + "/MemoryRegions")
+        assert status == 200
+        for member in data["Members"]:
+            status, region = api_client.get(member["@odata.id"])
+            assert status == 200
+            oem = region["Oem"]["Cxl"]
+            assert oem["@odata.type"] == "#Cxl.v1_0_0.MemoryRegion"
+            assert oem["RegionBaseOffsetBytes"] == region["RegionBaseOffsetMiB"] * MIB
+            assert oem["RegionSizeBytes"] == region["RegionSizeMiB"] * MIB
+            assert oem["BlockSizeBytes"] == region["BlockSizeMiB"] * MIB
+        ids = extent_ids(api_client)
+        assert ids
+        for ext_id in ids:
+            status, ext = api_client.get(f"{SLD}/MemoryExtents/{ext_id}")
+            assert status == 200
+            oem = ext["Oem"]["Cxl"]
+            assert oem == {"@odata.type": "#Cxl.v1_0_0.MemoryExtent",
+                           "ExtentOffsetBytes": ext["ExtentOffsetMiB"] * MIB,
+                           "ExtentSizeBytes": ext["ExtentSizeMiB"] * MIB}
+
+
+# =============================================================================
 # Devices without DCD support are unaffected
 # =============================================================================
 
