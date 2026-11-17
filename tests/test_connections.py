@@ -16,6 +16,7 @@ import json
 import pytest
 import requests
 
+from redfish_messages import check_error
 from test_health import daemon  # noqa: F401  (the fixture)
 
 
@@ -239,6 +240,70 @@ class TestPostIdempotent:
             status, data, _ = post(api_client, "switch_0_host0", target, chunks, access)
             assert status == 400, (target, chunks, access)
         assert api_client.get(CONNECTIONS) == before
+
+    VOLUME = {"Volume": {"@odata.id": "/redfish/v1/Storage/1/Volumes/1"},
+              "AccessCapabilities": ["Read", "Write"]}
+
+    @pytest.mark.parametrize("info", [[VOLUME], [], None])
+    def test_volume_info_400(self, api_client, info):
+        """Review F04.6c: VolumeInfo has no Read permission in
+        Connection_v1, and its initiators "shall be given access to this
+        volume". cxl-fmd serves no Volume and cannot: a POST with
+        VolumeInfo, even empty, is 400 and binds nothing, a target the host
+        has already included (it was 201, or 200, with VolumeInfo
+        ignored)."""
+        body = {"Links": {"InitiatorEndpoints": [{"@odata.id": self.EP + "switch_0_host0"}],
+                          "TargetEndpoints": [{"@odata.id": self.EP + "sld_0"}]},
+                "VolumeInfo": info}
+        before = (api_client.get(CONNECTIONS), self.vppbs(api_client))
+        status, data, _ = api_client.post(CONNECTIONS, body)
+        assert status == 400, data
+        assert check_error(data) == ["PropertyValueError"]
+        assert data["error"]["@Message.ExtendedInfo"][0]["RelatedProperties"] == ["/VolumeInfo"]
+        assert (api_client.get(CONNECTIONS), self.vppbs(api_client)) == before
+
+        status, conn, _ = post(api_client, "switch_0_host0", "sld_0")
+        assert status == 201, conn
+        status, data, _ = api_client.post(CONNECTIONS, body)
+        assert status == 400, data
+
+    @pytest.mark.parametrize("state", ["NonOptimized", "Standby", "Unavailable",
+                                       "Transitioning", "optimized", 1, None])
+    def test_access_state_400(self, api_client, state):
+        """Review F04.6d: AccessState is ReadWrite in Connection_v1, and a
+        Connection cxl-fmd makes is Optimized once bound: any other value
+        in a POST is 400, nothing bound, a target the host has already
+        included (it was 201, or 200, with the value ignored)."""
+        chunks = chunks_of(api_client, "sld_0")
+        body = {"Links": {"InitiatorEndpoints": [{"@odata.id": self.EP + "switch_0_host0"}],
+                          "TargetEndpoints": [{"@odata.id": self.EP + "sld_0"}]},
+                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": chunks[0]},
+                                     "AccessState": state}]}
+        before = (api_client.get(CONNECTIONS), self.vppbs(api_client))
+        status, data, _ = api_client.post(CONNECTIONS, body)
+        assert status == 400, data
+        assert check_error(data) == ["PropertyValueError"]
+        assert data["error"]["@Message.ExtendedInfo"][0]["MessageArgs"] == ["AccessState"]
+        assert (api_client.get(CONNECTIONS), self.vppbs(api_client)) == before
+
+        status, conn, _ = post(api_client, "switch_0_host0", "sld_0")
+        assert status == 201, conn
+        status, data, _ = api_client.post(CONNECTIONS, body)
+        assert status == 400, data
+
+    def test_access_state_optimized_201(self, api_client):
+        """Optimized, what the Connection is once bound, is taken."""
+        chunks = chunks_of(api_client, "sld_0")
+        body = {"Links": {"InitiatorEndpoints": [{"@odata.id": self.EP + "switch_0_host0"}],
+                          "TargetEndpoints": [{"@odata.id": self.EP + "sld_0"}]},
+                "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": c},
+                                     "AccessCapabilities": ["Read", "Write"],
+                                     "AccessState": "Optimized"} for c in chunks]}
+        status, conn, _ = api_client.post(CONNECTIONS, body)
+        assert status == 201, conn
+        assert {i["AccessState"] for i in conn["MemoryChunkInfo"]} == {"Optimized"}
+        status, again, _ = api_client.post(CONNECTIONS, body)
+        assert status == 200, again
 
     def test_two_initiators_400(self, api_client):
         status, _, _ = api_client.post(CONNECTIONS, {
@@ -546,6 +611,25 @@ class TestInferredDirect:
         status, again, _ = post(api_client, "local", "cxl_mem0")
         assert status == 200 and again["Oem"] == conn["Oem"]
         assert again["Status"] == conn["Status"]
+
+    def test_direct_post_volume_info_or_access_state_400(self, api_client):
+        """Review F04.6c and F04.6d: the POST of a direct-attached pair
+        with VolumeInfo, or with an AccessState other than Optimized, is
+        400, not the 200 of the pair's Connection."""
+        ep = "/redfish/v1/Fabrics/CXL/Endpoints/"
+        links = {"InitiatorEndpoints": [{"@odata.id": ep + "local"}],
+                 "TargetEndpoints": [{"@odata.id": ep + "cxl_mem0"}]}
+        chunk = chunks_of(api_client, "cxl_mem0")[0]
+        status, data, _ = api_client.post(CONNECTIONS, {"Links": links, "VolumeInfo": []})
+        assert status == 400, data
+        info = [{"MemoryChunk": {"@odata.id": chunk}, "AccessState": "Standby"}]
+        status, data, _ = api_client.post(CONNECTIONS, {"Links": links,
+                                                        "MemoryChunkInfo": info})
+        assert status == 400, data
+        info[0]["AccessState"] = "Optimized"
+        status, data, _ = api_client.post(CONNECTIONS, {"Links": links,
+                                                        "MemoryChunkInfo": info})
+        assert status == 200, data
 
     def test_host_domain_is_not_observed(self, api_client):
         status, data = api_client.get("/redfish/v1/Systems/local/MemoryDomains")

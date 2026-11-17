@@ -720,7 +720,7 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
 | 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs or is `Interrupted` (see "Binds and unbinds in the background"); `DynamicCapacityAdd`, `DynamicCapacityRelease` and a `MemoryExtent` `DELETE` the device accepted, with a `Task` that follows the host (see [Tasks of an add or a release](DCD-FM-API.md#tasks-of-an-add-or-a-release)) |
 | 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once; the task monitor of an unbind, or of a `MemoryExtent` `DELETE`, once it has succeeded |
-| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input, at once or at the end of the background operation (the task monitor); `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
+| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, whose `AccessState` is not `Optimized`, that has `VolumeInfo`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input, at once or at the end of the background operation (the task monitor); `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
@@ -1646,6 +1646,29 @@ Content-Type: application/json
 | `MemoryChunkInfo` | array | With an MLD or Multi-Headed device's ID | Chunks of the target; with an SLD or LD Endpoint it can be left out. It does not choose what is bound: a binding gives the whole SLD or LD |
 | `MemoryChunkInfo[].MemoryChunk` | object | Yes, in each entry | Reference to the MemoryChunk |
 | `MemoryChunkInfo[].AccessCapabilities` | array | No | `["Read", "Write"]` only: anything else is 400 |
+| `MemoryChunkInfo[].AccessState` | string | No | `"Optimized"` only: anything else is 400 (see below) |
+| `VolumeInfo` | array | No | Not supported: a body with it, even `[]`, is 400 (see below) |
+
+`AccessState` is ReadWrite in Connection_v1, one of `Optimized` ("The
+resource is in an active and optimized state"), `NonOptimized`,
+`Standby`, `Unavailable` and `Transitioning` ("The resource is
+transitioning to a new state"). A Connection cxl-fmd makes is `Optimized`
+once it is bound and `Enabled`, which is where a `POST` that succeeds
+ends (`201`; `202`, then `Enabled`; `200` of an `Enabled` one; an `Absent`
+one lists no chunk), and Bind vPPB has no field for any other (Table 7-35); `Transitioning` is what the service serves
+while a bind runs, not something to ask for. So `Optimized` is taken and
+any other value is `400` (cxl-fmd's choice, rather than ignoring it).
+
+`VolumeInfo` has no `OData.Permissions` annotation in Connection_v1 (where
+`ConnectionType`'s is `Read`), so it is not one of the "service-controlled
+properties" a create "may ignore" (DSP0266 Section 7.9). Of each entry's
+`Volume`, "The endpoints referenced by the `InitiatorEndpoints` or
+`InitiatorEndpointGroups` properties shall be given access to this volume"
+(Connection_v1). cxl-fmd serves no `Volume`, and a binding gives memory, so
+a body with `VolumeInfo` is `400`, even an empty one (cxl-fmd's choice).
+Both are checked before anything is read from the switch: a `POST` of a
+target the host has already, or of a direct-attached pair, is `400` too,
+not `200`.
 
 Every `@odata.id` is the URI the service serves the resource at: an
 Endpoint is `/redfish/v1/Fabrics/CXL/Endpoints/{id}`, and a chunk
@@ -2416,6 +2439,8 @@ Changes from the fixes of the external design review (branch
 | Connection `POST` with a link that is not the URI the service serves the resource at, but ends in the ID of one (`/bogus/sld_0`, `/redfish/v1/Chassis/sld_1` as a target, a chunk of one device under another's Chassis, a relative URI) | `201`: the last segment was taken as the ID, whatever came before it | `400`, nothing bound |
 | Connection `POST` naming a chunk by its URI in a host's view, `/redfish/v1/Systems/{host}/MemoryDomains/{dom}/MemoryChunks/{chunk}` | taken, by its last segment | `400`: a chunk is named by its Chassis URI |
 | Connection `POST` with `InitiatorEndpointGroups` or `TargetEndpointGroups` | ignored: `201` from the Endpoints alone | `400`, nothing bound |
+| Connection `POST` with `VolumeInfo` (`[]` too) | ignored: `201`, or `200` for a target the host has | `400`, nothing bound |
+| Connection `POST` with a `MemoryChunkInfo[].AccessState` other than `Optimized` (`NonOptimized`, `Standby`, `Unavailable`, `Transitioning`, or not a string) | ignored: `201`, or `200`, and the Connection served `Optimized` | `400`, nothing bound |
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
 | `GET` of a DCD's `MemoryRegion` or `MemoryExtent` when the host's LD is in the Pending Reference Bitmap of a tag (5608h), and of an extent a mock topology file declares `pending` | `Pending` `true` in the region's `MemoryExtents[]` and `Status.State` `Starting` for every extent of that host and tag, accepted ones too | `Pending` `false` and `Enabled` for every extent 5603h lists; the add is in the tag's `PendingLDs` of `Oem/Cxl/DynamicCapacityTags` only |
 | `GET` of a `CXLLogicalDevice` of a DCD | `MemorySizeMiB` the static capacity only (Total Capacity, or the LD allocation) | the static capacity plus every extent the LD's host holds, so it changes with an add or a release; a non-DCD device is unchanged |

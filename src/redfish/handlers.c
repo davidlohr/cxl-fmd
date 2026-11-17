@@ -6708,6 +6708,8 @@ struct post_request {
 	struct fmd_mem_chunk *chunks[POST_MAX_CHUNKS];
 	int nchunks;
 	bool bad_access;	/* AccessCapabilities other than Read and Write */
+	bool volume_info;	/* VolumeInfo is in the body */
+	bool bad_state;		/* an AccessState other than Optimized */
 };
 
 /* The one link of array @arr, NULL unless it has exactly one */
@@ -6803,6 +6805,18 @@ static int parse_post(struct fmd_ctx *ctx, const char *body, size_t body_size,
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -2;
+	/*
+	 * VolumeInfo has no OData.Permissions annotation in Connection_v1,
+	 * where ConnectionType's is Read, so it is not one of the
+	 * "service-controlled properties" a create "may ignore" (DSP0266
+	 * Section 7.9). Of the Volume of each entry, "The endpoints
+	 * referenced by the `InitiatorEndpoints` or `InitiatorEndpointGroups`
+	 * properties shall be given access to this volume" (Connection_v1):
+	 * cxl-fmd serves no Volume, and a binding gives memory, so it cannot
+	 * carry that out. Present at all, even empty, it is refused rather
+	 * than ignored (cxl-fmd's choice).
+	 */
+	req->volume_info = json_object_get(root, "VolumeInfo") != NULL;
 	links = json_object_get(root, "Links");
 	if (!json_is_object(links))
 		goto out;
@@ -6850,6 +6864,7 @@ static int parse_post(struct fmd_ctx *ctx, const char *body, size_t body_size,
 		goto out;
 	json_array_foreach(info, i, entry) {
 		json_t *access = json_object_get(entry, "AccessCapabilities");
+		json_t *state = json_object_get(entry, "AccessState");
 		struct fmd_mem_chunk *chunk = NULL;
 		const char *uri = link_uri(json_object_get(entry, "MemoryChunk"));
 
@@ -6888,6 +6903,21 @@ static int parse_post(struct fmd_ctx *ctx, const char *body, size_t body_size,
 			if (caps != (FMD_ACCESS_READ | FMD_ACCESS_WRITE))
 				req->bad_access = true;
 		}
+
+		/*
+		 * AccessState is ReadWrite, one of Optimized, NonOptimized,
+		 * Standby, Unavailable and Transitioning (Connection_v1). What
+		 * a Connection serves is conn_access_state()'s: Optimized
+		 * once it is Enabled, which is where a POST that succeeds
+		 * ends (201; 202, then Enabled; 200 of an Enabled one; an
+		 * Absent one lists no chunk). Bind vPPB has no field for any
+		 * other (Table 7-35), and Transitioning is what the service
+		 * says while a bind runs, not something to ask for: Optimized
+		 * only (cxl-fmd's choice).
+		 */
+		if (state && (!json_is_string(state) ||
+			      strcmp(json_string_value(state), "Optimized")))
+			req->bad_state = true;
 	}
 	rc = 0;
 out:
@@ -7088,7 +7118,8 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * resolve_endpoint() and resolve_chunk()).
  * AccessCapabilities, if given, are Read and Write: a binding exposes the
  * whole of what it reaches, and Bind vPPB has no field for access (Table
- * 7-35).
+ * 7-35). AccessState, if given, is Optimized, and the body has no
+ * VolumeInfo: see parse_post().
  *
  * Idempotent: if the host's VCS has the target already, the answer is that
  * Connection (200), whoever made the binding; if it is being bound, the
@@ -7128,7 +7159,9 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * -22 InitiatorEndpointGroups or TargetEndpointGroups
  * -23 a chunk is staged: its partition is active from the device's next
  *     reset (struct fmd_mem_chunk)
- * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -23.
+ * -24 VolumeInfo, which names volumes, not memory
+ * -25 a MemoryChunkInfo AccessState other than Optimized
+ * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -25.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -7152,6 +7185,10 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 		return rc;
 	if (req.bad_access)
 		return -20;
+	if (req.volume_info)
+		return -24;
+	if (req.bad_state)
+		return -25;
 
 	host = req.host;
 	comp = req.target;

@@ -1855,6 +1855,15 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "AccessCapabilities can only be Read and Write: a binding gives the whole of its target",
 					  RF_PROPERTY_AT("AccessCapabilities",
 							 "/MemoryChunkInfo"));
+		if (rc == -24)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "VolumeInfo is not supported: a binding gives memory, and this service has no Volume",
+					  RF_PROPERTY("VolumeInfo"));
+		if (rc == -25)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "AccessState can only be Optimized: what a binding is once it is made",
+					  RF_PROPERTY_AT("AccessState",
+							 "/MemoryChunkInfo"));
 		if (rc == -21)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "A link is not the URI of an Endpoint or a MemoryChunk as this service serves it",
