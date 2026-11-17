@@ -254,9 +254,16 @@ shown only in the tag view, as `PendingLDs` (Comment 4). Why:
 Extent List Generation Number is "A device-generated value that is used to
 indicate that the list has changed" (Table 7-71). The pages are read into a
 scratch list, read again from the start when the generation changes, up to
-three times, and applied only when the list was read to its end. A host
-whose 5601h or 5603h fails keeps the extents of its last complete read,
-which are then shown with `Status.Health` `Warning`. The refresh of the
+three times, and applied only when the list was read to its end. The
+regions (5601h) are read a page at a time too, and the region table
+changes only once every page has been read: a region still there is
+updated in place, one gone is removed, and the host's extents take the
+region their DPA is in now. 5601h has no generation number, so a table
+that changes between pages cannot be detected (cxl-fmd's choice, as the
+rest of this paragraph). A host whose 5601h or 5603h fails keeps the
+regions, counters and extents of its last complete read, which are then
+shown with `Status.Health` `Warning`, and is read again on the next
+`--event-poll` tick. The refresh of the
 device goes on with the other hosts and with 5608h, and returns the first
 failure (cxl-fmd's choice).
 
@@ -432,7 +439,8 @@ empty.
 
 `ExtentsCount` and `MemoryExtents[]` are the extents of this LD's host in
 the region; `Pending` is `false` for each (Comment 5). `Status.Health` is
-`Warning` while the tag list could not be read (Comment 5).
+`Warning` while the tag list could not be read (Comment 5), and while the
+host's last read failed or one is owed (Comment 6; cxl-fmd's choice).
 
 ### Set DC Region Configuration (5602h)
 
@@ -968,8 +976,8 @@ After the existing Type 3 classification:
 
 1. `cxlmi_cmd_fmapi_get_dcd_info()`, to every Type 3 device.
 2. For each Host ID the device can see (SLD: 0; MLD and MHD: each LD):
-   5601h, then 5603h into a scratch list, applied when complete (Comment
-   6). A host that fails keeps its extents and is marked stale; the others
+   5601h, every page staged before the region table changes, then 5603h
+   into a scratch list, applied when complete (Comment 6). A host that fails keeps its extents and is marked stale; the others
    are still read.
 3. 5608h once, device-wide; each extent's tag is checked against it,
    and none is made pending from it (Comment 5).

@@ -1394,21 +1394,81 @@ static int dc_hosts(struct fmd_component *dev, int *hosts, int max)
 	return n;
 }
 
-static void clear_host_regions(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
-{
-	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
-	struct fmd_component *child, *next;
+/* One region of a 5601h read, staged until every page has been read */
+struct dc_region_staged {
+	bool     present;
+	uint64_t base_dpa, decode_len, region_len, block_size;
+	uint8_t  flags;
+	bool     sanitize_on_release;
+};
 
-	if (!owner)
-		return;
+/*
+ * The host's region table becomes what @st says: a region still there is
+ * updated in place, so that its component, and what refers to it, stays;
+ * one no longer there goes; a new one is added. An extent of the host
+ * takes the region its DPA is in now, so that none names a region that
+ * has gone, even when the read of the extents after this fails.
+ */
+static int apply_host_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
+			      struct fmd_component *owner, int host_id,
+			      const struct dc_region_staged *st)
+{
+	struct fmd_component *child, *next;
+	bool have[FMD_MAX_DC_REGIONS] = { false };
 
 	for (child = owner->first_child; child; child = next) {
+		struct fmd_dc_region *r;
+
 		next = child->next_sibling;
-		if (child->type == FMD_COMPONENT_DC_REGION)
+		if (child->type != FMD_COMPONENT_DC_REGION)
+			continue;
+		r = fmd_to_dc_region(child);
+		if (r->region_id >= FMD_MAX_DC_REGIONS || !st[r->region_id].present ||
+		    have[r->region_id]) {
 			fmd_topology_remove(&ctx->topology, child);
+			continue;
+		}
+		have[r->region_id] = true;
 	}
+
+	for (int id = 0; id < FMD_MAX_DC_REGIONS; id++) {
+		struct fmd_dc_region *r;
+
+		if (!st[id].present)
+			continue;
+		r = have[id] ? fmd_dc_find_region(dev, host_id, id) :
+			       fmd_dc_region_add(ctx, owner, id, host_id);
+		if (!r)
+			return -ENOMEM;
+		r->base_dpa = st[id].base_dpa;
+		r->decode_len = st[id].decode_len;
+		r->region_len = st[id].region_len;
+		r->block_size = st[id].block_size;
+		r->flags = st[id].flags;
+		r->sanitize_on_release = st[id].sanitize_on_release;
+	}
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+		struct fmd_dc_region *r;
+
+		if (ext->host_id != host_id)
+			continue;
+		r = region_for_dpa(dev, host_id, ext->start_dpa);
+		ext->region_id = r ? r->region_id : FMD_DC_REGION_NONE;
+	}
+	return 0;
 }
 
+/*
+ * Read the host's regions with Get Host DC Region Configuration (5601h), a
+ * page at a time, and change the table only once every page has been read
+ * (cxl-fmd's choice). 5601h has no generation number, unlike 5603h, so a
+ * table that changes between pages cannot be told from one that does not:
+ * what is staged is what the pages said. A page that fails leaves the
+ * table, and the host's counters, as they were, and the host is marked
+ * stale by the caller.
+ */
 static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 			      struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
 			      int host_id)
@@ -1422,6 +1482,7 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 			     sizeof(((struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp *)0)->region_configs[0])];
 	} u = { 0 };
 	struct cxlmi_cmd_fmapi_get_host_dc_region_config_rsp *rsp = &u.rsp;
+	struct dc_region_staged st[FMD_MAX_DC_REGIONS] = { 0 };
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
 	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
 	int rc;
@@ -1455,20 +1516,14 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 			return -EIO;
 		}
 
-		/* the old regions go once the device has answered for the new */
-		if (start == 0)
-			clear_host_regions(ctx, dev, host_id);
-
 		for (int i = 0; i < rsp->regions_returned; i++) {
-			struct fmd_dc_region *r;
+			struct dc_region_staged *r = &st[start + i];
 
+			/* "Report 0 if the region is unavailable" (Table 8-347) */
 			if (rsp->region_configs[i].region_len == 0)
 				continue;
 
-			r = fmd_dc_region_add(ctx, owner, start + i, host_id);
-			if (!r)
-				return -ENOMEM;
-
+			r->present = true;
 			r->base_dpa = rsp->region_configs[i].base;
 			r->decode_len = rsp->region_configs[i].decode_len;
 			r->region_len = rsp->region_configs[i].region_len;
@@ -1483,6 +1538,11 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 			break;
 	}
 
+	rc = apply_host_regions(ctx, dev, owner, host_id, st);
+	if (rc)
+		return rc;
+
+	/* the counters after the last page's regions */
 	if (owner->type == FMD_COMPONENT_LD) {
 		struct fmd_ld *ld = fmd_to_ld(owner);
 		ld->dc_extents_supported = rsp->num_extents_supported;

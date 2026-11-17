@@ -5300,6 +5300,150 @@ out:
 }
 
 /*
+ * One page of Get Host DC Region Configuration (5601h, Tables 7-67 and
+ * 8-347): Number of Available Regions @num, @n regions from @start on,
+ * region N at (N + 1) GiB, 4 x 256 MB decoded, 1 GiB long in 256 MB
+ * blocks, with Attributes1 @flags.
+ */
+static void answer_regions_page(struct cxlmi_endpoint *ep, int num, int start,
+				int n, uint8_t flags)
+{
+	uint8_t pl[0x04 + 2 * 0x28 + 0x10] = { 0 };
+	uint8_t *tail = pl + 0x04 + n * 0x28;
+
+	pl[0x02] = num;				/* Number of Available Regions */
+	pl[0x03] = n;				/* Number of Regions Returned */
+	for (int i = 0; i < n; i++) {
+		uint8_t *r = pl + 0x04 + i * 0x28;
+
+		put64(r + 0x00, (uint64_t)(start + i + 1) << 30);
+		put64(r + 0x08, 4);
+		put64(r + 0x10, 1ULL << 30);
+		put64(r + 0x18, 1ULL << 28);
+		r[0x20] = flags;
+	}
+	put16(tail + 0x00, 64);
+	put16(tail + 0x04, 63);
+	put16(tail + 0x08, 16);
+	put16(tail + 0x0c, 15);
+	answer(ep, 0x5601, pl, 0x04 + n * 0x28 + 0x10);
+}
+
+static int host_region_count(struct fmd_component *dev, int host)
+{
+	struct fmd_component *owner = fmd_dc_host_component(dev, host), *c;
+	int n = 0;
+
+	for (c = owner ? owner->first_child : NULL; c; c = c->next_sibling)
+		n += c->type == FMD_COMPONENT_DC_REGION;
+	return n;
+}
+
+static bool region_health_is(struct fmd_ctx *ctx, const char *id, const char *region,
+			     const char *health)
+{
+	json_t *j = fmd_redfish_dc_memory_region(ctx, id, id, "1", region);
+	const char *h = j ? json_string_value(json_object_get(
+				json_object_get(j, "Status"), "Health")) : NULL;
+	bool ok = h && !strcmp(h, health);
+
+	json_decref(j);
+	return ok;
+}
+
+/*
+ * 5601h is read a page at a time (Starting Region Index, Region Count,
+ * Number of Available Regions: Table 7-66 and 7-67). The review's
+ * reproduction (F07): host 1 has regions 0 and 1 and an extent in region
+ * 1; a read whose page 1 says region 0 of 2 and whose page 2 fails left
+ * region 0 alone, so GET of region 1 was 404 and the extent linked to it.
+ * Now the table changes only once every page has been read: a failed page
+ * leaves both regions and the host's counters, the host stale and its
+ * regions Warning. A complete read keeps the region components it updates.
+ * A region gone takes no extent's link with it, even when the extent
+ * list then cannot be read.
+ */
+static void test_dc_region_pages_staged(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xf8, 2);
+	struct dc_ext e = { 2ULL << 30, 1ULL << 28, dc_tag, 0 };	/* in region 1 */
+	struct fmd_dc_region *r0, *r1;
+	struct fmd_dc_extent *x;
+	struct fmd_ld *ld;
+	char id[FMD_MAX_ID_LEN];
+	json_t *j;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+	device_id(id, sizeof(id), 0xf8);
+	ld = fmd_to_ld(fmd_dc_host_component(dev, 1));
+
+	answer_regions_page(ep, 2, 0, 2, 0x08);
+	answer_dc_extents(ep, 1, 0, 1, &e, 1);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	r0 = fmd_dc_find_region(dev, 1, 0);
+	r1 = fmd_dc_find_region(dev, 1, 1);
+	x = fmd_dc_find_extent(dev, 1, e.dpa);
+	CHECK(rc == 0 && r0 && r1 && x && x->region_id == 1 &&
+	      region_health_is(ctx, id, "1", "OK"),
+	      "a complete read: %d, regions %p %p, extent region %d", rc,
+	      (void *)r0, (void *)r1, x ? x->region_id : -1);
+
+	/* one region a page, Shareable no more: the same components */
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 2, 0, 1, 0x00);
+	answer_regions_page(ep, 2, 1, 1, 0x00);
+	answer_dc_extents(ep, 2, 0, 1, &e, 1);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(rc == 0 && fmd_dc_find_region(dev, 1, 0) == r0 &&
+	      fmd_dc_find_region(dev, 1, 1) == r1 && host_region_count(dev, 1) == 2 &&
+	      !(r1->flags & FMD_DC_REGION_SHAREABLE),
+	      "a two-page read: %d, regions %p %p (were %p %p), %d of them", rc,
+	      (void *)fmd_dc_find_region(dev, 1, 0), (void *)fmd_dc_find_region(dev, 1, 1),
+	      (void *)r0, (void *)r1, host_region_count(dev, 1));
+
+	/* page 1 says region 0 of 2, page 2 fails */
+	ld->dc_extents_available = 7;
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 2, 0, 1, 0x08);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	j = fmd_redfish_dc_memory_region(ctx, id, id, "1", "1");
+	CHECK(rc && j && host_region_count(dev, 1) == 2 &&
+	      fmd_dc_find_region(dev, 1, 0) == r0 && !(r0->flags & FMD_DC_REGION_SHAREABLE) &&
+	      ld->dc_extents_available == 7 &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE,
+	      "a failed page 2: %d, %d regions, GET region 1 %s, counter %u, sync %d",
+	      rc, host_region_count(dev, 1), j ? "200" : "404",
+	      ld->dc_extents_available, fmd_dc_host_sync(dev, 1));
+	json_decref(j);
+	CHECK(region_health_is(ctx, id, "0", "Warning") &&
+	      region_health_is(ctx, id, "1", "Warning"),
+	      "the regions of a stale host are not Warning");
+
+	/* region 1 gone, and the extent list not read: no link to it */
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 1, 0, 1, 0x08);
+	answer_rc(ep, 0x5603, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	x = fmd_dc_find_extent(dev, 1, e.dpa);
+	CHECK(rc && host_region_count(dev, 1) == 1 && fmd_dc_find_region(dev, 1, 0) == r0 &&
+	      x && x->region_id == FMD_DC_REGION_NONE && ld->dc_extents_available == 63,
+	      "region 1 gone: %d, %d regions, extent region %d, counter %u", rc,
+	      host_region_count(dev, 1), x ? x->region_id : -1, ld->dc_extents_available);
+out:
+	fmd_ctx_free(ctx);
+	report("a DC region table changes only once every page is read", before);
+}
+
+/*
  * A device found on a re-scan with records in its logs already: those send
  * no notification until they have been emptied, so the re-scan reads them.
  */
@@ -8244,6 +8388,7 @@ int main(void)
 	test_dc_retry_cleared_event();
 	test_dc_retry_overflow_and_tags();
 	test_dc_retry_on_tick();
+	test_dc_region_pages_staged();
 	test_rescan_reads_new_logs();
 	test_notification_route();
 	test_chunk_delete_partition_refused();

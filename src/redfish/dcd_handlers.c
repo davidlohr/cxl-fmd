@@ -797,10 +797,14 @@ static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_
 		"MemoryExtents", extents,
 		/*
 		 * Warning: the tag list could not be read, so whether an add
-		 * this host has not answered is outstanding is not known.
+		 * this host has not answered is outstanding is not known; or
+		 * the host's last read failed, or one is owed, so the region
+		 * and its extents are those of the last read that completed
+		 * (cxl-fmd's choice).
 		 */
 		"Status", rf_status("Enabled",
-				    fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags) ?
+				    fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags) ||
+				    fmd_dc_sync_behind(fmd_dc_host_sync(dev, host_id)) ?
 				    "Warning" : "OK"));
 
 	fmd_topology_rdunlock(&ctx->topology);
