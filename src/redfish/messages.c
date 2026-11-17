@@ -228,13 +228,16 @@ const char fmd_redfish_error_fallback[] =
 /*
  * Status.Conditions (DSP0288 1.4.0 Table 1, Comments 3 and 4) are made of
  * the messages of cxl-fmd's registry CxlHealth.1.0.0.json (in
- * schema/oem/registries, served at /redfish/v1/Registries): DMTF's have
- * none for what Get Health Info reports (CXL r4.0 Table 8-315). The
- * registry's name, CxlHealth, is "Cxl", the identifier of cxl-fmd's Oem
- * properties, with "Health" after it ("the defining organization's unique
- * OEM identifier ... should be prepended to the registry name", DSP0266
- * 1.25.0 Section 9.8.5). Copied from the registry; tests/test_conditions.py
- * compares them.
+ * schema/oem/registries, served at /redfish/v1/Registries): none of the
+ * DMTF registries (the latest of each published, as of 2026-11-17) has
+ * one for a Health Status bit or Media Status of Get Health Info (CXL
+ * r4.0 Table 8-315), and for Additional Status ResourceEvent 1.5.0's
+ * ResourceWarningThresholdExceeded takes the threshold's value, which
+ * cxl-fmd does not read. The registry's name, CxlHealth, is "Cxl", the
+ * identifier of cxl-fmd's Oem properties, with "Health" after it ("the
+ * defining organization's unique OEM identifier ... should be prepended
+ * to the registry name", DSP0266 1.25.0 Section 9.8.5). Copied from the
+ * registry; tests/test_conditions.py compares them.
  */
 static const struct rf_registry_msg health_msgs[FMD_COND_COUNT] = {
 	[FMD_COND_MAINTENANCE_NEEDED] = {

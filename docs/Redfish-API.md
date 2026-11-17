@@ -644,9 +644,15 @@ Status to `Status`, Comment 3, and Media Status to nothing):
   (MessageIds `CxlHealth.1.0.<Key>`), served at
   `/redfish/v1/Registries/CxlHealth.1.0.0.json` and listed in
   `/redfish/v1/Registries` ("Local copy of a Redfish registry file", DSP0266
-  1.25.0 Table 4). No DMTF registry has messages for these: the closest,
-  ResourceEvent 1.5.0's `ResourceWarningThresholdExceeded`, takes the
-  threshold as an argument, which cxl-fmd does not read. Each message is
+  1.25.0 Table 4). Of the DMTF message registries published at
+  https://redfish.dmtf.org/registries/ (the latest of each of the 25,
+  Base 1.24.0, ResourceEvent 1.5.0, Platform 1.5.0 and Device 1.0.0
+  among them, as of 2026-11-17), none has a message for a CXL Health
+  Status bit or Media Status. For Additional Status, ResourceEvent 1.5.0's
+  `ResourceWarningThresholdExceeded` takes the threshold's value as an
+  argument, which cxl-fmd does not read, and `ResourceErrorsDetected`
+  says that errors were detected, not that a count reached its threshold.
+  Each message is
   the description Table 8-315 gives (Health Status bits, Media Status);
   those of Additional Status are its "The device's count of total
   corrected errors has risen to or above the user-programmable ...
@@ -2150,6 +2156,15 @@ These are known gaps in what cxl-fmd does:
   Partition Info, in the CEL) is not read, and nothing tells cxl-fmd that
   the device was reset: a staged chunk (see "Staged chunks") is looked at
   again only on a `--rescan`, so with none it stays `StandbyOffline`.
+
+### Conditions
+
+`Status.Conditions` are given only for what Get Health Info reports (see
+"Status from Get Health Info"), as DSP0288 maps it. A `Health` of
+`Warning` that comes from cxl-fmd's own state has none: a Connection that
+is `Inferred` or whose target is not known, a DCD's `MemoryRegion` or
+`MemoryExtent` whose host or tag list could not be read, an extent in no
+region. Why is said in this document, not in the resource.
 
 ### Oem identifier
 
