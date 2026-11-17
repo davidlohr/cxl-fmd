@@ -254,15 +254,15 @@ The pytest test suite provides comprehensive API testing against mock topologies
 
 | File | Description | Tests |
 |------|-------------|-------|
-| `test_redfish_validator.py` | Basic endpoint accessibility, and the DMTF validator runs | 11 |
+| `test_redfish_validator.py` | Basic endpoint accessibility, and the DMTF validator runs | 32 |
 | `test_topology_inventory.py` | Device/switch/host/MHD discovery | 99 |
 | `test_orchestration.py` | Provisioning on the larger mock topologies | 15 |
-| `test_tasks.py` | Binds and unbinds in the background | 7 |
+| `test_tasks.py` | Binds and unbinds in the background | 8 |
 | `test_hot_removal.py` | Devices pulled out of a switch port | 3 |
 | `test_event_logs.py` | Event records as log entries | 8 |
 | `test_concurrency.py` | Requests served on several threads | 24 |
-| `test_memory_lifecycle.py` | Memory chunk CRUD operations | 20 |
-| `test_connections.py` | Connection management | 21 |
+| `test_memory_lifecycle.py` | Memory chunk CRUD operations | 67 |
+| `test_connections.py` | Connection management | 54 |
 | `test_cxl_business_rules.py` | CXL-specific rules (VCS, LD limits, health) | 34 |
 | `test_error_handling.py` | Error responses (404, 400, 409) | 31 |
 | `test_fuzzing.py` | Input fuzzing and boundary tests | 28 |
@@ -271,10 +271,10 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_mock_topologies.py` | The mock topologies, and the checker refusing invalid ones | 97 |
 | `test_manpage.py` | The man page against `--help` | 5 |
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 83 |
-| `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 16 |
+| `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 17 |
 | `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
 | `test_oem_schema.py` | Every `Oem.Cxl` object and Oem action against cxl-fmd's Oem schema `Cxl_v1.xml` | 7 |
-| **Total** | | **697** |
+| **Total** | | **800** |
 
 ### Running Tests
 
