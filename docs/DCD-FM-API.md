@@ -19,7 +19,7 @@ It fills a gap in the published DMTF material, which was checked on
 
 | Source | What it says about DCD |
 |--------|------------------------|
-| [DSP0288 v1.4.0](https://www.dmtf.org/sites/default/files/standards/documents/DSP0288_1.4.0.pdf) (2026-08-07), *CXL to Redfish Mapping* | Table 2 (FM-API) maps only the Physical Switch (51h), Virtual Switch (52h), MLD Component (54h) and *Get PBR Link Partner Info* commands. No 55h (MHD) and no 56h (DCD) command is mapped. The spec still normatively references CXL r3.0. |
+| [DSP0288 v1.4.0](https://www.dmtf.org/sites/default/files/standards/documents/DSP0288_1.4.0.pdf) (2026-08-07), *CXL to Redfish Mapping* | Table 2 (FM-API) maps only the Physical Switch (51h), Virtual Switch (52h), MLD Component (54h) and *Get PBR Link Partner Info* commands. No 55h (MHD) and no 56h (DCD) command is mapped. The spec still normatively references CXL r3.0. A request to DMTF to add them is drafted, to be submitted by the maintainer (Open Question 26). |
 | [DSP8010 2026.1](https://redfish.dmtf.org/schemas/v1/) | Adds everything needed for the write path (earlier releases had `MemoryRegion v1.0.3` with inline extents and `PCIeDevice` `CXLDevice/DynamicCapacity`, but no way to add or release capacity): a standalone `MemoryExtent` resource, `MemoryRegion v1.1.0`, `CXLLogicalDevice v1.4.0` with `DynamicCapacityAdd` / `DynamicCapacityRelease` actions and extent/tag counters, `PCIeDevice v1.22.0` with the `CXLReferenceDCMemory` action, the `EnableSharedAccess` policy and a `MemoryExtents` collection link, and `MemoryChunks v1.7.0` with `Links/MemoryExtent`. |
 | [DSP8010 2026.2](https://redfish.dmtf.org/schemas/v1/) (bundle vendored in `schema/dmtf`) | `PCIeDevice v1.23.0` adds `CXLDevice/DeviceClass` (`SLD`, `MLD`, `MH_SLD`, `MH_MLD`). Not DCD-specific but directly useful to cxl-fmd. |
 
@@ -154,7 +154,8 @@ is not listed in `MemoryBlockSizesSupported`, shows as `BlockSizeMiB` 0,
 and cannot be chosen with PATCH (a known limitation), and an extent's or
 region's offset or size that is not whole MiB is rounded down. Each of
 them is therefore given in bytes too, in cxl-fmd's Oem (its Oem schema,
-`Cxl_v1.xml`; review F12):
+`Cxl_v1.xml`; review F12). A request to DMTF for a standard way to give
+them is drafted, to be submitted by the maintainer (Open Question 25):
 
 | Resource | MiB property | `Oem.Cxl` property, bytes |
 |----------|--------------|---------------------------|
@@ -1352,8 +1353,9 @@ where it says so), not the specification's.
    MiB. Choice: `Length` is in MiB, as cxl-fmd's profile; it is converted
    to bytes with a check, and a value whose bytes do not fit is `400`.
    An exact byte count cannot be asked for, which matters only for a
-   region with a block size below 1 MiB. This is to be raised with the
-   Redfish Forum together with the missing DCD rows in DSP0288.
+   region with a block size below 1 MiB. A request to DMTF to state the
+   unit is drafted, to be submitted by the maintainer (review F12.8 and
+   DCD-T5b); the missing rows of DSP0288 are Open Question 26.
 2. **Does 5603h list extents still pending for the host?** Section 9.13.3
    says the host's Extent List "does not contain extents that are still
    pending acceptance from the host"; 5603h (Table 7-71) does not say
@@ -1498,8 +1500,11 @@ where it says so), not the specification's.
     `DynamicCapacityRelease`.
 20. **No DMTF resource for a tag.** Choice: `Oem/Cxl/DynamicCapacityTags`
     on `PCIeDevice`, described by cxl-fmd's Oem schema `Cxl_v1.xml`
-    (served at `/redfish/v1/Schemas/Cxl_v1.xml`). Whether to propose the
-    properties to DMTF is open.
+    (served at `/redfish/v1/Schemas/Cxl_v1.xml`). A request to DMTF for a
+    standard place for the tag list (the holders and pending LDs of each
+    tag, and the FM reference of a tag no host holds, which no
+    `MemoryExtent` can carry) is drafted, to be submitted by the
+    maintainer.
 21. **The earlier extent Ids `ext_<hex DPA>`.** Choice: `404`, no alias:
     they are ambiguous across hosts, and Ids are the service's to assign.
     cxl-fmd keeps no release notes; this document is where it is said.
@@ -1545,3 +1550,22 @@ where it says so), not the specification's.
 24. **GFD.** The GFAM equivalents (4907h-490Bh) share the same shapes but
     address the device via PBR. Out of scope here and listed separately in
     `TODO`.
+25. **DC sizes below 1 MiB.** A region's block size may be any power of
+    two from 2^6 bytes ("Bits[5:0] and bits[63:52] shall be 0", Table
+    7-65), and its Region Length, extent offsets and extent lengths follow
+    the block size (Tables 8-347 and 8-230). The DMTF properties they map
+    to are integer MiB (`BlockSizeMiB`, `RegionSizeMiB`,
+    `ExtentOffsetMiB`, `ExtentSizeMiB`, `MemorySizeMiB`). Total Dynamic
+    Capacity ("in multiples of 256 MB", Table 7-65) and Region Base
+    ("aligned to 256 MB", Table 8-347) are always whole MiB. Choice: the
+    bytes in `Oem.Cxl` (Comment 3). A request to DMTF for byte-granular
+    properties is drafted, to be submitted by the maintainer (review
+    F12.8).
+26. **No DSP0288 mapping for 55h and 56h.** DSP0288 1.4.0 Table 2 maps no
+    command of the Multi-Headed Devices (55h) or DCD Management (56h)
+    command sets, and its normative reference is CXL r3.0, of which "only
+    the edition cited applies". Choice: Table 3 above for 56h, and the
+    mapping of "MHD Memory Model" in [Redfish-API.md](Redfish-API.md) for
+    55h, both cxl-fmd's. A request to DMTF to add the rows and update the
+    reference is drafted, to be submitted by the maintainer (review
+    DCD-T5b).

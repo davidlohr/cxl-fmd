@@ -13,7 +13,8 @@ The contracts the maintainer chose over the review's proposals are stated
 plainly: a DELETE of a sharable extent releases the host's whole tag
 (DCD-Q A3), an all-zero Tag is no tag only by cxl-fmd's convention (DCD-Q
 T6), and TLS, authentication and the listen address are deferred gaps
-(F16).
+(F16). The questions for DMTF are drafted, to be submitted by the
+maintainer, and the docs do not say they were raised (F12.8, DCD-T5b).
 """
 
 import re
@@ -155,3 +156,26 @@ def test_the_lock_file_fences_one_host_only():
     for doc in deployments:
         assert re.search(r"mountPath: /run/cxl-fmd\b", doc), doc
         assert re.search(r"hostPath:\s*\n\s+path: /run/cxl-fmd\b", doc), doc
+
+
+def test_dmtf_questions_are_drafted_not_raised():
+    """cxl-fmd cannot raise a standards question itself (review F12.8,
+    DCD-T5b): the open questions that need DMTF say a request is drafted,
+    to be submitted by the maintainer, and none says it was raised."""
+    text = (DOCS / "DCD-FM-API.md").read_text()
+    oq = flat(section(text, "## Open Questions"))
+    drafted = "is drafted, to be submitted by the maintainer"
+    for start, end in (("1. **Units of the `Length`", " 2. **"),
+                       ("20. **No DMTF resource for a tag.**", " 21. **"),
+                       ("25. **DC sizes below 1 MiB.**", " 26. **"),
+                       ("26. **No DSP0288 mapping for 55h and 56h.**", None)):
+        item = oq[oq.index(start):]
+        item = item[:item.index(end)] if end else item
+        assert drafted in item, item
+    assert "Open Question 25" in flat(section(text, "### Comments for Table 3"))
+    assert "Open Question 26" in flat(text[:text.index("## Table of Contents")])
+    for words in ("to be raised with the Redfish Forum",
+                  "Whether to propose the properties to DMTF is open"):
+        assert words not in flat(text), words
+    assert not re.search(r"\b(was|were|has been|have been) (raised|submitted|sent)"
+                         r" (to|with) (DMTF|the Redfish Forum)", flat(text))
