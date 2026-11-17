@@ -730,12 +730,15 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld,
  * Get Multi-Headed Info, which says what heads and LDs it has, is read
  * before it is added under @parent (NULL: the root): if it fails for the
  * moment (enum fmd_probe) the device is not added, and -EAGAIN says to
- * discover it again later.
+ * discover it again later. @replaces, if not NULL, is the component the
+ * device was known as until now, under the same ID: it is removed when
+ * @mhd is added, and is left as it is when @mhd is not.
  * Returns 0 once it is added and read, 1 if it is added but could not be
  * read whole, and a negative value when it is not added, @mhd then freed.
  */
 static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
-			struct fmd_component *parent)
+			struct fmd_component *parent,
+			struct fmd_component *replaces)
 {
 	struct cxlmi_cmd_fmapi_get_multiheaded_info_req mh_req = {0};
 	struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp *mh_rsp = NULL;
@@ -776,6 +779,17 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		free(mh_rsp);
 		fmd_component_free(&mhd->base);
 		return -EAGAIN;
+	}
+	if (replaces) {
+		struct fmd_component *was_on = replaces->parent;
+
+		fmd_info(ctx, "%s: was taken for a device of one head: it is "
+			 "a Multi-Headed device", mhd->base.id);
+		fmd_topology_remove(&ctx->topology, replaces);
+		/* no vPPB points at what has gone */
+		if (was_on && was_on->type == FMD_COMPONENT_PORT && was_on->parent)
+			fmd_switch_resolve_vppb_bindings(&ctx->topology,
+							 fmd_to_switch(was_on->parent));
 	}
 	if (discovered_add(ctx, &mhd->base, parent)) {
 		free(mh_rsp);
@@ -1014,6 +1028,114 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 }
 
 
+/* Head @idx of @mhd, or NULL */
+static struct fmd_head *mhd_head(struct fmd_mhd *mhd, int idx)
+{
+	struct fmd_component *child;
+
+	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+		if (fmd_to_head(child)->head_id == idx)
+			return fmd_to_head(child);
+	}
+	return NULL;
+}
+
+/*
+ * Which head of @mhd the FM-owned LD of a head is of, when one is found by
+ * the device's serial number: -1 if that cannot be told. Nothing it answers
+ * says (Identify gives the device's serial number, Get LD Info the LDs of
+ * its head, Section 2.5.1). A head with an FM-owned LD presents an MLD: "a
+ * head with more than one LD mapped shall present itself as an MLD"
+ * (Section 2.5), and an SLD has none, as Get LD Info "is prohibited for an
+ * SLD" (Table 8-397). So it is taken to be the one head that presents an
+ * MLD, has its link up, and is not placed on a switch port, if there is
+ * only one (cxl-fmd's inference). With two or more, none is. Another
+ * route to the same head does not take it: one head's FM-owned LD can be
+ * reached on an endpoint of its own and through a switch.
+ */
+static int fmld_route_head(struct fmd_mhd *mhd)
+{
+	struct fmd_component *child;
+	int found = -1;
+
+	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+		struct fmd_head *head = fmd_to_head(child);
+
+		if (head->port || head->presentation != FMD_HEAD_MLD ||
+		    head->state != FMD_HEAD_ENABLED)
+			continue;
+		if (found >= 0)
+			return -1;
+		found = head->head_id;
+	}
+	return found;
+}
+
+/*
+ * @mhd is reached on @ep, through @ti, at a CCI of @role: through switch
+ * port @port (NULL: on an endpoint of its own). The route is kept (struct
+ * fmd_route). The FM-owned LD of a head on a switch port places the head
+ * there when fmld_route_head() can tell which it is, and the port then
+ * has the head as its device: one component, the Multi-Headed device,
+ * reached two ways.
+ */
+static void mhd_route_found(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
+			    struct cxlmi_endpoint *ep,
+			    const struct cxlmi_tunnel_info *ti,
+			    enum fmd_cci_role role, uint16_t msg_limit,
+			    struct fmd_port *port)
+{
+	int idx = role == FMD_CCI_HEAD_FMLD ? fmld_route_head(mhd) : -1;
+	struct fmd_head *head = idx >= 0 ? mhd_head(mhd, idx) : NULL;
+
+	fmd_mhd_add_route(mhd, ep, ti, role, idx, msg_limit);
+	if (port && head && !port->head && !port->base.first_child) {
+		head->port = port;
+		port->head = head;
+		fmd_switch_resolve_vppb_bindings(&ctx->topology,
+						 fmd_to_switch(port->base.parent));
+	}
+	if (port)
+		fmd_info(ctx, "%s: reached through %s port %d as well%s", mhd->base.id,
+			 port->base.parent->id, port->port_number,
+			 head && head->port == port ? ", its head there placed" :
+			 ": which head is there is not known");
+	else
+		fmd_info(ctx, "%s: reached on another endpoint as well (CCI role %d, "
+			 "head %d)", mhd->base.id, role, idx);
+}
+
+/*
+ * Switch port @port of @sw no longer has the head it had: it is no longer
+ * a DSP, or reports another kind of device, or none. The head is on no
+ * port, and the route through the port is dropped, as the device on the
+ * port is no longer known to be the head.
+ */
+static void head_left_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			   struct fmd_port *port)
+{
+	struct fmd_head *head = port->head;
+	struct fmd_component *dev = head->base.parent;
+
+	fmd_info(ctx, "%s: port %d no longer has head %d of %s", sw->base.id,
+		 port->port_number, head->head_id, dev ? dev->id : "?");
+	head->port = NULL;
+	port->head = NULL;
+	if (dev && dev->type == FMD_COMPONENT_MHD) {
+		struct fmd_mhd *mhd = fmd_to_mhd(dev);
+
+		for (int i = 0; i < mhd->nroutes; i++) {
+			const struct fmd_route *r = &mhd->routes[i];
+
+			if (r->ep == port->base.ep && r->tunnel.level == 1 &&
+			    !r->tunnel.mhd && r->tunnel.port == port->port_number)
+				mhd->routes[i--] = mhd->routes[--mhd->nroutes];
+		}
+	}
+	/* no vPPB points at what has gone */
+	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
+}
+
 /*
  * Discover devices attached to a switch port
  *
@@ -1091,7 +1213,23 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 		if (rc == 0 && identify.serial_num) {
 			(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64,
 				       identify.serial_num);
-			if (fmd_topology_find(&ctx->topology, dev_id)) {
+			struct fmd_component *known =
+				fmd_topology_find(&ctx->topology, dev_id);
+
+			/*
+			 * The device on the port is a head of a Multi-Headed
+			 * device known already: the switch has it as an MLD,
+			 * so it is a head that presents one, and what answered
+			 * is its FM-owned LD.
+			 */
+			if (known && known->type == FMD_COMPONENT_MHD) {
+				mhd_route_found(ctx, fmd_to_mhd(known), port->base.ep,
+						CXLMI_TUNNEL_SWITCH(port->port_number),
+						FMD_CCI_HEAD_FMLD,
+						tunnelled_msg_limit(&port->base), port);
+				break;
+			}
+			if (known) {
 				fmd_info(ctx, "%s: MLD %s on port %d is already known",
 					 port->base.parent->id, dev_id,
 					 port->port_number);
@@ -1538,7 +1676,19 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	 * down with the device still detected, a surprise Link Down, is not a
 	 * removal: "the presence pin ... will remain asserted".
 	 */
-	if (port->state != FMD_PORT_DSP || port->head)
+	/*
+	 * A head of a Multi-Headed device placed on the port stays while the
+	 * port is a DSP that reports what the head presents (Section 2.5),
+	 * and is otherwise gone from it, as a device would be.
+	 */
+	if (port->head) {
+		if (port->state == FMD_PORT_DSP &&
+		    port->conn_dev_type == (port->head->presentation == FMD_HEAD_MLD ?
+					    FMD_CONN_MLD : FMD_CONN_SLD))
+			return;
+		head_left_port(ctx, sw, port);
+	}
+	if (port->state != FMD_PORT_DSP)
 		return;
 
 	if (dev && port->conn_dev_type != memdev_conn_type(dev)) {
@@ -1765,6 +1915,151 @@ static uint16_t endpoint_msg_limit(struct cxlmi_endpoint *ep,
 }
 
 /*
+ * A Multi-Headed device on @ep, which answered Get Multi-Headed Info with
+ * no tunnel: discovered, added at the root, and its memory and Dynamic
+ * Capacity read. @replaces: see discover_mhd(). As discover_mhd().
+ */
+static int discover_new_mhd(struct fmd_ctx *ctx, const char *dev_id,
+			    struct cxlmi_endpoint *ep,
+			    const struct cxlmi_cmd_identify_rsp *identify,
+			    uint16_t msg_limit, struct fmd_component *replaces)
+{
+	struct fmd_mhd *mhd = fmd_mhd_create(dev_id);
+	int rc;
+
+	if (!mhd)
+		return -1;
+
+	mhd->identify = *identify;
+	mhd->base.ep = ep;
+	mhd->base.msg_limit = msg_limit;
+
+	/* added once what it is has been read */
+	rc = discover_mhd(ctx, mhd, NULL, replaces);
+	if (rc < 0)
+		return rc;
+	if (rc == 0)
+		rc = fmd_create_mhd_memory_resources(ctx, mhd);
+	if (rc == 0)
+		fmd_dcd_discover(ctx, &mhd->base);
+	fmd_device_events_enable(ctx, &mhd->base);
+
+	fmd_info(ctx, "%s: MHD with %d heads, %d LDs",
+		 dev_id, mhd->num_heads, mhd->total_lds);
+	return rc;
+}
+
+/*
+ * @ep has answered Identify with the serial number of @known, a device
+ * discovered already: the "unique identifier for this device" (Table
+ * 8-216), so it is the same device, reached another way (Section 2.5
+ * lets a Multi-Headed device be reached on its LD Pool CCI and on its
+ * heads). What CCI @ep is is asked:
+ *
+ *  - One that answers Get Multi-Headed Info with no tunnel, and more than
+ *    one head, is an LD Pool CCI, as on first discovery. A device that
+ *    was taken for one of a single head, an MLD or an SLD, reached first
+ *    on one of its heads, is a Multi-Headed device: it is discovered on
+ *    @ep, and replaces what it was taken for, whose route is kept as that
+ *    of a head (its FM-owned LD for an MLD).
+ *  - Of a Multi-Headed device, one that answers Get LD Info instead is a
+ *    head's FM-owned LD, and anything else is a CCI of the device whose
+ *    role is not known. The route is kept (mhd_route_found()).
+ *  - Otherwise, the device stays as it was first found.
+ *
+ * A probe that fails for the moment returns -EAGAIN: @ep is asked again
+ * later. Returns as discover_endpoint().
+ */
+static int discover_known_endpoint(struct fmd_ctx *ctx, struct fmd_component *known,
+				   struct cxlmi_endpoint *ep,
+				   const struct cxlmi_cmd_identify_rsp *identify)
+{
+	struct cxlmi_cmd_fmapi_get_multiheaded_info_req mh_req = {
+		.start_ld_id = 0,
+		.ld_map_list_limit = 1,		/* as in discover_endpoint() */
+	};
+	union {
+		struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp rsp;
+		uint8_t room[sizeof(struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp) +
+			     FMD_CCI_LIST_MAX];
+	} mh = { 0 };
+	struct cxlmi_cmd_fmapi_get_ld_info_rsp ld_info = { 0 };
+	enum fmd_cci_role role = FMD_CCI_UNKNOWN;
+	int rc;
+
+	if (identify->component_type != CXL_COMPONENT_TYPE3 ||
+	    (known->type != FMD_COMPONENT_MHD && known->type != FMD_COMPONENT_MLD &&
+	     known->type != FMD_COMPONENT_SLD)) {
+		fmd_info(ctx, "%s: reached on another endpoint as well, "
+			 "discovered once", known->id);
+		return 1;
+	}
+
+	errno = 0;	/* see fmd_probe_result() */
+	rc = cxlmi_cmd_fmapi_get_multiheaded_info(ep, CXLMI_NO_TUNNEL, &mh_req, &mh.rsp);
+	if (fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+		fmd_warn(ctx, "%s: get multiheaded info on another endpoint failed "
+			 "for now (%d): asked again later", known->id, rc);
+		return -EAGAIN;
+	}
+	if (rc == 0 && mh.rsp.num_heads > 1)
+		role = FMD_CCI_POOL;
+
+	if (known->type != FMD_COMPONENT_MHD) {
+		struct fmd_route was = { .ep = known->ep, .head = -1,
+					 .msg_limit = known->msg_limit };
+		struct fmd_port *port = NULL;
+		struct fmd_component *comp;
+		char dev_id[FMD_MAX_ID_LEN];
+
+		if (role != FMD_CCI_POOL) {
+			fmd_info(ctx, "%s: reached on another endpoint as well, "
+				 "discovered once", known->id);
+			return 1;
+		}
+
+		/* the way it was reached, which the removal forgets */
+		if (known->type == FMD_COMPONENT_MLD) {
+			struct fmd_mld *mld = fmd_to_mld(known);
+
+			was.role = FMD_CCI_HEAD_FMLD;
+			if (mld->switch_port >= 0)
+				was.tunnel = *CXLMI_TUNNEL_SWITCH(mld->switch_port);
+		}
+		if (known->parent && known->parent->type == FMD_COMPONENT_PORT)
+			port = fmd_to_port(known->parent);
+		snprintf(dev_id, sizeof(dev_id), "%s", known->id);
+
+		rc = discover_new_mhd(ctx, dev_id, ep, identify,
+				      endpoint_msg_limit(ep, identify), known);
+		if (rc < 0)
+			return rc;
+		/* @known is gone; the device is the MHD now */
+		comp = fmd_topology_find(&ctx->topology, dev_id);
+		if (comp && comp->type == FMD_COMPONENT_MHD && was.ep)
+			mhd_route_found(ctx, fmd_to_mhd(comp), was.ep,
+					was.tunnel.level ? &was.tunnel : CXLMI_NO_TUNNEL,
+					was.role, was.msg_limit, port);
+		return rc;
+	}
+
+	if (role != FMD_CCI_POOL) {
+		errno = 0;	/* see fmd_probe_result() */
+		rc = cxlmi_cmd_fmapi_get_ld_info(ep, CXLMI_NO_TUNNEL, &ld_info);
+		if (fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+			fmd_warn(ctx, "%s: get ld info on another endpoint failed "
+				 "for now (%d): asked again later", known->id, rc);
+			return -EAGAIN;
+		}
+		if (rc == 0)
+			role = FMD_CCI_HEAD_FMLD;
+	}
+	mhd_route_found(ctx, fmd_to_mhd(known), ep, CXLMI_NO_TUNNEL, role,
+			endpoint_msg_limit(ep, identify), NULL);
+	return 1;
+}
+
+/*
  * Discover the component on an endpoint that has answered Identify.
  * Returns 0 if it was added, 1 if it is one that is already known, -EAGAIN
  * if it could not be discovered for the moment (nothing is added: it is to
@@ -1784,7 +2079,8 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	 * this device" (Table 8-216), and names the component. A device can
 	 * be reached more than one way: on two interconnects, by MCTP and by
 	 * its mailbox, or as the MLD on a switch port and on its own. It is
-	 * one component however it is reached, and the first way stands.
+	 * one component however it is reached: the first way stands, but for
+	 * a Multi-Headed device, which keeps each (discover_known_endpoint()).
 	 *
 	 * A serial number of 0 identifies nothing. Such a device is named
 	 * after its endpoint, and is never taken for another.
@@ -1792,11 +2088,10 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	if (identify.serial_num) {
 		(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64,
 			       identify.serial_num);
-		if (fmd_topology_find(&ctx->topology, dev_id)) {
-			fmd_info(ctx, "%s: reached on another endpoint as well, "
-				 "discovered once", dev_id);
-			return 1;
-		}
+		struct fmd_component *known = fmd_topology_find(&ctx->topology, dev_id);
+
+		if (known)
+			return discover_known_endpoint(ctx, known, ep, &identify);
 	} else {
 		(void)snprintf(dev_id, sizeof(dev_id), "cxl_ep%d", index);
 	}
@@ -1870,26 +2165,8 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 
 		if (rc == 0 && mh.rsp.num_heads > 1) {
 			/* Multi-Headed Device */
-			struct fmd_mhd *mhd = fmd_mhd_create(dev_id);
-			if (!mhd)
-				return -1;
-
-			mhd->identify = identify;
-			mhd->base.ep = ep;
-			mhd->base.msg_limit = msg_limit;
-
-			/* added once what it is has been read */
-			rc = discover_mhd(ctx, mhd, NULL);
-			if (rc < 0)
-				return rc;
-			if (rc == 0)
-				rc = fmd_create_mhd_memory_resources(ctx, mhd);
-			if (rc == 0)
-				fmd_dcd_discover(ctx, &mhd->base);
-			fmd_device_events_enable(ctx, &mhd->base);
-
-			fmd_info(ctx, "%s: MHD with %d heads, %d LDs",
-				 dev_id, mhd->num_heads, mhd->total_lds);
+			rc = discover_new_mhd(ctx, dev_id, ep, &identify,
+					      msg_limit, NULL);
 			break;
 		}
 

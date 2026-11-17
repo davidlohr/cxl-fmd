@@ -9371,10 +9371,8 @@ out:
  * An MHD of 4 pool LDs of 1 to 4 GiB, whose LD Pool CCI answers Get LD
  * Info with Memory Size @memory_size, or not at all if it is 0.
  */
-static struct cxlmi_endpoint *new_mhd_sized(struct fmd_ctx *ctx, uint64_t serial,
-					    uint64_t memory_size)
+static void answer_mhd(struct cxlmi_endpoint *ep, uint64_t serial)
 {
-	struct cxlmi_endpoint *ep = new_device(ctx);
 	uint8_t probe[8 + 1] = { 0 }, info[8 + 4] = { 0 };
 	uint8_t heads[4 + 2 * 9] = { 0 };
 
@@ -9388,6 +9386,14 @@ static struct cxlmi_endpoint *new_mhd_sized(struct fmd_ctx *ctx, uint64_t serial
 		answer_memdev_identify(ep, 4 * (i + 1), 4 * (i + 1), 0);
 	heads[0] = 2; heads[4] = 1; heads[4 + 6] = 4; heads[4 + 9] = 2;
 	answer(ep, 0x5501, heads, sizeof(heads));
+}
+
+static struct cxlmi_endpoint *new_mhd_sized(struct fmd_ctx *ctx, uint64_t serial,
+					    uint64_t memory_size)
+{
+	struct cxlmi_endpoint *ep = new_device(ctx);
+
+	answer_mhd(ep, serial);
 	if (memory_size)
 		answer_ld_info(ep, memory_size, 4);
 	return ep;
@@ -9801,6 +9807,264 @@ static void test_mhd_route_head_mailbox(void)
 out:
 	fmd_ctx_free(ctx);
 	report("a Multi-Headed device's pool commands go on its route", before);
+}
+
+/* The route of @mhd on @ep, or NULL */
+static struct fmd_route *mhd_route_on(struct fmd_mhd *mhd, struct cxlmi_endpoint *ep)
+{
+	for (int i = 0; i < mhd->nroutes; i++) {
+		if (mhd->routes[i].ep == ep)
+			return &mhd->routes[i];
+	}
+	return NULL;
+}
+
+/*
+ * One Multi-Headed device on two endpoints (review F14): its LD Pool CCI,
+ * which answers Get Multi-Headed Info, and the FM-owned LD of its head 0,
+ * which presents an MLD and answers Get LD Info, not Get Multi-Headed
+ * Info. Both have the device's serial number, its "unique identifier"
+ * (Table 8-216). Found head first, the device was an MLD, the LD Pool CCI
+ * left unasked; found pool first, the head's endpoint was dropped. Either
+ * way it is now one MHD with both routes, each of its role; the pool's
+ * commands go to the LD Pool CCI. libcxlmi lists endpoints newest first.
+ */
+static void test_mhd_two_routes(bool pool_first)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *pool, *head, *ep = NULL;
+	struct cxlmi_tunnel_info *ti = NULL;
+	struct fmd_route *rp, *rh;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_mhd *mhd;
+	int before = failures, invalid;
+
+	if (pool_first) {
+		head = new_device(ctx);
+		pool = new_device(ctx);
+	} else {
+		pool = new_device(ctx);
+		head = new_device(ctx);
+	}
+	answer_mhd(pool, 0x14b);
+	answer_identify(head, 0x14b, 0x03);
+	answer_rc(head, 0x5500, CXLMI_RET_UNSUPPORTED);
+	answer_ld_info(head, 2ULL << 30, 2);
+	answer_ld_info(head, 2ULL << 30, 2);
+	answer_ld_allocations(head, 2, 0, 4);
+
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x14b);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	CHECK(mhd && !fmd_topology_find_mld(&ctx->topology, id) &&
+	      ctx->topology.root->device_count == 1,
+	      "%s: MHD %s, MLD %s, %d devices", id, mhd ? "yes" : "no",
+	      fmd_topology_find_mld(&ctx->topology, id) ? "yes" : "no",
+	      ctx->topology.root->device_count);
+	if (!mhd)
+		goto out;
+	rp = mhd_route_on(mhd, pool);
+	rh = mhd_route_on(mhd, head);
+	CHECK(mhd->nroutes == 2 && rp && rp->role == FMD_CCI_POOL && !rp->tunnel.level &&
+	      rh && rh->role == FMD_CCI_HEAD_FMLD && !rh->tunnel.level && rh->head == 0,
+	      "%d routes: pool CCI role %d, head's role %d, its head %d", mhd->nroutes,
+	      rp ? (int)rp->role : -1, rh ? (int)rh->role : -1, rh ? rh->head : -2);
+	CHECK(!fmd_mhd_pool_route(mhd, &ep, &ti) && ep == pool && !ti,
+	      "the pool's commands do not go to the LD Pool CCI");
+	CHECK(mhd->base.ep == pool && mhd->total_lds == 4 &&
+	      fmd_component_count_children(&mhd->base, FMD_COMPONENT_LD) == 4,
+	      "not read on the LD Pool CCI: %d pool LDs", mhd->total_lds);
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 0, "%d rule(s) broken", invalid);
+out:
+	fmd_ctx_free(ctx);
+	report(pool_first ? "an MHD found on its LD Pool CCI, then on a head" :
+			    "an MHD found on a head, then on its LD Pool CCI", before);
+}
+
+/*
+ * The LD Pool CCI of a device known as an MLD, found by a re-scan: the MLD
+ * becomes the Multi-Headed device, under the same ID, and the re-scan's
+ * refreshes of what was there before it (allocations, health) take the ID
+ * for what it is now.
+ */
+static void test_mhd_promoted_on_rescan(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *head = new_device(ctx), *pool;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_route *rh;
+	struct fmd_mhd *mhd;
+	int before = failures, invalid;
+
+	answer_identify(head, 0x14f, 0x03);
+	answer_rc(head, 0x5500, CXLMI_RET_UNSUPPORTED);
+	answer_ld_info(head, 2ULL << 30, 2);
+	answer_ld_info(head, 2ULL << 30, 2);
+	answer_ld_allocations(head, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x14f);
+	CHECK(fmd_topology_find_mld(&ctx->topology, id), "no MLD %s first", id);
+
+	pool = new_device(ctx);
+	answer_mhd(pool, 0x14f);
+	fmd_rescan(ctx);
+
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	rh = mhd ? mhd_route_on(mhd, head) : NULL;
+	invalid = fmd_topology_validate(ctx);
+	CHECK(mhd && !fmd_topology_find_mld(&ctx->topology, id) && mhd->nroutes == 2 &&
+	      rh && rh->role == FMD_CCI_HEAD_FMLD && rh->head == 0 &&
+	      fmd_component_count_children(&mhd->base, FMD_COMPONENT_LD) == 4 &&
+	      ctx->topology.root->device_count == 1 && invalid == 0,
+	      "after the re-scan: MHD %s, %d routes, %d devices, %d rule(s) broken",
+	      mhd ? "yes" : "no", mhd ? mhd->nroutes : -1,
+	      ctx->topology.root->device_count, invalid);
+	fmd_ctx_free(ctx);
+	report("an MLD whose LD Pool CCI a re-scan finds is an MHD", before);
+}
+
+/*
+ * What another endpoint of a known Multi-Headed device is, is decided only
+ * on what it says (see enum fmd_probe): Get Multi-Headed Info that fails
+ * for the moment says nothing of it. The endpoint is asked again later,
+ * and not kept as a route whose role is not known.
+ */
+static void test_mhd_route_not_ready(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *head = new_device(ctx), *pool = new_device(ctx);
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_route *rh;
+	struct fmd_mhd *mhd;
+	int before = failures;
+
+	answer_mhd(pool, 0x14e);
+	answer_identify(head, 0x14e, 0x03);
+	answer_rc(head, 0x5500, CXLMI_RET_RETRY);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x14e);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	CHECK(mhd && mhd->nroutes == 1 && !mhd_route_on(mhd, head),
+	      "a route kept from Retry Required: %d routes", mhd ? mhd->nroutes : -1);
+	if (!mhd)
+		goto out;
+
+	/* asked again, after the one rescan the backoff lets pass */
+	answer_identify(head, 0x14e, 0x03);
+	answer_rc(head, 0x5500, CXLMI_RET_UNSUPPORTED);
+	answer_ld_info(head, 2ULL << 30, 2);
+	fmd_discover(ctx);
+	fmd_discover(ctx);
+	rh = mhd_route_on(mhd, head);
+	CHECK(mhd->nroutes == 2 && rh && rh->role == FMD_CCI_HEAD_FMLD,
+	      "not asked again: %d routes, role %d", mhd->nroutes, rh ? (int)rh->role : -1);
+out:
+	fmd_ctx_free(ctx);
+	report("another endpoint of an MHD that is not ready is asked again", before);
+}
+
+/*
+ * A head of a Multi-Headed device on a switch port (review F14): head 0,
+ * which presents an MLD, is on port 5 of a switch, whose tunnelled
+ * Identify of the port's FM-owned LD gives the device's serial number, and
+ * the LD Pool CCI is on an endpoint of its own. Switches are discovered
+ * first, so the device was an MLD on port 5, and its LD Pool CCI was left
+ * unasked. Now it is one MHD with its head 0 on port 5 and two routes;
+ * the head presents an MLD, so a pool LD mapped to it is still not bound
+ * (which of the head's LD-IDs it is, is not known, Section 2.5.1).
+ * When the port then reports no device, the head is on no port, and the
+ * route through the port is dropped.
+ *
+ * @order: 0, the switch is found first; 1, the switch is found after the
+ * MHD (as on a rescan); 2, as 1, with head 0's FM-owned LD found on an
+ * endpoint of its own before the switch: the same head, reached two ways.
+ */
+static void test_mhd_head_on_switch(int order)
+{
+	static const char *const names[] = {
+		"an MHD's head on a switch port, found before it",
+		"an MHD's head found on a switch port after it",
+		"an MHD's head found on its own endpoint, then on a switch port",
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *pool = new_device(ctx), *sw = NULL, *own;
+	char id[FMD_MAX_ID_LEN], sw_id[FMD_MAX_ID_LEN], body[512];
+	uint8_t ports[4 + 16];
+	struct fmd_component *comp;
+	struct fmd_route *rs;
+	struct fmd_port *port;
+	struct fmd_head *head0;
+	struct fmd_mhd *mhd;
+	json_t *resp = NULL;
+	int before = failures, invalid, rc;
+
+	answer_mhd(pool, 0x14c);
+	if (order == 2) {
+		own = new_device(ctx);
+		answer_identify(own, 0x14c, 0x03);
+		answer_rc(own, 0x5500, CXLMI_RET_UNSUPPORTED);
+		answer_ld_info(own, 2ULL << 30, 2);
+	}
+	if (order)
+		fmd_discover(ctx);
+	sw = new_switch(ctx, 0x5014);
+	answer_identify(sw, 0x14c, 0x03);	/* tunnelled to port 5 */
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x14c);
+	device_id(sw_id, sizeof(sw_id), 0x5014);
+	comp = fmd_topology_find(&ctx->topology, id);
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 5);
+	CHECK(comp && comp->type == FMD_COMPONENT_MHD && port,
+	      "%s is %s", id, !comp ? "not there" :
+	      comp->type == FMD_COMPONENT_MLD ? "an MLD" : "not an MHD");
+	if (!comp || comp->type != FMD_COMPONENT_MHD || !port)
+		goto out;
+	mhd = fmd_to_mhd(comp);
+	head0 = fmd_topology_find_head(&ctx->topology, id, 0);
+	CHECK(comp->parent == &ctx->topology.root->base && head0 &&
+	      port->head == head0 && head0->port == port && !port->base.first_child,
+	      "head 0 is not on port 5, or the port has a device of its own");
+	rs = mhd_route_on(mhd, sw);
+	CHECK(mhd->nroutes == (order == 2 ? 3 : 2) && mhd_route_on(mhd, pool) && rs &&
+	      rs->role == FMD_CCI_HEAD_FMLD && rs->tunnel.level == 1 &&
+	      rs->tunnel.port == 5 && !rs->tunnel.mhd && rs->head == 0,
+	      "%d routes; through the switch: role %d, level %d, port %d, head %d",
+	      mhd->nroutes, rs ? (int)rs->role : -1, rs ? rs->tunnel.level : -1,
+	      rs ? rs->tunnel.port : -1, rs ? rs->head : -2);
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == 0, "%d rule(s) broken", invalid);
+
+	/* pool LD 0 is mapped to head 0, which presents an MLD */
+	snprintf(body, sizeof(body),
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
+		 "\"/redfish/v1/Fabrics/CXL/Endpoints/%s_host0\"}], \"TargetEndpoints\": "
+		 "[{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s_ld0\"}]}}",
+		 sw_id, id);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == -14 && !resp && !ctx->binding_ops,
+	      "a pool LD of a head that presents an MLD: %d", rc);
+	json_decref(resp);
+
+	/* port 5 reports no device: the head has left it */
+	memset(ports, 0, sizeof(ports));
+	ports[0] = 1;
+	port_block(ports + 4, 5, 0x03, 0, 0x00, 0x00, 0x0000);
+	answer(sw, 0x5101, ports, sizeof(ports));
+	fmd_switch_refresh_ports(ctx, fmd_topology_find_switch(&ctx->topology, sw_id),
+				 (uint8_t[]){ 5 }, 1);
+	invalid = fmd_topology_validate(ctx);
+	CHECK(!port->head && !head0->port && !mhd_route_on(mhd, sw) &&
+	      mhd->nroutes == (order == 2 ? 2 : 1) && invalid == 0,
+	      "port 5 reports no device: head %s, port %s, %d routes, %d rule(s) broken",
+	      head0->port ? "placed" : "not placed", port->head ? "has it" : "does not",
+	      mhd->nroutes, invalid);
+out:
+	fmd_ctx_free(ctx);
+	report(names[order], before);
 }
 
 /*
@@ -10692,6 +10956,13 @@ int main(void)
 	test_chunk_plan();
 	test_mhd_pool_route();
 	test_mhd_route_head_mailbox();
+	test_mhd_two_routes(false);
+	test_mhd_two_routes(true);
+	test_mhd_route_not_ready();
+	test_mhd_promoted_on_rescan();
+	test_mhd_head_on_switch(0);
+	test_mhd_head_on_switch(1);
+	test_mhd_head_on_switch(2);
 	test_mhd_chunk_delete();
 	test_mld_chunk_delete_partial();
 	test_pool_capacity();

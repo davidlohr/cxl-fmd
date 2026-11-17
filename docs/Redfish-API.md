@@ -1227,6 +1227,37 @@ FM Redfish view: all pool LDs 0-5 visible as CXLLogicalDevices/0 through /5
 - A head with one pool LD on a switch port is bound whole; a head that
   presents an MLD is not bound (see "Memory Binding (Connections)")
 
+**One device on several CCIs:** a device can answer on more than one CCI,
+and the serial number of Identify is the "unique identifier for this
+device" (Table 8-216). A Multi-Headed device's "LD Pool CCI may be exposed
+as an MCTP-based CCI or can be accessed via the Tunnel Management Command
+command through a head's Mailbox CCI", and "The FMLD within each head of an
+MH-MLD shall expose and manage only the LDs that are mapped to that head"
+(Sections 2.5 and 2.5.1). cxl-fmd keeps a Multi-Headed device as one
+device, with each CCI it was found on as a route of a role (cxl-fmd's
+inferences, as no command says what a CCI is):
+
+- an endpoint that answers Get Multi-Headed Info with no tunnel, and more
+  than one head, is the LD Pool CCI; the device is read there, and the
+  commands for its pool go there;
+- another endpoint with the serial number that answers Get LD Info, or an
+  MLD on a switch port whose Identify through the switch gives it, is the
+  FM-owned LD of a head that presents an MLD; one that answers neither is
+  a CCI of the device whose role is not known. Neither is sent commands
+  for the pool. A head's FM-owned LD is taken to be of the device's only
+  head that presents an MLD, has its link up and is placed nowhere else;
+  with two or more such heads, it is of none. On a switch port, that head
+  is placed on the port, until the port is no longer a DSP or reports
+  another kind of device, or none: the head is then on no port, and the
+  route through the port is dropped.
+
+A device found first on a head (as an SLD or MLD, directly attached or on
+a switch port; switches are discovered first) is replaced by the
+Multi-Headed device when its LD Pool CCI is found, with new IDs (see
+"Changes for Clients"). An endpoint whose answer is a temporary error is
+asked again later, as in discovery. A device found on two CCIs that is not
+Multi-Headed stays as it was first found.
+
 ### SLD Memory Model
 
 For Single Logical Devices (SLDs):
@@ -1799,8 +1830,10 @@ In summary:
    `--rescan` timer (see "Binding").
 4. On hardware, a Multi-Headed device has no Connections, and a `POST` to
    it is 400: no command maps a head's Port Number to a switch port or a
-   host. A head that presents an MLD cannot be bound per LD, and a binding
-   found on one is `Enabled` with `Health` `Warning` and no chunks (see
+   host (a head that presents an MLD is placed on a switch port only when
+   its FM-owned LD is found there, see "One device on several CCIs"). A
+   head that presents an MLD cannot be bound per LD, and a binding found
+   on one is `Enabled` with `Health` `Warning` and no chunks (see
    "Binding").
 5. The security actions are not served on the pool LDs of a
    Multi-Headed device, nor on a device whose CEL could not be read (see
@@ -1888,7 +1921,13 @@ These are known gaps in what cxl-fmd does:
 - On hardware, no command maps a head's Port Number (Table 7-64) to a
   switch port or a host, so cxl-fmd knows neither: a Multi-Headed device
   has no Connections, and a `POST` to it is 400. Only a mock topology can
-  say where a head is (`parent_switch` and `parent_port`, or `attached_host`).
+  say where a head is (`parent_switch` and `parent_port`, or
+  `attached_host`). The one exception is a head that presents an MLD on
+  a switch port whose FM-owned LD, Identified through the switch, has the
+  device's serial number, when it is the only head of the device that can
+  be (see "One device on several CCIs"); such a head cannot be bound per
+  LD anyway. A head that presents an SLD cannot be Identified through a
+  switch (Section 7.6.7.3.1), so it is never placed.
 - `Oem.Cxl.Origin` is lost on restart: after one, every binding is
   `"Discovered"`.
 - What a host has mapped of what is bound is not known: the FM has no
@@ -2171,6 +2210,8 @@ Changes from the fixes of the external design review (branch
 | `POST` of a `Memory` or `CXLLogicalDevice` security action the device answers with an error | `400` "Action failed" | Invalid Input, Incorrect Passphrase or Invalid Payload Length `400`; Invalid Security State `409`; Unsupported `501`; Retry Required or Busy `503`; any other `500`; the message names the return code |
 | A mock topology's `cel_commands` | `get_security_state` to `passphrase_secure_erase` were not known | known (see [mock-topology.md](mock-topology.md)); an MLD's LDs have the MLD's `cel_commands`; `cxl_mld_0` of `mock/mld-device.json` lists all six |
 | On hardware, a Dynamic Capacity action, a `MemoryRegion` `PATCH` or a `MemoryExtent` `DELETE` of a Multi-Headed device | the DCD Management command sent to the device's endpoint with no tunnel, whatever cxl-fmd knew of the route to its LD Pool CCI | sent on the route to the LD Pool CCI, the one Set LD Allocations goes on; `501`, with nothing sent, if no such route is known |
+| On hardware, a Multi-Headed device whose head presents an MLD, found on that head's FM-owned LD first (on a switch port, or on an endpoint of its own) and on its LD Pool CCI | an MLD (`DeviceClass` and the IDs of an MLD, on the switch port when it was found there), its LD Pool CCI never asked | a Multi-Headed device: its heads and pool LDs, at the root, the head on the switch port when it can be told which it is; the MLD's `Chassis`, `PCIeDevice`, LDs and chunks are gone |
+| On hardware, the same, found on its LD Pool CCI first | the Multi-Headed device, the other CCI dropped | the same, and a head placed on the switch port as above; that head's binding found by a vPPB is a Connection to its Endpoint, `Health` `Warning` |
 
 Mock topologies and discovery:
 
