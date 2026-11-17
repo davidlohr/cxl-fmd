@@ -109,11 +109,14 @@ static void add_common_headers(struct MHD_Response *response)
 	MHD_add_response_header(response, "Cache-Control", "no-store");
 }
 
-/* Add @headers, pairs of name and value ended by a NULL name, if given */
+/*
+ * Add @headers, pairs of name and value ended by a NULL name, if given; a
+ * value that is NULL or empty is left out
+ */
 static void add_headers(struct MHD_Response *response, const char *const *headers)
 {
 	for (; headers && headers[0]; headers += 2)
-		if (headers[1])
+		if (headers[1] && headers[1][0])
 			MHD_add_response_header(response, headers[0], headers[1]);
 }
 
@@ -399,6 +402,45 @@ static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
 			       fmd_redfish_error_body(message,
 					RF_MSG(FMD_RF_OPERATION_NOT_ALLOWED)),
 			       allow);
+}
+
+/*
+ * The Link header of a resource whose @odata.type is @type: "A Link
+ * header containing rel=describedby shall be returned on GET and HEAD
+ * requests for Redfish resources. If the referenced JSON Schema is a
+ * versioned schema, it shall match the version contained in the value of
+ * the @odata.type property returned in this resource" (DSP0266 1.25.0
+ * Section 8.2). It is DMTF's published JSON Schema of that very version
+ * ("#Chassis.v1_23_0.Chassis" gives Chassis.v1_23_0.json), or the
+ * unversioned one of a collection, at the URI that schema gives as its
+ * $id (http://redfish.dmtf.org/schemas/v1/...): cxl-fmd serves no JSON
+ * Schema of its own (cxl-fmd's choice). Empty for a body that is not a
+ * resource (no @odata.type: /redfish, the OData service document), and
+ * for a type of cxl-fmd's Oem schema, which has no JSON Schema.
+ */
+static void describedby_header(const char *type, char *buf, size_t len)
+{
+	const char *dot;
+
+	buf[0] = '\0';
+	if (!type || type[0] != '#' || !strncmp(type, "#Cxl.", 5))
+		return;
+	type++;
+	dot = strrchr(type, '.');
+	if (!dot || dot == type)
+		return;
+	snprintf(buf, len, "<http://redfish.dmtf.org/schemas/v1/%.*s.json>; rel=describedby",
+		 (int)(dot - type), type);
+}
+
+/* describedby_header() of the JSON text @data, @n bytes */
+static void describedby_of_text(const char *data, size_t n, char *buf, size_t len)
+{
+	json_t *root = json_loadb(data, n, 0, NULL);
+
+	describedby_header(json_string_value(json_object_get(root, "@odata.type")),
+			   buf, len);
+	json_decref(root);
 }
 
 static bool route_exists(struct fmd_ctx *ctx, const char *url);
@@ -714,7 +756,8 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 	 * Table 13), as a 405 of the resource has it (allow_header())
 	 */
 	char allow[64];
-	const char *const headers[] = { "Allow", allow, NULL };
+	char link[256] = "";
+	const char *const headers[] = { "Allow", allow, "Link", link, NULL };
 
 	norm_url = normalize_url(url);
 	if (!norm_url) {
@@ -801,6 +844,7 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 				return MHD_YES;
 			}
 			allow_header(ctx, url, allow, sizeof(allow));
+			describedby_of_text(data, len, link, sizeof(link));
 			return send_static_response(conn, MHD_HTTP_OK, data, len,
 						    "application/json; charset=utf-8",
 						    headers);
@@ -1019,6 +1063,8 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 								response, location);
 		if (status == MHD_HTTP_OK) {
 			allow_header(ctx, url, allow, sizeof(allow));
+			describedby_header(json_string_value(json_object_get(response,
+							"@odata.type")), link, sizeof(link));
 			return send_json_headers(conn, status, response, headers);
 		}
 		return send_json_response(conn, status, response);
@@ -1286,6 +1332,8 @@ ok:
 		return MHD_YES;
 	}
 	allow_header(ctx, url, allow, sizeof(allow));
+	describedby_header(json_string_value(json_object_get(response, "@odata.type")),
+			   link, sizeof(link));
 	return send_json_headers(conn, MHD_HTTP_OK, response, headers);
 }
 

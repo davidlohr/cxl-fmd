@@ -8,7 +8,8 @@ install_subdir(
     strip_directory: true,
 )
 
-# JSON schemas - served at /redfish/v1/JsonSchemas/
+# JSON schemas - installed only: cxl-fmd serves none, and its Link headers
+# name the DMTF copy (docs/Redfish-API.md, "Headers")
 install_subdir(
     'json-schema-installed',
     install_dir: get_option('datadir') / 'cxl-fmd' / 'JsonSchemas',

@@ -608,6 +608,25 @@ resource takes, the same list a `405` for it has (see "HTTP Status
 Codes"). `HEAD` is not supported (DSP0266 Section 7.4: "Services may
 support the HEAD method"), and is answered `405`.
 
+A `200` to a `GET` of a resource has a `Link` header to the JSON Schema of
+its type: "A Link header containing rel=describedby shall be returned on
+GET and HEAD requests for Redfish resources. If the referenced JSON Schema
+is a versioned schema, it shall match the version contained in the value
+of the @odata.type property returned in this resource" (DSP0266 Section
+8.2). It is DMTF's published schema of the version `@odata.type` names, at
+the URI that schema has as its `$id`, unversioned for a collection:
+
+```
+Link: <http://redfish.dmtf.org/schemas/v1/Chassis.v1_23_0.json>; rel=describedby
+Link: <http://redfish.dmtf.org/schemas/v1/ChassisCollection.json>; rel=describedby
+```
+
+cxl-fmd serves no JSON Schema itself (cxl-fmd's choice). A body with no
+`@odata.type` (`/redfish`, `/redfish/v1/odata`, `$metadata`, the XML
+schemas, the message object of a completed Dynamic Capacity task monitor)
+has no `Link`. No annotation `Link` is sent (Section 8.2: one "should be
+returned").
+
 ---
 
 ## Status from Get Health Info
@@ -2618,6 +2637,7 @@ Changes from the fixes of the external design review (branch
 | `GET /redfish/v1/TaskService/Tasks` | binds and unbinds only | with the Dynamic Capacity tasks; one that is `Running` on hardware has its host read on every `--event-poll` tick |
 | Any request | no `Cache-Control` header | `Cache-Control: no-store` on every response (see "Headers") |
 | `GET` answered `200` | no `Allow` header | `Allow`, the methods the resource takes, as its `405` lists them (see "Headers") |
+| `GET` of a resource answered `200` | no `Link` header | `Link: <http://redfish.dmtf.org/schemas/v1/{type}.json>; rel=describedby`, the JSON Schema of its `@odata.type` (see "Headers") |
 
 Mock topologies, discovery and start-up:
 

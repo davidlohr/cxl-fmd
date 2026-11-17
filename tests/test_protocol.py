@@ -357,10 +357,56 @@ def allow_as_405_has_it(base, uri, response):
         allowed(requests.put(base + uri, json={}, timeout=30)), uri
 
 
+# The DMTF JSON Schema of each @odata.type served, of the version it names
+# (review F18.6, the Redfish-Protocol-Validator's
+# RESP_HEADERS_LINK_REL_DESCRIBED_BY and RESP_HEADERS_LINK_SCHEMA_VER_MATCH)
+def described_by(uri, response):
+    """
+    "A Link header containing rel=describedby shall be returned on GET and
+    HEAD requests for Redfish resources. If the referenced JSON Schema is a
+    versioned schema, it shall match the version contained in the value of
+    the @odata.type property returned in this resource" (DSP0266 1.25.0
+    Section 8.2). cxl-fmd links DMTF's JSON Schema at the URI its $id has;
+    a body with no @odata.type (/redfish, the OData service document, XML)
+    has no Link.
+    """
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    odata_type = data.get("@odata.type") if isinstance(data, dict) else None
+    if not odata_type:
+        assert "Link" not in response.headers, uri
+        return
+    namespace = odata_type.lstrip("#").rsplit(".", 1)[0]
+    assert response.links.get("describedby", {}).get("url") == \
+        f"http://redfish.dmtf.org/schemas/v1/{namespace}.json", (uri, odata_type)
+    assert response.headers["Link"].count("<") == 1, uri
+
+
+def test_described_by_is_the_versioned_schema():
+    """A versioned type its version, a collection its unversioned schema"""
+    class R:
+        def __init__(self, t):
+            self.headers = {"Link": f"<http://redfish.dmtf.org/schemas/v1/{t}.json>; "
+                            "rel=describedby"}
+            self.links = {"describedby": {"url": self.headers["Link"][1:].split(">")[0]}}
+            self.body = {"@odata.type": "#Chassis.v1_23_0.Chassis"}
+
+        def json(self):
+            return self.body
+    described_by("/x", R("Chassis.v1_23_0"))
+    with pytest.raises(AssertionError):
+        described_by("/x", R("Chassis.v1_29_0"))
+    with pytest.raises(AssertionError):
+        described_by("/x", R("Chassis"))
+
+
 @pytest.mark.parametrize("topology", ["mock/fm-boots-first.json", "mock/dcd-device.json",
                                       "mock/unit/unit-direct-sld.json"])
-def test_get_has_allow(cxl_fmd_executable, topology):
-    """Every 200 of a GET has Allow; a 405 had it, a 200 did not"""
+def test_get_has_allow_and_link(cxl_fmd_executable, topology):
+    """Every 200 of a GET has Allow (a 405 had it, a 200 did not), and a
+    resource's has a Link to its JSON Schema (none had one)"""
     from conftest import _find_free_port, _wait_for_service
     import subprocess
     import tempfile
@@ -409,6 +455,7 @@ def test_get_has_allow(cxl_fmd_executable, topology):
             for uri, response in ok.items():
                 allow_as_405_has_it(base, uri, response)
                 seen |= methods(response.headers["Allow"])
+                described_by(uri, response)
             # each method one resource or another takes
             if topology == "mock/fm-boots-first.json":
                 assert seen == {"GET", "POST", "PATCH", "DELETE"}
