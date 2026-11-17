@@ -354,7 +354,7 @@ DSP0288 maps none of these commands. The mapping is cxl-fmd's own:
 | CXL Command | Redfish Resource | Redfish Operation |
 |-------------|------------------|-------------------|
 | Set LD Allocations (5402h) | `MemoryChunks` | `POST` and `DELETE` of a chunk of an MLD, or of a pool LD of a Multi-Headed device (see "Memory Provisioning") |
-| Set Partition Info (4101h) | `MemoryChunks` | `POST` and `DELETE` of a `"Volatile"` chunk of an SLD (see "Memory Provisioning") |
+| Set Partition Info (4101h) | `MemoryChunks` | `POST` and `DELETE` of a `"Volatile"` chunk of an SLD with partitionable capacity (see "Memory Provisioning") |
 | Bind vPPB (5201h) | `Connection` | `POST /redfish/v1/Fabrics/CXL/Connections` |
 | Unbind vPPB (5202h) | `Connection` | `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}`, with Unbind Option 1h, Simulate Managed Hot-Remove |
 | Unbind vPPB (5202h) | `Connection` | `POST /redfish/v1/Fabrics/CXL/Connections/{id}/Actions/Oem/Cxl.ForceUnbind`, with Unbind Option 2h, Simulate Surprise Hot-Remove (cxl-fmd's Oem action) |
@@ -898,13 +898,19 @@ the chunk's `SizeMiB`; `GET` of the chunk has the same link, and the LD's
   `MemoryChunkIncrementMiB` (the Memory Granularity, Table 7-48); one that
   is not is refused with 400, as is one smaller than Range 2. The same
   holds for an MHD's pool LDs.
-- **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
-  the volatile capacity staged (or else active) plus the chunk, worked out
-  and checked as in "Set Partition Info" above. Immediate is cleared: the
-  device takes the new partitioning at its next reset, yet the chunk is
-  in the collection at once (see Known Gaps). Persistent data is lost if
-  the persistent capacity changes. A `"PMEM"` chunk sends no command: it
-  only divides cxl-fmd's own record of the domain.
+- **SLD**: A `"Volatile"` chunk of an SLD with partitionable capacity
+  issues `Set Partition Info (0x4101h)` for the volatile capacity staged
+  (or else active) plus the chunk, worked out and checked as in "Set
+  Partition Info" above. Immediate is cleared: the device takes the new
+  partitioning at its next reset, yet the chunk is in the collection at
+  once (see Known Gaps). Persistent data is lost if the persistent
+  capacity changes. A `"PMEM"` chunk sends no command: it only divides
+  cxl-fmd's own record of the domain. Nor does a `"Volatile"` chunk of an
+  SLD with no partitionable capacity (Partition Alignment 0, or no
+  capacity beyond Volatile Only and Persistent Only, Table 8-309), on
+  which Set Partition Info "shall fail with an Unsupported error"
+  (Section 8.2.10.9.2.2): the chunk is of the Volatile Only capacity,
+  and taking them as a division of the domain is cxl-fmd's choice.
 
 ### Deleting Memory Chunks (DELETE)
 
@@ -949,15 +955,19 @@ In mock mode (`--mock`) nothing is sent, and a chunk `POST` or `DELETE` of
 an MLD or MHD changes the mock LD's `MemorySizeMiB` as Set LD Allocations
 would a device's; a `"Volatile"` chunk of an SLD does not change the
 mock's partition.
-- **SLD**: A `"Volatile"` chunk issues `Set Partition Info (0x4101h)` for
-  the volatile capacity staged (or else active) less the chunk, staged for
-  the next reset as on creation. A `"PMEM"` chunk sends no command.
+- **SLD**: A `"Volatile"` chunk of an SLD with partitionable capacity
+  issues `Set Partition Info (0x4101h)` for the volatile capacity staged
+  (or else active) less the chunk, staged for the next reset as on
+  creation; a partition the device cannot be given is `400`, and the
+  chunk stays. A `"PMEM"` chunk, and a `"Volatile"` one of an SLD with
+  no partitionable capacity, send no command.
 
 **While bound (409 Conflict):** a chunk that a switch-attached Connection
 exposes (one that is not Absent: Starting, Updating and Enabled ones
 included) is not deleted, and no chunk is created that would change the
 allocation of a bound LD (Set LD Allocations) or, `"Volatile"`, the
-partition of a bound SLD (Set Partition Info). Delete the Connection
+partition of a bound SLD with partitionable capacity (Set Partition
+Info). Delete the Connection
 first. The CXL specification does not say whether an LD or SLD that is
 bound may be changed; refusing it is cxl-fmd's choice. Direct-attached
 Connections, which have no binding to undo, do not hold their chunks.
@@ -1452,7 +1462,7 @@ standard:
 | May one LD be bound to two vPPBs? | Not said. "For a DSP above an MLD, there is a vPPB for each LD" (Table 7-93) is about routing | Refused on `POST` (409). The Connection ID has the vPPB in it, so a switch that shows one LD on two vPPBs gives two Connections, and nothing collides |
 | Are Binding Change records made, and seen by this FM, for binds made by another FM, through another CCI, or at boot? | Not said | The switch's VCSs are read again after every Binding Change no task follows, the whole switch before each `POST`, `DELETE` and `#Cxl.ForceUnbind`; `--rescan` stays the backstop |
 | Who made a binding? | No field of Table 7-34 or Table 7-80 says | A `DELETE` unbinds whoever made it. `Oem.Cxl.Origin` is advisory and lost on restart. There is no option to protect bindings cxl-fmd did not make: with the record lost on restart, it would protect cxl-fmd's own bindings after one |
-| May Set LD Allocations, or Set Partition Info, change an LD or SLD that is bound? | Not said | 409 for a chunk `DELETE`, and for a chunk `POST` that would send either command, while a switch-attached Connection that is not `Absent` exposes it. A `"PMEM"` chunk of an SLD sends nothing and is not refused. Direct-attached Connections, and Dynamic Capacity extents, are not gated |
+| May Set LD Allocations, or Set Partition Info, change an LD or SLD that is bound? | Not said | 409 for a chunk `DELETE`, and for a chunk `POST` that would send either command, while a switch-attached Connection that is not `Absent` exposes it. A `POST` of a `"PMEM"` chunk of an SLD, or of a `"Volatile"` one of an SLD with no partitionable capacity, sends nothing and is not refused. Direct-attached Connections, and Dynamic Capacity extents, are not gated |
 | Which chunks does a binding expose? | A binding names a port and an LD-ID only (Table 7-35); what LD Allocation Ranges 1 and 2 (Table 7-49) mean to a host is not said | The chunks cxl-fmd records for the SLD, or for the LD |
 | Which pool LD is LD-ID `n` of a head that presents an MLD? | "The MH-MLD maps the LD-IDs received at a head to the device-wide LD index in the MH-MLD's LD pool" (Section 2.5.1), by no rule given | `POST` to such a head is 400. A binding found there is a Connection to the head's Endpoint, `Enabled` with `Health` `Warning`, and no chunks |
 | Which switch port, or host, is a head of a Multi-Headed device on? | No command maps a head's Port Number (Table 7-64) to either | Only a mock topology says. On hardware a Multi-Headed device has no Connections, and a `POST` to it is 400 |
@@ -1854,6 +1864,8 @@ Changes from the fixes of the external design review (branch
 | `HEAD` or `OPTIONS` (or another method cxl-fmd does not serve) | `405` with no `Allow` header | `405` with `Allow`; `404` for a URI that is not a resource |
 | `PATCH` of a direct-attached Connection | `405`, `Allow: GET, DELETE` | `405`, `Allow: GET` |
 | `GET` of a Connection while the switch binds or unbinds it (`Status.State` `Starting` or `Updating`) | `MemoryChunkInfo[].AccessState` `Optimized` | `Transitioning`; `Optimized` once it is `Enabled` |
+| Chunk `DELETE` and `POST` on hardware of a `"Volatile"` chunk of an SLD with no partitionable capacity (Partition Alignment 0, such as one that is all Volatile Only) | `400`: Set Partition Info was taken to be needed, and is not sent to such a device (nor to any SLD behind a switch), so the chunk found at discovery could not be deleted and no `"Volatile"` chunk made | `204` / `201`, nothing sent: the chunk divides the Volatile Only capacity, as in a mock |
+| `"Volatile"` chunk `POST` on a bound SLD with no partitionable capacity (`sld_0` of `mock/fm-boots-first.json` once bound) | `409` "A Connection binds the logical device" | `201`, nothing sent, as for a `"PMEM"` chunk; one of an SLD with partitionable capacity is still `409` |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
 
 Mock topologies and discovery:

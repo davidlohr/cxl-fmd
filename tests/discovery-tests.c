@@ -5019,17 +5019,31 @@ static void test_notification_ack(void)
 }
 
 /*
- * Deleting a Volatile chunk of an SLD moves its partition, which a device
- * whose Partition Alignment is 0 cannot do (Table 8-309): that is the
- * request's fault, 400, as it is for a POST, and the chunk stays.
+ * A Volatile chunk of an SLD with partitionable capacity moves its
+ * partition with Set Partition Info (4101h), which "shall fail with an
+ * Unsupported error if there is no partitionable capacity (i.e., Identify
+ * Memory Device reports Partition Alignment as zero)" (Section
+ * 8.2.10.9.2.2). On a device that has only Volatile Only capacity a
+ * Volatile chunk is of that fixed capacity: its DELETE and POST send
+ * nothing and are carried out, as they are in a mock (it was 400 to both,
+ * so the chunk found at discovery could never be deleted). A partition a
+ * partitionable device cannot be given is still the request's fault, 400,
+ * and the chunk stays: deleting all of the volatile memory of a device
+ * with 2 GiB of Volatile Only capacity would ask for less than that.
  */
 static void test_chunk_delete_partition_refused(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_device(ctx);
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], chunk[FMD_MAX_ID_LEN + 16];
+	static const char body[] =
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}";
+	struct fmd_sld *sld;
+	json_t *rsp = NULL;
+	unsigned int sent;
 	int before = failures, rc;
 
+	/* 16 GiB, all of it Volatile Only, Partition Alignment 0 */
 	answer_identify(ep, 0xed, 0x03);
 	answer_memdev_identify(ep, 64, 64, 0);
 	fmd_discover(ctx);
@@ -5038,11 +5052,42 @@ static void test_chunk_delete_partition_refused(void)
 	snprintf(chunk, sizeof(chunk), "%.50s_chunk0", id);
 	CHECK(fmd_topology_find_chunk(&ctx->topology, chunk), "no chunk %s", chunk);
 
+	sent = commands_sent(ep);
 	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
-	CHECK(rc == -4, "delete: %d, not a refused partition", rc);
-	CHECK(fmd_topology_find_chunk(&ctx->topology, chunk),
-	      "the chunk went although its partition could not");
+	CHECK(rc == 0 && commands_sent(ep) == sent,
+	      "delete of a Volatile Only chunk: %d, %u commands sent", rc,
+	      commands_sent(ep) - sent);
+	CHECK(!fmd_topology_find_chunk(&ctx->topology, chunk), "the chunk stayed");
 
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &rsp);
+	CHECK(rc == 0 && commands_sent(ep) == sent,
+	      "Volatile chunk of Volatile Only capacity: %d, %u commands sent",
+	      rc, commands_sent(ep) - sent);
+	CHECK(rsp && json_is_string(json_object_get(rsp, "AddressRangeType")) &&
+	      !strcmp(json_string_value(json_object_get(rsp, "AddressRangeType")),
+		      "Volatile"), "the new chunk is not Volatile");
+	json_decref(rsp);
+	fmd_ctx_free(ctx);
+
+	/*
+	 * 16 GiB, 2 GiB Volatile Only, 14 GiB partitionable in steps of 2 GiB,
+	 * all of it volatile now: its one chunk is Volatile.
+	 */
+	ctx = new_ctx();
+	sld = direct_sld(ctx, &ep, 0xee, 64, 8, 0, 8, 64);
+	CHECK(sld, "no partitionable SLD");
+	if (sld) {
+		snprintf(id, sizeof(id), "%s", sld->base.id);
+		snprintf(dom, sizeof(dom), "%.50s_domain0", id);
+		snprintf(chunk, sizeof(chunk), "%.50s_chunk0", id);
+		sent = commands_sent(ep);
+		rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+		CHECK(rc == -4 && commands_sent(ep) == sent,
+		      "delete: %d, %u commands sent, not a refused partition", rc,
+		      commands_sent(ep) - sent);
+		CHECK(fmd_topology_find_chunk(&ctx->topology, chunk),
+		      "the chunk went although its partition could not");
+	}
 	fmd_ctx_free(ctx);
 	report("a chunk whose partition cannot be moved", before);
 }

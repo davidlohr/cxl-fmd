@@ -4670,6 +4670,21 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
 }
 
 /*
+ * Whether a chunk of @type of @dev changes a partition, with Set Partition
+ * Info (4101h): a Volatile chunk of an SLD that has partitionable capacity
+ * (fmd_partitionable()). Without any the command "shall fail with an
+ * Unsupported error" (CXL r4.0 Section 8.2.10.9.2.2), and a Volatile
+ * chunk, of the Volatile Only capacity, only divides cxl-fmd's record of
+ * the domain, as a PMEM chunk does: nothing is sent for it, and it is not
+ * refused while the SLD is bound (cxl-fmd's choice).
+ */
+static bool chunk_repartitions(const struct fmd_component *dev, const char *type)
+{
+	return dev->type == FMD_COMPONENT_SLD && !strcmp(type, "Volatile") &&
+	       fmd_partitionable(&fmd_to_sld(dev)->memdev);
+}
+
+/*
  * The AddressRangeType of the chunk of @plan, on @dev and its LD @ld (NULL
  * for an SLD). One asked for is taken if the device or LD can have memory
  * of that type (fmd_range_type_possible()), or if nothing is known of its
@@ -4816,12 +4831,13 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 
 	/*
 	 * A chunk of an LD a vPPB has bound changes the LD's allocation
-	 * (5402h), and a Volatile one of a bound SLD its partition (4101h):
-	 * refused while the binding stands, as a DELETE is. Checked on a
-	 * mock too, so that it answers as a device would, and before
-	 * anything is sent.
+	 * (5402h), and a Volatile one of a bound SLD with partitionable
+	 * capacity its partition (4101h, chunk_repartitions()): refused
+	 * while the binding stands, as a DELETE is. Checked on a mock too,
+	 * so that it answers as a device would, and before anything is
+	 * sent.
 	 */
-	if ((chassis->type != FMD_COMPONENT_SLD || !strcmp(plan.type, "Volatile")) &&
+	if ((chassis->type != FMD_COMPONENT_SLD || chunk_repartitions(chassis, plan.type)) &&
 	    ld_connected(ctx, chassis, ld, "a new chunk"))
 		return -7;
 
@@ -4913,11 +4929,12 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 			}
 		} else if (chassis->type == FMD_COMPONENT_SLD) {
 			/*
-			 * Only volatile chunks change the partition: the total
+			 * Only volatile chunks of partitionable capacity change
+			 * the partition (chunk_repartitions()): the total
 			 * volatile capacity, as staged or else active, grows by
 			 * the chunk. Staged for the next reset, not at once.
 			 */
-			if (strcmp(plan.type, "Volatile") == 0 && likely(!fmd_is_mock(ctx))) {
+			if (chunk_repartitions(chassis, plan.type) && likely(!fmd_is_mock(ctx))) {
 				struct fmd_sld *sld = fmd_to_sld(chassis);
 				uint64_t new_volatile;
 
@@ -5132,8 +5149,8 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 			if (rc)
 				return rc;
 		} else if (domain_parent->type == FMD_COMPONENT_SLD) {
-			/* Only volatile chunks change the partition */
-			if (strcmp(chunk->address_range_type, "Volatile") == 0 &&
+			/* only volatile chunks of partitionable capacity change it */
+			if (chunk_repartitions(domain_parent, chunk->address_range_type) &&
 			    likely(!fmd_is_mock(ctx))) {
 				struct fmd_sld *sld = fmd_to_sld(domain_parent);
 				uint64_t cur = CXL_TO_BYTES(

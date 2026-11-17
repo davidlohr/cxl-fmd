@@ -1523,6 +1523,7 @@ const char *fmd_range_type(const struct cxlmi_cmd_memdev_identify_rsp *id,
 bool fmd_range_type_possible(const struct cxlmi_cmd_memdev_identify_rsp *id,
 			     const struct cxlmi_cmd_memdev_get_partition_info_rsp *part,
 			     const char *type);
+bool fmd_partitionable(const struct cxlmi_cmd_memdev_identify_rsp *id);
 json_t *fmd_chunk_range_type(const struct fmd_mem_chunk *chunk);
 const struct fmd_ld *fmd_chunk_ld(const struct fmd_component *dev,
 				  const struct fmd_mem_chunk *chunk);

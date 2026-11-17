@@ -124,3 +124,60 @@ class TestLogicalDevice:
                                  timeout=30)
         assert response.status_code == 400
         assert "AddressRangeType" in response.json()["error"]["message"]
+
+
+BOOTS_FIRST = json.loads((ROOT / "mock" / "fm-boots-first.json").read_text())
+SW_CHUNKS = "/redfish/v1/Chassis/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks"
+
+
+def bind_volatile_chunk(base):
+    """sld_0 is unbound: make room, make a 1 GiB Volatile chunk and bind
+    sld_0 to switch_0_host0 with it"""
+    response = requests.get(base + SW_CHUNKS, timeout=30)
+    assert response.status_code == 200
+    for member in response.json()["Members"]:
+        assert requests.delete(base + member["@odata.id"], timeout=30).status_code == 204
+    response = requests.post(base + SW_CHUNKS, json={
+        "MemoryChunkSizeMiB": 1024, "AddressRangeType": "Volatile"}, timeout=30)
+    assert response.status_code == 201
+    response = requests.post(base + "/redfish/v1/Fabrics/CXL/Connections", json={
+        "ConnectionType": "Memory",
+        "Links": {
+            "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
+            "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/sld_0"}]},
+        "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": response.headers["Location"]}}]},
+        timeout=30)
+    assert response.status_code == 201
+
+
+def test_bound_volatile_only_sld_takes_a_volatile_chunk(daemon):
+    """sld_0 of fm-boots-first.json is all Volatile Only capacity, with no
+    Partition Alignment: a Volatile chunk sends no Set Partition Info (which
+    "shall fail with an Unsupported error if there is no partitionable
+    capacity", CXL r4.0 Section 8.2.10.9.2.2), so a binding does not refuse
+    it, as it does not a PMEM one (it was 409)."""
+    base = daemon(BOOTS_FIRST)
+    bind_volatile_chunk(base)
+    response = requests.post(base + SW_CHUNKS, json={
+        "MemoryChunkSizeMiB": 1024, "AddressRangeType": "Volatile"}, timeout=30)
+    assert response.status_code == 201
+    assert response.json()["AddressRangeType"] == "Volatile"
+
+
+def test_bound_partitionable_sld_refuses_a_volatile_chunk(daemon):
+    """The same SLD with all of its capacity partitionable, volatile now: a
+    Volatile chunk would change the partition, and is 409 while bound."""
+    topology = copy.deepcopy(BOOTS_FIRST)
+    dev = topology["devices"][0]
+    assert dev["id"] == "sld_0"
+    dev["identify_memory_device"].update({"volatile_capacity_mb": 0,
+                                          "persistent_capacity_mb": 0,
+                                          "partition_align_mb": 256})
+    dev["partition_info"] = {"active_volatile_mb": 16384, "active_persistent_mb": 0,
+                             "next_volatile_mb": 0, "next_persistent_mb": 0}
+    base = daemon(topology)
+    bind_volatile_chunk(base)
+    response = requests.post(base + SW_CHUNKS, json={
+        "MemoryChunkSizeMiB": 1024, "AddressRangeType": "Volatile"}, timeout=30)
+    assert response.status_code == 409
+    assert "A Connection binds" in response.json()["error"]["message"]

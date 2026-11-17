@@ -1140,6 +1140,22 @@ bool fmd_range_type_possible(const struct cxlmi_cmd_memdev_identify_rsp *id,
 
 	if (now || only)
 		return true;
+	return fmd_partitionable(id);
+}
+
+/*
+ * Whether a device or LD that answered Identify Memory Device @id has
+ * partitionable capacity. Of its Partition Alignment CXL r4.0 Table 8-309
+ * says "Partitionable capacity is equal to Total Capacity – Volatile Only
+ * Capacity – Persistent Only Capacity. If 0, the device does not support
+ * partitioning the capacity into both volatile capacity and persistent
+ * capacity", and Set Partition Info (4101h) "shall fail with an
+ * Unsupported error if there is no partitionable capacity (i.e., Identify
+ * Memory Device reports Partition Alignment as zero)" (Section
+ * 8.2.10.9.2.2). Both are checked.
+ */
+bool fmd_partitionable(const struct cxlmi_cmd_memdev_identify_rsp *id)
+{
 	return id->partition_align &&
 	       id->total_capacity > id->volatile_capacity + id->persistent_capacity;
 }
