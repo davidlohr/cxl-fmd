@@ -96,6 +96,28 @@ def results(bind="success", unbind="success", time_ms=200):
     return change
 
 
+# cxl-fmd's Resolution of a bind or unbind the switch answered Invalid Input
+REFUSED = ("Read the switch's ports and Virtual CXL Switches, and resubmit "
+           "the request if it still applies: the switch refused the command "
+           "as Invalid Input.")
+
+
+def answered_as_at_once(done, status, message, resolution):
+    """
+    The monitor @done of a task that is over answers as the request would
+    have, had the switch answered at once ("as if it had completed
+    synchronously", DSP0266 1.25.0 Section 12.2): @status, with the error
+    body the POST or DELETE gives (src/redfish/handlers.c
+    fmd_redfish_vppb_failure()).
+    """
+    assert done.status_code == status, done.text
+    error = done.json()["error"]
+    assert error["message"] == message
+    info = error["@Message.ExtendedInfo"]
+    assert [m["MessageId"] for m in info] == ["Base.1.24.GeneralError"]
+    assert info[0]["Resolution"] == resolution
+
+
 def warnings(client):
     status, data = client.get(SWITCH_LOG)
     assert status == 200
@@ -114,7 +136,10 @@ def test_bind_that_fails_in_the_background(daemon, time_ms):
         response = post_connection(client.base_url, "switch_0_host0", "sld_0", chunk)
         assert response.status_code == 202, response.text
         done = wait_for(client.base_url, response.headers["Location"])
-        assert done.status_code == 500
+        answered_as_at_once(done, 500, "Failed to create connection",
+                            "Read the resource to see what the device did "
+                            "before the request is resubmitted: the device "
+                            "failed the command.")
         status, task = client.get(response.json()["@odata.id"])
         assert task["TaskState"] == "Exception"
         assert "internal device error" in task["Messages"][0]["Message"]
@@ -143,12 +168,32 @@ def test_unbind_that_fails_in_the_background(daemon):
     response = requests.delete(client.base_url + uri, timeout=30)
     assert response.status_code == 202
     done = wait_for(client.base_url, response.headers["Location"])
-    assert done.status_code == 500
+    # 500 before review F18: a DELETE the switch refused at once is 400
+    answered_as_at_once(done, 400, "The switch refused the unbind as Invalid Input",
+                        REFUSED)
     status, task = client.get(response.json()["@odata.id"])
     assert "cmd input was invalid" in task["Messages"][0]["Message"]
     assert bound(bindings(client, SWITCH)) == before
     assert client.get(uri)[0] == 200
     assert len(warnings(client)) == 1
+
+
+def test_bind_refused_in_the_background(daemon):
+    """Invalid Input, at the end of a bind: the monitor answers 400, as a
+    POST the switch refused at once is (it was 500), and nothing is bound."""
+    _, client = daemon(results(bind="invalid_input"))
+    chunk = chunk_of(client, "sld_0")
+    response = post_connection(client.base_url, "switch_0_host0", "sld_0", chunk)
+    assert response.status_code == 202, response.text
+    done = wait_for(client.base_url, response.headers["Location"])
+    answered_as_at_once(done, 400, "The switch refused the bind as Invalid Input",
+                        REFUSED)
+    status, task = client.get(response.json()["@odata.id"])
+    assert task["TaskState"] == "Exception"
+    assert "cmd input was invalid" in task["Messages"][0]["Message"]
+    assert bound(bindings(client, SWITCH)) == {}
+    status, conns = client.get(CONNECTIONS)
+    assert conns["Members"] == []
 
 
 @pytest.mark.parametrize("result,http", [("busy", 503), ("unsupported", 501)])

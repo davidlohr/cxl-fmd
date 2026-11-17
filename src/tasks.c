@@ -246,6 +246,9 @@ static void task_judge(struct fmd_ctx *ctx, struct fmd_task *task,
 	char msg[sizeof(task->message)];
 
 	task->percent = 100;
+	/* how a failure is known: the monitor answers as the request would */
+	task->rc = rc;
+	task->outcome = rc != CXLMI_RET_SUCCESS ? FMD_TASK_RC : FMD_TASK_OBSERVED;
 
 	if (task->kind == FMD_TASK_BIND) {
 		/*
@@ -434,6 +437,8 @@ static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
 	char id[16];
 
 	if (!sw) {
+		/* whether it bound or unbound before it went is not known */
+		task->outcome = FMD_TASK_UNKNOWN;
 		task_finish(ctx, task, false, message);
 		return;
 	}

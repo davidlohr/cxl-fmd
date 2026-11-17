@@ -622,12 +622,69 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 	return result;
 }
 
+unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
+				      json_t **body)
+{
+	bool bind = kind == FMD_TASK_BIND;
+	unsigned int status;
+	const char *msg;
+	json_t *info;
+
+	switch (err) {
+	case -EAGAIN:		/* Busy, or Retry Required twice */
+		status = 503;
+		msg = bind ? "The switch cannot bind now; try again" :
+			     "The switch is carrying out another operation; try again";
+		info = fmd_redfish_message(FMD_RF_RESOURCE_IN_USE, FMD_RES_RETRY,
+					   NULL, 0);
+		break;
+	case -EOPNOTSUPP:	/* Unsupported: the command is optional */
+		status = 501;
+		msg = bind ? "The switch does not support Bind vPPB (Unsupported)" :
+			     "The switch does not support Unbind vPPB (Unsupported)";
+		info = bind ? fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+						  FMD_RES_UNSUPPORTED, NULL, 0) :
+			      fmd_redfish_message(FMD_RF_RESOURCE_CANNOT_BE_DELETED,
+						  NULL, NULL, 0);
+		break;
+	case -EPROTO:		/* Invalid Input */
+		status = 400;
+		msg = bind ? "The switch refused the bind as Invalid Input" :
+			     "The switch refused the unbind as Invalid Input";
+		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_REFUSED,
+					   NULL, 0);
+		break;
+	default:
+		status = 500;
+		msg = bind ? "Failed to create connection" : "Failed to delete connection";
+		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_FAILED,
+					   NULL, 0);
+		break;
+	}
+	*body = fmd_redfish_error_body(msg, info);
+	return status;
+}
+
 /*
  * Task monitor - /redfish/v1/TaskService/TaskMonitors/{id}
  *
  * Returns the HTTP status to answer with, and for all but 204 a body in
  * @response. @location is the monitor while the task runs, and the
  * connection once a bind has made it.
+ *
+ * Once the task is over, "the task monitor shall return: • The appropriate
+ * HTTP status code ... • The headers and response body of the initial
+ * operation, as if it had completed synchronously. If the initial
+ * operation fails, the response body shall contain an error response"
+ * (DSP0266 1.25.0 Section 12.2). An unbind is answered as its DELETE,
+ * which the Task's Payload names, even when #Cxl.ForceUnbind sent it
+ * (cxl-fmd's choice). A failure with the switch's return code is answered
+ * as the request would have been had the switch answered with it at once
+ * (fmd_redfish_vppb_failure()); one with none (the switch logged the
+ * operation failed, or the vPPB is not what was asked) is 500 with what
+ * the vPPB showed; and one whose switch is gone is 500 "Outcome unknown",
+ * as whether the switch did it before it went is not known (cxl-fmd's
+ * choices).
  */
 int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 			     char *location, size_t len)
@@ -648,11 +705,27 @@ int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 	}
 
 	if (task->state == FMD_TASK_EXCEPTION) {
-		*response = fmd_redfish_error_body(task->message,
-			fmd_redfish_message(FMD_RF_GENERAL_ERROR,
-				"Read the Connection to see what the switch did before "
-				"the request is resubmitted.", NULL, 0));
-		return 500;
+		char msg[sizeof(task->message) + 128];
+
+		switch (task->outcome) {
+		case FMD_TASK_RC:
+			return (int)fmd_redfish_vppb_failure(task->kind,
+						fmd_vppb_errno(task->rc), response);
+		case FMD_TASK_UNKNOWN:
+			snprintf(msg, sizeof(msg), "Outcome unknown: %s, and whether "
+				 "it %s the vPPB before it went is not known",
+				 task->message,
+				 task->kind == FMD_TASK_BIND ? "bound" : "unbound");
+			*response = fmd_redfish_error_body(msg,
+				fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+						    FMD_RES_OUTCOME_UNKNOWN, NULL, 0));
+			return 500;
+		default:
+			*response = fmd_redfish_error_body(task->message,
+				fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+						    FMD_RES_FAILED, NULL, 0));
+			return 500;
+		}
 	}
 
 	if (task->kind == FMD_TASK_UNBIND)

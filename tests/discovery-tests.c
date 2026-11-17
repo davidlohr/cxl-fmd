@@ -8174,6 +8174,109 @@ static struct fmd_task *task_interrupted(struct fmd_ctx *ctx,
 	return task;
 }
 
+/*
+ * A task's monitor answers, once the task is over, "The headers and
+ * response body of the initial operation, as if it had completed
+ * synchronously" (DSP0266 1.25.0 Section 12.2; Review F18): a bind or
+ * unbind the switch finished with a return code is answered as when the
+ * switch answers with it at once (fmd_redfish_vppb_failure(), which the
+ * POST and DELETE use too). Invalid Input, Unsupported and Busy were 500.
+ * One whose switch is gone is 500, "Outcome unknown".
+ */
+static void test_task_monitor_as_sync(void)
+{
+	static const struct {
+		uint16_t rc;
+		int status;
+	} cases[] = {
+		{ CXLMI_RET_INPUT, 400 },
+		{ CXLMI_RET_UNSUPPORTED, 501 },
+		{ CXLMI_RET_BUSY, 503 },
+		{ CXLMI_RET_INTERNAL, 500 },
+	};
+	int before = failures;
+
+	for (int unbind = 0; unbind < 2; unbind++) {
+		const char *what = unbind ? "unbind" : "bind";
+		enum fmd_task_kind kind = unbind ? FMD_TASK_UNBIND : FMD_TASK_BIND;
+
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			uint64_t serial = 0x5f40 + unbind * 8 + i;
+			struct fmd_ctx *ctx = new_ctx();
+			struct cxlmi_endpoint *ep = new_switch(ctx, serial);
+			char cid[FMD_CONN_ID_LEN], loc[128];
+			json_t *resp = NULL, *sync = NULL;
+			struct fmd_switch *sw;
+			struct fmd_task *task;
+			unsigned int sync_status;
+			int status;
+
+			task = task_on(ctx, ep, serial, unbind, cid, &sw);
+			CHECK(task, "%s: no task", what);
+			if (!task) {
+				fmd_ctx_free(ctx);
+				continue;
+			}
+			/* over, with the code; the vPPB as it was */
+			answer_bg_status(ep, false, 100, unbind ? 0x5202 : 0x5201,
+					 cases[i].rc);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, unbind ? vppb_ld1 : unbound, unbound);
+			fmd_tasks_poll(ctx);
+			CHECK(task->state == FMD_TASK_EXCEPTION &&
+			      task->outcome == FMD_TASK_RC && task->rc == cases[i].rc,
+			      "%s ended with %u: task %d (%s), outcome %d", what,
+			      cases[i].rc, task->state, task->message, task->outcome);
+
+			status = fmd_redfish_task_monitor(ctx, task->id, &resp, loc,
+							  sizeof(loc));
+			sync_status = fmd_redfish_vppb_failure(kind,
+						fmd_vppb_errno(cases[i].rc), &sync);
+			CHECK(status == cases[i].status &&
+			      status == (int)sync_status && resp && sync &&
+			      json_equal(resp, sync) && !loc[0],
+			      "%s ended with %u: the monitor answers %d, not %d as "
+			      "at once", what, cases[i].rc, status, cases[i].status);
+			json_decref(resp);
+			json_decref(sync);
+			fmd_ctx_free(ctx);
+		}
+
+		/* the switch is gone: what it did is not known */
+		{
+			uint64_t serial = 0x5f60 + unbind;
+			struct fmd_ctx *ctx = new_ctx();
+			struct cxlmi_endpoint *ep = new_switch(ctx, serial);
+			char cid[FMD_CONN_ID_LEN], loc[128];
+			struct fmd_switch *sw;
+			struct fmd_task *task;
+			json_t *resp = NULL;
+			const char *msg;
+			int status;
+
+			task = task_on(ctx, ep, serial, unbind, cid, &sw);
+			CHECK(task, "%s: no task", what);
+			if (task) {
+				snprintf(task->switch_id, sizeof(task->switch_id),
+					 "no_such_switch");
+				fmd_tasks_poll(ctx);
+				status = fmd_redfish_task_monitor(ctx, task->id, &resp,
+								  loc, sizeof(loc));
+				msg = json_string_value(json_object_get(
+					json_object_get(resp, "error"), "message"));
+				CHECK(task->state == FMD_TASK_EXCEPTION &&
+				      task->outcome == FMD_TASK_UNKNOWN && status == 500 &&
+				      msg && !strncmp(msg, "Outcome unknown: ", 17),
+				      "%s whose switch is gone: %d, %s", what, status,
+				      msg ? msg : "(no message)");
+				json_decref(resp);
+			}
+			fmd_ctx_free(ctx);
+		}
+	}
+	report("a task monitor answers as the request would have at once", before);
+}
+
 static void test_lost_task_interrupted(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -10950,6 +11053,7 @@ int main(void)
 	test_lost_task_frees_op();
 	test_task_fresh_observation();
 	test_lost_task_interrupted();
+	test_task_monitor_as_sync();
 	test_task_before_command();
 	test_post_delete_on_a_switch();
 	test_chunk_guard();

@@ -217,21 +217,6 @@ static enum MHD_Result send_bad_body(struct MHD_Connection *conn,
 	return send_error(conn, MHD_HTTP_BAD_REQUEST, message, info);
 }
 
-/* cxl-fmd's Resolutions, where the registry's would not say what to do */
-#define RES_RETRY "Resubmit the request later: the device was busy, or asked " \
-	"for the command to be sent again."
-#define RES_CORRECT "Correct the request as the error's message says, and " \
-	"resubmit it."
-#define RES_FAILED "Read the resource to see what the device did before the " \
-	"request is resubmitted: the device failed the command."
-#define RES_UNSUPPORTED "None: the device, or cxl-fmd's route to it, does not " \
-	"support this."
-#define RES_REFUSED "Read the switch's ports and Virtual CXL Switches, and " \
-	"resubmit the request if it still applies: the switch refused the " \
-	"command as Invalid Input."
-#define RES_OUTCOME_UNKNOWN "Read the resource to learn whether the request " \
-	"was carried out before it is resubmitted: cxl-fmd does not know."
-
 /*
  * A DC request the device accepted, whose state could not be read back
  * after it (FMD_DC_ACCEPTED_STALE): 200, with "An error response, with a
@@ -310,7 +295,7 @@ static enum MHD_Result send_security_result(struct MHD_Connection *conn, int rc,
 	case -EINVAL:
 		status = MHD_HTTP_BAD_REQUEST;
 		what = "The request is not valid";
-		info = RF_GENERAL(RES_CORRECT);
+		info = RF_GENERAL(FMD_RES_CORRECT);
 		break;
 	case -EBUSY:
 		status = MHD_HTTP_CONFLICT;
@@ -321,7 +306,7 @@ static enum MHD_Result send_security_result(struct MHD_Connection *conn, int rc,
 	case -EAGAIN:
 		status = MHD_HTTP_SERVICE_UNAVAILABLE;
 		what = "The device cannot do it now; try again";
-		info = fmd_redfish_message(FMD_RF_RESOURCE_IN_USE, RES_RETRY, NULL, 0);
+		info = fmd_redfish_message(FMD_RF_RESOURCE_IN_USE, FMD_RES_RETRY, NULL, 0);
 		break;
 	case -EOPNOTSUPP:
 		status = MHD_HTTP_NOT_IMPLEMENTED;
@@ -332,7 +317,7 @@ static enum MHD_Result send_security_result(struct MHD_Connection *conn, int rc,
 	default:
 		status = MHD_HTTP_INTERNAL_SERVER_ERROR;
 		what = "The command failed";
-		info = RF_GENERAL(RES_FAILED);
+		info = RF_GENERAL(FMD_RES_FAILED);
 		break;
 	}
 	if (msg)
@@ -360,6 +345,16 @@ static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
 }
 
 static bool route_exists(struct fmd_ctx *ctx, const char *url);
+
+/* A bind or unbind that failed with @err: as its task monitor answers */
+static enum MHD_Result send_vppb_failure(struct MHD_Connection *conn,
+					 enum fmd_task_kind kind, int err)
+{
+	json_t *body;
+	unsigned int status = fmd_redfish_vppb_failure(kind, err, &body);
+
+	return send_error_body(conn, status, body, NULL);
+}
 
 /* The action an action URI names: its last segment */
 static const char *action_of(const char *url)
@@ -398,7 +393,7 @@ static enum MHD_Result send_errno(struct fmd_ctx *ctx,
 					     "body, and resubmit it."));
 	case EINVAL:
 		return send_bad_body(conn, body, body_size, msg,
-				     RF_GENERAL(RES_CORRECT));
+				     RF_GENERAL(FMD_RES_CORRECT));
 	case EBUSY:
 	case EEXIST:
 		return send_error(conn, MHD_HTTP_CONFLICT, msg,
@@ -414,18 +409,18 @@ static enum MHD_Result send_errno(struct fmd_ctx *ctx,
 	case EAGAIN:	/* the device said Retry Required or Busy */
 		return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE, msg,
 				  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
-						      RES_RETRY, NULL, 0));
+						      FMD_RES_RETRY, NULL, 0));
 	case EREMOTEIO:	/* whether the device carried it out is not known */
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, msg,
-				  RF_GENERAL(RES_OUTCOME_UNKNOWN));
+				  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
 	case EOPNOTSUPP:	/* no route to the CCI: nothing was sent */
 		return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED, msg, action ?
 				  fmd_redfish_message(FMD_RF_ACTION_NOT_SUPPORTED,
 						      NULL, NULL, 1, action) :
-				  RF_GENERAL(RES_UNSUPPORTED));
+				  RF_GENERAL(FMD_RES_UNSUPPORTED));
 	default:
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, msg,
-				  RF_GENERAL(RES_FAILED));
+				  RF_GENERAL(FMD_RES_FAILED));
 	}
 }
 
@@ -868,6 +863,8 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 			return send_not_found(conn, url, "Task not found");
 		if (status == 204)
 			return send_no_content(conn);
+		if (status >= 400)
+			return send_error_body(conn, status, response, NULL);
 		if (location[0])
 			return send_json_response_with_location(conn, status,
 								response, location);
@@ -1304,7 +1301,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == FMD_MCTP_RESTRICTED)
 			return send_mctp_restricted(conn);
 		return send_bad_body(conn, body, body_size, "Action failed",
-				     RF_GENERAL(RES_CORRECT));
+				     RF_GENERAL(FMD_RES_CORRECT));
 	}
 
 	/*
@@ -1360,7 +1357,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  fmd_redfish_message(FMD_RF_ACTION_NOT_SUPPORTED,
 							      NULL, NULL, 1, action_of(url)));
 		return send_error(conn, MHD_HTTP_BAD_REQUEST, "Action failed",
-				  RF_GENERAL(RES_FAILED));
+				  RF_GENERAL(FMD_RES_FAILED));
 	}
 
 	/* POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd */
@@ -1512,7 +1509,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -10)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "A size or offset in MiB must be an integer from 0 to 17592186044415, and MemoryChunkSizeMiB greater than 0",
-					  RF_GENERAL(RES_CORRECT));
+					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -7)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "A Connection binds the logical device: delete the Connection first",
@@ -1522,7 +1519,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -11)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Name exactly one LD of the device: InterleaveSets[0].Memory as the URI of its Memory, or Links.CXLLogicalDevices[0] as the URI of its CXLLogicalDevice",
-					  RF_GENERAL(RES_CORRECT));
+					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -12)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "An InterleaveSets entry sets no OffsetMiB, RegionId or MemoryLevel, and its SizeMiB is MemoryChunkSizeMiB",
@@ -1530,7 +1527,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -13)
 			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
 					  "No LD Pool CCI of the Multi-Headed device is known: its allocations cannot be changed",
-					  RF_GENERAL(RES_UNSUPPORTED));
+					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		if (rc == -15)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Name the AddressRangeType: the memory of the device is not all of one type, or its type is not known",
@@ -1544,9 +1541,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -14)
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again",
-					  RF_GENERAL(RES_OUTCOME_UNKNOWN));
+					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-				  "Failed to create memory chunk", RF_GENERAL(RES_FAILED));
+				  "Failed to create memory chunk", RF_GENERAL(FMD_RES_FAILED));
 	}
 
 	/*
@@ -1579,7 +1576,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
 					  "The switch is carrying out another operation; try again",
 					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
-							      RES_RETRY, NULL, 0));
+							      FMD_RES_RETRY, NULL, 0));
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "ForceUnbind is offered only on a switch-attached connection",
@@ -1593,9 +1590,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -6)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The switch refused the unbind as Invalid Input",
-					  RF_GENERAL(RES_REFUSED));
+					  RF_GENERAL(FMD_RES_REFUSED));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-				  "Failed to unbind the connection", RF_GENERAL(RES_FAILED));
+				  "Failed to unbind the connection", RF_GENERAL(FMD_RES_FAILED));
 	}
 
 	/* POST /redfish/v1/Fabrics/{id}/Connections - create connection */
@@ -1643,7 +1640,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_not_found(conn, url, "Fabric not found");
 		if (rc == -2)
 			return send_bad_body(conn, body, body_size, "Invalid request body",
-					     RF_GENERAL(RES_CORRECT));
+					     RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -3)
 			return send_error(conn, MHD_HTTP_NOT_FOUND,
 					  "Host system (initiator) not found",
@@ -1661,12 +1658,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -8)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The host is not attached to that device or head: it cannot reach this memory",
-					  RF_GENERAL(RES_CORRECT));
+					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -11)
-			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
-					  "The switch cannot bind now; try again",
-					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
-							      RES_RETRY, NULL, 0));
+			return send_vppb_failure(conn, FMD_TASK_BIND, -EAGAIN);
 		if (rc == -12)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The host's Virtual CXL Switch has no unbound vPPB",
@@ -1677,13 +1671,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "The host's connection to the target is being unbound",
 					  RF_MSG(FMD_RF_RESOURCE_IN_USE));
 		if (rc == -17)
-			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
-					  "The switch does not support Bind vPPB (Unsupported)",
-					  RF_GENERAL(RES_UNSUPPORTED));
+			return send_vppb_failure(conn, FMD_TASK_BIND, -EOPNOTSUPP);
 		if (rc == -18)
-			return send_error(conn, MHD_HTTP_BAD_REQUEST,
-					  "The switch refused the bind as Invalid Input",
-					  RF_GENERAL(RES_REFUSED));
+			return send_vppb_failure(conn, FMD_TASK_BIND, -EPROTO);
 		if (rc == -19)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The memory chunks are on more than one logical device",
@@ -1696,11 +1686,11 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -21)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "A link is not the URI of an Endpoint or a MemoryChunk as this service serves it",
-					  RF_GENERAL(RES_CORRECT));
+					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -22)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "InitiatorEndpointGroups and TargetEndpointGroups are not supported: name InitiatorEndpoints and TargetEndpoints",
-					  RF_GENERAL(RES_CORRECT));
+					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -23)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The memory chunk is staged: its partition is active from the device's next reset",
@@ -1714,7 +1704,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -14)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The head presents an MLD: which pool LD each of its LD-IDs is, is not known (CXL r4.0 Section 2.5.1)",
-					  RF_GENERAL(RES_UNSUPPORTED));
+					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		if (rc == -15)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The memory chunk is not on the target",
@@ -1722,13 +1712,12 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -10)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The host and the device are not on the same switch",
-					  RF_GENERAL(RES_CORRECT));
+					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -9)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The device or logical device is bound, or being bound, to another vPPB",
 					  RF_MSG(FMD_RF_RESOURCE_IN_USE));
-		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-				  "Failed to create connection", RF_GENERAL(RES_FAILED));
+		return send_vppb_failure(conn, FMD_TASK_BIND, -EIO);
 	}
 
 	free(norm_url);
@@ -1809,9 +1798,9 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The device cannot be reached: an SLD on a switch port",
-					  RF_GENERAL(RES_UNSUPPORTED));
+					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "CCI command failed",
-				  RF_GENERAL(RES_FAILED));
+				  RF_GENERAL(FMD_RES_FAILED));
 	}
 
 	/* PATCH /redfish/v1/Chassis/{id}/Memory/{mem} */
@@ -1829,17 +1818,17 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 		if (rc == -2)
 			return send_bad_body(conn, body, body_size,
 					     "Invalid request body, or a capacity the device cannot be partitioned to",
-					     RF_GENERAL(RES_CORRECT));
+					     RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The device cannot be reached: an SLD on a switch port",
-					  RF_GENERAL(RES_UNSUPPORTED));
+					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		if (rc == -5)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The device has no partitionable capacity (Partition Alignment is 0)",
-					  RF_GENERAL(RES_UNSUPPORTED));
+					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "CCI command failed",
-				  RF_GENERAL(RES_FAILED));
+				  RF_GENERAL(FMD_RES_FAILED));
 	}
 
 	/* PATCH .../CXLLogicalDevices/{ld}/MemoryRegions/{region} - Set DC Region Config */
@@ -1905,7 +1894,7 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The device cannot be given that partition",
-					  RF_GENERAL(RES_UNSUPPORTED));
+					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		if (rc == -5)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "A Connection exposes the memory chunk: delete the Connection first",
@@ -1920,13 +1909,13 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -7)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The logical device has less memory allocated than the chunk",
-					  RF_GENERAL(RES_FAILED));
+					  RF_GENERAL(FMD_RES_FAILED));
 		if (rc == -8)
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again",
-					  RF_GENERAL(RES_OUTCOME_UNKNOWN));
+					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-				  "Failed to delete memory chunk", RF_GENERAL(RES_FAILED));
+				  "Failed to delete memory chunk", RF_GENERAL(FMD_RES_FAILED));
 	}
 
 	/* DELETE /redfish/v1/Fabrics/{id}/Connections/{conn} */
@@ -1949,10 +1938,7 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		}
 		json_decref(task);
 		if (rc == -3)
-			return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
-					  "The switch is carrying out another operation; try again",
-					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
-							      RES_RETRY, NULL, 0));
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EAGAIN);
 
 		if (rc == 0)
 			return send_no_content(conn);
@@ -1963,15 +1949,10 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 						"A direct-attached connection has no vPPB to unbind",
 						"GET");
 		if (rc == -5)
-			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
-					  "The switch does not support Unbind vPPB (Unsupported)",
-					  RF_MSG(FMD_RF_RESOURCE_CANNOT_BE_DELETED));
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EOPNOTSUPP);
 		if (rc == -6)
-			return send_error(conn, MHD_HTTP_BAD_REQUEST,
-					  "The switch refused the unbind as Invalid Input",
-					  RF_GENERAL(RES_REFUSED));
-		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
-				  "Failed to delete connection", RF_GENERAL(RES_FAILED));
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EPROTO);
+		return send_vppb_failure(conn, FMD_TASK_UNBIND, -EIO);
 	}
 
 	/* DELETE .../PCIeDevices/{dev}/MemoryExtents/{ext} - release the extent */

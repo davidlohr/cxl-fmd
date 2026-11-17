@@ -2936,6 +2936,22 @@ struct fmd_vppb *fmd_switch_bind_target_user(struct fmd_switch *sw,
 	return NULL;
 }
 
+int fmd_vppb_errno(uint16_t rc)
+{
+	switch (rc) {
+	case CXLMI_RET_RETRY:
+	case CXLMI_RET_BUSY:
+		return -EAGAIN;
+	case CXLMI_RET_UNSUPPORTED:
+		/* Bind and Unbind vPPB are optional (Table 7-31) */
+		return -EOPNOTSUPP;
+	case CXLMI_RET_INPUT:
+		return -EPROTO;
+	default:
+		return -EIO;
+	}
+}
+
 /*
  * Bind a physical port (or MLD LD) to a vPPB: Bind vPPB (5201h), CXL r4.0
  * Section 7.6.7.2.2.
@@ -3091,12 +3107,7 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: bind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
-		/* Bind and Unbind vPPB are optional (Table 7-31) */
-		if (rc == CXLMI_RET_UNSUPPORTED)
-			return -EOPNOTSUPP;
-		if (rc == CXLMI_RET_INPUT)
-			return -EPROTO;
-		return -EIO;
+		return fmd_vppb_errno(rc);
 	}
 
 	/* Refresh VCS state to reflect the binding */
@@ -3219,12 +3230,7 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: unbind vPPB failed: %d (%s)",
 			sw->base.id, rc, cxlmi_cmd_retcode_tostr(rc));
-		/* Bind and Unbind vPPB are optional (Table 7-31) */
-		if (rc == CXLMI_RET_UNSUPPORTED)
-			return -EOPNOTSUPP;
-		if (rc == CXLMI_RET_INPUT)
-			return -EPROTO;
-		return -EIO;
+		return fmd_vppb_errno(rc);
 	}
 
 	/* Refresh VCS state to reflect the unbinding */

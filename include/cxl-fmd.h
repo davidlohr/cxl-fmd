@@ -1832,6 +1832,14 @@ enum fmd_task_state {
 	FMD_TASK_INTERRUPTED,	/* lost: not asked about, settled by a read */
 };
 
+/* What is known of how a task in Exception failed */
+enum fmd_task_outcome {
+	FMD_TASK_OBSERVED,	/* the switch logged it failed, or the vPPB is
+				   not what was asked: no return code */
+	FMD_TASK_RC,		/* the switch's return code, rc */
+	FMD_TASK_UNKNOWN,	/* the switch is gone: what it did is not known */
+};
+
 struct fmd_task {
 	int id;
 	enum fmd_task_kind kind;
@@ -1849,6 +1857,8 @@ struct fmd_task {
 	time_t start;
 	time_t end;                          /* 0 while running */
 	char message[128];                   /* how it ended */
+	enum fmd_task_outcome outcome;       /* of an Exception */
+	uint16_t rc;                         /* FMD_TASK_RC: Table 8-208 code */
 	struct fmd_task *next;
 };
 
@@ -2255,6 +2265,13 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
  *
  * Return: 0 on success, negative errno on failure
  */
+/*
+ * The errno fmd_vppb_bind() and fmd_vppb_unbind() return for the switch's
+ * return code @rc, not Success or Background Command Started: -EAGAIN for
+ * Retry Required and Busy, -EOPNOTSUPP for Unsupported, -EPROTO for
+ * Invalid Input, else -EIO
+ */
+int fmd_vppb_errno(uint16_t rc);
 int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		  uint8_t vcs_id, uint8_t vppb_id,
 		  uint8_t port_id, uint16_t ld_id);
@@ -2690,6 +2707,31 @@ json_t *fmd_redfish_message(enum fmd_rf_msg id, const char *resolution,
 json_t *fmd_redfish_error_body(const char *message, json_t *info);
 /* the error body sent when one cannot be made */
 extern const char fmd_redfish_error_fallback[];
+
+/* cxl-fmd's Resolutions, where the registry's would not say what to do */
+#define FMD_RES_RETRY "Resubmit the request later: the device was busy, or " \
+	"asked for the command to be sent again."
+#define FMD_RES_CORRECT "Correct the request as the error's message says, " \
+	"and resubmit it."
+#define FMD_RES_FAILED "Read the resource to see what the device did before " \
+	"the request is resubmitted: the device failed the command."
+#define FMD_RES_UNSUPPORTED "None: the device, or cxl-fmd's route to it, does " \
+	"not support this."
+#define FMD_RES_REFUSED "Read the switch's ports and Virtual CXL Switches, " \
+	"and resubmit the request if it still applies: the switch refused the " \
+	"command as Invalid Input."
+#define FMD_RES_OUTCOME_UNKNOWN "Read the resource to learn whether the " \
+	"request was carried out before it is resubmitted: cxl-fmd does not know."
+
+/*
+ * The answer to a bind (@kind FMD_TASK_BIND: a POST of a Connection) or an
+ * unbind (a DELETE of one) that failed with @err, as fmd_vppb_bind() and
+ * fmd_vppb_unbind() return it (fmd_vppb_errno()), whether the switch
+ * answered at once or a task followed it: the HTTP status, and the error
+ * body in *@body (NULL if out of memory)
+ */
+unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
+				      json_t **body);
 
 
 /* Service root and metadata */

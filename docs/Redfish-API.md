@@ -633,14 +633,14 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
 | 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs or is `Interrupted` (see "Binds and unbinds in the background") |
 | 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once; the task monitor of an unbind once it has succeeded |
-| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
+| 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input, at once or at the end of the background operation (the task monitor); `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
-| 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception`; "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
-| 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
-| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
+| 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` with a return code other than Invalid Input, Unsupported, Busy or Retry Required, with none, or whose switch is gone ("Outcome unknown"); "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
+| 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported, at once or as the return code of the background operation (the task monitor) (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
+| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy (at once, or as the return code of the background operation: the task monitor), after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
 specification sets it.
@@ -1604,7 +1604,7 @@ cxl-fmd does not wait:
 | `DELETE .../Connections/{id}` | `202 Accepted`, a `Task`, `Location:` the task monitor | The Connection stands, `Updating`, until the vPPB reads unbound; then a `GET` of it is `404` |
 | `POST` of a target being bound for the host | `202 Accepted` and the same `Task` | |
 | Another bind or unbind while the switch is busy | `503 Service Unavailable` | Try again |
-| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs or is `Interrupted`; then `201` and the Connection for a bind, `204` for an unbind, or the error | |
+| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs or is `Interrupted`; then `201` and the Connection for a bind, `204` for an unbind, or the error the request would have had (see below) | |
 
 The task is at `/redfish/v1/TaskService/Tasks/{id}`. Its `PercentComplete` is
 the Percentage Complete of Background Operation Status (0002h), which the
@@ -1616,6 +1616,23 @@ Operation Status when the switch logged the operation as failed: "Failed
 bind and unbind operations generate events to the Warning Event Log"
 (Table 7-80). A switch that finishes a bind before it answers is answered
 for with `201`, and no task.
+
+Once the task is over, its monitor answers as the request that started it
+would have, had the switch answered at once: "the task monitor shall
+return: • The appropriate HTTP status code ... • The headers and response
+body of the initial operation, as if it had completed synchronously. If
+the initial operation fails, the response body shall contain an error
+response" (DSP0266 1.25.0 Section 12.2). A task that ended with the
+switch's return code is answered as a `POST` (a bind) or `DELETE` (an
+unbind) the switch refused with that code at once: Invalid Input `400`,
+Unsupported `501`, Busy or Retry Required `503`, any other `500`, with
+the same error body. An unbind is answered as its `DELETE`, which the
+task's `Payload` names, even when `#Cxl.ForceUnbind` sent it. A task that
+failed with no return code (the switch logged the operation failed, or
+the vPPB is not what was asked) is `500` with what was found. A task whose
+switch is gone is `500` with a message that starts "Outcome unknown":
+whether the switch bound or unbound the vPPB before it went is not known.
+Which status each of these gets is cxl-fmd's choice.
 
 The outcome is judged only on a read of the vPPB made after the switch
 said the operation was over (cxl-fmd's choice). A vPPB that still reads
@@ -2264,6 +2281,10 @@ Changes from the fixes of the external design review (branch
 | A request with a query parameter that starts with `$` | `code` `Base.1.15.0.QueryParameterUnsupported`, and `MessageId` `Base.1.15.0.QueryParameterUnsupported` in `@Message.ExtendedInfo` | `code` `Base.1.24.GeneralError`, `MessageId` `Base.1.24.QueryParameterUnsupported`: a MessageId has one minor version, "<MessageRegistryPrefix>.<MajorVersion>.<MinorVersion>.<MessageKey>" (DSP0266 Section 9.5.11.2) |
 | A Dynamic Capacity request the device accepted whose state could not be read back (`200`) | `code` `Base.1.0.Success` | `code` `Base.1.24.Success`, and `Base.1.24.Success` in `@Message.ExtendedInfo` |
 | `Messages[].MessageId` of a `Task` | `Base.1.0.Success`, `Base.1.0.GeneralError` | `Base.1.24.Success`, `Base.1.24.GeneralError` |
+| The task monitor of a bind or unbind the switch ended with Invalid Input (`bind_result` or `unbind_result` `invalid_input` in a mock) | `500`, `message` the task's ("Bind vPPB failed: cmd input was invalid") | `400`, the body a `POST` or `DELETE` the switch refused at once gets ("The switch refused the bind as Invalid Input"); the task's `Messages` keep the return code |
+| The same, ended with Unsupported, or Busy or Retry Required | `500` | `501`, or `503`, as at once |
+| The same, ended with another return code (Internal Error) | `500`, `message` the task's | `500`, `message` "Failed to create connection" or "Failed to delete connection", as at once |
+| The task monitor of a task whose switch is gone | `500`, "The switch is gone" | `500`, "Outcome unknown: The switch is gone, and whether it bound (unbound) the vPPB before it went is not known" |
 
 Mock topologies and discovery:
 
