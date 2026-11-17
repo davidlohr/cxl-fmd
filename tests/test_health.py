@@ -43,16 +43,17 @@ VIEWS = [
 
 @pytest.fixture
 def daemon(cxl_fmd_executable, tmp_path):
-    """start(topology) runs cxl-fmd on it and returns its base URL."""
+    """start(topology, *args) runs cxl-fmd on it, with more command line
+    arguments @args, and returns its base URL."""
     started = []
 
-    def start(topology):
+    def start(topology, *args):
         path = tmp_path / f"topology{len(started)}.json"
         path.write_text(json.dumps(topology))
         port = _find_free_port()
         log = tempfile.TemporaryFile()
         proc = subprocess.Popen([str(cxl_fmd_executable), "--mock", str(path),
-                                 "--port", str(port)],
+                                 "--port", str(port), *args],
                                 stdout=log, stderr=subprocess.STDOUT)
         started.append((proc, log))
         base = f"http://localhost:{port}"

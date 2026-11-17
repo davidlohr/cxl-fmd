@@ -83,6 +83,7 @@ See [docs/mock-topology.md](docs/mock-topology.md) for available topologies and 
 | `--event-poll SECS` | `-e` | Read the event logs every SECS seconds (default: 10, 0 disables) |
 | `--rescan SECS` | `-r` | Look for new devices every SECS seconds (default: 30, 0 disables) |
 | `--threads N` | `-N` | Serve requests on N threads, 1 to 256 (default: 8). Requests that only read run together; a change runs alone |
+| `--allow-mctp-restricted` | | Send Set Partition Info, Scan Media and the security commands as MCTP messages, tunnelled ones too. Without it they are refused (409): CXL r4.0 Table 8-308 note 4. Only when no host drives the devices (see [docs/Redfish-API.md](docs/Redfish-API.md#commands-restricted-on-mctp)) |
 | `--verbose` | `-v` | Increase verbosity (repeatable) |
 | `--help` | `-h` | Show help message |
 | `--version` | `-V` | Show version |

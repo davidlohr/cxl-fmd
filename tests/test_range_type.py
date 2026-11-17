@@ -175,7 +175,9 @@ def test_bound_partitionable_sld_refuses_a_volatile_chunk(daemon):
                                           "partition_align_mb": 256})
     dev["partition_info"] = {"active_volatile_mb": 16384, "active_persistent_mb": 0,
                              "next_volatile_mb": 0, "next_persistent_mb": 0}
-    base = daemon(topology)
+    # its Volatile chunks change the partition: Set Partition Info, which
+    # is not sent to a mock's devices unless allowed (review F15)
+    base = daemon(topology, "--allow-mctp-restricted")
     bind_volatile_chunk(base)
     response = requests.post(base + SW_CHUNKS, json={
         "MemoryChunkSizeMiB": 1024, "AddressRangeType": "Volatile"}, timeout=30)

@@ -1988,6 +1988,67 @@ bool fmd_endpoint_owns_events(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 	return true;
 }
 
+bool fmd_mctp_restricted(uint16_t opcode)
+{
+	switch (opcode) {
+	case 0x4101:	/* Set Partition Info */
+	case 0x4103:	/* Set LSA */
+	case 0x4302:	/* Clear Poison */
+	case 0x4304:	/* Scan Media */
+	case 0x4400:	/* Sanitize */
+	case 0x4401:	/* Secure Erase */
+	case 0x4501:	/* Set Passphrase */
+	case 0x4502:	/* Disable Passphrase */
+	case 0x4503:	/* Unlock */
+	case 0x4504:	/* Freeze Security State */
+	case 0x4505:	/* Passphrase Secure Erase */
+	case 0x4600:	/* Security Send */
+	case 0x4701:	/* Set SLD QoS Control */
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * Note 4 binds the system, and no CCI command says whether a device's
+ * mailboxes are operational: Mailbox Interfaces Ready, "When set, the
+ * device is ready to accept commands through the mailbox register
+ * interfaces" (Table 8-212), is a bit of the Memory Device Status
+ * Register (Section 8.2.9.5.1.1), which the FM does not read over MCTP.
+ * So, as cxl-fmd's choice, a
+ * command note 4 covers goes only where it is not an MCTP message, unless
+ * the operator, who can know that no host drives the device, says
+ * otherwise with --allow-mctp-restricted:
+ *
+ *  - An SLD attached directly through the kernel's mailbox (an ioctl
+ *    endpoint) is sent it.
+ *  - An SLD on an MCTP endpoint of its own is not.
+ *  - An LD of an MLD is reached with the Tunnel Management Command. A
+ *    switch tunnels to "the FM-owned LD of the MLD on the specified port,
+ *    using the transport defined in Section 7.6.3.1" (Section 7.6.7.3.1),
+ *    which is the MCTP PCIe VDM binding; that a tunnel within the MLD is
+ *    not an MCTP message the specification does not say. Every tunnelled
+ *    command is taken as MCTP, through a kernel mailbox too.
+ *  - A mock has no endpoints: its devices are taken as on MCTP, cxl-fmd's
+ *    default transport, so that a mock answers as such a device would.
+ */
+bool fmd_mctp_restricted_allowed(struct fmd_ctx *ctx,
+				 const struct fmd_component *dev,
+				 uint16_t opcode)
+{
+	if (!fmd_mctp_restricted(opcode) || ctx->config.allow_mctp_restricted)
+		return true;
+	if (!dev || dev->type != FMD_COMPONENT_SLD || !dev->ep ||
+	    fmd_sld_behind_switch(dev) || fmd_is_mock(ctx))
+		return false;
+	for (int i = 0; i < ctx->nioctl_eps; i++) {
+		if (ctx->ioctl_eps[i] == dev->ep)
+			return true;
+	}
+	return false;
+}
+
 /* Look for endpoints. libcxlmi does not open one that is open already */
 static void scan_endpoints(struct fmd_ctx *ctx)
 {

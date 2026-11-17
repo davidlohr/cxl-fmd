@@ -14,6 +14,7 @@ cxl-fmd \- CXL Fabric Manager daemon with a Redfish API
 .IR secs ]
 .RB [ \-N
 .IR threads ]
+.RB [ \-\-allow\-mctp\-restricted ]
 .RB [ \-v ...]
 .br
 .B cxl-fmd
@@ -125,6 +126,23 @@ The default is 8.
 This is how many requests can be in hand at once.
 Requests that only read (GET) run together; a request that changes the fabric
 runs alone.
+.TP
+.B \-\-allow\-mctp\-restricted
+Send the memory device commands that CXL r4.0 Table 8-308 marks O4 for MCTP
+as MCTP messages, tunnelled ones too: Set Partition Info, Scan Media, and the
+security commands (Set and Disable Passphrase, Freeze Security State,
+Passphrase Secure Erase).
+Note 4 of that table reads: \(lqSystems capable of management from Mailbox
+registers and an MCTP-based CCI shall ensure that these commands are not
+issued as MCTP messages while a device's mailboxes are operational.\(rq
+Nothing the fabric manager can read over MCTP says whether they are.
+Without this option, a request that would send one of these commands to a
+device on MCTP, or through a tunnel, is refused with 409 and its action is
+not advertised; only an SLD reached through the kernel's mailbox
+.RB ( \-i )
+is sent them.
+The devices of a mock topology are taken as on MCTP.
+Give it only when no host drives the devices.
 .TP
 .BR \-v ", " \-\-verbose
 Log more.

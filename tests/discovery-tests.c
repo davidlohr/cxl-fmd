@@ -1772,6 +1772,8 @@ static void test_scan_media(void)
 	};
 	const char *ok = "{\"PhysicalAddress\": \"0x1000\", \"Length\": 4096}";
 
+	/* an SLD on an MCTP endpoint: Scan Media only when allowed */
+	ctx->config.allow_mctp_restricted = true;
 	CHECK(sld, "no SLD");
 	if (!sld)
 		goto out;
@@ -1911,6 +1913,193 @@ static void chunk_state(struct fmd_ctx *ctx, const char *id, const char *dom,
 	snprintf(state, size, "%s", s ? s : "");
 	snprintf(type, tsize, "%s", t ? t : "");
 	json_decref(j);
+}
+
+/* Put @ep among the endpoints opened through the kernel's mailbox */
+static void mark_ioctl(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
+	struct cxlmi_endpoint **eps = realloc(ctx->ioctl_eps,
+			(ctx->nioctl_eps + 1) * sizeof(*eps));
+
+	if (!eps) {
+		printf("FAIL  out of memory\n");
+		exit(1);
+	}
+	ctx->ioctl_eps = eps;
+	ctx->ioctl_eps[ctx->nioctl_eps++] = ep;
+}
+
+/* The Memory actions served for @mem of @id: how many */
+static size_t memory_actions(struct fmd_ctx *ctx, const char *id, const char *mem)
+{
+	json_t *m = fmd_redfish_memory(ctx, id, mem);
+	size_t n = json_object_size(json_object_get(m, "Actions"));
+
+	CHECK(m && json_object_get(m, "SecurityStates"),
+	      "%s: no SecurityStates", mem);
+	json_decref(m);
+	return n;
+}
+
+/*
+ * Review F15. CXL r4.0 Table 8-308 marks Set Partition Info, Scan Media
+ * and the security commands, among others, "O4" for MCTP. Note 4:
+ * "Systems capable of management from Mailbox registers and an MCTP-based
+ * CCI shall ensure that these commands are not issued as MCTP messages
+ * while a device's mailboxes are operational." Each was sent whenever a
+ * client asked. Now, unless the operator started cxl-fmd with
+ * --allow-mctp-restricted, they are refused (FMD_MCTP_RESTRICTED, 409)
+ * with nothing sent or changed, and their action targets are left out;
+ * an SLD on a kernel mailbox (ioctl) endpoint is not on MCTP, and an LD
+ * of an MLD, reached through a tunnel, is (cxl-fmd's reading).
+ */
+static void test_o4_gate(void)
+{
+	static const uint16_t o4[] = {
+		0x4101, 0x4103, 0x4302, 0x4304, 0x4400, 0x4401, 0x4501,
+		0x4502, 0x4503, 0x4504, 0x4505, 0x4600, 0x4701,
+	};
+	static const uint16_t not_o4[] = {
+		0x4000, 0x4100, 0x4102, 0x4200, 0x4300, 0x4301, 0x4303,
+		0x4402, 0x4500, 0x4601, 0x4700, 0x4800, 0x5402,
+	};
+	static const char vol[] =
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}";
+	static const char pmem[] =
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"PMEM\"}";
+	static const char scan[] = "{\"PhysicalAddress\": \"0x1000\", \"Length\": 4096}";
+	static const char set[] = "{\"Passphrase\": \"a\", \"NewPassphrase\": \"b\"}";
+	static const char pass[] = "{\"Passphrase\": \"a\"}";
+	static const char erase[] = "{\"PassphraseType\": \"User\", \"Passphrase\": \"a\"}";
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_sld *sld = direct_sld(ctx, &ep, 0x1104, 64, 8, 16, 4, 24);
+	char id[FMD_MAX_ID_LEN], mld_id[FMD_MAX_ID_LEN], mem[FMD_MAX_ID_LEN + 8];
+	char dom_id[FMD_MAX_ID_LEN + 16], vchunk[FMD_MAX_ID_LEN + 16];
+	struct fmd_component *dom, *c;
+	struct cxlmi_tunnel_info ti;
+	unsigned int sent;
+	json_t *rsp = NULL;
+	int before = failures, rc, n;
+
+	for (size_t i = 0; i < sizeof(o4) / sizeof(o4[0]); i++)
+		CHECK(fmd_mctp_restricted(o4[i]), "%04xh is O4", o4[i]);
+	for (size_t i = 0; i < sizeof(not_o4) / sizeof(not_o4[0]); i++)
+		CHECK(!fmd_mctp_restricted(not_o4[i]), "%04xh is not O4", not_o4[i]);
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+	snprintf(id, sizeof(id), "%s", sld->base.id);
+	dom = fmd_first_child_type(&sld->base, FMD_COMPONENT_DOMAIN);
+	c = dom ? fmd_first_child_type(dom, FMD_COMPONENT_CHUNK) : NULL;
+	CHECK(dom && c, "no domain or chunk");
+	if (!dom || !c)
+		goto out;
+	snprintf(dom_id, sizeof(dom_id), "%s", dom->id);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom_id, c->id);
+	CHECK(rc == 0, "delete of the chunk found at discovery: %d", rc);
+
+	/* an SLD on an MCTP endpoint: each one refused, nothing sent */
+	CHECK(!fmd_mctp_restricted_allowed(ctx, &sld->base, 0x4101),
+	      "Set Partition Info is allowed on MCTP");
+	CHECK(fmd_mctp_restricted_allowed(ctx, &sld->base, 0x4100),
+	      "Get Partition Info is not allowed");
+	sent = commands_sent(ep);
+	rc = fmd_redfish_patch_memory(ctx, id, id,
+		"{\"CXL\": {\"StagedVolatileSizeMiB\": 10240}}",
+		strlen("{\"CXL\": {\"StagedVolatileSizeMiB\": 10240}}"));
+	CHECK(rc == FMD_MCTP_RESTRICTED, "PATCH Memory: %d", rc);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom_id, vol, strlen(vol), &rsp);
+	CHECK(rc == FMD_MCTP_RESTRICTED && !rsp && !fmd_first_child_type(dom, FMD_COMPONENT_CHUNK),
+	      "Volatile chunk POST: %d", rc);
+	json_decref(rsp);
+	rsp = NULL;
+	CHECK(fmd_redfish_action_scan_media(ctx, id, id, scan, strlen(scan)) ==
+	      FMD_MCTP_RESTRICTED, "Scan Media");
+	CHECK(fmd_redfish_action_set_passphrase(ctx, id, id, set, strlen(set)) ==
+	      FMD_MCTP_RESTRICTED, "SetPassphrase");
+	CHECK(fmd_redfish_action_set_master_passphrase(ctx, id, id, set, strlen(set)) ==
+	      FMD_MCTP_RESTRICTED, "SetMasterPassphrase");
+	CHECK(fmd_redfish_action_disable_passphrase(ctx, id, id, pass, strlen(pass)) ==
+	      FMD_MCTP_RESTRICTED, "DisablePassphrase");
+	CHECK(fmd_redfish_action_disable_master_passphrase(ctx, id, id, pass, strlen(pass)) ==
+	      FMD_MCTP_RESTRICTED, "DisableMasterPassphrase");
+	CHECK(fmd_redfish_action_freeze_security_state(ctx, id, id) ==
+	      FMD_MCTP_RESTRICTED, "FreezeSecurityState");
+	CHECK(fmd_redfish_action_secure_erase_unit(ctx, id, id, erase, strlen(erase)) ==
+	      FMD_MCTP_RESTRICTED, "SecureEraseUnit");
+	CHECK(commands_sent(ep) == sent, "%u commands sent", commands_sent(ep) - sent);
+	CHECK(fmd_redfish_action_freeze_security_state(ctx, id, "nonesuch") == -1,
+	      "an action on a Memory that is not there");
+	n = (int)memory_actions(ctx, id, id);
+	CHECK(n == 0, "%d actions served", n);
+
+	/* a PMEM chunk sends nothing, and is made */
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom_id, pmem, strlen(pmem), &rsp);
+	CHECK(rc == 0 && commands_sent(ep) == sent, "PMEM chunk POST: %d", rc);
+	json_decref(rsp);
+	rsp = NULL;
+
+	/* allowed: a Volatile chunk, which a DELETE without it cannot undo */
+	ctx->config.allow_mctp_restricted = true;
+	n = (int)memory_actions(ctx, id, id);
+	CHECK(n == 7, "%d actions served when allowed", n);
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom_id, vol, strlen(vol), &rsp);
+	CHECK(rc == 0 && last_opcode(ep) == 0x4101, "allowed Volatile chunk POST: %d", rc);
+	snprintf(vchunk, sizeof(vchunk), "%s",
+		 json_string_value(json_object_get(rsp, "Id")) ?: "");
+	json_decref(rsp);
+	rsp = NULL;
+	ctx->config.allow_mctp_restricted = false;
+	sent = commands_sent(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom_id, vchunk);
+	CHECK(rc == FMD_MCTP_RESTRICTED && commands_sent(ep) == sent &&
+	      fmd_topology_find_chunk(&ctx->topology, vchunk),
+	      "DELETE of a Volatile chunk %s: %d", vchunk, rc);
+
+	/* the same SLD on the kernel's mailbox: sent */
+	mark_ioctl(ctx, ep);
+	n = (int)memory_actions(ctx, id, id);
+	CHECK(n == 7, "%d actions served on a kernel mailbox", n);
+	answer(ep, 0x4504, NULL, 0);
+	rc = fmd_redfish_action_freeze_security_state(ctx, id, id);
+	CHECK(rc == 0 && last_opcode(ep) == 0x4504,
+	      "FreezeSecurityState on a kernel mailbox: %d, %04xh", rc, last_opcode(ep));
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom_id, vchunk);
+	CHECK(rc == 0 && last_opcode(ep) == 0x4101,
+	      "DELETE of the Volatile chunk on a kernel mailbox: %d", rc);
+
+	/* an LD of an MLD: tunnelled, so MCTP, on a kernel mailbox too */
+	ep = new_mld(ctx, 0x1105, 2, 0, 4);
+	fmd_discover(ctx);
+	mark_ioctl(ctx, ep);
+	device_id(mld_id, sizeof(mld_id), 0x1105);
+	snprintf(mem, sizeof(mem), "%s_ld1", mld_id);
+	CHECK(fmd_topology_find(&ctx->topology, mld_id), "no MLD");
+	sent = commands_sent(ep);
+	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem);
+	CHECK(rc == FMD_MCTP_RESTRICTED && commands_sent(ep) == sent,
+	      "FreezeSecurityState of an MLD's LD: %d", rc);
+	rc = fmd_redfish_action_scan_media(ctx, mld_id, mem, scan, strlen(scan));
+	CHECK(rc == FMD_MCTP_RESTRICTED && commands_sent(ep) == sent,
+	      "Scan Media of an MLD's LD: %d", rc);
+	n = (int)memory_actions(ctx, mld_id, mem);
+	CHECK(n == 0, "%d actions served for an MLD's LD", n);
+
+	ctx->config.allow_mctp_restricted = true;
+	answer(ep, 0x4504, NULL, 0);
+	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(rc == 0 && last_opcode(ep) == 0x4504 && ti.level == 1 && ti.ld == 1,
+	      "allowed FreezeSecurityState of LD 1: %d, %04xh, level %d, LD %d",
+	      rc, last_opcode(ep), ti.level, ti.ld);
+out:
+	fmd_ctx_free(ctx);
+	report("O4 commands are not sent as MCTP messages unless allowed", before);
 }
 
 /*
@@ -2076,6 +2265,8 @@ static void test_set_partition(void)
 		"{\"CXL\": {\"StagedNonVolatileSizeMiB\": 512}}",	/* < Persistent Only */
 	};
 
+	/* Set Partition Info on an MCTP endpoint: only when allowed */
+	ctx->config.allow_mctp_restricted = true;
 	CHECK(sld, "no SLD");
 	if (!sld)
 		goto out;
@@ -2144,6 +2335,7 @@ out:
 
 	/* Partition Alignment 0: "shall fail with an Unsupported error" */
 	ctx = new_ctx();
+	ctx->config.allow_mctp_restricted = true;
 	sld = direct_sld(ctx, &ep, 0x1103, 64, 32, 32, 0, 32);
 	if (sld) {
 		snprintf(id, sizeof(id), "%s", sld->base.id);
@@ -6736,6 +6928,7 @@ static void test_chunk_delete_partition_refused(void)
 	 * all of it volatile now: its one chunk is Volatile.
 	 */
 	ctx = new_ctx();
+	ctx->config.allow_mctp_restricted = true;
 	sld = direct_sld(ctx, &ep, 0xee, 64, 8, 0, 8, 64);
 	CHECK(sld, "no partitionable SLD");
 	if (sld) {
@@ -10017,6 +10210,7 @@ int main(void)
 	test_life_used();
 	test_switch_sld_placeholder();
 	test_set_partition();
+	test_o4_gate();
 	test_dcd_info();
 	test_dc_return_codes();
 	test_mib_out_of_range_sends_nothing();

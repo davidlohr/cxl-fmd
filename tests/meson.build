@@ -217,6 +217,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Commands Table 8-308 marks O4 for MCTP: only when allowed
+    test(
+        'mctp-restricted',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_mctp_restricted.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Query parameters, and methods a resource does not take
     test(
         'protocol',

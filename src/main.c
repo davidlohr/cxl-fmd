@@ -49,6 +49,11 @@ static void signal_handler(int sig)
 	atomic_store(&g_running, 0);
 }
 
+/* Long options with no short one */
+enum {
+	OPT_ALLOW_MCTP_RESTRICTED = 256,
+};
+
 static void print_usage(const char *prog)
 {
 	printf("Usage: %s [OPTIONS]\n"
@@ -68,6 +73,12 @@ static void print_usage(const char *prog)
 	       "  -N, --threads N       Serve requests on N threads, 1 to %d\n"
 	       "                        (default: %d). Requests that only read\n"
 	       "                        run together; a change runs alone.\n"
+	       "      --allow-mctp-restricted\n"
+	       "                        Send Set Partition Info, Scan Media and the\n"
+	       "                        security commands as MCTP messages, tunnelled\n"
+	       "                        ones too. Only when no host drives the devices:\n"
+	       "                        CXL r4.0 Table 8-308 note 4. Refused (409)\n"
+	       "                        without it.\n"
 	       "  -v, --verbose         Increase verbosity (can repeat)\n"
 	       "  -h, --help            Show this help\n"
 	       "  -V, --version         Show version\n"
@@ -176,6 +187,7 @@ int main(int argc, char *argv[])
 		{"mctp",    no_argument,       NULL, 'm'},
 		{"ioctl",   no_argument,       NULL, 'i'},
 		{"event-poll", required_argument, NULL, 'e'},
+		{"allow-mctp-restricted", no_argument, NULL, OPT_ALLOW_MCTP_RESTRICTED},
 		{"verbose", no_argument,       NULL, 'v'},
 		{"help",    no_argument,       NULL, 'h'},
 		{"version", no_argument,       NULL, 'V'},
@@ -192,6 +204,7 @@ int main(int argc, char *argv[])
 	unsigned int rescan_sec = FMD_DEFAULT_RESCAN_SEC;
 	const char *mock_path = NULL;
 	bool check_only = false;
+	bool allow_mctp_restricted = false;
 
 	while ((opt = getopt_long(argc, argv, "p:M:cN:r:mie:vhV", long_opts, NULL)) != -1) {
 		switch (opt) {
@@ -253,6 +266,9 @@ int main(int argc, char *argv[])
 			event_poll_sec = (unsigned int)val;
 			break;
 		}
+		case OPT_ALLOW_MCTP_RESTRICTED:
+			allow_mctp_restricted = true;
+			break;
 		case 'v':
 			verbosity++;
 			break;
@@ -282,6 +298,7 @@ int main(int argc, char *argv[])
 	ctx->config.port = port;
 	ctx->config.scan_mctp = use_mctp;
 	ctx->config.scan_ioctl = use_ioctl;
+	ctx->config.allow_mctp_restricted = allow_mctp_restricted;
 	ctx->config.event_poll_sec = event_poll_sec;
 	ctx->config.http_threads = http_threads;
 	ctx->config.rescan_sec = rescan_sec;
@@ -296,6 +313,11 @@ int main(int argc, char *argv[])
 	signal(SIGPIPE, SIG_IGN);
 
 	fmd_info(ctx, "%s version %s starting", FMD_NAME, FMD_VERSION);
+	if (allow_mctp_restricted)
+		fmd_warn(ctx, "--allow-mctp-restricted: Set Partition Info, Scan "
+			 "Media and the security commands are sent as MCTP "
+			 "messages; no host may be driving these devices "
+			 "(CXL r4.0 Table 8-308 note 4)");
 
 	/* Load mock topology or discover real devices */
 	if (mock_path) {

@@ -1461,6 +1461,11 @@ struct fmd_ctx {
 		uint16_t port;
 		bool scan_mctp;
 		bool scan_ioctl;
+		/*
+		 * --allow-mctp-restricted: send the commands Table 8-308
+		 * marks O4 for MCTP (see fmd_mctp_restricted_allowed())
+		 */
+		bool allow_mctp_restricted;
 		unsigned int event_poll_sec;	/* 0 disables */
 		unsigned int rescan_sec;	/* 0 disables */
 		unsigned int http_threads;	/* threads serving requests */
@@ -1966,6 +1971,31 @@ fmd_mld_ld_tunnel(const struct fmd_mld *mld, int ld_id,
 
 
 int fmd_discover(struct fmd_ctx *ctx);
+
+/*
+ * Whether @opcode is one of the Memory Device commands that CXL r4.0 Table
+ * 8-308 marks "O4" for MCTP: Set Partition Info, Set LSA, Clear Poison,
+ * Scan Media, Sanitize, Secure Erase, Set Passphrase, Disable Passphrase,
+ * Unlock, Freeze Security State, Passphrase Secure Erase, Security Send
+ * and Set SLD QoS Control. Note 4: "Systems capable of management from
+ * Mailbox registers and an MCTP-based CCI shall ensure that these commands
+ * are not issued as MCTP messages while a device's mailboxes are
+ * operational."
+ */
+bool fmd_mctp_restricted(uint16_t opcode);
+
+/*
+ * Whether cxl-fmd sends @opcode to memory device @dev (an SLD, an MLD for
+ * one of its LDs, or a Multi-Headed device). Always for a command note 4
+ * does not cover, and for any when the operator started cxl-fmd with
+ * --allow-mctp-restricted. Otherwise only to an SLD attached directly
+ * through the kernel's mailbox (ctx->ioctl_eps), which is not MCTP: the
+ * FM cannot tell whether the device's mailboxes are operational, and
+ * cxl-fmd takes every other route as MCTP (see the definition).
+ */
+bool fmd_mctp_restricted_allowed(struct fmd_ctx *ctx,
+				 const struct fmd_component *dev,
+				 uint16_t opcode);
 
 /*
  * Bring the topology up to date with what is there now: new endpoints, new
@@ -2634,6 +2664,13 @@ int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx, const char *chassis_id,
 				  const char *dev_id, const char *body, size_t body_size);
 int fmd_redfish_patch_memory(struct fmd_ctx *ctx, const char *chassis_id,
 			     const char *mem_id, const char *body, size_t body_size);
+
+/*
+ * A request refused because it would send a command fmd_mctp_restricted()
+ * names where fmd_mctp_restricted_allowed() does not let it go: answered
+ * 409, with nothing sent or changed.
+ */
+#define FMD_MCTP_RESTRICTED 3
 
 /* POST action handlers */
 int fmd_redfish_action_scan_media(struct fmd_ctx *ctx, const char *chassis_id,

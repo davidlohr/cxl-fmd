@@ -160,6 +160,24 @@ static enum MHD_Result send_dc_accepted_stale(struct MHD_Connection *conn,
 			  "message", message ? message : "Accepted"));
 }
 
+/*
+ * A request that would send a command CXL r4.0 Table 8-308 marks O4 for
+ * MCTP where fmd_mctp_restricted_allowed() does not let it go
+ * (FMD_MCTP_RESTRICTED): 409, nothing sent. Note 4: "Systems capable of
+ * management from Mailbox registers and an MCTP-based CCI shall ensure
+ * that these commands are not issued as MCTP messages while a device's
+ * mailboxes are operational."
+ */
+static enum MHD_Result send_mctp_restricted(struct MHD_Connection *conn)
+{
+	return send_error(conn, MHD_HTTP_CONFLICT,
+			  "Refused: this would send a command that CXL r4.0 Table 8-308 "
+			  "note 4 does not let go as an MCTP message while the device's "
+			  "mailboxes are operational, which cxl-fmd cannot tell. Nothing "
+			  "was sent. Once no host drives the device, the operator can "
+			  "start cxl-fmd with --allow-mctp-restricted");
+}
+
 /* An error with the Allow header a 405 has to have (RFC 9110 Section 15.5.6) */
 static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
 					unsigned int status, const char *message,
@@ -1090,6 +1108,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1104,6 +1124,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1118,6 +1140,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1132,6 +1156,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1146,6 +1172,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1159,6 +1187,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1173,6 +1203,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		return send_error(conn, MHD_HTTP_BAD_REQUEST,
 				  "Action failed");
 	}
@@ -1276,6 +1308,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -1)
 			return send_error(conn, MHD_HTTP_NOT_FOUND,
 					  "Chassis or MemoryDomain not found");
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		if (rc == -2)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Invalid request body - MemoryChunkSizeMiB required");
@@ -1561,6 +1595,8 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		if (rc == -1)
 			return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource not found");
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		if (rc == -2)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Invalid request body, or a capacity the device cannot be partitioned to");
@@ -1625,6 +1661,8 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		if (rc == -1)
 			return send_error(conn, MHD_HTTP_NOT_FOUND,
 					  "Memory chunk not found");
+		if (rc == FMD_MCTP_RESTRICTED)
+			return send_mctp_restricted(conn);
 		if (rc == -2)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Chunk does not belong to specified domain");

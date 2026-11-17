@@ -19,20 +19,26 @@ def run(executable, *args):
                           text=True, timeout=30)
 
 
+# an option of --help, with its short form or with none (an empty one)
+OPTION = r"^\s+(?:-(\w), )?--([\w-]+)"
+
+
 def test_every_option_is_documented(cxl_fmd_executable):
     usage = run(cxl_fmd_executable, "--help").stdout
-    options = re.findall(r"^\s+-(\w), --([\w-]+)", usage, re.M)
-    assert len(options) >= 10, usage
+    options = re.findall(OPTION, usage, re.M)
+    assert len(options) >= 11, usage
+    assert ("", "allow-mctp-restricted") in options, usage
     page = MANPAGE.read_text()
     for short, long in options:
-        assert "\\-" + short in page, f"-{short} is not in the man page"
+        if short:
+            assert "\\-" + short in page, f"-{short} is not in the man page"
         assert "\\-\\-" + long.replace("-", "\\-") in page, \
             f"--{long} is not in the man page"
 
 
 def test_no_option_is_documented_that_is_not_there(cxl_fmd_executable):
     usage = run(cxl_fmd_executable, "--help").stdout
-    known = {long for _, long in re.findall(r"^\s+-(\w), --([\w-]+)", usage, re.M)}
+    known = {long for _, long in re.findall(OPTION, usage, re.M)}
     page = MANPAGE.read_text()
     for long in re.findall(r"\\-\\-([a-z]+(?:\\-[a-z]+)*)", page):
         assert long.replace("\\-", "-") in known, f"--{long} is not an option"

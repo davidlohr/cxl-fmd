@@ -177,7 +177,10 @@ The change is sent with Immediate cleared, so it "shall become the
 "next" configuration, to become active on the next reset" (Table 8-311),
 and it can destroy data: "Using this command to change the size of the
 persistent capacity shall result in the loss of data stored" (Section
-8.2.10.9.2.2).
+8.2.10.9.2.2). Set Partition Info is not sent as an MCTP message unless
+cxl-fmd was started with `--allow-mctp-restricted`: without it, the
+`PATCH` is `409`, but on an SLD on the kernel's mailbox (see "Commands
+restricted on MCTP").
 
 #### Staged chunks
 
@@ -207,6 +210,64 @@ Capacity the Active Volatile Capacity has reached is `Enabled`, and in
 the Connection; one it has not reached is removed, and its range is free.
 A read that fails changes nothing. In a mock no Set Partition Info is
 sent, nor is anything staged: a `"Volatile"` chunk is `Enabled` at once.
+Such a `POST` and `DELETE` are `409`, in a mock too, unless the SLD is on
+the kernel's mailbox or cxl-fmd was started with `--allow-mctp-restricted`
+(see "Commands restricted on MCTP").
+
+### Commands restricted on MCTP
+
+CXL r4.0 Table 8-308 marks these Memory Device commands "O4" in its MCTP
+column: Set Partition Info (4101h), Set LSA (4103h), Clear Poison (4302h),
+Scan Media (4304h), Sanitize (4400h), Secure Erase (4401h), Set Passphrase
+(4501h), Disable Passphrase (4502h), Unlock (4503h), Freeze Security State
+(4504h), Passphrase Secure Erase (4505h), Security Send (4600h) and Set SLD
+QoS Control (4701h). Note 4 of the table reads:
+
+> Systems capable of management from Mailbox registers and an MCTP-based
+> CCI shall ensure that these commands are not issued as MCTP messages
+> while a device's mailboxes are operational.
+
+No CCI command tells an FM whether a device's mailboxes are operational:
+Mailbox Interfaces Ready ("When set, the device is ready to accept
+commands through the mailbox register interfaces", Table 8-212) is a bit
+of the Memory Device Status Register, which the host reads. So cxl-fmd
+does not send any of these as an MCTP message unless the operator, who can
+know that no host drives the devices, starts it with
+`--allow-mctp-restricted` (cxl-fmd's choice, by the maintainer's
+decision). Of them, cxl-fmd sends Set Partition Info, Scan Media and the
+security commands. Without the option:
+
+- a request that would send one of them is `409`, with nothing sent or
+  changed: `PATCH` of a `Memory` (Set Partition Info), its `ScanMedia` and
+  security actions, a `"Volatile"` chunk `POST` on an SLD with
+  partitionable capacity and the `DELETE` of such a chunk (see "Staged
+  chunks"). The check comes after the resource is found (`404`, or `400`
+  for an action of a `Memory` that is not there), before the body is read.
+  A chunk `POST` that a Connection refuses is `409` for that first;
+- the `Memory` of such a device has none of these actions in `Actions` (no
+  `Actions` at all if none is left). `SecurityStates` (Get Security State,
+  4500h, "O" for MCTP) is served.
+
+Which routes count as MCTP messages is cxl-fmd's reading:
+
+- only an SLD attached directly through the kernel's mailbox (`--ioctl`)
+  is sent these commands without the option: they are not MCTP messages
+  there;
+- an SLD on an MCTP endpoint of its own is not;
+- an LD of an MLD is reached with the Tunnel Management Command, and is not
+  either, whatever the endpoint. A switch tunnels a command "to the
+  FM-owned LD of the MLD on the specified port, using the transport defined
+  in Section 7.6.3.1" (Section 7.6.7.3.1), which is the MCTP PCIe VDM
+  binding (DSP0238); the specification does not say what a tunnel within an
+  MLD is carried on, and cxl-fmd takes every tunnelled command as MCTP;
+- a mock topology's devices are taken as on MCTP, cxl-fmd's default
+  transport, so that a mock answers as such a device would. An SLD on a
+  switch port is sent none of these commands on hardware (see "HTTP Method
+  Mapping"), and is refused as before there.
+
+With `--allow-mctp-restricted` the requests are carried out as before, and
+cxl-fmd logs a warning when it starts: making sure that no host drives the
+devices is the operator's.
 
 ### Where cxl-fmd puts CXL event records
 
@@ -446,7 +507,11 @@ Its `PCIeDevice` has no `CXLDevice/Timestamp`, a `PATCH` of the timestamp
 returns 400, and the `Memory` writes and actions fail. An MLD on a switch
 port is reached through that port. In mock mode (`--mock`) no command is
 sent for any device, and these requests act on the mock's state as for any
-other.
+other. The `Memory` writes and actions, and the chunk requests that send
+Set Partition Info, are `409` unless cxl-fmd was started with
+`--allow-mctp-restricted`, on hardware for every device but an SLD on the
+kernel's mailbox, and in a mock for every device (see "Commands restricted
+on MCTP").
 
 The write operations on a `Connection`, which no DSP0288 rule maps (see
 "cxl-fmd mapping (not in DSP0288)" above), are cxl-fmd's:
@@ -521,7 +586,7 @@ All error responses follow the Redfish error format with an `error` object conta
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP") |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception`; "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
 | 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.15.0.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
@@ -1711,9 +1776,11 @@ In summary:
     persistent, and `null` ("not known") if it has both or neither is
     known: one chunk of mixed memory is not split (cxl-fmd's rules).
     The chunks of a switch's pool domain are typed the same way.
-11. Set Partition Info, Scan Media and the security commands are sent
-    over MCTP without knowing whether a host is using the device's
-    mailboxes (see "Memory device writes").
+11. Whether a host is using a device's mailboxes is not known. Set
+    Partition Info, Scan Media and the security commands are not sent as
+    MCTP messages unless the operator allows it with
+    `--allow-mctp-restricted`, and then the operator is trusted (see
+    "Commands restricted on MCTP").
 12. libcxlmi fails a Get Event Records response that reports more than 20
     records (`CXLMI_MAX_SUPPORTED_EVENT_RECORDS`). A component "shall limit
     the output payload size of commands with variably sized outputs such
@@ -1797,9 +1864,11 @@ These are known gaps in what cxl-fmd does:
   MCTP in Table 8-308, which reads: "Systems capable of management from
   Mailbox registers and an MCTP-based CCI shall ensure that these commands
   are not issued as MCTP messages while a device's mailboxes are
-  operational." cxl-fmd sends them over MCTP whenever a client asks, and
-  does not know whether a host is using the device's mailboxes. Use these
-  operations only on a device no host is driving.
+  operational." cxl-fmd cannot tell whether they are: it refuses these
+  operations (409) on every device but an SLD on the kernel's mailbox,
+  unless started with `--allow-mctp-restricted`. With that option it sends
+  them whenever a client asks; use it only when no host drives the devices
+  (see "Commands restricted on MCTP").
 - Which reset makes a staged partition active (the command effects of Set
   Partition Info, in the CEL) is not read, and nothing tells cxl-fmd that
   the device was reset: a staged chunk (see "Staged chunks") is looked at
@@ -2035,6 +2104,9 @@ Changes from the fixes of the external design review (branch
 | The same for an MLD whose Get LD Allocations (5401h) failed that way or gave a reserved Memory Granularity, or whose second Get LD Info did, directly attached or on a switch port (and a switch-port MLD whose tunnelled Identify did) | an MLD for good, with LDs of 0 MiB and no `MemoryDomain` (or with no LDs) | likewise `404`, then the MLD whole |
 | The same for an SLD whose Identify Memory Device (4000h) failed that way | an SLD of capacity 0 for good | likewise |
 | `GET` of the `PCIeDevice` (`CXLDevice.DynamicCapacity`), `MemoryRegion`s and `MemoryExtent`s of a DCD on hardware whose Get DCD Info (5600h) failed at discovery other than with Unsupported (Retry Required, Internal Error) | no Dynamic Capacity, for good | none until a `--rescan` reads Get DCD Info (with the backoff and cap of "Devices that are not ready"); then the DCD as at discovery, its DC event notification asked for |
+| `PATCH` of a `Memory`; `POST` of its `ScanMedia`, `SetPassphrase`, `SetMasterPassphrase`, `DisablePassphrase`, `DisableMasterPassphrase`, `FreezeSecurityState` or `SecureEraseUnit`; a `"Volatile"` chunk `POST` on an SLD with partitionable capacity, and the `DELETE` of such a chunk: on hardware on any device but an SLD on the kernel's mailbox (`--ioctl`), and on any device of a mock | carried out: the command sent as an MCTP message (tunnelled for an LD of an MLD) whenever a client asked | `409` with nothing sent or changed, unless cxl-fmd is started with the new `--allow-mctp-restricted` (CXL r4.0 Table 8-308 note 4; see "Commands restricted on MCTP") |
+| `GET` of such a device's `Memory` | `Actions` with `ScanMedia` and the six security actions | no `Actions`, unless `--allow-mctp-restricted` |
+| `POST` of an action of a `Memory` that is not there, in a mock | `200` | `400`, as on hardware |
 
 Mock topologies and discovery:
 

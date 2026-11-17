@@ -3807,44 +3807,39 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 	 * DSP0288 1.3.0 and 1.4.0 map Set Passphrase, Disable Passphrase,
 	 * Freeze Security State and Passphrase Secure Erase to actions of
 	 * CXLLogicalDevice instead, which cxl-fmd does not serve (a known
-	 * gap). Scan Media is on Memory in both.
+	 * gap). Scan Media is on Memory in both. An action whose command may
+	 * not be sent to the device (fmd_mctp_restricted_allowed()) is left
+	 * out: its POST is refused.
 	 */
-	char scan_uri[256], set_pass_uri[256], set_master_uri[256];
-	char disable_pass_uri[256], disable_master_uri[256], freeze_uri[256];
+	static const struct {
+		const char *name;
+		uint16_t opcode;
+	} actions[] = {
+		{ "ScanMedia", 0x4304 },
+		{ "SetPassphrase", 0x4501 },
+		{ "SetMasterPassphrase", 0x4501 },
+		{ "DisablePassphrase", 0x4502 },
+		{ "DisableMasterPassphrase", 0x4502 },
+		{ "FreezeSecurityState", 0x4504 },
+		{ "SecureEraseUnit", 0x4505 },
+	};
+	json_t *acts = json_object();
 
-	snprintf(scan_uri, sizeof(scan_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.ScanMedia",
-		 chassis_id, mem_id);
-	snprintf(set_pass_uri, sizeof(set_pass_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.SetPassphrase",
-		 chassis_id, mem_id);
-	snprintf(set_master_uri, sizeof(set_master_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.SetMasterPassphrase",
-		 chassis_id, mem_id);
-	snprintf(disable_pass_uri, sizeof(disable_pass_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.DisablePassphrase",
-		 chassis_id, mem_id);
-	snprintf(disable_master_uri, sizeof(disable_master_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.DisableMasterPassphrase",
-		 chassis_id, mem_id);
-	snprintf(freeze_uri, sizeof(freeze_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.FreezeSecurityState",
-		 chassis_id, mem_id);
+	for (size_t i = 0; acts && i < sizeof(actions) / sizeof(actions[0]); i++) {
+		char key[64], target[512];
 
-	char secure_erase_uri[256];
-	snprintf(secure_erase_uri, sizeof(secure_erase_uri),
-		 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.SecureEraseUnit",
-		 chassis_id, mem_id);
-
-	json_object_set_new(result, "Actions",
-		json_pack("{s:{s:s}, s:{s:s}, s:{s:s}, s:{s:s}, s:{s:s}, s:{s:s}, s:{s:s}}",
-			  "#Memory.ScanMedia", "target", scan_uri,
-			  "#Memory.SetPassphrase", "target", set_pass_uri,
-			  "#Memory.SetMasterPassphrase", "target", set_master_uri,
-			  "#Memory.DisablePassphrase", "target", disable_pass_uri,
-			  "#Memory.DisableMasterPassphrase", "target", disable_master_uri,
-			  "#Memory.FreezeSecurityState", "target", freeze_uri,
-			  "#Memory.SecureEraseUnit", "target", secure_erase_uri));
+		if (!fmd_mctp_restricted_allowed(ctx, comp, actions[i].opcode))
+			continue;
+		snprintf(key, sizeof(key), "#Memory.%s", actions[i].name);
+		snprintf(target, sizeof(target),
+			 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.%s",
+			 chassis_id, mem_id, actions[i].name);
+		json_object_set_new(acts, key, json_pack("{s:s}", "target", target));
+	}
+	if (acts && json_object_size(acts))
+		json_object_set_new(result, "Actions", acts);
+	else
+		json_decref(acts);
 
 	return result;
 }
@@ -4729,6 +4724,20 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
 }
 
 /*
+ * Whether a request that sends @opcode to memory device @dev is refused
+ * under note 4 of Table 8-308 (fmd_mctp_restricted_allowed()). An SLD on a
+ * switch port is sent nothing on hardware, and is refused for that as it
+ * was; a mock's is answered as any mock device's.
+ */
+static bool mctp_refused(struct fmd_ctx *ctx, const struct fmd_component *dev,
+			 uint16_t opcode)
+{
+	if (likely(!fmd_is_mock(ctx)) && fmd_sld_behind_switch(dev))
+		return false;
+	return !fmd_mctp_restricted_allowed(ctx, dev, opcode);
+}
+
+/*
  * Whether a chunk of @type of @dev changes a partition, with Set Partition
  * Info (4101h): a Volatile chunk of an SLD that has partitionable capacity
  * (fmd_partitionable()). Without any the command "shall fail with an
@@ -4837,8 +4846,10 @@ static int chunk_plan_type(const struct fmd_component *dev, const struct fmd_ld 
  *       none known (chunk_plan_type())
  * -16 = an AddressRangeType the device or LD has no memory of, and cannot
  *       be partitioned to
- * Every one of -2, -6, -8 to -12, -15 and -16 is answered before anything
- * is changed or sent.
+ * FMD_MCTP_RESTRICTED = a chunk that changes the partition of an SLD that
+ *       Set Partition Info may not be sent to (mctp_refused())
+ * Every one of -2, -6, -8 to -12, -15, -16 and FMD_MCTP_RESTRICTED is
+ * answered before anything is changed or sent.
  */
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -4899,6 +4910,10 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	if ((chassis->type != FMD_COMPONENT_SLD || chunk_repartitions(chassis, plan.type)) &&
 	    ld_connected(ctx, chassis, ld, "a new chunk"))
 		return -7;
+
+	/* Set Partition Info, where note 4 of Table 8-308 lets it go */
+	if (chunk_repartitions(chassis, plan.type) && mctp_refused(ctx, chassis, 0x4101))
+		return FMD_MCTP_RESTRICTED;
 
 	/*
 	 * The LD's allocation as it is now, which others than cxl-fmd may
@@ -5162,6 +5177,9 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
  *       of its Multi-Headed device is known; nothing was sent
  *  -7 = the chunk's LD has less allocated than the chunk; nothing was sent
  *  -8 = as -14 of fmd_redfish_post_memory_chunk(): the chunk is kept
+ *  FMD_MCTP_RESTRICTED = the chunk changes the partition of an SLD that
+ *       Set Partition Info may not be sent to (mctp_refused()); nothing
+ *       was sent or changed
  */
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				    const char *chassis_id,
@@ -5189,6 +5207,12 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 	/* a chunk a binding exposes stays while it does (see chunk_connected()) */
 	if (chunk_connected(ctx, chunk))
 		return -5;
+
+	/* as for a POST: a chunk that changes the partition */
+	if (domain_parent->type == FMD_COMPONENT_SLD &&
+	    chunk_repartitions(domain_parent, chunk->address_range_type) &&
+	    mctp_refused(ctx, domain_parent, 0x4101))
+		return FMD_MCTP_RESTRICTED;
 
 	/*
 	 * Issue CCI command for hardware mode before removing from topology.
@@ -5471,6 +5495,48 @@ int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx,
 }
 
 /*
+ * The memory device of the Memory resource @mem_id of Chassis @chassis_id:
+ * the SLD whose ID both are, or the MLD of {chassis_id}_ld{n}. NULL if
+ * there is none, or @mem_id is not one of its Memory resources.
+ */
+static struct fmd_component *memory_device(struct fmd_ctx *ctx,
+					   const char *chassis_id,
+					   const char *mem_id)
+{
+	struct fmd_component *comp = fmd_topology_find(&ctx->topology, chassis_id);
+	char prefix[128];
+
+	if (!comp)
+		return NULL;
+	if (comp->type == FMD_COMPONENT_SLD)
+		return strcmp(mem_id, chassis_id) ? NULL : comp;
+	if (comp->type != FMD_COMPONENT_MLD)
+		return NULL;
+	snprintf(prefix, sizeof(prefix), "%s_ld", chassis_id);
+	if (strncmp(mem_id, prefix, strlen(prefix)) != 0 ||
+	    safe_parse_int(mem_id + strlen(prefix)) < 0)
+		return NULL;
+	return comp;
+}
+
+/*
+ * The checks of a Memory action that sends @opcode, before its body is
+ * read: -1 if there is no such Memory resource, FMD_MCTP_RESTRICTED if
+ * @opcode may not be sent to it (mctp_refused()), else 0.
+ */
+static int memory_action_check(struct fmd_ctx *ctx, const char *chassis_id,
+			       const char *mem_id, uint16_t opcode)
+{
+	struct fmd_component *dev = memory_device(ctx, chassis_id, mem_id);
+
+	if (!dev)
+		return -1;
+	if (mctp_refused(ctx, dev, opcode))
+		return FMD_MCTP_RESTRICTED;
+	return 0;
+}
+
+/*
  * PATCH /redfish/v1/Chassis/{id}/Memory/{mem}
  *
  * DSP0288 Table 1: Set Partition Info (Opcode 4101h) mappings
@@ -5492,6 +5558,8 @@ int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx,
  *  -3 on CCI command failure
  *  -4 if the device cannot be reached: an SLD on a switch port
  *  -5 if the device cannot be partitioned (Partition Alignment 0)
+ *  FMD_MCTP_RESTRICTED if Set Partition Info may not be sent to it
+ *  (mctp_refused()), before the body is read
  */
 int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 			     const char *chassis_id,
@@ -5552,6 +5620,9 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 		return -1;
 	}
 	total = memdev->total_capacity;
+
+	if (mctp_refused(ctx, comp, 0x4101))
+		return FMD_MCTP_RESTRICTED;
 
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
@@ -5625,7 +5696,8 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
  *   Length - Length in bytes, a nonzero multiple of 64
  *   NoEventLog - If true, don't log events (optional, default false)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if Scan Media may not be sent
+ * to the device (mctp_refused()), -1 on another error
  */
 int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -5639,10 +5711,14 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 	uint64_t phys_addr;
 	uint64_t length;
 	uint8_t flags = 0;
+	int rc;
 
 	comp = fmd_topology_find(&ctx->topology, chassis_id);
 	if (!comp || !fmd_is_memdev(comp))
 		return -1;
+	rc = memory_action_check(ctx, chassis_id, mem_id, 0x4304);
+	if (rc)
+		return rc;
 
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
@@ -5739,7 +5815,7 @@ int fmd_redfish_action_scan_media(struct fmd_ctx *ctx,
 	}
 
 	/* Scan Media runs in the background: "started" is success */
-	int rc = cxlmi_cmd_memdev_scan_media(ep, ti, &req);
+	rc = cxlmi_cmd_memdev_scan_media(ep, ti, &req);
 	if (rc != 0 && rc != CXLMI_RET_BACKGROUND)
 		return -1;
 
@@ -5808,7 +5884,8 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
  *   Passphrase - current passphrase string
  *   NewPassphrase - new passphrase string
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
+ * to the device (memory_action_check()), -1 on another error
  */
 int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
 				      const char *chassis_id,
@@ -5819,6 +5896,10 @@ int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
 	json_t *root, *current_j, *new_j;
 	json_error_t error;
 
+	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4501);
+
+	if (rc)
+		return rc;
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -1;
@@ -5876,7 +5957,8 @@ int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
  *   Passphrase - current passphrase string
  *   NewPassphrase - new passphrase string
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
+ * to the device (memory_action_check()), -1 on another error
  */
 int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
 					     const char *chassis_id,
@@ -5887,6 +5969,10 @@ int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
 	json_t *root, *current_j, *new_j;
 	json_error_t error;
 
+	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4501);
+
+	if (rc)
+		return rc;
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -1;
@@ -5943,7 +6029,8 @@ int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
  * Parameters:
  *   Passphrase - current passphrase string
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
+ * to the device (memory_action_check()), -1 on another error
  */
 int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
 					  const char *chassis_id,
@@ -5954,6 +6041,10 @@ int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
 	json_t *root, *pass_j;
 	json_error_t error;
 
+	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4502);
+
+	if (rc)
+		return rc;
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -1;
@@ -5999,7 +6090,8 @@ int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
  * Parameters:
  *   Passphrase - current passphrase string
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
+ * to the device (memory_action_check()), -1 on another error
  */
 int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
 						 const char *chassis_id,
@@ -6010,6 +6102,10 @@ int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
 	json_t *root, *pass_j;
 	json_error_t error;
 
+	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4502);
+
+	if (rc)
+		return rc;
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -1;
@@ -6054,12 +6150,17 @@ int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
  *
  * No parameters required.
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
+ * to the device (memory_action_check()), -1 on another error
  */
 int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx,
 					     const char *chassis_id,
 					     const char *mem_id)
 {
+	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4504);
+
+	if (rc)
+		return rc;
 	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
 
@@ -6085,7 +6186,8 @@ int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx,
  *   Passphrase - current passphrase string
  *   TODO: RegionId - not currently mapped to CXL command
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
+ * to the device (memory_action_check()), -1 on another error
  */
 int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
 					 const char *chassis_id,
@@ -6096,6 +6198,10 @@ int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
 	json_t *root, *type_j, *pass_j;
 	json_error_t error;
 
+	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4505);
+
+	if (rc)
+		return rc;
 	root = json_loadb(body, body_size, 0, &error);
 	if (!root)
 		return -1;
