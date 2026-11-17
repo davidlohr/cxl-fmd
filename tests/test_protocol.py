@@ -261,3 +261,58 @@ class TestPreconditionsSLD:
                             timeout=30).status_code == 405
         assert requests.post(base + CHASSIS, json={}, headers=h,
                              timeout=30).status_code == 405
+
+
+# Response headers every response has (review F18.6, the DMTF
+# Redfish-Protocol-Validator's RESP_HEADERS_CACHE_CONTROL)
+def cache_control(response):
+    """
+    Cache-Control "Shall be supported and indicates whether a response can
+    or cannot be cached" (DSP0266 1.25.0 Table 13, required); no-store is
+    cxl-fmd's choice.
+    """
+    assert response.headers.get("Cache-Control") == "no-store", \
+        (response.request.method, response.request.url, response.status_code)
+    assert response.headers.get("OData-Version") == "4.0"
+
+
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestCacheControlSLD:
+
+    @pytest.mark.parametrize("uri", [
+        "/redfish/v1", "/redfish", "/redfish/v1/odata", "/redfish/v1/$metadata",
+        "/redfish/v1/Schemas/Cxl_v1.xml", "/redfish/v1/Registries/CxlHealth.1.0.0.json",
+        SLD_CHUNKS, "/redfish/v1/Nonexistent", CHASSIS + "?$top=1"])
+    def test_get(self, api_client, uri):
+        """200 (JSON, XML, a file compiled in), 404 and 501"""
+        cache_control(requests.get(api_client.base_url + uri, timeout=30))
+
+    def test_writes(self, api_client):
+        """201, 204, 400, 405 and 412"""
+        base = api_client.base_url
+        chunk = api_client.get(SLD_CHUNKS)[1]["Members"][0]["@odata.id"]
+        deleted = requests.delete(base + chunk, timeout=30)
+        assert deleted.status_code == 204
+        cache_control(deleted)
+        created = requests.post(base + SLD_CHUNKS, json={"MemoryChunkSizeMiB": 256},
+                                timeout=30)
+        assert created.status_code == 201
+        cache_control(created)
+        for r in [requests.post(base + SLD_CHUNKS, data="{", timeout=30,
+                                headers={"Content-Type": "application/json"}),
+                  requests.put(base + CHASSIS, json={}, timeout=30),
+                  requests.post(base + SLD_CHUNKS, json={"MemoryChunkSizeMiB": 256},
+                                headers={"If-Match": "*"}, timeout=30)]:
+            assert r.status_code in (400, 405, 412)
+            cache_control(r)
+
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+def test_cache_control_task(api_client):
+    """202, with a Task, and its monitor"""
+    from test_dcd import SLD_ADD, TAG_NEW
+    r = requests.post(api_client.base_url + SLD_ADD, timeout=30, json={
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
+    assert r.status_code == 202
+    cache_control(r)
+    cache_control(requests.get(api_client.base_url + r.headers["Location"], timeout=30))

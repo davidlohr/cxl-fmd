@@ -590,6 +590,17 @@ The write operations on a `Connection`, which no DSP0288 rule maps (see
 - `DELETE /redfish/v1/Fabrics/CXL/Connections/{conn}` - Unbind vPPB, Simulate Managed Hot-Remove (switch-attached only)
 - `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` - Unbind vPPB, Simulate Surprise Hot-Remove (cxl-fmd's Oem action)
 
+### Headers
+
+Every response, errors included, has `OData-Version: 4.0` ("OData version
+of the payload to which the response conforms") and `Cache-Control:
+no-store`: Cache-Control "Shall be supported and indicates whether a
+response can or cannot be cached" (DSP0266 1.25.0 Table 13, both
+required). `no-store` is cxl-fmd's choice: a response is the fabric as it
+was read, which hosts, switches and other requests change, and cxl-fmd
+gives no `ETag` or `Last-Modified` that a cache could check a stored one
+against.
+
 ---
 
 ## Status from Get Health Info
@@ -2598,6 +2609,7 @@ Changes from the fixes of the external design review (branch
 | A Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` follows, or an add of a Tag whose `PendingLDs` has the host | sent | `409` `ResourceInUse`, nothing sent |
 | On hardware, a Dynamic Capacity add, release or `MemoryExtent` `DELETE` whose host's last read failed or is owed | sent, on what was last read | the host read first; `503`, nothing sent, if it cannot be |
 | `GET /redfish/v1/TaskService/Tasks` | binds and unbinds only | with the Dynamic Capacity tasks; one that is `Running` on hardware has its host read on every `--event-poll` tick |
+| Any request | no `Cache-Control` header | `Cache-Control: no-store` on every response (see "Headers") |
 
 Mock topologies, discovery and start-up:
 

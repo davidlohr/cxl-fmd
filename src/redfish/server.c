@@ -94,6 +94,22 @@ static void free_params(const char **params, int count)
 }
 
 /*
+ * The headers of every response cxl-fmd makes. OData-Version: "OData
+ * version of the payload to which the response conforms", and
+ * Cache-Control, which "Shall be supported and indicates whether a
+ * response can or cannot be cached" (DSP0266 1.25.0 Table 13, both
+ * required). Its value, no-store, is cxl-fmd's choice: a response is the
+ * fabric as it was when it was read, which a host, a switch or another
+ * request changes under it, and cxl-fmd gives no validator (no ETag, no
+ * Last-Modified) a cache could check one it kept against.
+ */
+static void add_common_headers(struct MHD_Response *response)
+{
+	MHD_add_response_header(response, "OData-Version", "4.0");
+	MHD_add_response_header(response, "Cache-Control", "no-store");
+}
+
+/*
  * Send JSON response
  */
 static enum MHD_Result send_json_response(struct MHD_Connection *conn,
@@ -123,7 +139,7 @@ static enum MHD_Result send_json_response(struct MHD_Connection *conn,
 
 	MHD_add_response_header(response, "Content-Type",
 				"application/json; charset=utf-8");
-	MHD_add_response_header(response, "OData-Version", "4.0");
+	add_common_headers(response);
 
 	ret = MHD_queue_response(conn, status, response);
 	MHD_destroy_response(response);
@@ -156,7 +172,7 @@ static enum MHD_Result send_error_body(struct MHD_Connection *conn,
 	}
 	MHD_add_response_header(response, "Content-Type",
 				"application/json; charset=utf-8");
-	MHD_add_response_header(response, "OData-Version", "4.0");
+	add_common_headers(response);
 	if (allow)
 		MHD_add_response_header(response, "Allow", allow);
 	ret = MHD_queue_response(conn, status, response);
@@ -464,7 +480,7 @@ static enum MHD_Result send_no_content(struct MHD_Connection *conn)
 	if (!response)
 		return MHD_NO;
 
-	MHD_add_response_header(response, "OData-Version", "4.0");
+	add_common_headers(response);
 
 	ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, response);
 	MHD_destroy_response(response);
@@ -504,7 +520,7 @@ static enum MHD_Result send_json_response_with_location(
 
 	MHD_add_response_header(response, "Content-Type",
 				"application/json; charset=utf-8");
-	MHD_add_response_header(response, "OData-Version", "4.0");
+	add_common_headers(response);
 	if (location)
 		MHD_add_response_header(response, "Location", location);
 
@@ -532,7 +548,7 @@ static enum MHD_Result send_static_response(struct MHD_Connection *conn,
 		return MHD_NO;
 
 	MHD_add_response_header(response, "Content-Type", type);
-	MHD_add_response_header(response, "OData-Version", "4.0");
+	add_common_headers(response);
 
 	ret = MHD_queue_response(conn, status, response);
 	MHD_destroy_response(response);
@@ -564,7 +580,7 @@ static enum MHD_Result send_xml_response(struct MHD_Connection *conn,
 
 	MHD_add_response_header(response, "Content-Type",
 				"application/xml; charset=utf-8");
-	MHD_add_response_header(response, "OData-Version", "4.0");
+	add_common_headers(response);
 
 	ret = MHD_queue_response(conn, status, response);
 	MHD_destroy_response(response);
