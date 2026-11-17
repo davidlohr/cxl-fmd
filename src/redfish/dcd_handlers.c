@@ -485,6 +485,8 @@ static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev
 	view = json_pack("{s:b, s:I}",
 			 "TagsKnown", dcd->tags.known ? 1 : 0,
 			 "Generation", (json_int_t)dcd->tags.gen);
+	/* when the last list read to its end was, also while TagsKnown is false */
+	rf_set_date_time(view, "LastRefreshed", dcd->tags.read_at);
 	if (dcd->tags.known)
 		json_object_set_new(view, "Tags", tags);
 	else
@@ -602,6 +604,26 @@ void fmd_redfish_dc_logical_device_props(struct fmd_ctx *ctx, struct fmd_compone
 	json_object_set_new(result, "TotalSupportedTags", json_integer(tag_sup));
 	json_object_set_new(result, "AvailableTags", json_integer(tag_avail));
 
+	/*
+	 * When the host's region table (5601h, the counters above among it)
+	 * and its extent list (5603h, in MemorySizeMiB) were last read to
+	 * their end, each absent until one has been (cxl-fmd's Oem). Review
+	 * F07 claim 6.
+	 */
+	if (host_id >= 0) {
+		time_t regions, extents;
+
+		fmd_dc_host_read_times(dev, host_id, &regions, &extents);
+		if (regions || extents) {
+			json_t *oem = json_pack("{s:s}", "@odata.type",
+						"#Cxl.v1_0_0.CXLLogicalDevice");
+
+			rf_set_date_time(oem, "DynamicCapacityRegionsLastRefreshed", regions);
+			rf_set_date_time(oem, "DynamicCapacityExtentsLastRefreshed", extents);
+			json_object_set_new(result, "Oem", json_pack("{s:o}", "Cxl", oem));
+		}
+	}
+
 	/* Actions (CXLLogicalDevice v1.4) */
 	json_t *actions = json_object_get(result, "Actions");
 	if (!actions) {
@@ -714,10 +736,18 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 	 * ExtentSizeMiB, integers of MiB, round down.
 	 * Review F12 claim 5.
 	 */
-	json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:I, s:I}}", "Cxl",
-		"@odata.type", "#Cxl.v1_0_0.MemoryExtent",
-		"ExtentOffsetBytes", (json_int_t)ext->start_dpa,
-		"ExtentSizeBytes", (json_int_t)ext->len));
+	{
+		json_t *oem = json_pack("{s:s, s:I, s:I}",
+			"@odata.type", "#Cxl.v1_0_0.MemoryExtent",
+			"ExtentOffsetBytes", (json_int_t)ext->start_dpa,
+			"ExtentSizeBytes", (json_int_t)ext->len);
+		time_t regions, extents;
+
+		/* when its host's extent list was last read to its end */
+		fmd_dc_host_read_times(dev, ext->host_id, &regions, &extents);
+		rf_set_date_time(oem, "LastRefreshed", extents);
+		json_object_set_new(result, "Oem", json_pack("{s:o}", "Cxl", oem));
+	}
 
 	/*
 	 * FMReferencedExtent: Flags Bit[0] "FM Holds Reference" of the tag's
@@ -1020,12 +1050,19 @@ static json_t *dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassis_
 	 * integers, round down, a block size under 1 MiB to 0. Review F12
 	 * claims 4 and 5.
 	 */
-	if (result)
-		json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:I, s:I, s:I}}", "Cxl",
+	if (result) {
+		json_t *oem = json_pack("{s:s, s:I, s:I, s:I}",
 			"@odata.type", "#Cxl.v1_0_0.MemoryRegion",
 			"RegionBaseOffsetBytes", (json_int_t)region->base_dpa,
 			"RegionSizeBytes", (json_int_t)region->region_len,
-			"BlockSizeBytes", (json_int_t)region->block_size));
+			"BlockSizeBytes", (json_int_t)region->block_size);
+		time_t regions, ext;
+
+		/* when the host's region table was last read to its end */
+		fmd_dc_host_read_times(dev, host_id, &regions, &ext);
+		rf_set_date_time(oem, "LastRefreshed", regions);
+		json_object_set_new(result, "Oem", json_pack("{s:o}", "Cxl", oem));
+	}
 
 	fmd_topology_rdunlock(&ctx->topology);
 	return result;

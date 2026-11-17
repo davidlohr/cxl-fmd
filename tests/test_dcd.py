@@ -1304,10 +1304,52 @@ class TestExactBytes:
         for ext_id in ids:
             status, ext = api_client.get(f"{SLD}/MemoryExtents/{ext_id}")
             assert status == 200
-            oem = ext["Oem"]["Cxl"]
+            oem = dict(ext["Oem"]["Cxl"])
+            # and when its host's extents were read (TestLastRefreshed)
+            assert isinstance(oem.pop("LastRefreshed"), str)
             assert oem == {"@odata.type": "#Cxl.v1_0_0.MemoryExtent",
                            "ExtentOffsetBytes": ext["ExtentOffsetMiB"] * MIB,
                            "ExtentSizeBytes": ext["ExtentSizeMiB"] * MIB}
+
+
+DATE_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+class TestLastRefreshed:
+    """When a host's regions (5601h) and extents (5603h), and the tag list
+    (5608h), were last read is served (review F07 claim 6). A mock's are
+    when it last set them: at load, and at each change it makes."""
+
+    def test_served(self, api_client):
+        status, ld = api_client.get(SLD_LD0)
+        assert status == 200
+        oem = ld["Oem"]["Cxl"]
+        assert oem["@odata.type"] == "#Cxl.v1_0_0.CXLLogicalDevice"
+        regions = oem["DynamicCapacityRegionsLastRefreshed"]
+        extents = oem["DynamicCapacityExtentsLastRefreshed"]
+        assert DATE_TIME.fullmatch(regions) and DATE_TIME.fullmatch(extents)
+
+        status, coll = api_client.get(SLD_LD0 + "/MemoryRegions")
+        for member in coll["Members"]:
+            region = api_client.get(member["@odata.id"])[1]
+            assert region["Oem"]["Cxl"]["LastRefreshed"] == regions
+        for ext_id in extent_ids(api_client):
+            ext = api_client.get(f"{SLD}/MemoryExtents/{ext_id}")[1]
+            assert ext["Oem"]["Cxl"]["LastRefreshed"] == extents
+
+        tags = api_client.get(SLD)[1]["Oem"]["Cxl"]["DynamicCapacityTags"]
+        assert DATE_TIME.fullmatch(tags["LastRefreshed"])
+
+    def test_a_change_is_a_new_time(self, api_client):
+        before = api_client.get(SLD_LD0)[1]["Oem"]["Cxl"]
+        time.sleep(1.1)
+        status, _, _ = dc_post(api_client, SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
+        assert status == 200
+        after = api_client.get(SLD_LD0)[1]["Oem"]["Cxl"]
+        assert after["DynamicCapacityExtentsLastRefreshed"] > \
+            before["DynamicCapacityExtentsLastRefreshed"]
 
 
 # =============================================================================

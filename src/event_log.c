@@ -682,18 +682,10 @@ int fmd_device_logs_poll(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
  * ============================================================================
  */
 
-static void iso_time(time_t t, char *buf, size_t len)
-{
-	struct tm tm;
-
-	gmtime_r(&t, &tm);
-	strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
-}
-
 /* A CXL timestamp: unsigned nanoseconds since midnight, 01-Jan-1970 UTC */
 static void cxl_time(uint64_t ns, char *buf, size_t len)
 {
-	iso_time((time_t)(ns / 1000000000ULL), buf, len);
+	rf_date_time((time_t)(ns / 1000000000ULL), buf, len);
 }
 
 static const char *const entry_types[] = {
@@ -769,7 +761,7 @@ static json_t *log_service(struct fmd_component *comp, const char *base,
 	struct fmd_log *log = comp->log;
 	char now[32];
 
-	iso_time(time(NULL), now, sizeof(now));
+	rf_date_time(time(NULL), now, sizeof(now));
 
 	return json_pack("{s:s, s:s, s:s, s:s, s:b, s:s, s:i, s:s, s:b, s:s, s:o,"
 			 " s:{s:s}, s:{s:{s:s}}}",
@@ -805,7 +797,7 @@ static json_t *log_entry(struct fmd_component *comp, const char *base, int id,
 		return NULL;
 
 	snprintf(uri, sizeof(uri), "%s/Entries/%d", base, id);
-	iso_time(entry->created, created, sizeof(created));
+	rf_date_time(entry->created, created, sizeof(created));
 	entry_message(entry, msg, sizeof(msg));
 
 	result = json_pack("{s:s, s:s, s:s, s:s, s:s, s:s, s:s, s:s, s:s}",

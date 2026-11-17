@@ -17,6 +17,7 @@ object against the CSDL: its type, each property declared, each enum
 value a member, each nested object of its declared type.
 """
 
+import re
 import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
@@ -47,6 +48,9 @@ EDM_CHECK = {
     "Edm.String": lambda v: isinstance(v, str),
     "Edm.Boolean": lambda v: isinstance(v, bool),
     "Edm.Int64": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    # cxl-fmd serves its times in UTC, "YYYY-MM-DDThh:mm:ssZ"
+    "Edm.DateTimeOffset": lambda v: isinstance(v, str) and
+        re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", v) is not None,
 }
 
 
@@ -152,7 +156,7 @@ def crawl(base):
 @pytest.mark.parametrize("topology, expected", [
     ("mock/dcd-device.json", {"Cxl.v1_0_0.PCIeDevice", "Cxl.v1_0_0.Connection",
                               "Cxl.v1_0_0.MemoryDomain", "Cxl.v1_0_0.MemoryRegion",
-                              "Cxl.v1_0_0.MemoryExtent"}),
+                              "Cxl.v1_0_0.MemoryExtent", "Cxl.v1_0_0.CXLLogicalDevice"}),
     ("mock/event-logs.json", {"Cxl.v1_0_0.Connection", "Cxl.v1_0_0.MemoryDomain",
                               "#Cxl.ForceUnbind"}),
     ("mock/mhd-device.json", {"Cxl.v1_0_0.Connection", "Cxl.v1_0_0.MemoryDomain"}),

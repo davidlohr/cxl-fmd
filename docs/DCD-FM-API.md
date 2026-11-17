@@ -248,6 +248,7 @@ Comment 3 in bytes). The view and its names are cxl-fmd's choice. Its type, `#Cx
 |----------|------|
 | `TagsKnown` | whether the last 5608h read of the device completed. `false` when it failed, or the device answered Unsupported; `Tags` is then left out, not empty, as an empty list would say that no LD has an add outstanding (cxl-fmd's choice) |
 | `Generation` | Generation Number of the last complete read, "Generation number of the tags list. This number shall change every time the remainder of the command's payload would change" (Table 7-77) |
+| `LastRefreshed` | the time of cxl-fmd (UTC) at which the last complete read ended; served while `TagsKnown` is `false` too, so that a client can tell how old the last list is. Absent until a read completes, and when the device answered Unsupported (cxl-fmd's) |
 | `Tags[].Tag` | the Tag, as a UUID string |
 | `Tags[].FMHoldsReference` | Flags Bit[0] |
 | `Tags[].AcceptedLDs` | the LD-IDs whose bit is set in the Reference Bitmap: "Each 1 indicates an LD that has accepted the capacity associated with this tag" (Table 7-78). Given only when the Validity Bitmap has "Reference Bitmaps Valid" set |
@@ -320,6 +321,21 @@ shown with `Status.Health` `Warning`, and is read again on the next
 `--event-poll` tick. The refresh of the
 device goes on with the other hosts and with 5608h, and returns the first
 failure (cxl-fmd's choice).
+
+When each of these reads last completed is served, in UTC, as the time of
+cxl-fmd at which its last page was answered; a read that fails leaves the
+time of the one before, and a time is absent until a read has completed
+(cxl-fmd's Oem, review F07 claim 6). No CXL command reports such a time:
+
+| Read | Served as |
+|------|-----------|
+| a host's regions (5601h) | `Oem/Cxl/LastRefreshed` of its `MemoryRegion`s; `Oem/Cxl/DynamicCapacityRegionsLastRefreshed` of its `CXLLogicalDevice` (whose `TotalSupportedExtents`, `AvailableExtents`, `TotalSupportedTags` and `AvailableTags` are from it) |
+| a host's extents (5603h) | `Oem/Cxl/LastRefreshed` of its `MemoryExtent`s; `Oem/Cxl/DynamicCapacityExtentsLastRefreshed` of its `CXLLogicalDevice` |
+| the tag list (5608h) | `Oem/Cxl/DynamicCapacityTags/LastRefreshed` of the `PCIeDevice` (Comment 4) |
+
+As 5601h has no generation number, the time of a region table is when its
+pages were read, not that of one consistent table. In a mock the times are
+when the mock last set the state: at load, and at each change it makes.
 
 ---
 

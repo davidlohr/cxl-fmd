@@ -510,21 +510,13 @@ json_t *fmd_redfish_managers_collection(struct fmd_ctx *ctx)
  * answered with once it is over.
  */
 
-static void task_time(time_t t, char *buf, size_t len)
-{
-	struct tm tm;
-
-	gmtime_r(&t, &tm);
-	strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
-}
-
 /* TaskService - /redfish/v1/TaskService */
 json_t *fmd_redfish_task_service(struct fmd_ctx *ctx)
 {
 	char now[32];
 
 	(void)ctx;
-	task_time(time(NULL), now, sizeof(now));
+	rf_date_time(time(NULL), now, sizeof(now));
 
 	return json_pack("{s:s, s:s, s:s, s:s, s:b, s:s, s:o, s:{s:s}}",
 		"@odata.id", "/redfish/v1/TaskService",
@@ -621,7 +613,7 @@ static json_t *dc_task(struct fmd_ctx *ctx, const struct fmd_task *task,
 	if (task->state != FMD_TASK_RUNNING) {
 		char end[32];
 
-		task_time(task->end, end, sizeof(end));
+		rf_date_time(task->end, end, sizeof(end));
 		json_object_set_new(result, "EndTime", json_string(end));
 		json_object_set_new(result, "TaskStatus", json_string(status));
 	}
@@ -643,13 +635,13 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 	if (fmd_task_is_dc(task)) {
 		snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
 		snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
-		task_time(task->start, start, sizeof(start));
+		rf_date_time(task->start, start, sizeof(start));
 		return dc_task(ctx, task, uri, monitor, start);
 	}
 
 	snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
 	snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
-	task_time(task->start, start, sizeof(start));
+	rf_date_time(task->start, start, sizeof(start));
 	task_connection_uri(task, conn_uri, sizeof(conn_uri));
 
 	result = json_pack("{s:s, s:s, s:s, s:s, s:s, s:i, s:s, s:s, s:{s:s, s:s}}",
@@ -688,7 +680,7 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 		bool ok = task->state == FMD_TASK_COMPLETED;
 		char end[32], msgid[64];
 
-		task_time(task->end, end, sizeof(end));
+		rf_date_time(task->end, end, sizeof(end));
 		fmd_redfish_message_id(ok ? FMD_RF_SUCCESS : FMD_RF_GENERAL_ERROR,
 				       msgid, sizeof(msgid));
 		json_object_set_new(result, "EndTime", json_string(end));

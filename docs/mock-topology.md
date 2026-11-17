@@ -513,6 +513,11 @@ host's DPA space. `mock/dcd-shared-perhost.json` uses all of what follows.
 Each host listed gets its own view of the region under its
 `CXLLogicalDevice`, which is how FM-API 0x5601 reports them.
 
+A mock's state is never read from a device: the times served as when the
+regions, the extents and the tag list were last read (`LastRefreshed` and
+the like, DCD-FM-API.md Comment 6) are when the mock last set them, at
+load and at each change it makes.
+
 #### Extent Fields (Get DC Region Extent Lists 0x5603, List Tags 0x5608)
 
 An entry of `extents` is capacity, and one extent of each host it names.

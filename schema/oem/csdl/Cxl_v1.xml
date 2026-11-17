@@ -138,6 +138,22 @@
         </Property>
       </ComplexType>
 
+      <ComplexType Name="CXLLogicalDevice" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a CXL logical device whose host has dynamic capacity."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a CXL logical device whose host has dynamic capacity.  It shall be absent until one of its properties is."/>
+        <Property Name="DynamicCapacityRegionsLastRefreshed" Type="Edm.DateTimeOffset" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="When the host's region table was last read to its end."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the time of the service at which the last read of the host's regions with Get Host DC Region Configuration (5601h), of which TotalSupportedExtents, AvailableExtents, TotalSupportedTags and AvailableTags are, completed with every page answered.  A read that fails shall not change it.  It shall be absent when no such read has completed.  This is a property of cxl-fmd: CXL defines no such time."/>
+        </Property>
+        <Property Name="DynamicCapacityExtentsLastRefreshed" Type="Edm.DateTimeOffset" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="When the host's extent list was last read to its end."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the time of the service at which the last read of the host's extents with Get DC Region Extent Lists (5603h) completed, every page with the same Extent List Generation Number.  A read that fails shall not change it.  It shall be absent when no such read has completed.  This is a property of cxl-fmd: CXL defines no such time."/>
+        </Property>
+      </ComplexType>
+
       <ComplexType Name="MemoryRegion" BaseType="Resource.OemObject">
         <Annotation Term="OData.AdditionalProperties" Bool="false"/>
         <Annotation Term="OData.Description" String="cxl-fmd's properties of a dynamic capacity region."/>
@@ -160,6 +176,11 @@
           <Annotation Term="OData.LongDescription" String="This property shall contain the Region Block Size that Get Host DC Region Configuration reports, in bytes."/>
           <Annotation Term="Measures.Unit" String="By"/>
         </Property>
+        <Property Name="LastRefreshed" Type="Edm.DateTimeOffset" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="When the host's region table was last read to its end."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the time of the service at which the last read of the host's regions with Get Host DC Region Configuration (5601h) completed with every page answered.  A read that fails shall not change it.  5601h has no generation number, so the regions are what its pages said, not the table of one instant.  It shall be absent when no such read has completed.  This is a property of cxl-fmd: CXL defines no such time."/>
+        </Property>
       </ComplexType>
 
       <ComplexType Name="MemoryExtent" BaseType="Resource.OemObject">
@@ -178,6 +199,11 @@
           <Annotation Term="OData.LongDescription" String="This property shall contain the Length of the extent (CXL r4.0 Table 8-230)."/>
           <Annotation Term="Measures.Unit" String="By"/>
         </Property>
+        <Property Name="LastRefreshed" Type="Edm.DateTimeOffset" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="When the extent list of the extent's host was last read to its end."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the time of the service at which the last read of the host's extents with Get DC Region Extent Lists (5603h) completed, every page with the same Extent List Generation Number.  A read that fails shall not change it.  It shall be absent when no such read has completed.  This is a property of cxl-fmd: CXL defines no such time."/>
+        </Property>
       </ComplexType>
 
       <ComplexType Name="DynamicCapacityTags">
@@ -193,6 +219,11 @@
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
           <Annotation Term="OData.Description" String="The Generation Number of the tag list."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain the Generation Number the device reported with the tag list."/>
+        </Property>
+        <Property Name="LastRefreshed" Type="Edm.DateTimeOffset" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="When the tag list was last read to its end."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the time of the service at which the last read of the tag list with Dynamic Capacity List Tags (5608h) completed, every page with the same Generation Number.  It shall be present while TagsKnown is false if such a read completed before, and absent when none has, or when the device answered Unsupported.  This is a property of cxl-fmd: CXL defines no such time."/>
         </Property>
         <Property Name="Tags" Type="Collection(Cxl.v1_0_0.DynamicCapacityTag)">
           <Annotation Term="OData.Description" String="The tags."/>

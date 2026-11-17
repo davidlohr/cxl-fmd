@@ -781,6 +781,9 @@ struct fmd_ld {
 	uint32_t dc_ext_gen;                 /* Extent List Generation Number */
 	uint8_t  dc_sync;                    /* enum fmd_dc_sync */
 	int      dc_sync_err;                /* why it is FMD_DC_SYNC_STALE */
+	/* when the host's last 5601h, and 5603h, read completed; 0: never */
+	time_t   dc_regions_read;
+	time_t   dc_extents_read;
 };
 
 
@@ -1111,6 +1114,7 @@ struct fmd_dc_tags {
 	uint8_t  validity;                  /* Validity Bitmap: Bit[0] ref, Bit[1] pending */
 	bool     known;                     /* the last read completed */
 	bool     unsupported;               /* the device answered Unsupported */
+	time_t   read_at;                   /* when the last complete read was; 0: never */
 };
 
 /*
@@ -1191,6 +1195,8 @@ struct fmd_dcd_info {
 	uint32_t dc_ext_gen;
 	uint8_t  dc_sync;                   /* enum fmd_dc_sync */
 	int      dc_sync_err;
+	time_t   dc_regions_read;           /* as on fmd_ld */
+	time_t   dc_extents_read;
 
 	/* Dynamic Capacity List Tags (5608h); the mock builds its own */
 	struct fmd_dc_tags tags;
@@ -2689,6 +2695,15 @@ void fmd_dc_mock_ref_set(struct fmd_dcd_info *dcd, const uint8_t tag[FMD_DC_TAG_
 
 /* Whether a host's extents are those of its last 5603h (enum fmd_dc_sync) */
 enum fmd_dc_sync fmd_dc_host_sync(struct fmd_component *dev, int host_id);
+
+/*
+ * When the last read of a host's region table (5601h) and of its extent
+ * list (5603h) completed, 0 for never: the time of the service, when the
+ * last page was answered (cxl-fmd's; see fmd_dc_host_read_times() in
+ * src/dcd.c). The mock's are when it last set them.
+ */
+void fmd_dc_host_read_times(struct fmd_component *dev, int host_id,
+			    time_t *regions, time_t *extents);
 
 /* Component (SLD or LD) that owns the DC regions of a host */
 struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_id);

@@ -3768,6 +3768,9 @@ static void test_dc_exact_bytes(void)
 			 "RegionBaseOffsetBytes", (json_int_t)1 << 30,
 			 "RegionSizeBytes", (json_int_t)((1ULL << 30) + (1ULL << 16)),
 			 "BlockSizeBytes", (json_int_t)1 << 16);
+	/* and when it was read (test_dc_last_refreshed()) */
+	CHECK(json_is_string(json_object_get(oem, "LastRefreshed")), "region read when");
+	json_object_del(oem, "LastRefreshed");
 	CHECK(oem && json_equal(oem, want), "region Oem");
 	CHECK(json_integer_value(json_object_get(j, "BlockSizeMiB")) == 0,
 	      "BlockSizeMiB of a region of 64 KiB blocks");
@@ -3784,6 +3787,9 @@ static void test_dc_exact_bytes(void)
 		want = json_pack("{s:s, s:I, s:I}", "@odata.type", "#Cxl.v1_0_0.MemoryExtent",
 				 "ExtentOffsetBytes", (json_int_t)dpa,
 				 "ExtentSizeBytes", (json_int_t)1 << 16);
+		CHECK(json_is_string(json_object_get(oem, "LastRefreshed")),
+		      "extent %s read when", xid);
+		json_object_del(oem, "LastRefreshed");
 		CHECK(j && oem && json_equal(oem, want), "extent %s Oem", xid);
 		/* the MiB properties of both are the same */
 		CHECK(json_integer_value(json_object_get(j, "ExtentOffsetMiB")) == 1024 &&
@@ -7771,6 +7777,170 @@ static void test_dc_region_pages_staged(void)
 out:
 	fmd_ctx_free(ctx);
 	report("a DC region table changes only once every page is read", before);
+}
+
+/* @t as cxl-fmd serves it, "" for 0 */
+static void date_time_str(time_t t, char *buf, size_t len)
+{
+	struct tm tm;
+
+	buf[0] = '\0';
+	if (!t)
+		return;
+	gmtime_r(&t, &tm);
+	strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+/* Whether @obj's @name is the date-time @t, or absent for 0 */
+static bool served_time_is(json_t *obj, const char *name, time_t t)
+{
+	const char *v = json_string_value(json_object_get(obj, name));
+	char want[32];
+
+	date_time_str(t, want, sizeof(want));
+	return t ? v && !strcmp(v, want) : !json_object_get(obj, name);
+}
+
+/* Oem/Cxl of a resource */
+static json_t *oem_cxl(json_t *j)
+{
+	return json_object_get(json_object_get(j, "Oem"), "Cxl");
+}
+
+/*
+ * What host 1 of @dev is served with: its LD's two times, region 0's and
+ * its extent's, and the tag view's, each the stored one, or absent for 0.
+ */
+static bool dc_times_served(struct fmd_ctx *ctx, struct fmd_component *dev,
+			    const char *id, time_t regions, time_t extents,
+			    time_t tags)
+{
+	json_t *ld = fmd_redfish_cxl_logical_device(ctx, id, id, "1");
+	json_t *region = fmd_redfish_dc_memory_region(ctx, id, id, "1", "0");
+	json_t *ext = fmd_redfish_dc_memory_extent(ctx, id, id, "ext_1_80000000");
+	json_t *view = fmd_redfish_dc_tags_oem(ctx, dev, id, id);
+	json_t *ld_oem = oem_cxl(ld);
+	bool ok;
+
+	ok = ld && (regions || extents ? ld_oem != NULL : !json_object_get(ld, "Oem"));
+	ok = ok && served_time_is(ld_oem, "DynamicCapacityRegionsLastRefreshed", regions) &&
+	     served_time_is(ld_oem, "DynamicCapacityExtentsLastRefreshed", extents);
+	ok = ok && (!region || served_time_is(oem_cxl(region), "LastRefreshed", regions));
+	ok = ok && (!ext || served_time_is(oem_cxl(ext), "LastRefreshed", extents));
+	/* the PCIeDevice's Oem */
+	ok = ok && served_time_is(json_object_get(json_object_get(view, "Cxl"),
+						  "DynamicCapacityTags"),
+				  "LastRefreshed", tags);
+	json_decref(ld);
+	json_decref(region);
+	json_decref(ext);
+	json_decref(view);
+	return ok;
+}
+
+/*
+ * Review F07 claim 6: no time of the last good read was served. A host's
+ * region table (5601h) and extent list (5603h), and the device's tag list
+ * (5608h), each have the time their last read to the end completed, kept
+ * by a read that fails: on the CXLLogicalDevice
+ * (DynamicCapacityRegionsLastRefreshed, DynamicCapacityExtentsLastRefreshed),
+ * the MemoryRegion and the MemoryExtent (LastRefreshed), and the tag view
+ * (DynamicCapacityTags/LastRefreshed), absent until there is one.
+ */
+static void test_dc_last_refreshed(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xf9, 2);
+	struct dc_ext e = { 2ULL << 30, 1ULL << 28, dc_tag, 0 };	/* in region 1 */
+	struct dc_ext e2 = { (2ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag, 0 };
+	struct dc_tag_row row = { dc_tag, false, { 1 }, 1, { 0 }, 0 };
+	struct fmd_dcd_info *dcd;
+	struct fmd_ld *ld;
+	char id[FMD_MAX_ID_LEN];
+	int before = failures, rc;
+	time_t t0;
+
+	if (!dev)
+		goto out;
+	device_id(id, sizeof(id), 0xf9);
+	dcd = fmd_memdev_dcd(dev);
+	ld = fmd_to_ld(fmd_dc_host_component(dev, 1));
+
+	/* discovery's reads were not answered: nothing has been read */
+	CHECK(!ld->dc_regions_read && !ld->dc_extents_read && !dcd->tags.read_at &&
+	      dc_times_served(ctx, dev, id, 0, 0, 0),
+	      "never read: %ld %ld %ld", (long)ld->dc_regions_read,
+	      (long)ld->dc_extents_read, (long)dcd->tags.read_at);
+
+	/* a complete read: now, in each view */
+	t0 = time(NULL);
+	answer_regions_page(ep, 2, 0, 2, 0x00);
+	answer_dc_extents(ep, 1, 0, 1, &e, 1);
+	answer_dc_tags(ep, 1, 1, 0x03, &row, 1);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(rc == 0 && ld->dc_regions_read >= t0 && ld->dc_extents_read >= t0 &&
+	      dcd->tags.read_at >= t0 && dcd->tags.known &&
+	      dc_times_served(ctx, dev, id, ld->dc_regions_read, ld->dc_extents_read,
+			      dcd->tags.read_at),
+	      "a complete read: %d, %ld %ld %ld (from %ld)", rc, (long)ld->dc_regions_read,
+	      (long)ld->dc_extents_read, (long)dcd->tags.read_at, (long)t0);
+
+	/* page 2 of the regions and the tag list fail: the times stay */
+	ld->dc_regions_read = 1000;
+	ld->dc_extents_read = 2000;
+	dcd->tags.read_at = 3000;
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 2, 0, 1, 0x00);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(rc && ld->dc_regions_read == 1000 && ld->dc_extents_read == 2000 &&
+	      dcd->tags.read_at == 3000 && !dcd->tags.known &&
+	      dc_times_served(ctx, dev, id, 1000, 2000, 3000),
+	      "a failed page 2: %d, %ld %ld %ld", rc, (long)ld->dc_regions_read,
+	      (long)ld->dc_extents_read, (long)dcd->tags.read_at);
+
+	/* the regions are read, the extents fail: only the regions' time */
+	t0 = time(NULL);
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 2, 0, 2, 0x00);
+	answer_rc(ep, 0x5603, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(rc && ld->dc_regions_read >= t0 && ld->dc_extents_read == 2000 &&
+	      dc_times_served(ctx, dev, id, ld->dc_regions_read, 2000, 3000),
+	      "5603h failed: %d, %ld %ld", rc, (long)ld->dc_regions_read,
+	      (long)ld->dc_extents_read);
+
+	/* an extent list that keeps changing as it is read is not read */
+	ld->dc_regions_read = 1000;
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 2, 0, 2, 0x00);
+	for (uint32_t i = 0; i <= 3; i++) {
+		answer_dc_extents(ep, 10 + 2 * i, 0, 2, &e, 1);
+		answer_dc_extents(ep, 11 + 2 * i, 1, 2, &e2, 1);
+	}
+	answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(rc && ld->dc_regions_read != 1000 && ld->dc_extents_read == 2000 &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE,
+	      "a changing extent list: %d, %ld %ld", rc, (long)ld->dc_regions_read,
+	      (long)ld->dc_extents_read);
+
+	/* Unsupported: there is no list, nor a time */
+	cxlmi_mock_clear_responses(ep);
+	answer_regions_page(ep, 2, 0, 2, 0x00);
+	answer_dc_extents(ep, 20, 0, 1, &e, 1);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(rc == 0 && ld->dc_extents_read >= t0 && !dcd->tags.read_at &&
+	      dc_times_served(ctx, dev, id, ld->dc_regions_read, ld->dc_extents_read, 0),
+	      "tags Unsupported: %d, %ld %ld", rc, (long)ld->dc_extents_read,
+	      (long)dcd->tags.read_at);
+out:
+	fmd_ctx_free(ctx);
+	report("the time of each DC read that completed is served", before);
 }
 
 /*
@@ -11945,6 +12115,7 @@ int main(void)
 	test_dc_retry_overflow_and_tags();
 	test_dc_retry_on_tick();
 	test_dc_region_pages_staged();
+	test_dc_last_refreshed();
 	test_dc_accepted_stale();
 	test_dc_tasks_hw();
 	test_rescan_reads_new_logs();

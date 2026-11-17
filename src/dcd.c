@@ -669,6 +669,8 @@ void fmd_dc_mock_retag(struct fmd_component *dev)
 	dcd->tags.known = true;
 	dcd->tags.unsupported = false;
 	dcd->tags.gen++;
+	/* the mock's list is current whenever it is made: its time is now */
+	dcd->tags.read_at = time(NULL);
 }
 
 /*
@@ -724,6 +726,22 @@ static void mock_orphans_drop(struct fmd_dcd_info *dcd, const uint8_t *tag)
  * against the specification does not say: the mock counts it, and its tag,
  * against every host that sees its region.
  */
+/* A mock host's regions and extents are as the mock has just set them */
+static void mock_host_read_now(struct fmd_component *dev, int host_id)
+{
+	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	time_t now = time(NULL);
+
+	if (owner && owner->type == FMD_COMPONENT_LD) {
+		fmd_to_ld(owner)->dc_regions_read = now;
+		fmd_to_ld(owner)->dc_extents_read = now;
+	} else if (owner && dcd) {
+		dcd->dc_regions_read = now;
+		dcd->dc_extents_read = now;
+	}
+}
+
 void fmd_dc_mock_recount(struct fmd_component *dev)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
@@ -825,6 +843,8 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 
 		*ext_avail = extents < ext_sup ? ext_sup - extents : 0;
 		*tag_avail = n_tags < tag_sup ? tag_sup - n_tags : 0;
+		/* the mock's state is current whenever it is counted: now */
+		mock_host_read_now(dev, h);
 	}
 
 	free(tags);
@@ -1794,18 +1814,20 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 	if (rc)
 		return rc;
 
-	/* the counters after the last page's regions */
+	/* the counters after the last page's regions, and when it was read */
 	if (owner->type == FMD_COMPONENT_LD) {
 		struct fmd_ld *ld = fmd_to_ld(owner);
 		ld->dc_extents_supported = rsp->num_extents_supported;
 		ld->dc_extents_available = rsp->num_extents_available;
 		ld->dc_tags_supported = rsp->num_tags_supported;
 		ld->dc_tags_available = rsp->num_tags_available;
+		ld->dc_regions_read = time(NULL);
 	} else if (dcd) {
 		dcd->extents_supported = rsp->num_extents_supported;
 		dcd->extents_available = rsp->num_extents_available;
 		dcd->tags_supported = rsp->num_tags_supported;
 		dcd->tags_available = rsp->num_tags_available;
+		dcd->dc_regions_read = time(NULL);
 	}
 
 	return 0;
@@ -1813,7 +1835,7 @@ static int hw_refresh_regions(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 /* A host's 5603h state: on the SLD's dcd for host 0, on the LD otherwise */
 static void dc_host_sync_ptrs(struct fmd_component *dev, int host_id, uint32_t **gen,
-			      uint8_t **sync, int **err)
+			      uint8_t **sync, int **err, time_t **read)
 {
 	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
@@ -1825,10 +1847,35 @@ static void dc_host_sync_ptrs(struct fmd_component *dev, int host_id, uint32_t *
 		*gen = &ld->dc_ext_gen;
 		*sync = &ld->dc_sync;
 		*err = &ld->dc_sync_err;
+		*read = &ld->dc_extents_read;
 	} else if (owner && dcd) {
 		*gen = &dcd->dc_ext_gen;
 		*sync = &dcd->dc_sync;
 		*err = &dcd->dc_sync_err;
+		*read = &dcd->dc_extents_read;
+	}
+}
+
+/*
+ * The time of the service when the host's last read of its regions, or
+ * of its extents, completed: when the last page was answered. Neither is
+ * a time the device reports, and 5601h has no generation number, so the
+ * region table is what its pages said, not a snapshot of one instant
+ * (cxl-fmd's). A read that fails leaves the time of the one before.
+ */
+void fmd_dc_host_read_times(struct fmd_component *dev, int host_id,
+			    time_t *regions, time_t *extents)
+{
+	struct fmd_component *owner = fmd_dc_host_component(dev, host_id);
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	*regions = *extents = 0;
+	if (owner && owner->type == FMD_COMPONENT_LD) {
+		*regions = fmd_to_ld(owner)->dc_regions_read;
+		*extents = fmd_to_ld(owner)->dc_extents_read;
+	} else if (owner && dcd) {
+		*regions = dcd->dc_regions_read;
+		*extents = dcd->dc_extents_read;
 	}
 }
 
@@ -1837,8 +1884,9 @@ enum fmd_dc_sync fmd_dc_host_sync(struct fmd_component *dev, int host_id)
 	uint32_t *gen;
 	uint8_t *sync;
 	int *err;
+	time_t *read;
 
-	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err);
+	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err, &read);
 	return gen ? (enum fmd_dc_sync)*sync : FMD_DC_SYNC_NEVER;
 }
 
@@ -1849,8 +1897,9 @@ static void dc_host_synced(struct fmd_component *dev, int host_id, int rc,
 	uint32_t *gen;
 	uint8_t *sync;
 	int *err;
+	time_t *read;
 
-	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err);
+	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err, &read);
 	if (!gen)
 		return;
 	if (rc) {
@@ -1860,6 +1909,7 @@ static void dc_host_synced(struct fmd_component *dev, int host_id, int rc,
 		*gen = generation;
 		*sync = FMD_DC_SYNC_OK;
 		*err = 0;
+		*read = time(NULL);
 	}
 }
 
@@ -1873,8 +1923,9 @@ static void dc_host_dirty(struct fmd_component *dev, int host_id)
 	uint32_t *gen;
 	uint8_t *sync;
 	int *err;
+	time_t *read;
 
-	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err);
+	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err, &read);
 	if (gen && *sync != FMD_DC_SYNC_STALE)
 		*sync = FMD_DC_SYNC_DIRTY;
 }
@@ -2095,6 +2146,7 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 			dcd->tags.n = 0;
 			dcd->tags.known = false;
 			dcd->tags.unsupported = true;
+			dcd->tags.read_at = 0;
 			goto done;
 		}
 		if (rc) {
@@ -2158,6 +2210,7 @@ static int hw_refresh_tags(struct fmd_ctx *ctx, struct fmd_component *dev,
 	dcd->tags.validity = validity;
 	dcd->tags.known = true;
 	dcd->tags.unsupported = false;
+	dcd->tags.read_at = time(NULL);
 	v = NULL;
 	goto done;
 
@@ -2815,6 +2868,8 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 		 dev->id, region->region_id, (uint64_t)(block_size / FMD_MIB),
 		 sanitize_on_release);
 	apply_region_config(dev, region->region_id, block_size, sanitize_on_release);
+	for (int h = 0; h < dcd->num_hosts; h++)
+		mock_host_read_now(dev, h);
 	return 0;
 }
 
@@ -3497,6 +3552,7 @@ int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 	struct fmd_task *t;
 	uint32_t *gen;
 	uint8_t *sync;
+	time_t *read;
 	int *err, n;
 
 	snprintf(dc->dev_id, sizeof(dc->dev_id), "%s", dev->id);
@@ -3554,7 +3610,7 @@ int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return -ENOMEM;
 	}
 	dc->n_base = n;
-	dc_host_sync_ptrs(dev, dc->host_id, &gen, &sync, &err);
+	dc_host_sync_ptrs(dev, dc->host_id, &gen, &sync, &err, &read);
 	dc->base_gen = gen ? *gen : 0;
 	return 0;
 }

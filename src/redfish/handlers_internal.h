@@ -306,6 +306,28 @@ static inline json_t *rf_status(const char *state, const char *health)
 }
 
 /*
+ * A time of the service as an Edm.DateTimeOffset, in UTC: "YYYY-MM-DDThh:mm:ssZ"
+ */
+static inline void rf_date_time(time_t t, char *buf, size_t len)
+{
+	struct tm tm;
+
+	gmtime_r(&t, &tm);
+	strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+/* @obj's @name, the date-time @t; nothing for 0, a time never set */
+static inline void rf_set_date_time(json_t *obj, const char *name, time_t t)
+{
+	char buf[32];
+
+	if (!t)
+		return;
+	rf_date_time(t, buf, sizeof(buf));
+	json_object_set_new(obj, name, json_string(buf));
+}
+
+/*
  * Build a Redfish Status object with HealthRollup.
  * HealthRollup aggregates health from subordinate resources.
  */
