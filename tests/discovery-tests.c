@@ -1801,7 +1801,7 @@ static void test_conditions(void)
 	struct fmd_ctx *ctx;
 	char keys[512];
 	int before = failures;
-	json_t *j, *c;
+	json_t *j, *c, *args;
 	char *text;
 
 	/* case C: Additional Status Bit[4] and Bit[5], Health OK */
@@ -1874,10 +1874,12 @@ static void test_conditions(void)
 	CHECK(!strcmp(keys, "HardwareReplacementNeeded MediaStatusReserved"),
 	      "Health Status 04h, Media Status 0Ah: \"%s\"", keys);
 	c = json_array_get(json_object_get(json_object_get(j, "Status"), "Conditions"), 1);
-	CHECK(c && json_equal(json_object_get(c, "MessageArgs"), json_pack("[s]", "0Ah")) &&
+	args = json_pack("[s]", "0Ah");
+	CHECK(c && json_equal(json_object_get(c, "MessageArgs"), args) &&
 	      !strcmp(json_string_value(json_object_get(c, "Message")) ?: "",
 		      "The device reported the reserved Media Status 0Ah."),
 	      "the reserved Media Status's argument");
+	json_decref(args);
 	json_decref(j);
 	fmd_ctx_free(ctx);
 
