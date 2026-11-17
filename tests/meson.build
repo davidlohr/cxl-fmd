@@ -542,6 +542,28 @@ if pytest_available and requests_available
     )
 endif
 
+# What fails a validator run, and that Oem extensions are checked (needs
+# only pytest)
+if pytest_available
+    test(
+        'redfish-validator-gate',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            '-k', 'test_validator_problems or test_no_oem_check_is_not_used',
+            meson.current_source_dir() / 'test_redfish_validator.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 60,
+        suite: 'unit',
+    )
+endif
+
 # The validator over mock topologies: one for each, by its test
 if pytest_available and run_validator
     foreach t : [
@@ -552,6 +574,7 @@ if pytest_available and run_validator
         ['redfish-validator-dcd', 'test_dcd_validation'],
         ['redfish-validator-dcd-perhost', 'test_dcd_perhost_validation'],
         ['redfish-validator-degraded', 'test_degraded_validation'],
+        ['redfish-validator-all', 'test_every_topology_validation', 1800],
     ]
         test(
             t[0],
@@ -567,7 +590,7 @@ if pytest_available and run_validator
                 'MESON_BUILD_ROOT': meson.project_build_root(),
                 'MESON_SOURCE_ROOT': meson.project_source_root(),
             },
-            timeout: 600,
+            timeout: t.length() > 2 ? t[2] : 600,
             suite: 'validator',
             is_parallel: false,
         )

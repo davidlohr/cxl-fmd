@@ -156,7 +156,6 @@ def run_validator(venv_mgr, port, schema_dir=None, output_dir=None,
         str(venv_mgr.validator),
         "-r", f"http://localhost:{port}",
         "--user", "none", "--password", "none", "--authtype", "Basic",
-        "--nooemcheck",
     ]
 
     if schema_dir and schema_dir.exists():
