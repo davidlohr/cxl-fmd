@@ -428,12 +428,17 @@ DELETE /redfish/v1/Chassis/mld_2/MemoryDomains/.../MemoryChunks/{chunk}
 # Step 2: Verify the chunk is gone
 GET /redfish/v1/Chassis/mld_2/MemoryDomains/mld_2_domain0/MemoryChunks
 
-# Step 3: Allocate to memory-hungry Host 2
+# Step 3: Allocate to memory-hungry Host 2: grow LD 0 (an MLD's chunk
+# names its one LD, or the POST is 400), then bind it
 POST /redfish/v1/Chassis/mld_2/MemoryDomains/.../MemoryChunks
 {
     "MemoryChunkSizeMiB": 524288,
-    "AddressRangeType": "PMEM"
+    "AddressRangeType": "PMEM",
+    "InterleaveSets": [{
+        "Memory": {"@odata.id": "/redfish/v1/Chassis/mld_2/Memory/mld_2_ld0"}
+    }]
 }
+→ 201, Location the new chunk's URI
 
 POST /redfish/v1/Fabrics/CXL/Connections
 {
@@ -441,7 +446,7 @@ POST /redfish/v1/Fabrics/CXL/Connections
         "InitiatorEndpoints": [{"@odata.id": ".../Endpoints/host2"}],
         "TargetEndpoints": [{"@odata.id": ".../Endpoints/mld_2_ld0"}]
     },
-    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../chunk_new"}}]
+    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": "{the new chunk's URI}"}}]
 }
 → vPPB automatically bound to Host 2's VCS
 ```
@@ -690,7 +695,7 @@ POST /Fabrics/CXL/Connections
         "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/hostA"}],
         "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhd_0"}]
     },
-    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_0"}}]
+    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": "/redfish/v1/Chassis/mhd_0/MemoryDomains/mhd_0_domain0/MemoryChunks/{chunk of mhd_0_ld0}"}}]
 }
 → 200 OK: a directly attached head has its Connection already
   ("mhd_0" with a chunk of one LD is accepted for compatibility; the
@@ -703,7 +708,7 @@ POST /Fabrics/CXL/Connections
         "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/hostA"}],
         "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/mhd_0"}]
     },
-    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_from_ld2"}}]
+    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id": "/redfish/v1/Chassis/mhd_0/MemoryDomains/mhd_0_domain0/MemoryChunks/{chunk of mhd_0_ld2}"}}]
 }
 → 400 Bad Request: "The host is not attached to that device or head: it cannot reach this memory"
 ```
@@ -1499,8 +1504,8 @@ POST /redfish/v1/Chassis/{dev}/MemoryDomains/{dom}/MemoryChunks
 PATCH /redfish/v1/Fabrics/CXL/Connections/{conn}
 {
     "MemoryChunkInfo": [
-        {"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_0"}},
-        {"MemoryChunk": {"@odata.id": ".../MemoryChunks/chunk_1"}}  # New
+        {"MemoryChunk": {"@odata.id": ".../MemoryChunks/{chunk}"}},
+        {"MemoryChunk": {"@odata.id": ".../MemoryChunks/{new chunk}"}}  # New
     ]
 }
 ```

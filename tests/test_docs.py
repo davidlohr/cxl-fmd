@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: LGPL-2.1
 """
+What the docs must keep saying, where getting it wrong would mislead a
+reader about what cxl-fmd does.
+
 The deployment sketches in docs/Usecases.md run one cxl-fmd for a fabric
 (review F13 C6). The OCP CMS white paper has the MFM Node Agent as "A
 daemonset running on each node" and the MFM as "the central control point"
 (Section 7); a cxl-fmd on every node would be several Fabric Managers
 driving one switch, which nothing in cxl-fmd coordinates.
+
+The contracts the maintainer chose over the review's proposals are stated
+plainly: a DELETE of a sharable extent releases the host's whole tag
+(DCD-Q A3), an all-zero Tag is no tag only by cxl-fmd's convention (DCD-Q
+T6), and TLS, authentication and the listen address are deferred gaps
+(F16).
 """
 
 import re

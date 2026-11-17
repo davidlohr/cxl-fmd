@@ -293,7 +293,7 @@ meson test -C build -v
 meson test -C build --suite redfish    # Quick endpoint tests
 meson test -C build --suite api        # Full API tests
 meson test -C build --suite security   # Fuzzing and adversarial tests
-meson test -C build --suite unit       # discovery-tests, the mock topologies, the man page, and 7 attachment/device combinations
+meson test -C build --suite unit       # discovery-tests, the mock topologies, the man page, the docs, and 7 attachment/device combinations
 meson test -C build --suite validator  # DMTF schema validation
 ```
 

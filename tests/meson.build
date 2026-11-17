@@ -88,7 +88,7 @@ if pytest_available
     )
 endif
 
-# The docs' deployment sketches run one cxl-fmd per fabric
+# What the docs say of deployment, the DCD contracts and the trust boundary
 if pytest_available
     test(
         'docs',
