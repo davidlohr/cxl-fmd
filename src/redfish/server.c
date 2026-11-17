@@ -200,20 +200,24 @@ static enum MHD_Result send_not_found(struct MHD_Connection *conn,
 }
 
 /*
- * A 400 for a request body: MalformedJSON if @body is not JSON, else
- * @info, which is consumed either way
+ * A 400 for a request: MalformedJSON if it has a body that is not JSON,
+ * else @info (with no body, or none that is read, what was wrong is not
+ * the JSON). @info is consumed either way.
  */
 static enum MHD_Result send_bad_body(struct MHD_Connection *conn,
 				     const char *body, size_t body_size,
 				     const char *message, json_t *info)
 {
-	json_t *root = body_size ? json_loadb(body, body_size, 0, NULL) : NULL;
+	json_t *root;
 
-	if (!root) {
-		json_decref(info);
-		info = RF_MSG(FMD_RF_MALFORMED_JSON);
+	if (body_size) {
+		root = json_loadb(body, body_size, 0, NULL);
+		if (!root) {
+			json_decref(info);
+			info = RF_MSG(FMD_RF_MALFORMED_JSON);
+		}
+		json_decref(root);
 	}
-	json_decref(root);
 	return send_error(conn, MHD_HTTP_BAD_REQUEST, message, info);
 }
 
@@ -1293,7 +1297,9 @@ static bool takes_method(struct fmd_ctx *ctx, const char *method,
  * its response to the same request without those conditions, prior to
  * processing the request content, would have been a status code other
  * than a 2xx (Successful) or 412 (Precondition Failed)", RFC 9110 Section
- * 13.2.1). A GET is not checked: a conditional GET is "If supported by the
+ * 13.2.1); an action is judged by its resource only, so an action a
+ * resource that is there does not have is 412 with the header, and 404
+ * without (cxl-fmd's simplification). A GET is not checked: a conditional GET is "If supported by the
  * service" (DSP0266 Section 7.2.1), and cxl-fmd answers it as one without.
  * Base PreconditionFailed is not used: "The use of this message shall
  * only be used in responses for deep operations, since HTTP status code

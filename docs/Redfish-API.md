@@ -671,7 +671,10 @@ A request answered `404` or `405` without the header is answered so with
 it: "A server MUST ignore all received preconditions if its response to
 the same request without those conditions, prior to processing the request
 content, would have been a status code other than a 2xx (Successful) or
-412 (Precondition Failed)" (RFC 9110 Section 13.2.1). A `GET` is answered
+412 (Precondition Failed)" (RFC 9110 Section 13.2.1). An action is judged
+by its resource only: a `POST` to an action that a resource that is there
+does not have is `412` with the header, and `404` without (cxl-fmd's
+simplification). A `GET` is answered
 as one without the header: a conditional GET is "If supported by the
 service" (DSP0266 Section 7.2.1), and cxl-fmd does not support it.
 
@@ -679,15 +682,18 @@ service" (DSP0266 Section 7.2.1), and cxl-fmd does not support it.
 
 Every error response is an `error` object with `code`, `message` and
 `@Message.ExtendedInfo` ("The @Message.ExtendedInfo property should be
-present in all error responses", DSP0266 1.25.0 Section 9.5.10):
+present in all error responses", DSP0266 1.25.0 Section 8.6):
 
 - `code` is always `Base.1.24.GeneralError`: "If no better message exists
   or the ExtendedInfo array contains multiple messages, use GeneralError
   from the Base Message Registry only in the code property of the error
   object" (Section 9.5.11.2). Keeping one code is cxl-fmd's choice.
 - `message` is cxl-fmd's own sentence on what went wrong, the same text as
-  before `@Message.ExtendedInfo` was added (cxl-fmd's choice; Table 16 has
-  it "a human-readable error message").
+  before `@Message.ExtendedInfo` was added. Table 16 has `message`
+  "Displays a human-readable error message that corresponds to the message
+  in the message registry": it is not GeneralError's registry text, but
+  the sentence existing clients read, which the registry message in
+  `@Message.ExtendedInfo` stands beside (cxl-fmd's choice).
 - `@Message.ExtendedInfo` holds messages of the DMTF Base registry 1.24.0
   (`Base.1.24.0.json`, a copy of which is in `schema/dmtf/registries`):
   `MessageId` `Base.1.24.<key>` (the format is
@@ -2315,7 +2321,7 @@ Changes from the fixes of the external design review (branch
 | The same, ended with Unsupported, or Busy or Retry Required | `500` | `501`, or `503`, as at once |
 | The same, ended with another return code (Internal Error) | `500`, `message` the task's | `500`, `message` "Failed to create connection" or "Failed to delete connection", as at once |
 | The task monitor of a task whose switch is gone | `500`, "The switch is gone" | `500`, "Outcome unknown: The switch is gone, and whether it bound (unbound) the vPPB before it went is not known" |
-| A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match` (a `PATCH` of a `MemoryRegion` with a stale `If-Match`) | the header ignored, the request carried out (Set DC Region Configuration sent) | `412`, nothing done; a `404` or `405` stays so; a `GET` is unchanged |
+| A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match` (a `PATCH` of a `MemoryRegion` with a stale `If-Match`) | the header ignored, the request carried out (Set DC Region Configuration sent) | `412`, nothing done; a `404` or `405` stays so (but for an action a resource that is there does not have, which is `412`); a `GET` is unchanged |
 
 Mock topologies and discovery:
 

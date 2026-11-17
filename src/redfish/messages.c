@@ -3,7 +3,7 @@
  * CXL Fabric Manager Daemon - Redfish error responses
  *
  * "The @Message.ExtendedInfo property should be present in all error
- * responses" (DSP0266 1.25.0 Section 9.5.10). Each message object cxl-fmd
+ * responses" (DSP0266 1.25.0 Section 8.6). Each message object cxl-fmd
  * makes is one of the DMTF Base registry, Base.1.24.0.json (a copy is in
  * schema/dmtf/registries): its MessageId, its Message with the arguments
  * put in, its MessageSeverity and its Resolution, which cxl-fmd replaces
@@ -161,7 +161,7 @@ json_t *fmd_redfish_message(enum fmd_rf_msg id, const char *resolution,
 	fmd_redfish_message_id(id, msgid, sizeof(msgid));
 	/*
 	 * Severity is deprecated for MessageSeverity (Table 20); both are
-	 * given, as in the example of Section 9.5.10 (cxl-fmd's choice)
+	 * given, as in the example of Section 8.6 (cxl-fmd's choice)
 	 */
 	obj = json_pack("{s:s, s:s, s:s, s:s, s:s}",
 			"MessageId", msgid,

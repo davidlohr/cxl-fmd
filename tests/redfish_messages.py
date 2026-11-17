@@ -4,7 +4,7 @@ The error responses of cxl-fmd, checked against the DMTF Base registry
 (review F18 claim 2).
 
 "The @Message.ExtendedInfo property should be present in all error
-responses" (DSP0266 1.25.0 Section 9.5.10). Each message in it is checked
+responses" (DSP0266 1.25.0 Section 8.6). Each message in it is checked
 against schema/dmtf/registries/Base.1.24.0.json, a copy of the registry as
 the DMTF publishes it: its MessageId is
 "<MessageRegistryPrefix>.<MajorVersion>.<MinorVersion>.<MessageKey>"

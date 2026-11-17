@@ -4,7 +4,7 @@ Error responses carry @Message.ExtendedInfo, with messages of the DMTF Base
 registry that say what went wrong (review F18 claim 2).
 
 "The @Message.ExtendedInfo property should be present in all error
-responses" (DSP0266 1.25.0 Section 9.5.10). Every error response any test
+responses" (DSP0266 1.25.0 Section 8.6). Every error response any test
 meets is checked against the registry (redfish_messages.py, from
 conftest.py); these are the messages cxl-fmd chooses for each kind of
 error.
@@ -54,6 +54,13 @@ class TestMessages:
         response = requests.post(api_client.base_url + CONNECTIONS,
                                  data="{not json", timeout=30)
         assert error_of(response, 400) == ["MalformedJSON"]
+
+    def test_no_body_is_not_malformed(self, api_client):
+        """A request with no body is not told its JSON is malformed: it was
+        MalformedJSON for any 400 with no body (a chunk POST with none, a
+        MemoryExtent DELETE or FreezeSecurityState the device refused)"""
+        response = requests.post(api_client.base_url + CHUNKS, data="", timeout=30)
+        assert error_of(response, 400) == ["PropertyMissing"]
 
     def test_body_not_as_asked(self, api_client):
         """Valid JSON that is not a Connection: GeneralError, with what to do"""
