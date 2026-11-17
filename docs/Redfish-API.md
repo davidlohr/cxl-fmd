@@ -1949,6 +1949,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of a direct-attached Connection of a head of a Multi-Headed device (mock topologies only) | no `Oem` | `Oem.Cxl.Origin` `Configured`; `Status` unchanged |
 | `GET` of a host's `MemoryDomain` (`/redfish/v1/Systems/{id}/MemoryDomains/{dom}`) | no `Oem` | `Oem.Cxl.HostState` `NotObserved`: what the host has mapped is not known |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
+| `GET` of a DCD's `MemoryExtent`s after a Dynamic Capacity Event Record of their host was read and cleared and the read of the host that followed failed (or after an overflow, or a tag list read that failed) | `Status.Health` `Warning`, as it was, until another record or command made cxl-fmd read the host again: later empty logs read nothing else | the same until the next `--event-poll` tick (default 10 s), which reads every such host, and the tag list, again until a read completes; then what the device lists, `OK`. Devices whose DC event log is the host's are read too. With `--event-poll 0`, as before |
 
 Mock topologies and discovery:
 

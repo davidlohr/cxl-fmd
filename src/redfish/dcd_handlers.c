@@ -526,13 +526,13 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 		 * Enabled: an extent 5603h lists is not pending (cxl-fmd's
 		 * choice, see dc_tags_check()). Warning: the extent is in no
 		 * region of its host, or is what the host's last complete
-		 * 5603h listed, the read after it having failed, or it has a
-		 * tag and the tag list could not be read, so whether the FM
-		 * holds a reference on it is not known.
+		 * 5603h listed, the read after it having failed or not having
+		 * been made yet, or it has a tag and the tag list could not be
+		 * read, so whether the FM holds a reference on it is not known.
 		 */
 		"Status", rf_status("Enabled",
 				    ext->region_id == FMD_DC_REGION_NONE ||
-				    fmd_dc_host_sync(dev, ext->host_id) == FMD_DC_SYNC_STALE ||
+				    fmd_dc_sync_behind(fmd_dc_host_sync(dev, ext->host_id)) ||
 				    (tag_str[0] && fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags)) ?
 				    "Warning" : "OK"));
 

@@ -869,7 +869,12 @@ As implemented; the comments are the header's.
 #define FMD_DC_MAX_HOST_ID     255   /* highest Host ID those bitmaps can name */
 #define FMD_DC_REGION_NONE     0xFF  /* extent lies in no region of its host */
 
-enum fmd_dc_sync { FMD_DC_SYNC_NEVER = 0, FMD_DC_SYNC_OK, FMD_DC_SYNC_STALE };
+enum fmd_dc_sync {
+	FMD_DC_SYNC_NEVER = 0,
+	FMD_DC_SYNC_OK,
+	FMD_DC_SYNC_STALE,                   /* the last read failed */
+	FMD_DC_SYNC_DIRTY,                   /* to be read: a record named it */
+};
 
 /* One Dynamic Capacity Tag Information entry of 5608h (Table 7-78) */
 struct fmd_dc_tag {
@@ -970,7 +975,16 @@ After the existing Type 3 classification:
    and none is made pending from it (Comment 5).
 4. After 5602h: steps 2 and 3 for every host. After 5604h or 5605h: step
    2 for that host, then step 3. After 5606h or 5607h: step 3. After DC
-   event records: step 2 for each host they name, then step 3.
+   event records: step 2 for each host they name, then step 3; a host is
+   marked DIRTY when its record is read, before the record is cleared.
+5. On every `--event-poll` tick, after the DC event logs are drained and
+   whether or not they had records: step 2 for each host that is STALE or
+   DIRTY, then step 3, and step 3 alone when the tag list could not be
+   read (`fmd_dcd_retry_stale()`). A record that has been cleared is not
+   read again, so nothing else would read such a host: it is read once a
+   tick until a read completes. Devices whose DC event log is the host's are
+   read too. With `--event-poll 0` there is no retry. The retry policy is
+   cxl-fmd's; the specification has none for an FM.
 
 All of it runs under `ctx->dcd_lock`; the refresh returns the first
 failure.

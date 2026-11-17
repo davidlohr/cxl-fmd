@@ -1552,6 +1552,22 @@ static void dc_host_synced(struct fmd_component *dev, int host_id, int rc,
 }
 
 /*
+ * The host is to be read again: what it has may have changed and nothing
+ * may say so again. Only a read that completes, through dc_host_synced(),
+ * takes it back to OK; until then fmd_dcd_retry_stale() reads it.
+ */
+static void dc_host_dirty(struct fmd_component *dev, int host_id)
+{
+	uint32_t *gen;
+	uint8_t *sync;
+	int *err;
+
+	dc_host_sync_ptrs(dev, host_id, &gen, &sync, &err);
+	if (gen && *sync != FMD_DC_SYNC_STALE)
+		*sync = FMD_DC_SYNC_DIRTY;
+}
+
+/*
  * Bring the host's extents in line with 5603h, the "Extent list for the
  * specified host" (Table 7-71). The list is read a page at a time, and from
  * Starting Extent Index 0 again when the Extent List Generation Number, "a
@@ -2054,6 +2070,12 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			break;
 		}
 		if (rsp->flags & EVENT_FLAG_OVERFLOW) {
+			int all[FMD_DC_MAX_HOST_ID + 1];
+			int nall = dc_hosts(dev, all, FMD_DC_MAX_HOST_ID + 1);
+
+			/* records were lost: any host may have changed */
+			for (int h = 0; h < nall; h++)
+				dc_host_dirty(dev, all[h]);
 			overflow = true;
 			overflow_count = rsp->overflow_err_count;
 			first_ns = rsp->first_overflow_timestamp;
@@ -2084,6 +2106,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			}
 			hosts[host / 8] |= 1 << (host % 8);
 			named = true;
+			/* before the clear: the record will not name it again */
+			dc_host_dirty(dev, host);
 			dc_event_counts(dev, host, rec->data);
 		}
 
@@ -2167,6 +2191,79 @@ int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 	}
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 	return rc ? -1 : n;
+}
+
+/*
+ * Nothing else reads a host again once the record that named it has been
+ * cleared (CXL r4.0 Section 8.2.10.2.3: "Clear Event Records provides a
+ * mechanism for the host to clear events that it has consumed from the
+ * device's Event Log"), nor once a command to it was accepted and the read
+ * after it failed: a GET serves what was read last. The hosts whose read
+ * failed (STALE), or is owed (DIRTY), are read here, with the tag list,
+ * and so is a tag list that could not be read. The event thread calls this
+ * on every --event-poll tick, one attempt each; with --event-poll 0 there
+ * is no retry, and a host stays stale until something else reads it. The
+ * devices whose DC event log is the host's are read too: their staleness
+ * comes from cxl-fmd's own reads. All of it is cxl-fmd's choice; the
+ * specification has no retry policy for an FM. A host never read (NEVER)
+ * is not retried.
+ */
+int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
+{
+	static const enum fmd_component_type types[] = {
+		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
+	};
+	struct fmd_component *devs[DC_EVENT_MAX_DEVS], *comp;
+	int n = 0, read = 0, rc = 0;
+
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+
+	fmd_topology_rdlock(&ctx->topology);
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, types[t]) {
+			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) &&
+			    n < DC_EVENT_MAX_DEVS)
+				devs[n++] = comp;
+		}
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+
+	for (int i = 0; i < n; i++) {
+		struct fmd_component *dev = devs[i];
+		int all[FMD_DC_MAX_HOST_ID + 1], list[FMD_DC_MAX_HOST_ID + 1];
+		int nall, m = 0, r = 0;
+		bool tried = true;
+
+		pthread_mutex_lock(&ctx->dcd_lock);
+		nall = dc_hosts(dev, all, FMD_DC_MAX_HOST_ID + 1);
+		for (int h = 0; h < nall; h++) {
+			if (fmd_dc_sync_behind(fmd_dc_host_sync(dev, all[h])))
+				list[m++] = all[h];
+		}
+		if (m) {
+			fmd_dbg(ctx, "%s: reading %d DC host(s) again", dev->id, m);
+			r = dcd_refresh_hosts_locked(ctx, dev, list, m);
+		} else if (fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags)) {
+			struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+
+			fmd_dbg(ctx, "%s: reading the DC tag list again", dev->id);
+			r = hw_refresh_tags(ctx, dev, dev->ep, ti);
+		} else {
+			tried = false;
+		}
+		if (tried) {
+			read++;
+			/* a tag list read that fails returns 0, and stays failed */
+			if (!r && fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags))
+				r = -EIO;
+		}
+		pthread_mutex_unlock(&ctx->dcd_lock);
+		if (r && !rc)
+			rc = r;
+	}
+
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+	return rc ? -1 : read;
 }
 
 /*

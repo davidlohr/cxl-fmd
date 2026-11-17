@@ -5051,6 +5051,255 @@ out:
 }
 
 /*
+ * A DCD MLD of two hosts, both read and the tag list Unsupported, so that
+ * nothing about it is stale: host 0 with no extent, host 1 with @e.
+ */
+static struct fmd_component *dc_retry_dev(struct fmd_ctx *ctx, struct cxlmi_endpoint **epp,
+					  uint64_t serial, const struct dc_ext *e, int n)
+{
+	struct fmd_component *dev = hw_dcd_mld(ctx, epp, serial, 2);
+
+	if (!dev)
+		return NULL;
+	dc_refresh_host(ctx, *epp, dev, 0, 1ULL << 30, 4, 0x08, NULL, 0);
+	dc_refresh_host(ctx, *epp, dev, 1, 1ULL << 30, 4, 0x08, e, n);
+	CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK &&
+	      fmd_memdev_dcd(dev)->tags.unsupported,
+	      "the fixture is stale: hosts %d %d", fmd_dc_host_sync(dev, 0),
+	      fmd_dc_host_sync(dev, 1));
+	return dev;
+}
+
+/*
+ * The review's reproduction (F07): host 1's Add Capacity Response is read
+ * and cleared ("Clear Event Records provides a mechanism for the host to
+ * clear events that it has consumed from the device's Event Log", CXL r4.0
+ * Section 8.2.10.2.3; a cleared record is not read again), and the 5601h that
+ * follows fails. Later polls found the log empty and sent only 0100h: host
+ * 1 stayed stale for good, though the device answered again. Now the host
+ * is DIRTY from the moment the record is read, STALE once its read fails,
+ * and fmd_dcd_retry_stale() reads it on every tick until a read completes:
+ * one that fails again is tried on the next. A device with nothing stale
+ * is sent nothing.
+ */
+static void test_dc_retry_cleared_event(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct dc_ext old = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct dc_ext now[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag_b, 0 },
+	};
+	struct fmd_component *dev = dc_retry_dev(ctx, &ep, 0xf7, &old, 1);
+	uint8_t page[0x20 + 0x80] = { 0 };
+	unsigned int sent;
+	int before = failures, rc;
+
+	if (!dev)
+		goto out;
+
+	/* the record names host 1; cleared; the log empty; 5601h fails */
+	put16(page + 0x14, 1);
+	put_dc_record(page + 0x20, 0x91, 0x04, 1, 0, 0, 0);
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_poll_events(ctx);
+	CHECK(fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE &&
+	      fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK,
+	      "after a failed read: host 1 %d, host 0 %d",
+	      fmd_dc_host_sync(dev, 1), fmd_dc_host_sync(dev, 0));
+
+	/* a retry that fails again: host 1 alone, still stale */
+	cxlmi_mock_clear_responses(ep);
+	answer_rc(ep, 0x5601, CXLMI_RET_RETRY);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	sent = commands_sent(ep);
+	rc = fmd_dcd_retry_stale(ctx);
+	CHECK(rc == -1 && commands_sent(ep) - sent == 2 &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE,
+	      "a retry that fails: %d, %u commands, host 1 %d", rc,
+	      commands_sent(ep) - sent, fmd_dc_host_sync(dev, 1));
+
+	/* the device answers: the next tick reads host 1 and it converges */
+	cxlmi_mock_clear_responses(ep);
+	answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+	answer_dc_extents(ep, 2, 0, 2, now, 2);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	sent = commands_sent(ep);
+	rc = fmd_dcd_retry_stale(ctx);
+	CHECK(rc == 1 && commands_sent(ep) - sent == 3 && last_opcode(ep) == 0x5608 &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK &&
+	      fmd_dc_find_extent(dev, 1, now[1].dpa),
+	      "host 1 did not converge: %d, %u commands, last %04xh, sync %d", rc,
+	      commands_sent(ep) - sent, last_opcode(ep), fmd_dc_host_sync(dev, 1));
+
+	/* nothing stale: nothing sent */
+	cxlmi_mock_clear_responses(ep);
+	sent = commands_sent(ep);
+	rc = fmd_dcd_retry_stale(ctx);
+	CHECK(rc == 0 && commands_sent(ep) == sent,
+	      "nothing stale: %d, %u commands", rc, commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a DC host whose read failed after its record was cleared is retried", before);
+}
+
+/*
+ * A record names a host, and the read of it fails before it starts (no
+ * memory, say): the host is DIRTY, not OK, and read on the next tick. An
+ * overflowed log has every host read; those whose read fails are read
+ * again on the next tick. A tag list that could not be read is read again
+ * on its own.
+ */
+static void test_dc_retry_overflow_and_tags(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct dc_ext e = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct fmd_component *dev = dc_retry_dev(ctx, &ep, 0xf9, &e, 1);
+	struct fmd_dcd_info *dcd;
+	unsigned int sent;
+	int before = failures, rc;
+	json_t *j;
+	char id[FMD_MAX_ID_LEN];
+
+	if (!dev)
+		goto out;
+	dcd = fmd_memdev_dcd(dev);
+	device_id(id, sizeof(id), 0xf9);
+
+	/* overflow: both hosts read, and both reads fail */
+	answer_no_events(ep, true);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_poll_events(ctx);
+	CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_STALE &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE,
+	      "after an overflow: host 0 %d, host 1 %d",
+	      fmd_dc_host_sync(dev, 0), fmd_dc_host_sync(dev, 1));
+
+	/* the next tick reads both, once each, and the tag list once */
+	cxlmi_mock_clear_responses(ep);
+	for (int h = 0; h < 2; h++) {
+		answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+		answer_dc_extents(ep, 1, 0, 1, &e, 1);
+	}
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	sent = commands_sent(ep);
+	rc = fmd_dcd_retry_stale(ctx);
+	CHECK(rc == 1 && commands_sent(ep) - sent == 5 &&
+	      fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK &&
+	      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK,
+	      "after an overflow: %d, %u commands, hosts %d %d", rc,
+	      commands_sent(ep) - sent, fmd_dc_host_sync(dev, 0),
+	      fmd_dc_host_sync(dev, 1));
+
+	/*
+	 * A record of host 1, and no answer to its 5601h: the host is behind,
+	 * and its extent Warning, until a read of it completes.
+	 */
+	cxlmi_mock_clear_responses(ep);
+	{
+		uint8_t page[0x20 + 0x80] = { 0 };
+
+		put16(page + 0x14, 1);
+		put_dc_record(page + 0x20, 0x92, 0x04, 1, 0, 0, 0);
+		answer(ep, 0x0100, page, sizeof(page));
+	}
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_poll_events(ctx);
+	CHECK(fmd_dc_sync_behind(fmd_dc_host_sync(dev, 1)),
+	      "host 1 after its record and no read: %d", fmd_dc_host_sync(dev, 1));
+	j = fmd_redfish_dc_memory_extent(ctx, id, id, "ext_1_40000000");
+	CHECK(j && json_string_value(json_object_get(json_object_get(j, "Status"), "Health")) &&
+	      !strcmp(json_string_value(json_object_get(json_object_get(j, "Status"),
+							"Health")), "Warning"),
+	      "an extent of a host that is behind is not Warning");
+	json_decref(j);
+
+	cxlmi_mock_clear_responses(ep);
+	answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+	answer_dc_extents(ep, 1, 0, 1, &e, 1);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_retry_stale(ctx);
+	CHECK(rc == 1 && fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK,
+	      "host 1 not read again: %d, sync %d", rc, fmd_dc_host_sync(dev, 1));
+
+	/* a tag list that could not be read is read again, alone */
+	dcd->tags.unsupported = false;
+	dcd->tags.known = false;
+	cxlmi_mock_clear_responses(ep);
+	answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+	sent = commands_sent(ep);
+	rc = fmd_dcd_retry_stale(ctx);
+	CHECK(rc == -1 && commands_sent(ep) - sent == 1 && last_opcode(ep) == 0x5608 &&
+	      fmd_dc_tags_failed(&dcd->tags),
+	      "a failed tag list: %d, %u commands, last %04xh", rc,
+	      commands_sent(ep) - sent, last_opcode(ep));
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	rc = fmd_dcd_retry_stale(ctx);
+	sent = commands_sent(ep);
+	CHECK(rc == 1 && !fmd_dc_tags_failed(&dcd->tags) &&
+	      fmd_dcd_retry_stale(ctx) == 0 && commands_sent(ep) == sent,
+	      "the tag list was not read again, or is read with nothing failed: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("an overflow, a record not yet read, and a tag list are retried", before);
+}
+
+/*
+ * The retry runs on the --event-poll tick, after the drain, whether or not
+ * the drain found anything, and on a device whose DC event log is the
+ * host's (one on a mailbox endpoint), which is not drained.
+ */
+static void test_dc_retry_on_tick(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct dc_ext e = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct fmd_component *dev = dc_retry_dev(ctx, &ep, 0xfa, &e, 1);
+	unsigned int sent;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	/* as if the scan of /dev/cxl had opened it: the log is the host's */
+	ctx->ioctl_eps = calloc(1, sizeof(*ctx->ioctl_eps));
+	if (ctx->ioctl_eps)
+		ctx->ioctl_eps[ctx->nioctl_eps++] = ep;
+
+	/* host 1 is read and fails, as after an accepted command */
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_refresh(ctx, dev, 1);
+	CHECK(fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE, "host 1 is not stale");
+
+	cxlmi_mock_clear_responses(ep);
+	answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+	answer_dc_extents(ep, 1, 0, 1, &e, 1);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	ctx->config.event_poll_sec = 10;
+	ctx->next_dc_poll_ms = 1;		/* due */
+	sent = commands_sent(ep);
+	fmd_events_poll(ctx, 0);
+	CHECK(fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK && commands_sent(ep) - sent == 3,
+	      "the tick did not read host 1: sync %d, %u commands",
+	      fmd_dc_host_sync(dev, 1), commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a stale DC host is read on the --event-poll tick", before);
+}
+
+/*
  * A device found on a re-scan with records in its logs already: those send
  * no notification until they have been emptied, so the re-scan reads them.
  */
@@ -7992,6 +8241,9 @@ int main(void)
 	test_dc_refresh_after_failed_read();
 	test_dc_records_ld200();
 	test_dc_records_counts();
+	test_dc_retry_cleared_event();
+	test_dc_retry_overflow_and_tags();
+	test_dc_retry_on_tick();
 	test_rescan_reads_new_logs();
 	test_notification_route();
 	test_chunk_delete_partition_refused();

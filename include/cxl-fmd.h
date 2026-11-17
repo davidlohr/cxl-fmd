@@ -945,14 +945,25 @@ struct fmd_mem_chunk {
 
 /*
  * Whether a host's extents are those of its last Get DC Region Extent
- * Lists (5603h): never read, read, or kept from an earlier read after the
- * last one failed.
+ * Lists (5603h): never read, read, kept from an earlier read after the
+ * last one failed (STALE), or to be read again (DIRTY): a DC event record
+ * named the host or the log overflowed, and the host has not been read
+ * since. A record that is cleared is not reported again, so STALE and
+ * DIRTY hosts are read again on every --event-poll tick until a read
+ * completes (cxl-fmd's choice; see fmd_dcd_retry_stale()).
  */
 enum fmd_dc_sync {
 	FMD_DC_SYNC_NEVER = 0,
 	FMD_DC_SYNC_OK,
 	FMD_DC_SYNC_STALE,
+	FMD_DC_SYNC_DIRTY,
 };
+
+/* Whether a host's DC state is not known to be what the device has now */
+static inline bool fmd_dc_sync_behind(enum fmd_dc_sync sync)
+{
+	return sync == FMD_DC_SYNC_STALE || sync == FMD_DC_SYNC_DIRTY;
+}
 
 /*
  * One Dynamic Capacity Tag Information entry of Dynamic Capacity List Tags
@@ -2303,6 +2314,13 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev);
  * named in Add Capacity Response / Capacity Released records.
  */
 int fmd_dcd_poll_events(struct fmd_ctx *ctx);
+
+/*
+ * Read again every host of every DCD whose state is STALE or DIRTY, and a
+ * tag list that could not be read, whoever owns the device's event log.
+ * Return how many devices were read, or -1 if a read failed.
+ */
+int fmd_dcd_retry_stale(struct fmd_ctx *ctx);
 
 /* MCTP Event Notification listeners (src/events.c) */
 int fmd_events_init(struct fmd_ctx *ctx);

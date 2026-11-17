@@ -218,7 +218,9 @@ static int64_t now_ms(void)
 
 /*
  * Drain the DC event log when the poll interval has elapsed. Notifications
- * only shorten the wait; the timer is what works on every transport.
+ * only shorten the wait; the timer is what works on every transport. A DC
+ * host whose state is stale is read again on the same tick, whether or not
+ * the drain found anything, until it converges (fmd_dcd_retry_stale()).
  */
 static void poll_dc_events_if_due(struct fmd_ctx *ctx, int64_t now)
 {
@@ -236,6 +238,7 @@ static void poll_dc_events_if_due(struct fmd_ctx *ctx, int64_t now)
 		return;
 
 	fmd_dcd_poll_events(ctx);
+	fmd_dcd_retry_stale(ctx);
 	/* and the logs of the switches, on the same timer */
 	fmd_switch_events_poll(ctx);
 	ctx->next_dc_poll_ms = now_ms() + interval;
