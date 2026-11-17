@@ -1733,8 +1733,11 @@ static enum MHD_Result collect_dollar_param(void *cls, enum MHD_ValueKind kind,
  * unsupported query parameters for this resource"; the others are
  * ignored ("Shall ignore unknown or unsupported query parameters that do
  * not begin with $"). The extended error has one Base
- * QueryParameterUnsupported message ("Query parameter '%1' is not
- * supported.", Base 1.15.0) for each. A request of any method is
+ * QueryParameterUnsupported message for each, as the DMTF Base registry
+ * 1.15.0 (Base.1.15.0.json, where it was added) has it: Message "Query
+ * parameter '%1' is not supported.", Severity "Warning", Resolution
+ * "Correct or remove the query parameter and resubmit the request.";
+ * Base.1.24.0.json has the same three. A request of any method is
  * answered so: cxl-fmd's choice, as the clause has query parameters only
  * on GET. Returns false if there is none, and the request is handled as
  * usual; else true, the answer sent, and *@result what sending it gave.

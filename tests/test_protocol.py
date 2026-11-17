@@ -22,15 +22,21 @@ CONNECTIONS = "/redfish/v1/Fabrics/CXL/Connections"
 
 
 def unsupported(response, *params):
-    """A 501 whose extended error names each of @params."""
+    """
+    A 501 whose extended error names each of @params, with the Message,
+    Severity and Resolution of QueryParameterUnsupported in the DMTF Base
+    registry (Base.1.15.0.json; the same in Base.1.24.0.json).
+    """
     assert response.status_code == 501
     error = response.json()["error"]
     info = error["@Message.ExtendedInfo"]
     assert [m["MessageArgs"] for m in info] == [[p] for p in params]
     for m in info:
-        assert m["MessageId"].startswith("Base.")
-        assert m["MessageId"].endswith(".QueryParameterUnsupported")
-        assert m["MessageArgs"][0] in m["Message"]
+        assert m["MessageId"] == "Base.1.15.0.QueryParameterUnsupported"
+        assert m["Message"] == f"Query parameter '{m['MessageArgs'][0]}' is not supported."
+        assert m["Severity"] == "Warning"
+        assert m["Resolution"] == \
+            "Correct or remove the query parameter and resubmit the request."
 
 
 @pytest.mark.mock_topology("mock/fm-boots-first.json")
