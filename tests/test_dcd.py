@@ -71,6 +71,19 @@ class TestDCDDiscovery:
         assert dc["MemoryExtents"]["@odata.id"] == SLD + "/MemoryExtents"
         assert "#PCIeDevice.CXLReferenceDCMemory" in data["Actions"]
 
+    def test_ld_size_includes_extents(self, api_client):
+        """An LD's MemorySizeMiB is its static capacity plus its host's
+        extents (CXLLogicalDevice_v1.xml): the SLD's 16384 and its 4096 MiB
+        extent; the MLD's LD 0, 4096 with 2048 and 256; LD 1, 4096 with 2048
+        and the 1024 the file has host 1 not answered, which is listed, so
+        not pending, and counted (cxl-fmd's choice). Review F12."""
+        sizes = {}
+        for ld in (SLD_LD0, MLD + "/CXLLogicalDevices/0", MLD + "/CXLLogicalDevices/1"):
+            status, data = api_client.get(ld)
+            assert status == 200
+            sizes[ld] = data["MemorySizeMiB"]
+        assert list(sizes.values()) == [16384 + 4096, 4096 + 2048 + 256, 4096 + 2048 + 1024]
+
     def test_mld_device_class(self, api_client):
         status, data = api_client.get(MLD)
         assert status == 200
@@ -599,6 +612,24 @@ class TestDynamicCapacityRelease:
         ids = extent_ids(api_client, MLD)
         assert "ext_0_200000000" not in ids and "ext_0_2c0000000" not in ids
         assert "ext_1_200000000" in ids
+
+    def test_ld_size_follows_extents(self, api_client):
+        """MemorySizeMiB "shall equate to the sum of the dynamic capacity
+        extents and the static capacity assigned to this logical device"
+        (CXLLogicalDevice_v1.xml): it grows with an add, and goes back with
+        the release. Review F12."""
+        def size():
+            status, data = api_client.get(SLD_LD0)
+            assert status == 200
+            return data["MemorySizeMiB"]
+
+        assert size() == 16384 + 4096
+        status, _, _ = api_client.post(SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
+        assert status == 200
+        assert size() == 16384 + 4096 + 1024
+        assert api_client.delete(SLD + "/MemoryExtents/ext_0_500000000") == 204
+        assert size() == 16384 + 4096
 
     def test_add_then_delete_round_trip(self, api_client):
         status, _, _ = api_client.post(SLD_ADD, {

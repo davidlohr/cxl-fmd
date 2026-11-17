@@ -193,6 +193,40 @@ struct fmd_component *fmd_dc_host_component(struct fmd_component *dev, int host_
 	}
 }
 
+/*
+ * The bytes of the extents the host of LD @ld_idx has, as its 5603h last
+ * listed them: every one, as none is pending (dc_tags_check()). Each is a
+ * child of @dev with the host's Host ID; extents are rebuilt under
+ * dcd_lock, so it is taken, then the topology lock. 0 when @dev is not a
+ * DCD or has no such LD; UINT64_MAX if the sum does not fit.
+ */
+uint64_t fmd_dc_host_bytes(struct fmd_ctx *ctx, struct fmd_component *dev, int ld_idx)
+{
+	struct fmd_component *child;
+	uint64_t sum = 0;
+	int host_id;
+
+	if (!dev || !fmd_memdev_dcd(dev))
+		return 0;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	fmd_topology_rdlock(&ctx->topology);
+	host_id = fmd_dc_host_id(dev, ld_idx);
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+		if (host_id < 0 || ext->host_id != host_id)
+			continue;
+		if (__builtin_add_overflow(sum, ext->len, &sum)) {
+			sum = UINT64_MAX;
+			break;
+		}
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return sum;
+}
+
 struct fmd_dc_region *fmd_dc_find_region(struct fmd_component *dev, int host_id,
 					 uint8_t region_id)
 {

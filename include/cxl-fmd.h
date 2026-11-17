@@ -2188,6 +2188,13 @@ struct fmd_dcd_info *fmd_memdev_dcd(struct fmd_component *dev);
  */
 int fmd_dc_host_id(struct fmd_component *dev, int ld_idx);
 
+/*
+ * Bytes of dynamic capacity the host of LD @ld_idx holds: the sum of its
+ * extents. 0 for a device that is not a DCD; UINT64_MAX if it overflows.
+ * Takes ctx->dcd_lock and the topology read lock.
+ */
+uint64_t fmd_dc_host_bytes(struct fmd_ctx *ctx, struct fmd_component *dev, int ld_idx);
+
 /* floor(log2(v)); 0 for v <= 1 */
 static inline int fmd_ilog2_u64(uint64_t v)
 {

@@ -3176,7 +3176,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		return NULL;
 	char uri[512];
 	char name[64];
-	uint64_t mem_size_mib;
+	uint64_t mem_size_bytes, dc_bytes;
 	uint8_t health_status;
 	uint8_t media_status;
 	uint8_t qos_allocated = 0;
@@ -3197,7 +3197,10 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		if (ld_idx != 0)
 			return NULL;
 
-		mem_size_mib = sld->memdev.total_capacity * 256;
+		/* Total Capacity, in multiples of 256 MB (Table 8-309) */
+		if (__builtin_mul_overflow(sld->memdev.total_capacity, 256 * FMD_MIB,
+					   &mem_size_bytes))
+			mem_size_bytes = UINT64_MAX;
 		health_status = sld->health.health_status;
 		media_status = sld->health.media_status;
 		qos_caps = sld->memdev.qos_telemetry_caps;
@@ -3228,7 +3231,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		if (!ld)
 			return NULL;
 
-		mem_size_mib = ld->memory_size / (1024ULL * 1024);
+		mem_size_bytes = ld->memory_size;
 		health_status = ld->health.health_status;
 		media_status = ld->health.media_status;
 		/* Convert CXL format (fraction * 256) back to percentage with rounding */
@@ -3265,7 +3268,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		if (!ld)
 			return NULL;
 
-		mem_size_mib = ld->memory_size / (1024ULL * 1024);
+		mem_size_bytes = ld->memory_size;
 		health_status = ld->health.health_status;
 		media_status = ld->health.media_status;
 		/* Convert CXL format (fraction * 256) back to percentage with rounding */
@@ -3280,6 +3283,18 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	} else {
 		return NULL;
 	}
+
+	/*
+	 * MemorySizeMiB "shall equate to the sum of the dynamic capacity
+	 * extents and the static capacity assigned to this logical device"
+	 * (CXLLogicalDevice_v1.xml): the static capacity above plus the
+	 * extents the LD's host holds, summed in bytes and divided once.
+	 * That Total Capacity and the LD allocation leave the dynamic
+	 * capacity out is cxl-fmd's reading; CXL does not say.
+	 */
+	dc_bytes = fmd_dc_host_bytes(ctx, comp, ld_idx);
+	if (__builtin_add_overflow(mem_size_bytes, dc_bytes, &mem_size_bytes))
+		mem_size_bytes = UINT64_MAX;
 
 	enum rf_health health = fmd_map_health_status(health_status);
 	enum rf_state state = fmd_map_media_status(media_status);
@@ -3298,7 +3313,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"@odata.type", "#CXLLogicalDevice.v1_5_0.CXLLogicalDevice",
 		"Id", ld_id,
 		"Name", name,
-		"MemorySizeMiB", (json_int_t)mem_size_mib,
+		"MemorySizeMiB", (json_int_t)(mem_size_bytes / FMD_MIB),
 		"SemanticsSupported", semantics,
 		"Status", "State", rf_state_to_str(state),
 		         "Health", rf_health_to_str(health)

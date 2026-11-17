@@ -65,6 +65,7 @@ table is cxl-fmd's proposal, not DSP0288 text.
 | Set DC Region Configuration (5602h) | Region Block Size, Sanitize on Release | `MemoryRegion` | PATCH `BlockSizeMiB`, `SanitizeOnRelease` | Yes |
 | Get DC Region Extent Lists (5603h) | Extent Start DPA | `MemoryExtent` | `ExtentOffsetMiB`, in the DPA space of the host whose list has the extent (Comment 2) | Yes |
 | Get DC Region Extent Lists | Extent Length | `MemoryExtent` | `ExtentSizeMiB` | Yes |
+| Get DC Region Extent Lists | Extent Length, summed over the host's extents | `CXLLogicalDevice` | `MemorySizeMiB`: the LD's static capacity plus this sum, in bytes, divided into MiB once. The schema says it "shall equate to the sum of the dynamic capacity extents and the static capacity assigned to this logical device" (`CXLLogicalDevice_v1.xml`). The static capacity is Total Capacity of Identify Memory Device for an SLD and the LD allocation (5401h) for an MLD or Multi-Headed device; that neither has the dynamic capacity in it is cxl-fmd's reading, as CXL does not say. Every extent 5603h lists counts (Comment 5) | Yes |
 | Get DC Region Extent Lists | Extent Tag | `MemoryExtent` | `Tag`; left out when all zero | Yes |
 | Get DC Region Extent Lists | Shared Extent Sequence | `MemoryExtent` | `SequenceNumber` | Yes |
 | Get DC Region Extent Lists | Host ID of the request | `MemoryExtent` | the `<ld>` of the Id `ext_<ld>_<hex DPA>`, and the one link of `Links/MemoryRegions` | Yes |

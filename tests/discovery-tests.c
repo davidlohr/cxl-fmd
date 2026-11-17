@@ -3077,6 +3077,55 @@ out:
 	report("an FM reference no host holds", before);
 }
 
+/* MemorySizeMiB of CXLLogicalDevice @ld of @dev, or -1 */
+static long long ld_size_mib(struct fmd_ctx *ctx, struct fmd_component *dev, const char *ld)
+{
+	json_t *j = fmd_redfish_cxl_logical_device(ctx, dev->id, dev->id, ld);
+	json_t *v = json_object_get(j, "MemorySizeMiB");
+	long long ret = json_is_integer(v) ? (long long)json_integer_value(v) : -1;
+
+	json_decref(j);
+	return ret;
+}
+
+/*
+ * Review F12: an LD's MemorySizeMiB "shall equate to the sum of the dynamic
+ * capacity extents and the static capacity assigned to this logical device"
+ * (CXLLogicalDevice_v1.xml). Host 1 of a DCD MLD gets two 256 MB extents,
+ * under a tag with an add of host 1 outstanding: LD 1 grows by 512 MiB,
+ * LD 0 does not; when 5603h no longer lists them, it
+ * is back.
+ */
+static void test_dc_ld_size(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev = hw_dcd_mld(ctx, &ep, 0xde, 2);
+	struct dc_ext e[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag, 0 },
+	};
+	long long ld0, ld1;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+	ld0 = ld_size_mib(ctx, dev, "0");
+	ld1 = ld_size_mib(ctx, dev, "1");
+	answer_dc_tags(ep, 1, 1, 0x03, &(struct dc_tag_row){ dc_tag, false,
+		       { 1 }, 1, { 1 }, 1 }, 1);
+	dc_refresh_host_tags(ctx, ep, dev, 1, e, 2);
+	CHECK(ld_size_mib(ctx, dev, "1") == ld1 + 512 && ld_size_mib(ctx, dev, "0") == ld0,
+	      "LD 1 %lld MiB, LD 0 %lld MiB; %lld and %lld before, LD 1's host has 512 MiB",
+	      ld_size_mib(ctx, dev, "1"), ld_size_mib(ctx, dev, "0"), ld1, ld0);
+	dc_refresh_host(ctx, ep, dev, 1, 1ULL << 30, 4, 0, NULL, 0);
+	CHECK(ld_size_mib(ctx, dev, "1") == ld1, "LD 1 %lld MiB with no extents, not %lld",
+	      ld_size_mib(ctx, dev, "1"), ld1);
+out:
+	fmd_ctx_free(ctx);
+	report("an LD's size includes its host's extents", before);
+}
+
 /*
  * Whether 5603h lists an extent the host has not responded to is not said
  * (only Get Dynamic Capacity Extent List, 4801h, excludes them): host 1's
@@ -7600,6 +7649,7 @@ int main(void)
 	test_dc_tags_pending();
 	test_dc_tags_accepted_and_pending();
 	test_dc_tags_unreadable();
+	test_dc_ld_size();
 	test_dc_tags_validity0();
 	test_dc_tags_ld200();
 	test_dc_tags_generation_restart();

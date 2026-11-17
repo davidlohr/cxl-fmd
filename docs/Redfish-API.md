@@ -315,7 +315,7 @@ cxl-fmd's.
 | Get LD Info | QoS Telemetry Capabilities[0]: Egress Port Congestion Supported | `Port` | `CXL/QoSTelemetryCapabilities/EgressPortBackpressureSupported` | See Comment 1. | Yes, for an MLD on a switch port. An MLD that is not on one has no `Port`: cxl-fmd serves it on its `PCIeDevice` as `CXLDevice/EgressPortCongestionSupport` (cxl-fmd's choice) |
 | Get LD Info | QoS Telemetry Capabilities[1]: Temporary Throughput Reduction Supported | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionSupported` | | Yes |
 | Get LD Allocations | Memory Granularity | `MemoryDomain` | `MemoryChunkIncrementMiB` | | Yes |
-| Get LD Allocations | Memory Granularity, LD Allocation List | `CXLLogicalDevice` | `MemorySizeMiB` | | Yes |
+| Get LD Allocations | Memory Granularity, LD Allocation List | `CXLLogicalDevice` | `MemorySizeMiB` | On a DCD, plus the extents the LD's host holds: the schema has it "equate to the sum of the dynamic capacity extents and the static capacity assigned to this logical device" ([DCD-FM-API.md](DCD-FM-API.md), Table 3). | Yes |
 | Get QoS Control | QoS Telemetry Control[0]: Egress Port Congestion Enable | `Port` | `CXL/Congestion/CongestionTelemetryEnabled` | | Yes |
 | Get QoS Control | QoS Telemetry Control[1]: Temporary Throughput Reduction Enable | `PCIeDevice` | `CXLDevice/TemporaryThroughputReductionEnabled` | | Yes |
 | Get QoS Control | Egress Moderate Percentage | `Port` | `CXL/Congestion/EgressModeratePercentage` | | Yes |
@@ -1802,6 +1802,7 @@ Changes from the fixes of the external design review (branch
 | Connection `POST` with `InitiatorEndpointGroups` or `TargetEndpointGroups` | ignored: `201` from the Endpoints alone | `400`, nothing bound |
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
 | `GET` of a DCD's `MemoryRegion` or `MemoryExtent` when the host's LD is in the Pending Reference Bitmap of a tag (5608h), and of an extent a mock topology file declares `pending` | `Pending` `true` in the region's `MemoryExtents[]` and `Status.State` `Starting` for every extent of that host and tag, accepted ones too | `Pending` `false` and `Enabled` for every extent 5603h lists; the add is in the tag's `PendingLDs` of `Oem/Cxl/DynamicCapacityTags` only |
+| `GET` of a `CXLLogicalDevice` of a DCD | `MemorySizeMiB` the static capacity only (Total Capacity, or the LD allocation) | the static capacity plus every extent the LD's host holds, so it changes with an add or a release; a non-DCD device is unchanged |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
 
 Mock topologies and discovery:
