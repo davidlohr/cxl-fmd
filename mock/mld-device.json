@@ -51,7 +51,13 @@
                 "get_partition_info",
                 "get_health_info",
                 "get_alert_config",
-                "get_poison_list"
+                "get_poison_list",
+                "get_security_state",
+                "set_passphrase",
+                "disable_passphrase",
+                "unlock",
+                "freeze_security_state",
+                "passphrase_secure_erase"
             ],
 
             "logical_devices": [

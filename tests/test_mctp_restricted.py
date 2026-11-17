@@ -51,6 +51,11 @@ def partitionable(volatile=True):
                                           "persistent_capacity_mb": 0,
                                           "partition_align_mb": 256})
     active = 16384 if volatile else 0
+    # the defaults list none of the security commands (see mock-topology.md)
+    dev["cel_commands"] = ["identify", "get_supported_logs", "get_log", "memdev_identify",
+                           "get_partition_info", "get_health_info", "set_passphrase",
+                           "disable_passphrase", "unlock", "freeze_security_state",
+                           "passphrase_secure_erase"]
     dev["partition_info"] = {"active_volatile_mb": active,
                              "active_persistent_mb": 16384 - active,
                              "next_volatile_mb": 0, "next_persistent_mb": 0}
@@ -134,9 +139,9 @@ def test_carried_out_with_the_flag(daemon):
 
 @pytest.mark.parametrize("args", [(), (FLAG,)])
 def test_action_on_no_memory(daemon, args):
-    """An action of a Memory that is not there is refused, in a mock too
-    (it was 200 there)."""
+    """An action of a Memory that is not there is 404, in a mock too (it
+    was 200 there, and 400 on hardware)."""
     base = daemon(partitionable(), *args)
     response = requests.post(f"{base}/redfish/v1/Chassis/{DEV}/Memory/nonesuch"
                              "/Actions/Memory.FreezeSecurityState", json={}, timeout=30)
-    assert response.status_code == 400
+    assert response.status_code == 404

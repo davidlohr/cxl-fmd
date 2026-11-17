@@ -178,6 +178,59 @@ static enum MHD_Result send_mctp_restricted(struct MHD_Connection *conn)
 			  "start cxl-fmd with --allow-mctp-restricted");
 }
 
+/*
+ * The answer to a security action (fmd_redfish_ld_security_action() and
+ * the Memory aliases): 200 with no body when it was carried out; 404 if
+ * there is no such resource or action; 400 for a request that is not
+ * right, or that the device answered Invalid Input, Incorrect Passphrase
+ * or Invalid Payload Length; 409 for Invalid Security State, or a command
+ * that may not be sent (send_mctp_restricted()); 501 if the device's CEL
+ * does not list the command, the device answered Unsupported, or cxl-fmd
+ * has no route to the LD; 503 for Retry Required or Busy; else 500.
+ * cxl-fmd's choices.
+ */
+static enum MHD_Result send_security_result(struct MHD_Connection *conn, int rc,
+					    const char *msg)
+{
+	char buf[256];
+	unsigned int status;
+	const char *what;
+
+	switch (rc) {
+	case 0:
+		return send_json_response(conn, MHD_HTTP_OK, NULL);
+	case FMD_MCTP_RESTRICTED:
+		return send_mctp_restricted(conn);
+	case -ENOENT:
+		return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource or action not found");
+	case -EINVAL:
+		status = MHD_HTTP_BAD_REQUEST;
+		what = "The request is not valid";
+		break;
+	case -EBUSY:
+		status = MHD_HTTP_CONFLICT;
+		what = "The device's security state does not allow it";
+		break;
+	case -EAGAIN:
+		status = MHD_HTTP_SERVICE_UNAVAILABLE;
+		what = "The device cannot do it now; try again";
+		break;
+	case -EOPNOTSUPP:
+		status = MHD_HTTP_NOT_IMPLEMENTED;
+		what = "The device does not support the command";
+		break;
+	default:
+		status = MHD_HTTP_INTERNAL_SERVER_ERROR;
+		what = "The command failed";
+		break;
+	}
+	if (msg)
+		snprintf(buf, sizeof(buf), "%s: %s", what, msg);
+	else
+		snprintf(buf, sizeof(buf), "%s", what);
+	return send_error(conn, status, buf);
+}
+
 /* An error with the Allow header a 405 has to have (RFC 9110 Section 15.5.6) */
 static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
 					unsigned int status, const char *message,
@@ -1114,99 +1167,41 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 				  "Action failed");
 	}
 
-	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetPassphrase */
-	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetPassphrase",
+	/*
+	 * POST .../Memory/{mem}/Actions/Memory.{action}: the deprecated
+	 * aliases of the CXLLogicalDevice security actions
+	 */
+	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/{action}",
 			norm_url, params, 8)) {
-		rc = fmd_redfish_action_set_passphrase(ctx, params[0], params[1],
-						       body, body_size);
+		static const char prefix[] = "Memory.";
+		const char *action = params[2];
+		const char *msg = NULL;
+
+		rc = -ENOENT;
+		if (action && !strncmp(action, prefix, strlen(prefix))) {
+			action += strlen(prefix);
+			if (!strcmp(action, "SetPassphrase"))
+				rc = fmd_redfish_action_set_passphrase(ctx, params[0], params[1],
+								       body, body_size, &msg);
+			else if (!strcmp(action, "SetMasterPassphrase"))
+				rc = fmd_redfish_action_set_master_passphrase(ctx, params[0],
+						params[1], body, body_size, &msg);
+			else if (!strcmp(action, "DisablePassphrase"))
+				rc = fmd_redfish_action_disable_passphrase(ctx, params[0],
+						params[1], body, body_size, &msg);
+			else if (!strcmp(action, "DisableMasterPassphrase"))
+				rc = fmd_redfish_action_disable_master_passphrase(ctx, params[0],
+						params[1], body, body_size, &msg);
+			else if (!strcmp(action, "FreezeSecurityState"))
+				rc = fmd_redfish_action_freeze_security_state(ctx, params[0],
+						params[1], &msg);
+			else if (!strcmp(action, "SecureEraseUnit"))
+				rc = fmd_redfish_action_secure_erase_unit(ctx, params[0],
+						params[1], body, body_size, &msg);
+		}
 		free_params(params, 8);
 		free(norm_url);
-
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
-		if (rc == FMD_MCTP_RESTRICTED)
-			return send_mctp_restricted(conn);
-		return send_error(conn, MHD_HTTP_BAD_REQUEST,
-				  "Action failed");
-	}
-
-	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetMasterPassphrase */
-	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetMasterPassphrase",
-			norm_url, params, 8)) {
-		rc = fmd_redfish_action_set_master_passphrase(ctx, params[0], params[1],
-							      body, body_size);
-		free_params(params, 8);
-		free(norm_url);
-
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
-		if (rc == FMD_MCTP_RESTRICTED)
-			return send_mctp_restricted(conn);
-		return send_error(conn, MHD_HTTP_BAD_REQUEST,
-				  "Action failed");
-	}
-
-	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisablePassphrase */
-	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisablePassphrase",
-			norm_url, params, 8)) {
-		rc = fmd_redfish_action_disable_passphrase(ctx, params[0], params[1],
-							   body, body_size);
-		free_params(params, 8);
-		free(norm_url);
-
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
-		if (rc == FMD_MCTP_RESTRICTED)
-			return send_mctp_restricted(conn);
-		return send_error(conn, MHD_HTTP_BAD_REQUEST,
-				  "Action failed");
-	}
-
-	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisableMasterPassphrase */
-	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisableMasterPassphrase",
-			norm_url, params, 8)) {
-		rc = fmd_redfish_action_disable_master_passphrase(ctx, params[0], params[1],
-								  body, body_size);
-		free_params(params, 8);
-		free(norm_url);
-
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
-		if (rc == FMD_MCTP_RESTRICTED)
-			return send_mctp_restricted(conn);
-		return send_error(conn, MHD_HTTP_BAD_REQUEST,
-				  "Action failed");
-	}
-
-	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.FreezeSecurityState */
-	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.FreezeSecurityState",
-			norm_url, params, 8)) {
-		rc = fmd_redfish_action_freeze_security_state(ctx, params[0], params[1]);
-		free_params(params, 8);
-		free(norm_url);
-
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
-		if (rc == FMD_MCTP_RESTRICTED)
-			return send_mctp_restricted(conn);
-		return send_error(conn, MHD_HTTP_BAD_REQUEST,
-				  "Action failed");
-	}
-
-	/* POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SecureEraseUnit */
-	if (match_route("/redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SecureEraseUnit",
-			norm_url, params, 8)) {
-		rc = fmd_redfish_action_secure_erase_unit(ctx, params[0], params[1],
-							  body, body_size);
-		free_params(params, 8);
-		free(norm_url);
-
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
-		if (rc == FMD_MCTP_RESTRICTED)
-			return send_mctp_restricted(conn);
-		return send_error(conn, MHD_HTTP_BAD_REQUEST,
-				  "Action failed");
+		return send_security_result(conn, rc, msg);
 	}
 
 	/* POST /redfish/v1/Fabrics/{fab}/Switches/{sw}/Ports/{port}/Actions/Port.ResetPPB */
@@ -1257,6 +1252,26 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		return send_errno(conn, rc, msg);
+	}
+
+	/*
+	 * POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.{action}:
+	 * the security actions (DSP0288 1.4.0 Table 1). The DC actions are
+	 * matched above.
+	 */
+	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/Actions/{action}",
+			norm_url, params, 8)) {
+		static const char prefix[] = "CXLLogicalDevice.";
+		const char *msg = NULL;
+
+		rc = -ENOENT;
+		if (params[3] && !strncmp(params[3], prefix, strlen(prefix)))
+			rc = fmd_redfish_ld_security_action(ctx, params[0], params[1],
+							    params[2], params[3] + strlen(prefix),
+							    body, body_size, &msg);
+		free_params(params, 8);
+		free(norm_url);
+		return send_security_result(conn, rc, msg);
 	}
 
 	/* POST .../PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory */

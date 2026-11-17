@@ -97,11 +97,11 @@ whether it serves the mapping, and where it serves it under another name.
 | Get Alert Configuration | Valid Alerts and Programmable Alerts | `MemoryMetrics` | `CXL/AlertCapabilities` | | No |
 | Scan Media | N/A | `Memory` | `ScanMedia` action | | Yes |
 | Get Security State | Security State | `Memory` | `SecurityStates` | | Yes |
-| Set Passphrase | All | `CXLLogicalDevice` | `SetPassphrase` action | | No. Served on `Memory`, as DSP0288 1.2.0 mapped it (see "Security actions" below) |
-| Disable Passphrase | All | `CXLLogicalDevice` | `DisablePassphrase` action | | No. Served on `Memory`, as DSP0288 1.2.0 mapped it |
-| Freeze Security State | N/A | `CXLLogicalDevice` | `FreezeSecurityState` action | | No. Served on `Memory`, as DSP0288 1.2.0 mapped it |
-| Passphrase Secure Erase | All | `CXLLogicalDevice` | `PassphraseSecureErase` action | | No. Served on `Memory` as `SecureEraseUnit`, as DSP0288 1.2.0 mapped it |
-| Unlock | All | `CXLLogicalDevice` | `Unlock` action | | No |
+| Set Passphrase | All | `CXLLogicalDevice` | `SetPassphrase` action | | Yes, when the LD's CEL lists it (see "Security actions" below) |
+| Disable Passphrase | All | `CXLLogicalDevice` | `DisablePassphrase` action | | Yes, likewise |
+| Freeze Security State | N/A | `CXLLogicalDevice` | `FreezeSecurityState` action | | Yes, likewise |
+| Passphrase Secure Erase | All | `CXLLogicalDevice` | `PassphraseSecureErase` action | | Yes, likewise |
+| Unlock | All | `CXLLogicalDevice` | `Unlock` action | | Yes, likewise |
 
 ### Comments for Table 1
 
@@ -115,17 +115,61 @@ whether it serves the mapping, and where it serves it under another name.
 
 ### Security actions
 
-DSP0288 1.2.0 mapped the security commands to actions of `Memory`: Set
-Passphrase to `SetMasterPassphrase` (Passphrase Type 00h) and
-`SetPassphrase` (01h), Disable Passphrase to `DisableMasterPassphrase`
-(00h) and `DisablePassphrase` (01h), Freeze Security State to
-`FreezeSecurityState`, and Passphrase Secure Erase to `SecureEraseUnit`.
-DSP0288 1.3.0 changed Set Passphrase, Disable Passphrase, Freeze Security
-State and Passphrase Secure Erase to the `SetPassphrase`,
-`DisablePassphrase`, `FreezeSecurityState` and `PassphraseSecureErase`
-actions of `CXLLogicalDevice`, and added Unlock (Annex A). cxl-fmd serves
-the 1.2.0 mapping, on `Memory`, and none of these actions on
-`CXLLogicalDevice` (see Known Gaps).
+DSP0288 1.4.0 Table 1 maps Set Passphrase, Disable Passphrase, Freeze
+Security State, Passphrase Secure Erase and Unlock (CXL r4.0 Section
+8.2.10.9.6) to the `SetPassphrase`, `DisablePassphrase`,
+`FreezeSecurityState`, `PassphraseSecureErase` and `Unlock` actions of
+`CXLLogicalDevice`; 1.3.0 moved the first four there from `Memory` and
+added Unlock (DSP0288 Annex A). Get Security State stays on `Memory`
+(`SecurityStates`). cxl-fmd serves them at
+`/redfish/v1/Chassis/{id}/PCIeDevices/{id}/CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.{action}`,
+on LD 0 of an SLD and on each LD of an MLD (through the tunnel to the LD),
+with the parameters of `CXLLogicalDevice_v1`:
+
+| Action | Parameters | Command and payload |
+|--------|------------|---------------------|
+| `SetPassphrase` | `PassphraseType`, `Passphrase`, `NewPassphrase` | Set Passphrase (4501h, Table 8-336) |
+| `DisablePassphrase` | `PassphraseType`, `Passphrase` | Disable Passphrase (4502h, Table 8-337) |
+| `Unlock` | `PassphraseType` (`User` only), `Passphrase` | Unlock (4503h, Table 8-338) |
+| `FreezeSecurityState` | none (the body is not read) | Freeze Security State (4504h), no payload |
+| `PassphraseSecureErase` | `PassphraseType`, `Passphrase` | Passphrase Secure Erase (4505h, Table 8-339) |
+
+`PassphraseType` `Master` is Passphrase Type 00h and `User` 01h. Unlock
+"supplies the user passphrase" (Section 8.2.10.9.6.4) and its payload has
+no Passphrase Type, so `Master` is `400` there. A passphrase field is 20h
+bytes: a `Passphrase` or `NewPassphrase` of more than 32 bytes (of UTF-8)
+is `400`, not cut, and a shorter one is padded with zero bytes (cxl-fmd's
+choices: CXL gives the field no encoding).
+
+An action is in the LD's `Actions`, and carried out, only when
+
+- the LD's Command Effects Log lists its command: an SLD's CEL, or the
+  LD's own, read through the tunnel. One whose CEL could not be read is
+  taken to support none of them (cxl-fmd's choice), and so is a mock
+  device whose `cel_commands` does not list them; the `POST` is then
+  `501`;
+- the command may be sent: these commands are O4 for MCTP (see "Commands
+  restricted on MCTP"), so without `--allow-mctp-restricted` they are
+  served only on an SLD on the kernel's mailbox, and the `POST` is `409`
+  elsewhere.
+
+The pool LDs of a Multi-Headed device have none: cxl-fmd sends no Memory
+Device command to one (`501`). What the device answers is mapped by
+cxl-fmd's choice: Invalid Input, Incorrect Passphrase and Invalid Payload
+Length `400`; Invalid Security State `409`; Unsupported and Unsupported
+Mailbox or CCI `501`; Retry Required and Busy `503`; any other, or a
+response that cannot be read, `500`. Success is `200` with no body.
+
+The actions DSP0288 1.2.0 mapped to `Memory` (`SetPassphrase` and
+`DisablePassphrase` for the user passphrase, `SetMasterPassphrase` and
+`DisableMasterPassphrase` for the master one, `FreezeSecurityState`, and
+`SecureEraseUnit` for Passphrase Secure Erase) are deprecated aliases of
+these, on the `Memory` of the LD. They take the request they took
+(`Passphrase` and `NewPassphrase`; `PassphraseType` and `Passphrase` for
+`SecureEraseUnit`), are served and answered as the `CXLLogicalDevice`
+action is, and will be removed. The deprecation is cxl-fmd's: the
+`Memory` schema does not deprecate them. There is no `Memory` alias of
+`Unlock`, and `Memory.UnlockUnit` is not served (`404`).
 
 ### Life Used
 
@@ -239,14 +283,15 @@ security commands. Without the option:
 
 - a request that would send one of them is `409`, with nothing sent or
   changed: `PATCH` of a `Memory` (Set Partition Info), its `ScanMedia` and
-  security actions, a `"Volatile"` chunk `POST` on an SLD with
+  security actions, the security actions of a `CXLLogicalDevice` (see
+  "Security actions"), a `"Volatile"` chunk `POST` on an SLD with
   partitionable capacity and the `DELETE` of such a chunk (see "Staged
   chunks"). The check comes after the resource is found (`404`, or `400`
   for an action of a `Memory` that is not there), before the body is read.
   A chunk `POST` that a Connection refuses is `409` for that first;
-- the `Memory` of such a device has none of these actions in `Actions` (no
-  `Actions` at all if none is left). `SecurityStates` (Get Security State,
-  4500h, "O" for MCTP) is served.
+- the `Memory` and the `CXLLogicalDevice`s of such a device have none of
+  these actions in `Actions` (no `Actions` at all if none is left).
+  `SecurityStates` (Get Security State, 4500h, "O" for MCTP) is served.
 
 Which routes count as MCTP messages is cxl-fmd's reading:
 
@@ -485,12 +530,17 @@ Currently implemented write operations:
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}` - Set Timestamp
 - `PATCH /redfish/v1/Chassis/{id}/Memory/{mem}` - Set Partition Info
 - `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.ScanMedia` - Scan Media
-- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetPassphrase` - Set User Passphrase
-- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetMasterPassphrase` - Set Master Passphrase
-- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisablePassphrase` - Disable User Passphrase
-- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisableMasterPassphrase` - Disable Master Passphrase
-- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.FreezeSecurityState` - Freeze Security State
-- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SecureEraseUnit` - Secure Erase Unit
+- `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.SetPassphrase` - Set Passphrase
+- `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DisablePassphrase` - Disable Passphrase
+- `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.Unlock` - Unlock
+- `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.FreezeSecurityState` - Freeze Security State
+- `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.PassphraseSecureErase` - Passphrase Secure Erase
+- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetPassphrase` - Set Passphrase, user (deprecated alias)
+- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SetMasterPassphrase` - Set Passphrase, master (deprecated alias)
+- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisablePassphrase` - Disable Passphrase, user (deprecated alias)
+- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.DisableMasterPassphrase` - Disable Passphrase, master (deprecated alias)
+- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.FreezeSecurityState` - Freeze Security State (deprecated alias)
+- `POST /redfish/v1/Chassis/{id}/Memory/{mem}/Actions/Memory.SecureEraseUnit` - Passphrase Secure Erase (deprecated alias)
 - `POST /redfish/v1/Fabrics/CXL/Switches/{sw}/Ports/{port}/Actions/Port.ResetPPB` - Reset PPB
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}` - Set DC Region Configuration
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd` - Initiate Dynamic Capacity Add
@@ -586,10 +636,10 @@ All error responses follow the Redfish error format with an `error` object conta
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP") |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception`; "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
-| 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.15.0.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
+| 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.15.0.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
 | 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
@@ -892,12 +942,17 @@ Zones represent Virtual CXL Switches (VCS) as access domains. Each Zone contains
 |----------|--------|-------------|
 | `.../Ports/{port}/Actions/Port.ResetPPB` | POST | Reset Physical Port PPB (offered on a DSP only) |
 | `.../Memory/{mem}/Actions/Memory.ScanMedia` | POST | Scan media for errors |
-| `.../Memory/{mem}/Actions/Memory.SetPassphrase` | POST | Set user passphrase |
-| `.../Memory/{mem}/Actions/Memory.SetMasterPassphrase` | POST | Set master passphrase |
-| `.../Memory/{mem}/Actions/Memory.DisablePassphrase` | POST | Disable user passphrase |
-| `.../Memory/{mem}/Actions/Memory.DisableMasterPassphrase` | POST | Disable master passphrase |
-| `.../Memory/{mem}/Actions/Memory.FreezeSecurityState` | POST | Freeze security state |
-| `.../Memory/{mem}/Actions/Memory.SecureEraseUnit` | POST | Secure erase |
+| `.../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.SetPassphrase` | POST | Set the user or master passphrase (see "Security actions") |
+| `.../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DisablePassphrase` | POST | Disable the user or master passphrase |
+| `.../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.Unlock` | POST | Unlock with the user passphrase |
+| `.../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.FreezeSecurityState` | POST | Freeze the security state |
+| `.../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.PassphraseSecureErase` | POST | Passphrase secure erase |
+| `.../Memory/{mem}/Actions/Memory.SetPassphrase` | POST | Set user passphrase (deprecated alias) |
+| `.../Memory/{mem}/Actions/Memory.SetMasterPassphrase` | POST | Set master passphrase (deprecated alias) |
+| `.../Memory/{mem}/Actions/Memory.DisablePassphrase` | POST | Disable user passphrase (deprecated alias) |
+| `.../Memory/{mem}/Actions/Memory.DisableMasterPassphrase` | POST | Disable master passphrase (deprecated alias) |
+| `.../Memory/{mem}/Actions/Memory.FreezeSecurityState` | POST | Freeze security state (deprecated alias) |
+| `.../Memory/{mem}/Actions/Memory.SecureEraseUnit` | POST | Passphrase secure erase (deprecated alias) |
 | `/redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` | POST | Unbind vPPB with Simulate Surprise Hot-Remove (cxl-fmd's Oem action, switch-attached Connections only) |
 
 **Note:** vPPB Bind and Unbind are done through the Connections API, a
@@ -1747,9 +1802,9 @@ In summary:
    host. A head that presents an MLD cannot be bound per LD, and a binding
    found on one is `Enabled` with `Health` `Warning` and no chunks (see
    "Binding").
-5. The security actions are served on `Memory`, not on
-   `CXLLogicalDevice`, where DSP0288 1.3.0 and 1.4.0 put them (see
-   "DSP0288 mappings").
+5. The security actions are not served on the pool LDs of a
+   Multi-Headed device, nor on a device whose CEL could not be read (see
+   "Security actions").
 6. The event logs of a Multi-Headed device are not read (see "Event logs
    and switch events").
 7. A device on a switch port is taken to be removed when Get Physical Port
@@ -1849,9 +1904,9 @@ These are known gaps in what cxl-fmd does:
 
 These are known gaps against DSP0288 1.4.0 (see Tables 1 and 2):
 
-- The security actions are served on `Memory`, as DSP0288 1.2.0 mapped
-  them, not as actions of `CXLLogicalDevice`, where 1.3.0 and 1.4.0 map
-  them; `Unlock` is not served at all.
+- The security actions DSP0288 1.2.0 mapped to `Memory` are still served
+  there, as deprecated aliases of the `CXLLogicalDevice` actions (see
+  "Security actions").
 - `Status/Conditions` is not served: Comments 3 and 4 of Table 1 are not
   met.
 
@@ -2106,7 +2161,15 @@ Changes from the fixes of the external design review (branch
 | `GET` of the `PCIeDevice` (`CXLDevice.DynamicCapacity`), `MemoryRegion`s and `MemoryExtent`s of a DCD on hardware whose Get DCD Info (5600h) failed at discovery other than with Unsupported (Retry Required, Internal Error) | no Dynamic Capacity, for good | none until a `--rescan` reads Get DCD Info (with the backoff and cap of "Devices that are not ready"); then the DCD as at discovery, its DC event notification asked for |
 | `PATCH` of a `Memory`; `POST` of its `ScanMedia`, `SetPassphrase`, `SetMasterPassphrase`, `DisablePassphrase`, `DisableMasterPassphrase`, `FreezeSecurityState` or `SecureEraseUnit`; a `"Volatile"` chunk `POST` on an SLD with partitionable capacity, and the `DELETE` of such a chunk: on hardware on any device but an SLD on the kernel's mailbox (`--ioctl`), and on any device of a mock | carried out: the command sent as an MCTP message (tunnelled for an LD of an MLD) whenever a client asked | `409` with nothing sent or changed, unless cxl-fmd is started with the new `--allow-mctp-restricted` (CXL r4.0 Table 8-308 note 4; see "Commands restricted on MCTP") |
 | `GET` of such a device's `Memory` | `Actions` with `ScanMedia` and the six security actions | no `Actions`, unless `--allow-mctp-restricted` |
-| `POST` of an action of a `Memory` that is not there, in a mock | `200` | `400`, as on hardware |
+| `POST` of an action of a `Memory` that is not there | `200` in a mock, `400` on hardware | `404` |
+| `GET` of a `CXLLogicalDevice` of an SLD or MLD | no security actions | `Actions` with `#CXLLogicalDevice.SetPassphrase`, `DisablePassphrase`, `Unlock`, `FreezeSecurityState` and `PassphraseSecureErase`, each whose command the LD's CEL lists, when it may be sent (see "Security actions"); a DCD's DC actions beside them |
+| `POST` of those actions | `404` | carried out, `200`; `400` for a missing or wrong parameter, a `PassphraseType` other than `User` or `Master` (`Master` on `Unlock`), or a passphrase of more than 32 bytes; `501` if the CEL does not list the command; `409` without `--allow-mctp-restricted` but on an SLD on the kernel's mailbox |
+| `POST` of a security action of a pool LD of a Multi-Headed device (`.../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.Unlock` and the others) | `404` | `501`: cxl-fmd sends no Memory Device command to a pool LD, and its `CXLLogicalDevice` has none of these actions |
+| `GET` of a `Memory`: its security actions | all six, on every device | as the `CXLLogicalDevice`'s: only those whose command the CEL lists. A device whose CEL could not be read, and a mock device whose `cel_commands` does not list them (the defaults), have none. The six are deprecated aliases |
+| `POST` of a `Memory` security action whose command the CEL does not list | sent (`200`, or `400` if the device refused it) | `501`, nothing sent |
+| `POST` of a `Memory` security action with a passphrase of more than 32 bytes | the first 32 bytes sent | `400`, nothing sent |
+| `POST` of a `Memory` or `CXLLogicalDevice` security action the device answers with an error | `400` "Action failed" | Invalid Input, Incorrect Passphrase or Invalid Payload Length `400`; Invalid Security State `409`; Unsupported `501`; Retry Required or Busy `503`; any other `500`; the message names the return code |
+| A mock topology's `cel_commands` | `get_security_state` to `passphrase_secure_erase` were not known | known (see [mock-topology.md](mock-topology.md)); an MLD's LDs have the MLD's `cel_commands`; `cxl_mld_0` of `mock/mld-device.json` lists all six |
 
 Mock topologies and discovery:
 

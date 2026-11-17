@@ -589,6 +589,18 @@ static uint64_t parse_cel_commands(json_t *jcel)
 			cmds |= FMD_CMD_GET_PARTITION_INFO;
 		else if (strcmp(cmd, "set_partition_info") == 0)
 			cmds |= FMD_CMD_SET_PARTITION_INFO;
+		else if (strcmp(cmd, "get_security_state") == 0)
+			cmds |= FMD_CMD_GET_SECURITY_STATE;
+		else if (strcmp(cmd, "set_passphrase") == 0)
+			cmds |= FMD_CMD_SET_PASSPHRASE;
+		else if (strcmp(cmd, "disable_passphrase") == 0)
+			cmds |= FMD_CMD_DISABLE_PASSPHRASE;
+		else if (strcmp(cmd, "unlock") == 0)
+			cmds |= FMD_CMD_UNLOCK;
+		else if (strcmp(cmd, "freeze_security_state") == 0)
+			cmds |= FMD_CMD_FREEZE_SECURITY_STATE;
+		else if (strcmp(cmd, "passphrase_secure_erase") == 0)
+			cmds |= FMD_CMD_PASSPHRASE_SECURE_ERASE;
 		else if (strcmp(cmd, "get_health_info") == 0)
 			cmds |= FMD_CMD_GET_HEALTH_INFO;
 		else if (strcmp(cmd, "get_alert_config") == 0)
@@ -1903,6 +1915,14 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 					mock_add(ctx, &ld->base, &mld->base);
 				}
 			}
+		}
+
+		/* an LD's commands are its MLD's cel_commands */
+		{
+			struct fmd_component *child;
+
+			fmd_for_each_child_type(&mld->base, child, FMD_COMPONENT_LD)
+				fmd_to_ld(child)->supported_cmds = mld->supported_cmds;
 		}
 
 		if (fmd_create_mld_memory_resources(ctx, mld))

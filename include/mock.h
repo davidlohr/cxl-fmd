@@ -49,6 +49,12 @@ struct fmd_ctx;
 #define FMD_CMD_GET_POISON_LIST		(1ULL << 25)  /* 0x4300 */
 #define FMD_CMD_INJECT_POISON		(1ULL << 26)  /* 0x4301 */
 #define FMD_CMD_CLEAR_POISON		(1ULL << 27)  /* 0x4302 */
+#define FMD_CMD_GET_SECURITY_STATE	(1ULL << 28)  /* 0x4500 */
+#define FMD_CMD_SET_PASSPHRASE		(1ULL << 29)  /* 0x4501 */
+#define FMD_CMD_DISABLE_PASSPHRASE	(1ULL << 30)  /* 0x4502 */
+#define FMD_CMD_UNLOCK			(1ULL << 31)  /* 0x4503 */
+#define FMD_CMD_FREEZE_SECURITY_STATE	(1ULL << 32)  /* 0x4504 */
+#define FMD_CMD_PASSPHRASE_SECURE_ERASE	(1ULL << 33)  /* 0x4505 */
 
 /* Default command set for Type 3 memory devices */
 #define FMD_CMD_DEFAULT_MEMDEV ( \

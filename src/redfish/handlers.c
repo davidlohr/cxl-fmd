@@ -28,6 +28,10 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx, const char *chassis_id,
 				 const char *mem_id, struct cxlmi_endpoint **ep_out,
 				 struct cxlmi_tunnel_info *ti_buf,
 				 struct cxlmi_tunnel_info **ti_out);
+static void sec_memory_actions(struct fmd_ctx *ctx, const char *chassis_id,
+			       const char *mem_id, json_t *actions);
+static void sec_ld_actions(struct fmd_ctx *ctx, struct fmd_component *dev,
+			   int ld_idx, const char *uri, json_t *actions);
 
 /*
  * OData Service Document - /redfish/v1/odata
@@ -3514,6 +3518,21 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		rf_uri(0, "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s/DeviceLog",
 		       chassis_id, pcie_id, ld_id)));
 
+	/*
+	 * DSP0288 1.4.0 Table 1: the security actions (sec_ld_actions()). A
+	 * DCD's actions are added to the same Actions.
+	 */
+	{
+		json_t *actions = json_object();
+
+		if (actions)
+			sec_ld_actions(ctx, comp, ld_idx, uri, actions);
+		if (actions && json_object_size(actions))
+			json_object_set_new(result, "Actions", actions);
+		else
+			json_decref(actions);
+	}
+
 	fmd_redfish_dc_logical_device_props(ctx, comp, ld_idx, chassis_id, pcie_id,
 					    ld_id, result);
 
@@ -3801,41 +3820,24 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 			  "MasterPassphraseAttemptCountReached", (sec_state >> 5) & 1));
 
 	/*
-	 * Security actions on Memory, as DSP0288 1.2.0 Table 1 mapped them
+	 * DSP0288 Table 1: Scan Media -> the ScanMedia action of Memory. The
+	 * security actions on Memory are those DSP0288 1.2.0 Table 1 mapped
 	 * (SetPassphrase, SetMasterPassphrase, DisablePassphrase,
-	 * DisableMasterPassphrase, FreezeSecurityState, SecureEraseUnit).
-	 * DSP0288 1.3.0 and 1.4.0 map Set Passphrase, Disable Passphrase,
-	 * Freeze Security State and Passphrase Secure Erase to actions of
-	 * CXLLogicalDevice instead, which cxl-fmd does not serve (a known
-	 * gap). Scan Media is on Memory in both. An action whose command may
-	 * not be sent to the device (fmd_mctp_restricted_allowed()) is left
-	 * out: its POST is refused.
+	 * DisableMasterPassphrase, FreezeSecurityState, SecureEraseUnit),
+	 * now deprecated aliases of the CXLLogicalDevice actions DSP0288
+	 * 1.3.0 and 1.4.0 map them to (sec_memory_actions()). An action whose
+	 * command may not be sent to the device
+	 * (fmd_mctp_restricted_allowed()), or that its CEL does not list, is
+	 * left out: its POST is refused.
 	 */
-	static const struct {
-		const char *name;
-		uint16_t opcode;
-	} actions[] = {
-		{ "ScanMedia", 0x4304 },
-		{ "SetPassphrase", 0x4501 },
-		{ "SetMasterPassphrase", 0x4501 },
-		{ "DisablePassphrase", 0x4502 },
-		{ "DisableMasterPassphrase", 0x4502 },
-		{ "FreezeSecurityState", 0x4504 },
-		{ "SecureEraseUnit", 0x4505 },
-	};
 	json_t *acts = json_object();
 
-	for (size_t i = 0; acts && i < sizeof(actions) / sizeof(actions[0]); i++) {
-		char key[64], target[512];
-
-		if (!fmd_mctp_restricted_allowed(ctx, comp, actions[i].opcode))
-			continue;
-		snprintf(key, sizeof(key), "#Memory.%s", actions[i].name);
-		snprintf(target, sizeof(target),
-			 "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.%s",
-			 chassis_id, mem_id, actions[i].name);
-		json_object_set_new(acts, key, json_pack("{s:s}", "target", target));
-	}
+	if (acts && fmd_mctp_restricted_allowed(ctx, comp, 0x4304))
+		json_object_set_new(acts, "#Memory.ScanMedia", json_pack("{s:s}", "target",
+			rf_uri(0, "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.ScanMedia",
+			       chassis_id, mem_id)));
+	if (acts)
+		sec_memory_actions(ctx, chassis_id, mem_id, acts);
 	if (acts && json_object_size(acts))
 		json_object_set_new(result, "Actions", acts);
 	else
@@ -5875,386 +5877,464 @@ static int memory_endpoint_setup(struct fmd_ctx *ctx,
 }
 
 /*
- * Memory.SetPassphrase action handler (User passphrase)
- *
- * DSP0288 Table 1: Set Passphrase -> Memory.SetPassphrase action
- * CXL command: Set Passphrase (Opcode 4501h) with type=01h (User)
- *
- * Parameters:
- *   Passphrase - current passphrase string
- *   NewPassphrase - new passphrase string
- *
- * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
- * to the device (memory_action_check()), -1 on another error
+ * The Persistent Memory Data-at-rest Security commands (CXL r4.0 Section
+ * 8.2.10.9.6) that DSP0288 1.4.0 Table 1 maps to actions of
+ * CXLLogicalDevice: Set Passphrase, Disable Passphrase, Freeze Security
+ * State, Passphrase Secure Erase and Unlock, to the SetPassphrase,
+ * DisablePassphrase, FreezeSecurityState, PassphraseSecureErase and
+ * Unlock actions. (Get Security State stays on Memory, SecurityStates.)
  */
-int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx,
-				      const char *chassis_id,
-				      const char *mem_id,
-				      const char *body,
-				      size_t body_size)
+enum sec_op {
+	SEC_SET_PASSPHRASE,
+	SEC_DISABLE_PASSPHRASE,
+	SEC_UNLOCK,
+	SEC_FREEZE,
+	SEC_SECURE_ERASE,
+};
+
+static const struct sec_action {
+	const char *name;	/* CXLLogicalDevice.{name} */
+	uint16_t opcode;
+	bool type;		/* takes PassphraseType and Passphrase */
+	bool new_passphrase;	/* and NewPassphrase */
+} sec_actions[] = {
+	[SEC_SET_PASSPHRASE] = { "SetPassphrase", 0x4501, true, true },
+	[SEC_DISABLE_PASSPHRASE] = { "DisablePassphrase", 0x4502, true, false },
+	[SEC_UNLOCK] = { "Unlock", 0x4503, true, false },
+	[SEC_FREEZE] = { "FreezeSecurityState", 0x4504, false, false },
+	[SEC_SECURE_ERASE] = { "PassphraseSecureErase", 0x4505, true, false },
+};
+
+#define SEC_ACTIONS (sizeof(sec_actions) / sizeof(sec_actions[0]))
+
+/* A passphrase field: "Current Passphrase", "New Passphrase" (Table 8-336) */
+#define SEC_PASSPHRASE_LEN 0x20
+
+/* Passphrase Type (Tables 8-336, 8-337 and 8-339) */
+#define SEC_MASTER 0x00
+#define SEC_USER   0x01
+
+/* What a request of one of the actions asks for */
+struct sec_req {
+	enum sec_op op;
+	uint8_t type;
+	uint8_t passphrase[SEC_PASSPHRASE_LEN];
+	uint8_t new_passphrase[SEC_PASSPHRASE_LEN];
+};
+
+/*
+ * The memory device @dev and LD @ld_idx a security action goes to, and the
+ * commands its Command Effects Log lists: an SLD's own (LD 0), or an LD of
+ * an MLD's, read through the tunnel (a mock's LD has its MLD's
+ * cel_commands). -ENOENT if there is no such LD; -EOPNOTSUPP for the pool
+ * LD of a Multi-Headed device, which cxl-fmd sends no Memory Device
+ * command (it has no route to one: memory_endpoint_setup()).
+ */
+static int sec_target(struct fmd_ctx *ctx, struct fmd_component *dev,
+		      int ld_idx, uint64_t *cmds)
 {
-	json_t *root, *current_j, *new_j;
-	json_error_t error;
-
-	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4501);
-
-	if (rc)
-		return rc;
-	root = json_loadb(body, body_size, 0, &error);
-	if (!root)
-		return -1;
-
-	/* Get required Passphrase (current) parameter */
-	current_j = json_object_get(root, "Passphrase");
-	if (!current_j || !json_is_string(current_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *current_str = json_string_value(current_j);
-
-	/* Get required NewPassphrase parameter */
-	new_j = json_object_get(root, "NewPassphrase");
-	if (!new_j || !json_is_string(new_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *new_str = json_string_value(new_j);
-
-	/*
-	 * Build CXL request - passphrases are 32 bytes, zero-padded.
-	 * The strings belong to the JSON document: copy them before it is freed.
-	 */
-	struct cxlmi_cmd_memdev_set_passphrase_req req = {0};
-	req.passphrase_type = 1;  /* 01h = User */
-	strncpy((char *)req.current_passphrase, current_str,
-		sizeof(req.current_passphrase));
-	strncpy((char *)req.new_passphrase, new_str,
-		sizeof(req.new_passphrase));
-
-	json_decref(root);
-
-	if (unlikely(fmd_is_mock(ctx)))
+	if (!dev || ld_idx < 0 || ld_idx > UINT8_MAX)
+		return -ENOENT;
+	if (dev->type == FMD_COMPONENT_SLD) {
+		if (ld_idx != 0)
+			return -ENOENT;
+		*cmds = fmd_to_sld(dev)->supported_cmds;
 		return 0;
+	}
+	if (dev->type == FMD_COMPONENT_MLD) {
+		struct fmd_ld *ld = fmd_topology_find_ld(&ctx->topology, dev->id,
+							 (uint8_t)ld_idx);
 
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
+		if (!ld)
+			return -ENOENT;
+		*cmds = ld->supported_cmds;
+		return 0;
+	}
+	if (dev->type == FMD_COMPONENT_MHD &&
+	    fmd_topology_find_ld(&ctx->topology, dev->id, (uint8_t)ld_idx))
+		return -EOPNOTSUPP;
+	return -ENOENT;
+}
 
-	if (cxlmi_cmd_memdev_set_passphrase(ep, ti, &req) != 0)
-		return -1;
+/*
+ * Whether action @a may be asked of @dev: its command is in @cmds, what
+ * the CEL lists (-EOPNOTSUPP if not: one the CEL could not be read for
+ * lists none of these, cxl-fmd's choice), and may be sent to it
+ * (mctp_refused(): FMD_MCTP_RESTRICTED).
+ */
+static int sec_allowed(struct fmd_ctx *ctx, const struct fmd_component *dev,
+		       uint64_t cmds, const struct sec_action *a, const char **msg)
+{
+	if (!(cmds & fmd_cmd_bit(a->opcode))) {
+		*msg = "The device's Command Effects Log does not list the command";
+		return -EOPNOTSUPP;
+	}
+	if (mctp_refused(ctx, dev, a->opcode))
+		return FMD_MCTP_RESTRICTED;
+	return 0;
+}
 
+/* Whether the action is served on @dev's LD: as sec_allowed() takes it */
+static bool sec_served(struct fmd_ctx *ctx, const struct fmd_component *dev,
+		       uint64_t cmds, const struct sec_action *a)
+{
+	const char *msg;
+
+	return sec_allowed(ctx, dev, cmds, a, &msg) == 0 &&
+	       fmd_mctp_restricted_allowed(ctx, dev, a->opcode);
+}
+
+/*
+ * Passphrase @name of @root into @out, zero-padded. A passphrase field is
+ * 20h bytes long (Tables 8-336 to 8-339): a longer one is refused rather
+ * than cut, and the bytes are the string's UTF-8 as JSON gives them,
+ * which is cxl-fmd's choice (CXL gives them no encoding).
+ */
+static int sec_passphrase(json_t *root, const char *name,
+			  uint8_t out[SEC_PASSPHRASE_LEN], const char **msg)
+{
+	json_t *j = json_object_get(root, name);
+
+	if (!j || !json_is_string(j)) {
+		*msg = "A required parameter is missing, or is not a string";
+		return -EINVAL;
+	}
+	if (json_string_length(j) > SEC_PASSPHRASE_LEN) {
+		*msg = "A passphrase is at most 32 bytes";
+		return -EINVAL;
+	}
+	memset(out, 0, SEC_PASSPHRASE_LEN);
+	memcpy(out, json_string_value(j), json_string_length(j));
 	return 0;
 }
 
 /*
- * Memory.SetMasterPassphrase action handler (Master passphrase)
- *
- * DSP0288 Table 1: Set Passphrase -> Memory.SetMasterPassphrase action
- * CXL command: Set Passphrase (Opcode 4501h) with type=00h (Master)
- *
- * Parameters:
- *   Passphrase - current passphrase string
- *   NewPassphrase - new passphrase string
- *
- * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
- * to the device (memory_action_check()), -1 on another error
+ * The parameters of @a from @body: PassphraseType, "User" or "Master"
+ * (CXLLogicalDevice_v1 PassphraseType), unless @type is fixed (>= 0, the
+ * Memory aliases); Passphrase; NewPassphrase. FreezeSecurityState takes
+ * none, and its body is not read: "If an action does not have any
+ * required parameters, the service shall accept an empty JSON object"
+ * (DSP0266 1.25.0 Section 7.11). Unlock "supplies the user passphrase"
+ * (Section 8.2.10.9.6.4), and its payload has no Passphrase Type (Table
+ * 8-338): Master is refused.
  */
-int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx,
-					     const char *chassis_id,
-					     const char *mem_id,
-					     const char *body,
-					     size_t body_size)
+static int sec_parse(const struct sec_action *a, int type, const char *body,
+		     size_t body_size, struct sec_req *req, const char **msg)
 {
-	json_t *root, *current_j, *new_j;
 	json_error_t error;
+	json_t *root;
+	int rc = 0;
 
-	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4501);
-
-	if (rc)
-		return rc;
-	root = json_loadb(body, body_size, 0, &error);
-	if (!root)
-		return -1;
-
-	/* Get required Passphrase (current) parameter */
-	current_j = json_object_get(root, "Passphrase");
-	if (!current_j || !json_is_string(current_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *current_str = json_string_value(current_j);
-
-	/* Get required NewPassphrase parameter */
-	new_j = json_object_get(root, "NewPassphrase");
-	if (!new_j || !json_is_string(new_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *new_str = json_string_value(new_j);
-
-	/*
-	 * Build CXL request - passphrases are 32 bytes, zero-padded.
-	 * The strings belong to the JSON document: copy them before it is freed.
-	 */
-	struct cxlmi_cmd_memdev_set_passphrase_req req = {0};
-	req.passphrase_type = 0;  /* 00h = Master */
-	strncpy((char *)req.current_passphrase, current_str,
-		sizeof(req.current_passphrase));
-	strncpy((char *)req.new_passphrase, new_str,
-		sizeof(req.new_passphrase));
-
-	json_decref(root);
-
-	if (unlikely(fmd_is_mock(ctx)))
+	req->op = (enum sec_op)(a - sec_actions);
+	if (!a->type)
 		return 0;
+	root = json_loadb(body, body_size, 0, &error);
+	if (!root || !json_is_object(root)) {
+		json_decref(root);
+		*msg = "The request body is not a JSON object";
+		return -EINVAL;
+	}
+	if (type < 0) {
+		json_t *t = json_object_get(root, "PassphraseType");
+		const char *v = json_is_string(t) ? json_string_value(t) : NULL;
 
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
-
-	if (cxlmi_cmd_memdev_set_passphrase(ep, ti, &req) != 0)
-		return -1;
-
-	return 0;
+		if (v && !strcmp(v, "User")) {
+			type = SEC_USER;
+		} else if (v && !strcmp(v, "Master")) {
+			type = SEC_MASTER;
+		} else {
+			*msg = "PassphraseType must be User or Master";
+			rc = -EINVAL;
+			goto out;
+		}
+	}
+	if (req->op == SEC_UNLOCK && type != SEC_USER) {
+		*msg = "Unlock takes the user passphrase: CXL r4.0 Unlock has no Passphrase Type";
+		rc = -EINVAL;
+		goto out;
+	}
+	req->type = (uint8_t)type;
+	rc = sec_passphrase(root, "Passphrase", req->passphrase, msg);
+	if (!rc && a->new_passphrase)
+		rc = sec_passphrase(root, "NewPassphrase", req->new_passphrase, msg);
+out:
+	json_decref(root);
+	return rc;
 }
 
 /*
- * Memory.DisablePassphrase action handler (User passphrase)
- *
- * DSP0288 Table 1: Disable Passphrase -> Memory.DisablePassphrase action
- * CXL command: Disable Passphrase (Opcode 4502h) with type=01h (User)
- *
- * Parameters:
- *   Passphrase - current passphrase string
- *
- * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
- * to the device (memory_action_check()), -1 on another error
+ * Send @req to LD @ld_idx of @dev. What a device answers is mapped by
+ * cxl-fmd's choice: Invalid Input, Incorrect Passphrase and Invalid
+ * Payload Length -EINVAL (400), Invalid Security State -EBUSY (409),
+ * Unsupported and Unsupported Mailbox or CCI -EOPNOTSUPP (501), Retry
+ * Required and Busy -EAGAIN (503), any other -EIO (500), as is a command
+ * that could not be sent or whose response could not be read. In a mock
+ * nothing is sent.
  */
-int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx,
-					  const char *chassis_id,
-					  const char *mem_id,
-					  const char *body,
-					  size_t body_size)
+static int sec_send(struct fmd_ctx *ctx, struct fmd_component *dev, int ld_idx,
+		    const struct sec_req *req, const char **msg)
 {
-	json_t *root, *pass_j;
-	json_error_t error;
-
-	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4502);
-
-	if (rc)
-		return rc;
-	root = json_loadb(body, body_size, 0, &error);
-	if (!root)
-		return -1;
-
-	/* Get required Passphrase parameter */
-	pass_j = json_object_get(root, "Passphrase");
-	if (!pass_j || !json_is_string(pass_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *pass_str = json_string_value(pass_j);
-
-	/*
-	 * Build CXL request - passphrase is 32 bytes, zero-padded.
-	 * The strings belong to the JSON document: copy them before it is freed.
-	 */
-	struct cxlmi_cmd_memdev_disable_passphrase_req req = {0};
-	req.passphrase_type = 1;  /* 01h = User */
-	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
-
-	json_decref(root);
+	struct cxlmi_tunnel_info ti_buf, *ti = CXLMI_NO_TUNNEL;
+	struct cxlmi_endpoint *ep = dev->ep;
+	int rc;
 
 	if (unlikely(fmd_is_mock(ctx)))
 		return 0;
+	if (!ep || fmd_sld_behind_switch(dev)) {
+		*msg = "The device cannot be reached";
+		return -EOPNOTSUPP;
+	}
+	if (dev->type == FMD_COMPONENT_MLD)
+		ti = fmd_mld_ld_tunnel(fmd_to_mld(dev), ld_idx, &ti_buf);
 
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
+	switch (req->op) {
+	case SEC_SET_PASSPHRASE: {
+		struct cxlmi_cmd_memdev_set_passphrase_req in = {
+			.passphrase_type = req->type,
+		};
 
-	if (cxlmi_cmd_memdev_disable_passphrase(ep, ti, &req) != 0)
-		return -1;
+		memcpy(in.current_passphrase, req->passphrase, SEC_PASSPHRASE_LEN);
+		memcpy(in.new_passphrase, req->new_passphrase, SEC_PASSPHRASE_LEN);
+		rc = cxlmi_cmd_memdev_set_passphrase(ep, ti, &in);
+		break;
+	}
+	case SEC_DISABLE_PASSPHRASE: {
+		struct cxlmi_cmd_memdev_disable_passphrase_req in = {
+			.passphrase_type = req->type,
+		};
 
-	return 0;
+		memcpy(in.passphrase, req->passphrase, SEC_PASSPHRASE_LEN);
+		rc = cxlmi_cmd_memdev_disable_passphrase(ep, ti, &in);
+		break;
+	}
+	case SEC_UNLOCK: {
+		struct cxlmi_cmd_memdev_unlock_req in;
+
+		memcpy(in.current_passphrase, req->passphrase, SEC_PASSPHRASE_LEN);
+		rc = cxlmi_cmd_memdev_unlock(ep, ti, &in);
+		break;
+	}
+	case SEC_FREEZE:
+		rc = cxlmi_cmd_memdev_freeze_security_state(ep, ti);
+		break;
+	case SEC_SECURE_ERASE: {
+		struct cxlmi_cmd_memdev_passphrase_secure_erase_req in = {
+			.passphrase_type = req->type,
+		};
+
+		memcpy(in.passphrase, req->passphrase, SEC_PASSPHRASE_LEN);
+		rc = cxlmi_cmd_memdev_passphrase_secure_erase(ep, ti, &in);
+		break;
+	}
+	default:
+		return -EINVAL;
+	}
+
+	if (rc == CXLMI_RET_SUCCESS)
+		return 0;
+	if (rc < 0) {
+		*msg = "The command could not be sent, or its response could not be read";
+		return -EIO;
+	}
+	*msg = cxlmi_cmd_retcode_tostr(rc);
+	switch (rc) {
+	case CXLMI_RET_INPUT:
+	case CXLMI_RET_PASSPHRASE:
+	case CXLMI_RET_PAYLOADLEN:
+		return -EINVAL;
+	case CXLMI_RET_SECURITY:
+		return -EBUSY;
+	case CXLMI_RET_UNSUPPORTED:
+	case CXLMI_RET_MBUNSUPPORTED:
+		return -EOPNOTSUPP;
+	case CXLMI_RET_RETRY:
+	case CXLMI_RET_BUSY:
+		return -EAGAIN;
+	default:
+		return -EIO;
+	}
 }
 
 /*
- * Memory.DisableMasterPassphrase action handler (Master passphrase)
- *
- * DSP0288 Table 1: Disable Passphrase -> Memory.DisableMasterPassphrase action
- * CXL command: Disable Passphrase (Opcode 4502h) with type=00h (Master)
- *
- * Parameters:
- *   Passphrase - current passphrase string
- *
- * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
- * to the device (memory_action_check()), -1 on another error
+ * The checks and the command of action @a on LD @ld_idx of @dev, in this
+ * order: the LD is there (-ENOENT, -EOPNOTSUPP: sec_target()), its CEL
+ * lists the command (-EOPNOTSUPP) and it may be sent (FMD_MCTP_RESTRICTED:
+ * sec_allowed()), the parameters (-EINVAL: sec_parse()), then what the
+ * device answers (sec_send()). Nothing is sent unless all of them pass.
  */
-int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx,
-						 const char *chassis_id,
-						 const char *mem_id,
-						 const char *body,
-						 size_t body_size)
+static int sec_action(struct fmd_ctx *ctx, struct fmd_component *dev, int ld_idx,
+		      const struct sec_action *a, int type, const char *body,
+		      size_t body_size, const char **msg)
 {
-	json_t *root, *pass_j;
-	json_error_t error;
+	struct sec_req req = { 0 };
+	uint64_t cmds = 0;
+	int rc;
 
-	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4502);
-
-	if (rc)
-		return rc;
-	root = json_loadb(body, body_size, 0, &error);
-	if (!root)
-		return -1;
-
-	/* Get required Passphrase parameter */
-	pass_j = json_object_get(root, "Passphrase");
-	if (!pass_j || !json_is_string(pass_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *pass_str = json_string_value(pass_j);
-
-	/*
-	 * Build CXL request - passphrase is 32 bytes, zero-padded.
-	 * The strings belong to the JSON document: copy them before it is freed.
-	 */
-	struct cxlmi_cmd_memdev_disable_passphrase_req req = {0};
-	req.passphrase_type = 0;  /* 00h = Master */
-	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
-
-	json_decref(root);
-
-	if (unlikely(fmd_is_mock(ctx)))
-		return 0;
-
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
-
-	if (cxlmi_cmd_memdev_disable_passphrase(ep, ti, &req) != 0)
-		return -1;
-
-	return 0;
+	rc = sec_target(ctx, dev, ld_idx, &cmds);
+	if (!rc)
+		rc = sec_allowed(ctx, dev, cmds, a, msg);
+	if (!rc)
+		rc = sec_parse(a, type, body, body_size, &req, msg);
+	if (!rc)
+		rc = sec_send(ctx, dev, ld_idx, &req, msg);
+	return rc;
 }
 
 /*
- * Memory.FreezeSecurityState action handler
- *
- * DSP0288 Table 1: Freeze Security State -> Memory.FreezeSecurityState action
- * CXL command: Freeze Security State (Opcode 4504h)
- *
- * No parameters required.
- *
- * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
- * to the device (memory_action_check()), -1 on another error
+ * The security actions of CXLLogicalDevice @ld_id served for it: those
+ * whose command the LD's CEL lists and may be sent (sec_allowed()).
+ * Added to @actions, which a DCD's actions share.
  */
-int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx,
-					     const char *chassis_id,
-					     const char *mem_id)
+static void sec_ld_actions(struct fmd_ctx *ctx, struct fmd_component *dev,
+			   int ld_idx, const char *uri, json_t *actions)
 {
-	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4504);
+	uint64_t cmds = 0;
 
-	if (rc)
-		return rc;
-	if (unlikely(fmd_is_mock(ctx)))
-		return 0;
+	if (sec_target(ctx, dev, ld_idx, &cmds))
+		return;
+	for (size_t i = 0; i < SEC_ACTIONS; i++) {
+		char key[64];
 
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
+		if (!sec_served(ctx, dev, cmds, &sec_actions[i]))
+			continue;
+		snprintf(key, sizeof(key), "#CXLLogicalDevice.%s", sec_actions[i].name);
+		json_object_set_new(actions, key, json_pack("{s:s}", "target",
+			rf_uri(0, "%s/Actions/CXLLogicalDevice.%s", uri,
+			       sec_actions[i].name)));
+	}
+}
 
-	if (cxlmi_cmd_memdev_freeze_security_state(ep, ti) != 0)
-		return -1;
+int fmd_redfish_ld_security_action(struct fmd_ctx *ctx, const char *chassis_id,
+				   const char *dev_id, const char *ld_id,
+				   const char *action, const char *body,
+				   size_t body_size, const char **msg)
+{
+	struct fmd_component *dev = fmd_topology_find(&ctx->topology, chassis_id);
 
-	return 0;
+	*msg = NULL;
+	if (!dev || strcmp(chassis_id, dev_id) != 0 || !fmd_is_memdev(dev))
+		return -ENOENT;
+	for (size_t i = 0; i < SEC_ACTIONS; i++) {
+		if (!strcmp(action, sec_actions[i].name))
+			return sec_action(ctx, dev, parse_ld_id(ld_id), &sec_actions[i],
+					  -1, body, body_size, msg);
+	}
+	return -ENOENT;
 }
 
 /*
- * Memory.SecureEraseUnit action handler
- *
- * DSP0288 Table 1: Passphrase Secure Erase -> Memory.SecureEraseUnit action
- * CXL command: Passphrase Secure Erase (Opcode 4505h)
- *
- * Parameters:
- *   PassphraseType - "User" or "Master"
- *   Passphrase - current passphrase string
- *   TODO: RegionId - not currently mapped to CXL command
- *
- * Returns: 0 on success, FMD_MCTP_RESTRICTED if the command may not be sent
- * to the device (memory_action_check()), -1 on another error
+ * The security actions of Memory, as DSP0288 1.2.0 mapped them, now
+ * deprecated aliases of the CXLLogicalDevice actions (cxl-fmd's choice:
+ * the Memory schema does not deprecate them). Each is the action of the
+ * LD of the Memory resource, with the request it took: SetPassphrase and
+ * DisablePassphrase for the user passphrase (01h), SetMasterPassphrase
+ * and DisableMasterPassphrase for the master passphrase (00h), each with
+ * Passphrase (and NewPassphrase); SecureEraseUnit with PassphraseType and
+ * Passphrase; FreezeSecurityState with none. There is no UnlockUnit.
+ * Returns as fmd_redfish_ld_security_action().
  */
-int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx,
-					 const char *chassis_id,
-					 const char *mem_id,
-					 const char *body,
-					 size_t body_size)
+static int memory_sec_action(struct fmd_ctx *ctx, const char *chassis_id,
+			     const char *mem_id, enum sec_op op, int type,
+			     const char *body, size_t body_size, const char **msg)
 {
-	json_t *root, *type_j, *pass_j;
-	json_error_t error;
+	struct fmd_component *dev = memory_device(ctx, chassis_id, mem_id);
+	int ld_idx = 0;
 
-	int rc = memory_action_check(ctx, chassis_id, mem_id, 0x4505);
+	*msg = NULL;
+	if (!dev)
+		return -ENOENT;
+	if (dev->type == FMD_COMPONENT_MLD)
+		ld_idx = safe_parse_int(mem_id + strlen(chassis_id) + strlen("_ld"));
+	return sec_action(ctx, dev, ld_idx, &sec_actions[op], type, body,
+			  body_size, msg);
+}
 
-	if (rc)
-		return rc;
-	root = json_loadb(body, body_size, 0, &error);
-	if (!root)
-		return -1;
+int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
+				      const char *mem_id, const char *body,
+				      size_t body_size, const char **msg)
+{
+	return memory_sec_action(ctx, chassis_id, mem_id, SEC_SET_PASSPHRASE,
+				 SEC_USER, body, body_size, msg);
+}
 
-	/* Get required PassphraseType parameter */
-	type_j = json_object_get(root, "PassphraseType");
-	if (!type_j || !json_is_string(type_j)) {
-		json_decref(root);
-		return -1;
+int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
+					     const char *mem_id, const char *body,
+					     size_t body_size, const char **msg)
+{
+	return memory_sec_action(ctx, chassis_id, mem_id, SEC_SET_PASSPHRASE,
+				 SEC_MASTER, body, body_size, msg);
+}
+
+int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
+					  const char *mem_id, const char *body,
+					  size_t body_size, const char **msg)
+{
+	return memory_sec_action(ctx, chassis_id, mem_id, SEC_DISABLE_PASSPHRASE,
+				 SEC_USER, body, body_size, msg);
+}
+
+int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
+						 const char *mem_id, const char *body,
+						 size_t body_size, const char **msg)
+{
+	return memory_sec_action(ctx, chassis_id, mem_id, SEC_DISABLE_PASSPHRASE,
+				 SEC_MASTER, body, body_size, msg);
+}
+
+int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx, const char *chassis_id,
+					     const char *mem_id, const char **msg)
+{
+	return memory_sec_action(ctx, chassis_id, mem_id, SEC_FREEZE, -1, NULL, 0, msg);
+}
+
+int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx, const char *chassis_id,
+					 const char *mem_id, const char *body,
+					 size_t body_size, const char **msg)
+{
+	return memory_sec_action(ctx, chassis_id, mem_id, SEC_SECURE_ERASE, -1,
+				 body, body_size, msg);
+}
+
+/* The Memory alias of each security action, and the action it is */
+static const struct {
+	const char *name;
+	enum sec_op op;
+} memory_sec_aliases[] = {
+	{ "SetPassphrase", SEC_SET_PASSPHRASE },
+	{ "SetMasterPassphrase", SEC_SET_PASSPHRASE },
+	{ "DisablePassphrase", SEC_DISABLE_PASSPHRASE },
+	{ "DisableMasterPassphrase", SEC_DISABLE_PASSPHRASE },
+	{ "FreezeSecurityState", SEC_FREEZE },
+	{ "SecureEraseUnit", SEC_SECURE_ERASE },
+};
+
+/*
+ * The deprecated security actions of Memory @mem_id served for it, into
+ * @actions: as the CXLLogicalDevice's are (sec_served()).
+ */
+static void sec_memory_actions(struct fmd_ctx *ctx, const char *chassis_id,
+			       const char *mem_id, json_t *actions)
+{
+	struct fmd_component *dev = memory_device(ctx, chassis_id, mem_id);
+	uint64_t cmds = 0;
+	int ld_idx = 0;
+
+	if (!dev)
+		return;
+	if (dev->type == FMD_COMPONENT_MLD)
+		ld_idx = safe_parse_int(mem_id + strlen(chassis_id) + strlen("_ld"));
+	if (sec_target(ctx, dev, ld_idx, &cmds))
+		return;
+	for (size_t i = 0; i < sizeof(memory_sec_aliases) / sizeof(memory_sec_aliases[0]); i++) {
+		char key[64];
+
+		if (!sec_served(ctx, dev, cmds, &sec_actions[memory_sec_aliases[i].op]))
+			continue;
+		snprintf(key, sizeof(key), "#Memory.%s", memory_sec_aliases[i].name);
+		json_object_set_new(actions, key, json_pack("{s:s}", "target",
+			rf_uri(0, "/redfish/v1/Chassis/%s/Memory/%s/Actions/Memory.%s",
+			       chassis_id, mem_id, memory_sec_aliases[i].name)));
 	}
-	const char *type_str = json_string_value(type_j);
-	uint8_t passphrase_type;
-	if (strcmp(type_str, "Master") == 0)
-		passphrase_type = 0;  /* 00h = Master */
-	else if (strcmp(type_str, "User") == 0)
-		passphrase_type = 1;  /* 01h = User */
-	else {
-		json_decref(root);
-		return -1;
-	}
-
-	/* Get required Passphrase parameter */
-	pass_j = json_object_get(root, "Passphrase");
-	if (!pass_j || !json_is_string(pass_j)) {
-		json_decref(root);
-		return -1;
-	}
-	const char *pass_str = json_string_value(pass_j);
-
-	/* TODO: RegionId parameter - not currently mapped to CXL command */
-
-	/*
-	 * Build CXL request - passphrase is 32 bytes, zero-padded.
-	 * The strings belong to the JSON document: copy them before it is freed.
-	 */
-	struct cxlmi_cmd_memdev_passphrase_secure_erase_req req = {0};
-	req.passphrase_type = passphrase_type;
-	strncpy((char *)req.passphrase, pass_str, sizeof(req.passphrase));
-
-	json_decref(root);
-
-	if (unlikely(fmd_is_mock(ctx)))
-		return 0;
-
-	struct cxlmi_endpoint *ep;
-	struct cxlmi_tunnel_info ti_buf, *ti;
-	if (memory_endpoint_setup(ctx, chassis_id, mem_id, &ep, &ti_buf, &ti) != 0)
-		return -1;
-
-	if (cxlmi_cmd_memdev_passphrase_secure_erase(ep, ti, &req) != 0)
-		return -1;
-
-	return 0;
 }
 
 /*

@@ -1915,6 +1915,16 @@ static void chunk_state(struct fmd_ctx *ctx, const char *id, const char *dom,
 	json_decref(j);
 }
 
+/* The commands 4501h to 4505h, as a CEL that lists them gives them */
+static uint64_t security_cmds(void)
+{
+	uint64_t cmds = 0;
+
+	for (uint16_t op = 0x4501; op <= 0x4505; op++)
+		cmds |= fmd_cmd_bit(op);
+	return cmds;
+}
+
 /* Put @ep among the endpoints opened through the kernel's mailbox */
 static void mark_ioctl(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 {
@@ -1980,6 +1990,7 @@ static void test_o4_gate(void)
 	struct cxlmi_tunnel_info ti;
 	unsigned int sent;
 	json_t *rsp = NULL;
+	const char *msg;
 	int before = failures, rc, n;
 
 	for (size_t i = 0; i < sizeof(o4) / sizeof(o4[0]); i++)
@@ -1991,6 +2002,7 @@ static void test_o4_gate(void)
 	if (!sld)
 		goto out;
 	snprintf(id, sizeof(id), "%s", sld->base.id);
+	sld->supported_cmds |= security_cmds();
 	dom = fmd_first_child_type(&sld->base, FMD_COMPONENT_DOMAIN);
 	c = dom ? fmd_first_child_type(dom, FMD_COMPONENT_CHUNK) : NULL;
 	CHECK(dom && c, "no domain or chunk");
@@ -2017,20 +2029,20 @@ static void test_o4_gate(void)
 	rsp = NULL;
 	CHECK(fmd_redfish_action_scan_media(ctx, id, id, scan, strlen(scan)) ==
 	      FMD_MCTP_RESTRICTED, "Scan Media");
-	CHECK(fmd_redfish_action_set_passphrase(ctx, id, id, set, strlen(set)) ==
+	CHECK(fmd_redfish_action_set_passphrase(ctx, id, id, set, strlen(set), &msg) ==
 	      FMD_MCTP_RESTRICTED, "SetPassphrase");
-	CHECK(fmd_redfish_action_set_master_passphrase(ctx, id, id, set, strlen(set)) ==
+	CHECK(fmd_redfish_action_set_master_passphrase(ctx, id, id, set, strlen(set), &msg) ==
 	      FMD_MCTP_RESTRICTED, "SetMasterPassphrase");
-	CHECK(fmd_redfish_action_disable_passphrase(ctx, id, id, pass, strlen(pass)) ==
+	CHECK(fmd_redfish_action_disable_passphrase(ctx, id, id, pass, strlen(pass), &msg) ==
 	      FMD_MCTP_RESTRICTED, "DisablePassphrase");
-	CHECK(fmd_redfish_action_disable_master_passphrase(ctx, id, id, pass, strlen(pass)) ==
+	CHECK(fmd_redfish_action_disable_master_passphrase(ctx, id, id, pass, strlen(pass), &msg) ==
 	      FMD_MCTP_RESTRICTED, "DisableMasterPassphrase");
-	CHECK(fmd_redfish_action_freeze_security_state(ctx, id, id) ==
+	CHECK(fmd_redfish_action_freeze_security_state(ctx, id, id, &msg) ==
 	      FMD_MCTP_RESTRICTED, "FreezeSecurityState");
-	CHECK(fmd_redfish_action_secure_erase_unit(ctx, id, id, erase, strlen(erase)) ==
+	CHECK(fmd_redfish_action_secure_erase_unit(ctx, id, id, erase, strlen(erase), &msg) ==
 	      FMD_MCTP_RESTRICTED, "SecureEraseUnit");
 	CHECK(commands_sent(ep) == sent, "%u commands sent", commands_sent(ep) - sent);
-	CHECK(fmd_redfish_action_freeze_security_state(ctx, id, "nonesuch") == -1,
+	CHECK(fmd_redfish_action_freeze_security_state(ctx, id, "nonesuch", &msg) == -ENOENT,
 	      "an action on a Memory that is not there");
 	n = (int)memory_actions(ctx, id, id);
 	CHECK(n == 0, "%d actions served", n);
@@ -2065,7 +2077,7 @@ static void test_o4_gate(void)
 	n = (int)memory_actions(ctx, id, id);
 	CHECK(n == 7, "%d actions served on a kernel mailbox", n);
 	answer(ep, 0x4504, NULL, 0);
-	rc = fmd_redfish_action_freeze_security_state(ctx, id, id);
+	rc = fmd_redfish_action_freeze_security_state(ctx, id, id, &msg);
 	CHECK(rc == 0 && last_opcode(ep) == 0x4504,
 	      "FreezeSecurityState on a kernel mailbox: %d, %04xh", rc, last_opcode(ep));
 	answer(ep, 0x4101, NULL, 0);
@@ -2079,9 +2091,12 @@ static void test_o4_gate(void)
 	mark_ioctl(ctx, ep);
 	device_id(mld_id, sizeof(mld_id), 0x1105);
 	snprintf(mem, sizeof(mem), "%s_ld1", mld_id);
-	CHECK(fmd_topology_find(&ctx->topology, mld_id), "no MLD");
+	CHECK(fmd_topology_find_ld(&ctx->topology, mld_id, 1), "no MLD");
+	if (fmd_topology_find_ld(&ctx->topology, mld_id, 1))
+		fmd_topology_find_ld(&ctx->topology, mld_id, 1)->supported_cmds |=
+			security_cmds();
 	sent = commands_sent(ep);
-	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem);
+	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem, &msg);
 	CHECK(rc == FMD_MCTP_RESTRICTED && commands_sent(ep) == sent,
 	      "FreezeSecurityState of an MLD's LD: %d", rc);
 	rc = fmd_redfish_action_scan_media(ctx, mld_id, mem, scan, strlen(scan));
@@ -2092,7 +2107,7 @@ static void test_o4_gate(void)
 
 	ctx->config.allow_mctp_restricted = true;
 	answer(ep, 0x4504, NULL, 0);
-	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem);
+	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem, &msg);
 	cxlmi_mock_get_last_tunnel(ep, &ti);
 	CHECK(rc == 0 && last_opcode(ep) == 0x4504 && ti.level == 1 && ti.ld == 1,
 	      "allowed FreezeSecurityState of LD 1: %d, %04xh, level %d, LD %d",
@@ -2100,6 +2115,336 @@ static void test_o4_gate(void)
 out:
 	fmd_ctx_free(ctx);
 	report("O4 commands are not sent as MCTP messages unless allowed", before);
+}
+
+/* POST CXLLogicalDevice.@action of LD @ld of @id with @body: what it returns */
+static int ld_sec(struct fmd_ctx *ctx, const char *id, const char *ld,
+		  const char *action, const char *body)
+{
+	const char *msg;
+
+	return fmd_redfish_ld_security_action(ctx, id, id, ld, action, body,
+					      body ? strlen(body) : 0, &msg);
+}
+
+/* The security actions served on CXLLogicalDevice @ld of @id: a bit each */
+static unsigned int ld_sec_served(struct fmd_ctx *ctx, const char *id, const char *ld)
+{
+	static const char *const names[] = {
+		"SetPassphrase", "DisablePassphrase", "Unlock",
+		"FreezeSecurityState", "PassphraseSecureErase",
+	};
+	json_t *r = fmd_redfish_cxl_logical_device(ctx, id, id, ld);
+	json_t *acts = json_object_get(r, "Actions");
+	unsigned int served = 0;
+
+	for (size_t i = 0; i < 5; i++) {
+		char key[64], target[512];
+		json_t *a;
+
+		snprintf(key, sizeof(key), "#CXLLogicalDevice.%s", names[i]);
+		snprintf(target, sizeof(target),
+			 "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s"
+			 "/Actions/CXLLogicalDevice.%s", id, id, ld, names[i]);
+		a = json_object_get(acts, key);
+		if (!a)
+			continue;
+		CHECK(json_string_value(json_object_get(a, "target")) &&
+		      !strcmp(json_string_value(json_object_get(a, "target")), target),
+		      "%s target", key);
+		served |= 1u << i;
+	}
+	CHECK(r && (served || !acts), "an empty Actions on LD %s", ld);
+	json_decref(r);
+	return served;
+}
+
+/*
+ * The payload of the last command sent to @ep is @want (@len bytes):
+ * Passphrase Type, 1Fh reserved bytes, and the passphrases, each 20h
+ * bytes zero-padded (Tables 8-336 to 8-339)
+ */
+static bool sent_payload(struct cxlmi_endpoint *ep, uint16_t opcode,
+			 const uint8_t *want, size_t len)
+{
+	uint8_t pl[0x80];
+	uint16_t op = 0;
+	size_t n = last_payload(ep, &op, pl, sizeof(pl));
+
+	return op == opcode && n == len && !memcmp(pl, want, len);
+}
+
+/*
+ * Review F17. DSP0288 1.4.0 Table 1 maps Set Passphrase, Disable
+ * Passphrase, Freeze Security State, Passphrase Secure Erase and Unlock to
+ * the SetPassphrase, DisablePassphrase, FreezeSecurityState,
+ * PassphraseSecureErase and Unlock actions of CXLLogicalDevice; cxl-fmd
+ * served the first four on Memory, as DSP0288 1.2.0 had them, unless the
+ * CEL listed them or not, and no Unlock. They are now served on
+ * CXLLogicalDevice, each when the LD's CEL lists its command and it may be
+ * sent (review F15), with the parameters of CXLLogicalDevice_v1, and the
+ * Memory actions are aliases of them.
+ */
+static void test_ld_security(void)
+{
+	static const char user[] = "{\"PassphraseType\": \"User\", \"Passphrase\": \"old\"}";
+	static const char master[] = "{\"PassphraseType\": \"Master\", \"Passphrase\": \"old\"}";
+	static const char set[] = "{\"PassphraseType\": \"Master\", \"Passphrase\": \"old\","
+				  " \"NewPassphrase\": \"new\"}";
+	static const char p32[] = "{\"PassphraseType\": \"User\", \"Passphrase\":"
+				  " \"0123456789abcdef0123456789abcdef\"}";
+	static const char p33[] = "{\"PassphraseType\": \"User\", \"Passphrase\":"
+				  " \"0123456789abcdef0123456789abcdefX\"}";
+	static const char *const bad[] = {
+		"{\"Passphrase\": \"old\"}",					/* no type */
+		"{\"PassphraseType\": \"Admin\", \"Passphrase\": \"old\"}",
+		"{\"PassphraseType\": \"User\"}",				/* no passphrase */
+		"{\"PassphraseType\": \"User\", \"Passphrase\": 7}",
+		"not json",
+	};
+	static const struct {
+		uint16_t rc;
+		int want;
+	} answers[] = {
+		{ CXLMI_RET_PASSPHRASE, -EINVAL },
+		{ CXLMI_RET_INPUT, -EINVAL },
+		{ CXLMI_RET_SECURITY, -EBUSY },
+		{ CXLMI_RET_UNSUPPORTED, -EOPNOTSUPP },
+		{ CXLMI_RET_BUSY, -EAGAIN },
+		{ CXLMI_RET_RETRY, -EAGAIN },
+		{ CXLMI_RET_INTERNAL, -EIO },
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct fmd_sld *sld = direct_sld(ctx, &ep, 0x1106, 64, 8, 16, 4, 24);
+	char id[FMD_MAX_ID_LEN], mld_id[FMD_MAX_ID_LEN], mem[FMD_MAX_ID_LEN + 8];
+	uint8_t want[0x60];
+	struct cxlmi_tunnel_info ti;
+	struct fmd_ld *ld;
+	const char *msg;
+	unsigned int sent;
+	int before = failures, rc;
+
+	for (uint16_t op = 0x4500; op <= 0x4505; op++) {
+		CHECK(fmd_cmd_bit(op), "no CEL bit for %04xh", op);
+		for (uint16_t o = 0x4500; o < op; o++)
+			CHECK(fmd_cmd_bit(o) != fmd_cmd_bit(op), "%04xh and %04xh", o, op);
+	}
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+	snprintf(id, sizeof(id), "%s", sld->base.id);
+	ctx->config.allow_mctp_restricted = true;
+
+	/* its CEL could not be read: none of them */
+	CHECK(!(sld->supported_cmds & security_cmds()), "a CEL not read lists them");
+	CHECK(ld_sec_served(ctx, id, "0") == 0, "served with no CEL");
+	sent = commands_sent(ep);
+	rc = ld_sec(ctx, id, "0", "FreezeSecurityState", "{}");
+	CHECK(rc == -EOPNOTSUPP && commands_sent(ep) == sent, "Freeze with no CEL: %d", rc);
+
+	sld->supported_cmds |= security_cmds();
+	CHECK(ld_sec_served(ctx, id, "0") == 0x1f, "not all five served");
+
+	/* Set Passphrase (Table 8-336): Master is 00h */
+	memset(want, 0, sizeof(want));
+	want[0] = 0x00;
+	memcpy(want + 0x20, "old", 3);
+	memcpy(want + 0x40, "new", 3);
+	answer(ep, 0x4501, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "SetPassphrase", set);
+	CHECK(rc == 0 && sent_payload(ep, 0x4501, want, 0x60), "SetPassphrase Master: %d", rc);
+	sent = commands_sent(ep);
+	rc = ld_sec(ctx, id, "0", "SetPassphrase", user);	/* no NewPassphrase */
+	CHECK(rc == -EINVAL && commands_sent(ep) == sent, "SetPassphrase with no NewPassphrase: %d", rc);
+
+	/* Disable Passphrase (Table 8-337): User is 01h */
+	memset(want, 0, sizeof(want));
+	want[0] = 0x01;
+	memcpy(want + 0x20, "old", 3);
+	answer(ep, 0x4502, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "DisablePassphrase", user);
+	CHECK(rc == 0 && sent_payload(ep, 0x4502, want, 0x40), "DisablePassphrase User: %d", rc);
+
+	/* Unlock (Table 8-338): the user passphrase, and nothing else */
+	memset(want, 0, sizeof(want));
+	memcpy(want, "old", 3);
+	answer(ep, 0x4503, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "Unlock", user);
+	CHECK(rc == 0 && sent_payload(ep, 0x4503, want, 0x20), "Unlock: %d", rc);
+	sent = commands_sent(ep);
+	rc = ld_sec(ctx, id, "0", "Unlock", master);
+	CHECK(rc == -EINVAL && commands_sent(ep) == sent, "Unlock with Master: %d", rc);
+
+	/* Freeze Security State: no payload; an empty object, or no body */
+	answer(ep, 0x4504, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "FreezeSecurityState", "{}");
+	CHECK(rc == 0 && sent_payload(ep, 0x4504, want, 0), "FreezeSecurityState {}: %d", rc);
+	answer(ep, 0x4504, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "FreezeSecurityState", NULL);
+	CHECK(rc == 0 && sent_payload(ep, 0x4504, want, 0), "FreezeSecurityState: %d", rc);
+
+	/* Passphrase Secure Erase (Table 8-339) */
+	memset(want, 0, sizeof(want));
+	want[0] = 0x00;
+	memcpy(want + 0x20, "old", 3);
+	answer(ep, 0x4505, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "PassphraseSecureErase", master);
+	CHECK(rc == 0 && sent_payload(ep, 0x4505, want, 0x40), "PassphraseSecureErase: %d", rc);
+
+	/* 32 bytes fill the field; 33 are refused, not cut */
+	memset(want, 0, sizeof(want));
+	want[0] = 0x01;
+	memcpy(want + 0x20, "0123456789abcdef0123456789abcdef", 32);
+	answer(ep, 0x4502, NULL, 0);
+	rc = ld_sec(ctx, id, "0", "DisablePassphrase", p32);
+	CHECK(rc == 0 && sent_payload(ep, 0x4502, want, 0x40), "a passphrase of 32 bytes: %d", rc);
+	sent = commands_sent(ep);
+	rc = ld_sec(ctx, id, "0", "DisablePassphrase", p33);
+	CHECK(rc == -EINVAL && commands_sent(ep) == sent, "a passphrase of 33 bytes: %d", rc);
+	rc = fmd_redfish_action_disable_passphrase(ctx, id, id,
+		"{\"Passphrase\": \"0123456789abcdef0123456789abcdefX\"}",
+		strlen("{\"Passphrase\": \"0123456789abcdef0123456789abcdefX\"}"), &msg);
+	CHECK(rc == -EINVAL && commands_sent(ep) == sent,
+	      "a passphrase of 33 bytes on Memory: %d", rc);
+
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		rc = ld_sec(ctx, id, "0", "PassphraseSecureErase", bad[i]);
+		CHECK(rc == -EINVAL && commands_sent(ep) == sent, "%s: %d", bad[i], rc);
+	}
+	CHECK(ld_sec(ctx, id, "1", "Unlock", user) == -ENOENT, "LD 1 of an SLD");
+	CHECK(ld_sec(ctx, id, "0", "UnlockUnit", user) == -ENOENT, "an action that is not there");
+	CHECK(fmd_redfish_ld_security_action(ctx, id, "other", "0", "Unlock", user,
+					     strlen(user), &msg) == -ENOENT,
+	      "a PCIeDevice that is not the Chassis'");
+	CHECK(commands_sent(ep) == sent, "%u sent for requests refused",
+	      commands_sent(ep) - sent);
+
+	/* what the device answers */
+	for (size_t i = 0; i < sizeof(answers) / sizeof(answers[0]); i++) {
+		answer_rc(ep, 0x4502, answers[i].rc);
+		rc = ld_sec(ctx, id, "0", "DisablePassphrase", user);
+		CHECK(rc == answers[i].want, "answered %u: %d", answers[i].rc, rc);
+	}
+
+	/* the Memory aliases are the same actions: Master is 00h */
+	memset(want, 0, sizeof(want));
+	want[0] = 0x00;
+	memcpy(want + 0x20, "old", 3);
+	memcpy(want + 0x40, "new", 3);
+	answer(ep, 0x4501, NULL, 0);
+	rc = fmd_redfish_action_set_master_passphrase(ctx, id, id,
+		"{\"Passphrase\": \"old\", \"NewPassphrase\": \"new\"}",
+		strlen("{\"Passphrase\": \"old\", \"NewPassphrase\": \"new\"}"), &msg);
+	CHECK(rc == 0 && sent_payload(ep, 0x4501, want, 0x60), "SetMasterPassphrase: %d", rc);
+	want[0] = 0x01;
+	answer(ep, 0x4501, NULL, 0);
+	rc = fmd_redfish_action_set_passphrase(ctx, id, id,
+		"{\"Passphrase\": \"old\", \"NewPassphrase\": \"new\"}",
+		strlen("{\"Passphrase\": \"old\", \"NewPassphrase\": \"new\"}"), &msg);
+	CHECK(rc == 0 && sent_payload(ep, 0x4501, want, 0x60), "Memory SetPassphrase: %d", rc);
+	want[0] = 0x00;
+	answer(ep, 0x4505, NULL, 0);
+	rc = fmd_redfish_action_secure_erase_unit(ctx, id, id, master, strlen(master), &msg);
+	CHECK(rc == 0 && sent_payload(ep, 0x4505, want, 0x40), "SecureEraseUnit Master: %d", rc);
+
+	/* a command the CEL does not list: neither served nor sent */
+	sld->supported_cmds &= ~fmd_cmd_bit(0x4503);
+	CHECK(ld_sec_served(ctx, id, "0") == (0x1f & ~(1u << 2)), "Unlock served with no CEL entry");
+	sent = commands_sent(ep);
+	rc = ld_sec(ctx, id, "0", "Unlock", user);
+	CHECK(rc == -EOPNOTSUPP && commands_sent(ep) == sent, "Unlock with no CEL entry: %d", rc);
+	sld->supported_cmds &= ~fmd_cmd_bit(0x4504);
+	rc = fmd_redfish_action_freeze_security_state(ctx, id, id, &msg);
+	CHECK(rc == -EOPNOTSUPP && commands_sent(ep) == sent,
+	      "Memory FreezeSecurityState with no CEL entry: %d", rc);
+	sld->supported_cmds |= security_cmds();
+
+	/* and none of them unless they may be sent */
+	ctx->config.allow_mctp_restricted = false;
+	CHECK(ld_sec_served(ctx, id, "0") == 0, "served on MCTP");
+	rc = ld_sec(ctx, id, "0", "Unlock", user);
+	CHECK(rc == FMD_MCTP_RESTRICTED && commands_sent(ep) == sent, "Unlock on MCTP: %d", rc);
+
+	/* an LD of an MLD: through the tunnel to it */
+	ctx->config.allow_mctp_restricted = true;
+	ep = new_mld(ctx, 0x1107, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(mld_id, sizeof(mld_id), 0x1107);
+	ld = fmd_topology_find_ld(&ctx->topology, mld_id, 1);
+	CHECK(ld, "no LD 1");
+	if (!ld)
+		goto out;
+	ld->supported_cmds |= security_cmds();
+	CHECK(ld_sec_served(ctx, mld_id, "1") == 0x1f, "LD 1 not served");
+	CHECK(ld_sec_served(ctx, mld_id, "0") == 0, "LD 0, whose CEL lists none, served");
+	memset(want, 0, sizeof(want));
+	memcpy(want, "old", 3);
+	answer(ep, 0x4503, NULL, 0);
+	rc = ld_sec(ctx, mld_id, "1", "Unlock", user);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(rc == 0 && sent_payload(ep, 0x4503, want, 0x20) && ti.level == 1 && ti.ld == 1,
+	      "Unlock of LD 1: %d, level %d, LD %d", rc, ti.level, ti.ld);
+	snprintf(mem, sizeof(mem), "%s_ld1", mld_id);
+	answer(ep, 0x4504, NULL, 0);
+	rc = fmd_redfish_action_freeze_security_state(ctx, mld_id, mem, &msg);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(rc == 0 && last_opcode(ep) == 0x4504 && ti.level == 1 && ti.ld == 1,
+	      "Memory FreezeSecurityState of LD 1: %d, level %d, LD %d", rc, ti.level, ti.ld);
+	CHECK(ld_sec(ctx, mld_id, "7", "Unlock", user) == -ENOENT, "an LD that is not there");
+out:
+	fmd_ctx_free(ctx);
+	report("security actions on CXLLogicalDevice", before);
+}
+
+/*
+ * The CEL of an SLD (Get Supported Logs, then Get Log of the CEL, Table
+ * 8-229 ff.) says which security commands it supports: what is served.
+ */
+static void test_security_cel(void)
+{
+	static const uint8_t cel_uuid[16] = {
+		0x0d, 0xa9, 0xc0, 0xb5, 0xbf, 0x41, 0x4b, 0x78,
+		0x8f, 0x79, 0x96, 0xb1, 0x62, 0x3b, 0x3f, 0x17
+	};
+	static const uint16_t listed[] = { 0x4000, 0x4500, 0x4501, 0x4503, 0x4505 };
+	uint8_t logs[8 + 20] = { 0 }, cel[4 * 5] = { 0 };
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_sld *sld;
+	unsigned int served;
+	int before = failures;
+
+	logs[0] = 1;					/* one log */
+	memcpy(logs + 8, cel_uuid, 16);
+	logs[8 + 16] = sizeof(cel);			/* its Log Size */
+	for (size_t i = 0; i < 5; i++) {
+		cel[4 * i] = listed[i] & 0xff;
+		cel[4 * i + 1] = listed[i] >> 8;
+	}
+	answer(ep, 0x0400, logs, sizeof(logs));
+	answer(ep, 0x0401, cel, sizeof(cel));
+	answer_identify(ep, 0x1108, 0x03);
+	answer_memdev_identify(ep, 64, 0, 64);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x1108);
+	sld = fmd_topology_find_sld(&ctx->topology, id);
+	CHECK(sld, "no SLD");
+	if (sld) {
+		ctx->config.allow_mctp_restricted = true;
+		CHECK((sld->supported_cmds & security_cmds()) ==
+		      (fmd_cmd_bit(0x4501) | fmd_cmd_bit(0x4503) | fmd_cmd_bit(0x4505)),
+		      "supported %" PRIx64, sld->supported_cmds);
+		served = ld_sec_served(ctx, id, "0");
+		/* SetPassphrase, Unlock, PassphraseSecureErase */
+		CHECK(served == (1u << 0 | 1u << 2 | 1u << 4), "served %#x", served);
+		CHECK(memory_actions(ctx, id, id) == 4,
+		      "Memory: ScanMedia, SetPassphrase, SetMasterPassphrase, SecureEraseUnit");
+	}
+	fmd_ctx_free(ctx);
+	report("the CEL says which security actions are served", before);
 }
 
 /*
@@ -10211,6 +10556,8 @@ int main(void)
 	test_switch_sld_placeholder();
 	test_set_partition();
 	test_o4_gate();
+	test_ld_security();
+	test_security_cel();
 	test_dcd_info();
 	test_dc_return_codes();
 	test_mib_out_of_range_sends_nothing();

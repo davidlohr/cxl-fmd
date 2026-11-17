@@ -120,9 +120,22 @@ static uint64_t opcode_to_cmd_bit(uint16_t opcode)
 	case 0x4301: return FMD_CMD_INJECT_POISON;
 	case 0x4302: return FMD_CMD_CLEAR_POISON;
 
+	/* Persistent Memory Data-at-rest Security */
+	case 0x4500: return FMD_CMD_GET_SECURITY_STATE;
+	case 0x4501: return FMD_CMD_SET_PASSPHRASE;
+	case 0x4502: return FMD_CMD_DISABLE_PASSPHRASE;
+	case 0x4503: return FMD_CMD_UNLOCK;
+	case 0x4504: return FMD_CMD_FREEZE_SECURITY_STATE;
+	case 0x4505: return FMD_CMD_PASSPHRASE_SECURE_ERASE;
+
 	default:
 		return 0;
 	}
+}
+
+uint64_t fmd_cmd_bit(uint16_t opcode)
+{
+	return opcode_to_cmd_bit(opcode);
 }
 
 /*

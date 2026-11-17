@@ -330,6 +330,20 @@ If `cel_commands` is not specified, defaults are applied based on device type:
 | `get_poison_list` | 0x4300 | Get Poison List |
 | `inject_poison` | 0x4301 | Inject Poison |
 | `clear_poison` | 0x4302 | Clear Poison |
+| `get_security_state` | 0x4500 | Get Security State |
+| `set_passphrase` | 0x4501 | Set Passphrase |
+| `disable_passphrase` | 0x4502 | Disable Passphrase |
+| `unlock` | 0x4503 | Unlock |
+| `freeze_security_state` | 0x4504 | Freeze Security State |
+| `passphrase_secure_erase` | 0x4505 | Passphrase Secure Erase |
+
+The security actions of a `CXLLogicalDevice` (`SetPassphrase`,
+`DisablePassphrase`, `Unlock`, `FreezeSecurityState`,
+`PassphraseSecureErase`) and their deprecated aliases on `Memory` are
+served only for a device whose `cel_commands` lists their command, and
+only when cxl-fmd runs with `--allow-mctp-restricted` (a mock's devices
+are taken as on MCTP). The defaults list none of them. The LDs of an MLD
+have the MLD's `cel_commands`.
 
 ### Logical Devices Configuration (MLD Support)
 

@@ -13,6 +13,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
     )
+    config.addinivalue_line(
+        "markers", "daemon_args(*args): more command line arguments for the daemon, "
+        "such as --allow-mctp-restricted"
+    )
 
 
 import os
@@ -146,6 +150,7 @@ def cxl_fmd_daemon(cxl_fmd_executable, request):
     Use markers to customize:
         @pytest.mark.mock_topology("mock/mld-device.json")
         @pytest.mark.port(8081)
+        @pytest.mark.daemon_args("--allow-mctp-restricted")
     """
     # Get mock topology from test marker or use default
     marker = request.node.get_closest_marker("mock_topology")
@@ -156,6 +161,9 @@ def cxl_fmd_daemon(cxl_fmd_executable, request):
     port_marker = request.node.get_closest_marker("port")
     port = port_marker.args[0] if port_marker else _find_free_port()
 
+    args_marker = request.node.get_closest_marker("daemon_args")
+    extra = list(args_marker.args) if args_marker else []
+
     # Start daemon. Its output goes to a file: a pipe nobody reads fills up
     # and then blocks the daemon in the middle of a test.
     log = tempfile.TemporaryFile()
@@ -164,6 +172,7 @@ def cxl_fmd_daemon(cxl_fmd_executable, request):
             str(cxl_fmd_executable),
             "--mock", str(mock_path),
             "--port", str(port),
+            *extra,
         ],
         stdout=log,
         stderr=subprocess.STDOUT,

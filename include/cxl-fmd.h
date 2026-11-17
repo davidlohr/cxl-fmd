@@ -1973,6 +1973,13 @@ fmd_mld_ld_tunnel(const struct fmd_mld *mld, int ld_id,
 int fmd_discover(struct fmd_ctx *ctx);
 
 /*
+ * The bit of a supported_cmds mask (the commands a component's Command
+ * Effects Log lists, FMD_CMD_* of mock.h) that stands for @opcode, or 0 if
+ * cxl-fmd keeps none for it
+ */
+uint64_t fmd_cmd_bit(uint16_t opcode);
+
+/*
  * Whether @opcode is one of the Memory Device commands that CXL r4.0 Table
  * 8-308 marks "O4" for MCTP: Set Partition Info, Set LSA, Clear Poison,
  * Scan Media, Sanitize, Secure Erase, Set Passphrase, Disable Passphrase,
@@ -2675,18 +2682,37 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx, const char *chassis_id,
 /* POST action handlers */
 int fmd_redfish_action_scan_media(struct fmd_ctx *ctx, const char *chassis_id,
 				  const char *mem_id, const char *body, size_t body_size);
+/*
+ * The security actions (src/redfish/handlers.c). Each returns 0, a
+ * negative errno (-ENOENT, -EINVAL, -EBUSY, -EAGAIN, -EOPNOTSUPP, -EIO)
+ * with *msg saying why where there is more to say, or
+ * FMD_MCTP_RESTRICTED.
+ *
+ * CXLLogicalDevice.{action}: SetPassphrase, DisablePassphrase, Unlock,
+ * FreezeSecurityState or PassphraseSecureErase (DSP0288 1.4.0 Table 1).
+ */
+int fmd_redfish_ld_security_action(struct fmd_ctx *ctx, const char *chassis_id,
+				   const char *dev_id, const char *ld_id,
+				   const char *action, const char *body,
+				   size_t body_size, const char **msg);
+/* The deprecated aliases of them on Memory */
 int fmd_redfish_action_set_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
-				      const char *mem_id, const char *body, size_t body_size);
+				      const char *mem_id, const char *body, size_t body_size,
+				      const char **msg);
 int fmd_redfish_action_set_master_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
-					     const char *mem_id, const char *body, size_t body_size);
+					     const char *mem_id, const char *body, size_t body_size,
+					     const char **msg);
 int fmd_redfish_action_disable_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
-					  const char *mem_id, const char *body, size_t body_size);
+					  const char *mem_id, const char *body, size_t body_size,
+					  const char **msg);
 int fmd_redfish_action_disable_master_passphrase(struct fmd_ctx *ctx, const char *chassis_id,
-						 const char *mem_id, const char *body, size_t body_size);
+						 const char *mem_id, const char *body, size_t body_size,
+						 const char **msg);
 int fmd_redfish_action_freeze_security_state(struct fmd_ctx *ctx, const char *chassis_id,
-					     const char *mem_id);
+					     const char *mem_id, const char **msg);
 int fmd_redfish_action_secure_erase_unit(struct fmd_ctx *ctx, const char *chassis_id,
-					 const char *mem_id, const char *body, size_t body_size);
+					 const char *mem_id, const char *body, size_t body_size,
+					 const char **msg);
 int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx, const char *switch_id,
 				 const char *port_id);
 
