@@ -358,9 +358,19 @@ MLD on a switch port, through that port with
 tunnel target: "The FM-owned LD (LD=FFFFh) is an invalid target in MLDs."
 (Section 7.6.7.3.1). For a Multi-Headed device, the specification names
 "the LD Pool CCI in a Multi-Headed device" among the valid tunnel targets,
-"targeted using the Target Type field"; cxl-fmd sends to the MHD's endpoint
-with no tunnel, which assumes that endpoint is the LD Pool CCI. No tunnel to
-the LD Pool CCI is built.
+"targeted using the Target Type field", and says "The LD Pool CCI may be
+exposed as an MCTP-based CCI or can be accessed via the Tunnel Management
+Command command through a head's Mailbox CCI" (Section 2.5). cxl-fmd keeps
+each way it reached the device as a route, with the role of the CCI at its
+end (`struct fmd_route`), and sends the 56xxh commands on the route to the
+LD Pool CCI (`fmd_mhd_pool_route()`): with no tunnel to an endpoint that
+answered Get Multi-Headed Info (5500h) with no tunnel, which cxl-fmd takes
+to be the LD Pool CCI (its inference: the command set "is required on the
+LD Pool CCI", Section 7.6.7.5, which does not say only there), or with a
+tunnel of Target Type 1 through a head's Mailbox CCI. Discovery finds only
+the first kind; it sends no tunnelled probe. With no route to the LD Pool
+CCI known, nothing is sent: the action or `DELETE` is `501 Not
+Implemented`.
 
 ```c
 int cxlmi_cmd_fmapi_get_dcd_info(struct cxlmi_endpoint *ep,

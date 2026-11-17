@@ -9698,8 +9698,14 @@ static void test_mhd_pool_route(void)
 	json_decref(resp);
 	resp = NULL;
 
-	/* no LD Pool CCI known: nothing sent, 501 */
-	mhd->pool_cci = false;
+	/* discovery found the LD Pool CCI: one route, of that role, no tunnel */
+	CHECK(mhd->nroutes == 1 && mhd->routes[0].ep == ep &&
+	      mhd->routes[0].role == FMD_CCI_POOL && !mhd->routes[0].tunnel.level,
+	      "%d routes, the first of role %d", mhd->nroutes,
+	      mhd->nroutes ? (int)mhd->routes[0].role : -1);
+
+	/* no LD Pool CCI known, only a head's FM-owned LD: nothing sent, 501 */
+	mhd->routes[0].role = FMD_CCI_HEAD_FMLD;
 	chunks = fmd_component_count_children(&domain->base, FMD_COMPONENT_CHUNK);
 	sent = commands_sent(ep);
 	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
@@ -9714,6 +9720,80 @@ static void test_mhd_pool_route(void)
 out:
 	fmd_ctx_free(ctx);
 	report("a pool LD's allocation is changed on the LD Pool CCI", before);
+}
+
+/*
+ * The commands for the pool of a Multi-Headed device go on its route to the
+ * LD Pool CCI (review F14), whatever that route is: through a head's
+ * Mailbox CCI, a tunnel with Target Type 1, "The LD Pool CCI in
+ * Multi-Headed devices is targeted using the Target Type field" (CXL r4.0
+ * Section 7.6.7.3.1). Get LD Allocations, and the DCD Management commands,
+ * which went to the device's endpoint with no tunnel whatever the route.
+ * Initiate Dynamic Capacity Add on pool LD 2 names Host ID 2, the pool
+ * LD-ID (docs/DCD-FM-API.md, which says this is not verified). With no
+ * route to the LD Pool CCI, no DC command is sent, and the action is 501.
+ */
+static void test_mhd_route_head_mailbox(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_mhd(ctx, 0x14d);
+	struct cxlmi_tunnel_info ti;
+	char id[FMD_MAX_ID_LEN], body[256];
+	uint8_t info[0x54] = { 0 }, pl[64];
+	struct fmd_mhd *mhd;
+	const char *msg = NULL;
+	int before = failures, rc;
+	unsigned int sent;
+	uint16_t op = 0;
+
+	info[0x00] = 4;				/* Number of Hosts */
+	info[0x01] = 1;				/* Number of Supported DC Regions */
+	put16(info + 0x04, 0x07);		/* Free, Contiguous, Prescriptive */
+	put16(info + 0x08, 0x03);		/* Tag-based, Prescriptive */
+	put64(info + 0x0c, 4);			/* Total Dynamic Capacity: 1 GiB */
+	put64(info + 0x14, 1ULL << 28);		/* Region 0: 256 MB blocks */
+	answer(ep, 0x5600, info, sizeof(info));
+	fmd_discover(ctx);
+	cxlmi_mock_clear_responses(ep);
+
+	device_id(id, sizeof(id), 0x14d);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	CHECK(mhd && fmd_memdev_dcd(&mhd->base), "no DCD MHD %s", id);
+	if (!mhd || !fmd_memdev_dcd(&mhd->base))
+		goto out;
+
+	/* the LD Pool CCI is reached through a head's Mailbox CCI */
+	mhd->nroutes = 0;
+	fmd_mhd_add_route(mhd, ep, CXLMI_TUNNEL_MHD, FMD_CCI_HEAD_MAILBOX, 0, 256);
+
+	answer_get_ld(ep, 3, 4);
+	rc = fmd_mhd_set_ld_allocation(ctx, mhd, 0, 2ULL << 30);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	CHECK(last_opcode(ep) == 0x5401 && ti.level == 1 && ti.mhd,
+	      "5401h: %d, %04xh, level %d, LD Pool CCI %d", rc, last_opcode(ep),
+	      ti.level, ti.mhd);
+
+	answer_rc(ep, 0x5604, CXLMI_RET_INPUT);
+	snprintf(body, sizeof(body), "{\"Policy\": \"Free\", \"RegionNumber\": 0, "
+		 "\"Length\": 256, \"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}");
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "2", body, strlen(body), &msg);
+	cxlmi_mock_get_last_tunnel(ep, &ti);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == -EINVAL && op == 0x5604 && ti.level == 1 && ti.mhd &&
+	      (pl[0] | pl[1] << 8) == 2,
+	      "DC add on pool LD 2: %d (%s), %04xh, level %d, LD Pool CCI %d, Host ID %d",
+	      rc, msg ? msg : "", op, ti.level, ti.mhd, pl[0] | pl[1] << 8);
+
+	/* no route to the LD Pool CCI: no DC command is sent */
+	mhd->routes[0].role = FMD_CCI_HEAD_FMLD;
+	sent = commands_sent(ep);
+	msg = NULL;
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "2", body, strlen(body), &msg);
+	CHECK(rc == -EOPNOTSUPP && msg && commands_sent(ep) == sent,
+	      "DC add with no LD Pool CCI: %d, %u sent", rc, commands_sent(ep) - sent);
+out:
+	fmd_ctx_free(ctx);
+	report("a Multi-Headed device's pool commands go on its route", before);
 }
 
 /*
@@ -10604,6 +10684,7 @@ int main(void)
 	test_chunk_guard();
 	test_chunk_plan();
 	test_mhd_pool_route();
+	test_mhd_route_head_mailbox();
 	test_mhd_chunk_delete();
 	test_mld_chunk_delete_partial();
 	test_pool_capacity();

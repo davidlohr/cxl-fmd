@@ -833,9 +833,6 @@ struct fmd_head {
 	/* Host attachment info */
 	char attached_host_id[FMD_MAX_ID_LEN]; /* Connected host, if known */
 
-	/* Per-head MCTP endpoint for FM access (NULL if using the MHD's ep) */
-	struct cxlmi_endpoint *ep;
-
 	/*
 	 * The switch port this head is on, NULL if it is on a host directly.
 	 * A head is a CXL port of the device (CXL r4.0 Section 2.5), so each
@@ -844,6 +841,58 @@ struct fmd_head {
 	 */
 	struct fmd_port *port;
 };
+
+/*
+ * What a CCI that reaches a Multi-Headed device is, as cxl-fmd takes it.
+ *
+ * "Multi-Headed Devices shall expose a dedicated Component Command
+ * Interface (CCI), the LD Pool CCI, for management of all LDs within the
+ * device. The LD Pool CCI may be exposed as an MCTP-based CCI or can be
+ * accessed via the Tunnel Management Command command through a head's
+ * Mailbox CCI" (CXL r4.0 Section 2.5), and "The FMLD within each head of
+ * an MH-MLD shall expose and manage only the LDs that are mapped to that
+ * head" (Section 2.5.1). No command says which a CCI is: the role is
+ * inferred from what the CCI answers (see the roles).
+ */
+enum fmd_cci_role {
+	FMD_CCI_UNKNOWN = 0,	/* the device's, by its serial number; no more known */
+	/*
+	 * The LD Pool CCI: it answered Get Multi-Headed Info (5500h) with
+	 * no tunnel. The MHD command set "is required on the LD Pool CCI"
+	 * (Section 7.6.7.5); that it is not answered elsewhere is cxl-fmd's
+	 * inference.
+	 */
+	FMD_CCI_POOL,
+	/*
+	 * A head's Mailbox CCI, through which the LD Pool CCI is reached
+	 * with the Tunnel Management Command, Target Type 1 (Section
+	 * 7.6.7.3.1). Discovery finds none (no tunnelled probe is sent).
+	 */
+	FMD_CCI_HEAD_MAILBOX,
+	/*
+	 * The FM-owned LD of a head that presents an MLD: it answered Get LD
+	 * Info (5400h) and not Get Multi-Headed Info. It sees only that
+	 * head's LDs, by head-local LD-IDs (Section 2.5.1), and is not sent
+	 * commands for the pool.
+	 */
+	FMD_CCI_HEAD_FMLD,
+};
+
+/*
+ * One way to reach a device: an endpoint, and the tunnel through it, if
+ * any, to the CCI whose role this is. A switch-attached head is reached
+ * on the switch's endpoint through its port.
+ */
+struct fmd_route {
+	struct cxlmi_endpoint *ep;
+	enum fmd_cci_role role;
+	/* the tunnel from ep to the CCI: level 0 for none */
+	struct cxlmi_tunnel_info tunnel;
+	int head;			/* index of the head the CCI is of; -1 if not known */
+	uint16_t msg_limit;		/* as fmd_component.msg_limit */
+};
+
+#define FMD_MAX_ROUTES 8
 
 /*
  * Multi-Headed Device (MHD)
@@ -868,10 +917,11 @@ struct fmd_mhd {
 	uint64_t supported_cmds;
 
 	/*
-	 * base.ep is the LD Pool CCI: it answered Get Multi-Headed Info
-	 * (5500h) with no tunnel. See fmd_mhd_pool_route().
+	 * The CCIs the device was found on, each with its role. base.ep is
+	 * the one discovery read the device on. See fmd_mhd_pool_route().
 	 */
-	bool pool_cci;
+	struct fmd_route routes[FMD_MAX_ROUTES];
+	int nroutes;
 
 	/* Multi-Head configuration (from Get MHD Info or identify) */
 	uint8_t num_heads;                   /* Number of heads (CXL ports) */
@@ -2316,11 +2366,17 @@ int fmd_ld_alloc_set(struct fmd_ctx *ctx, struct fmd_component *dev,
 		     struct fmd_ld *ld, uint64_t size_bytes);
 
 /*
- * The route to the LD Pool CCI of @mhd: *@ep, through *@ti. Returns 0, or
- * -EOPNOTSUPP if cxl-fmd knows of no CCI of @mhd that is its LD Pool CCI.
+ * The route to the LD Pool CCI of @mhd, from its routes: *@ep, through *@ti
+ * (which points into @mhd, or is CXLMI_NO_TUNNEL). Returns 0, or
+ * -EOPNOTSUPP if cxl-fmd knows of no route of @mhd to its LD Pool CCI.
  */
-int fmd_mhd_pool_route(const struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
+int fmd_mhd_pool_route(struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
 		       struct cxlmi_tunnel_info **ti);
+
+/* Record a route to @mhd (struct fmd_route); one known already is not */
+void fmd_mhd_add_route(struct fmd_mhd *mhd, struct cxlmi_endpoint *ep,
+		       const struct cxlmi_tunnel_info *ti, enum fmd_cci_role role,
+		       int head, uint16_t msg_limit);
 
 /*
  * Set LD allocation for an MHD via LD Pool CCI Set LD Allocations (5402h)

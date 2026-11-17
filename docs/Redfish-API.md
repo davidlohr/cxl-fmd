@@ -2170,6 +2170,7 @@ Changes from the fixes of the external design review (branch
 | `POST` of a `Memory` security action with a passphrase of more than 32 bytes | the first 32 bytes sent | `400`, nothing sent |
 | `POST` of a `Memory` or `CXLLogicalDevice` security action the device answers with an error | `400` "Action failed" | Invalid Input, Incorrect Passphrase or Invalid Payload Length `400`; Invalid Security State `409`; Unsupported `501`; Retry Required or Busy `503`; any other `500`; the message names the return code |
 | A mock topology's `cel_commands` | `get_security_state` to `passphrase_secure_erase` were not known | known (see [mock-topology.md](mock-topology.md)); an MLD's LDs have the MLD's `cel_commands`; `cxl_mld_0` of `mock/mld-device.json` lists all six |
+| On hardware, a Dynamic Capacity action, a `MemoryRegion` `PATCH` or a `MemoryExtent` `DELETE` of a Multi-Headed device | the DCD Management command sent to the device's endpoint with no tunnel, whatever cxl-fmd knew of the route to its LD Pool CCI | sent on the route to the LD Pool CCI, the one Set LD Allocations goes on; `501`, with nothing sent, if no such route is known |
 
 Mock topologies and discovery:
 

@@ -1311,6 +1311,25 @@ static struct cxlmi_tunnel_info *dcd_tunnel(struct fmd_component *dev,
 }
 
 /*
+ * The endpoint the 56xxh commands of @dev go on, and in *@ti the tunnel
+ * through it (dcd_tunnel()). A Multi-Headed device's go to its LD Pool CCI,
+ * on the route to it (fmd_mhd_pool_route()): the CCI "for management of all
+ * LDs within the device" (Section 2.5), where discovery read the pool.
+ * NULL, with nothing to send, if no route to that CCI is known.
+ */
+static struct cxlmi_endpoint *dcd_ep(struct fmd_component *dev,
+				     struct cxlmi_tunnel_info **ti,
+				     struct cxlmi_tunnel_info *buf)
+{
+	struct cxlmi_endpoint *ep;
+
+	if (dev->type == FMD_COMPONENT_MHD)
+		return fmd_mhd_pool_route(fmd_to_mhd(dev), &ep, ti) ? NULL : ep;
+	*ti = dcd_tunnel(dev, buf);
+	return dev->ep;
+}
+
+/*
  * What a DCD Management command that failed comes to. A negative @rc is
  * libcxlmi failing to carry the command: alike for a request not sent, one
  * not answered, and a response it could not read, so the device may have
@@ -1934,8 +1953,12 @@ static int dcd_refresh_hosts_locked(struct fmd_ctx *ctx, struct fmd_component *d
 	if (unlikely(!dev_is_hw(dev)) || !fmd_memdev_dcd(dev))
 		return 0;
 
-	ep = dev->ep;
-	ti = dcd_tunnel(dev, &tbuf);
+	ep = dcd_ep(dev, &ti, &tbuf);
+	if (!ep) {
+		for (int i = 0; i < n; i++)
+			dc_host_synced(dev, hosts[i], -EOPNOTSUPP, 0);
+		return -EOPNOTSUPP;
+	}
 
 	/*
 	 * A host whose regions or extents could not be read keeps what it
@@ -2058,13 +2081,19 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct cxlmi_cmd_fmapi_get_dcd_info_rsp info = {0};
 	struct cxlmi_tunnel_info tbuf, *ti;
+	struct cxlmi_endpoint *ep;
 	struct fmd_dcd_info *dcd;
 	int rc;
 
 	if (unlikely(!dev_is_hw(dev)) || !fmd_is_memdev(dev))
 		return 0;
 
-	ti = dcd_tunnel(dev, &tbuf);
+	ep = dcd_ep(dev, &ti, &tbuf);
+	if (!ep) {
+		fmd_dbg(ctx, "%s: no route to its LD Pool CCI: dynamic capacity "
+			"not read", dev->id);
+		return 0;
+	}
 
 	/*
 	 * Get DCD Info (5600h). Its Possible Command Return Codes are
@@ -2074,7 +2103,7 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 	 * and up to a cap (fmd_dcd_retry_pending(), cxl-fmd's policy).
 	 */
 	errno = 0;	/* see fmd_probe_result() */
-	rc = cxlmi_cmd_fmapi_get_dcd_info(dev->ep, ti, &info);
+	rc = cxlmi_cmd_fmapi_get_dcd_info(ep, ti, &info);
 	if (rc) {
 		struct fmd_retry *retry;
 		bool *pending = dcd_pending_of(dev, &retry);
@@ -2188,14 +2217,17 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_cmd_get_event_records_req req = { .event_log = DC_EVENT_LOG };
 	struct cxlmi_cmd_get_event_records_rsp *rsp;
 	struct cxlmi_cmd_clear_event_records_req *clr;
-	struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
-	struct cxlmi_endpoint *ep = dev->ep;
+	struct cxlmi_tunnel_info tbuf, *ti;
+	struct cxlmi_endpoint *ep = dcd_ep(dev, &ti, &tbuf);
 	uint8_t hosts[FMD_DC_LD_BITMAP_BYTES] = { 0 };	/* bit h: host h */
 	int list[FMD_DC_MAX_HOST_ID + 1], n = 0;
 	bool overflow = false, named = false;
 	uint16_t overflow_count = 0;
 	uint64_t first_ns = 0, last_ns = 0;
 	int rc = 0, err = 0;
+
+	if (!ep)
+		return -EOPNOTSUPP;
 
 	rsp = calloc(1, sizeof(*rsp) +
 		     CXLMI_MAX_SUPPORTED_EVENT_RECORDS * sizeof(rsp->records[0]));
@@ -2441,10 +2473,11 @@ int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
 			fmd_dbg(ctx, "%s: reading %d DC host(s) again", dev->id, m);
 			r = dcd_refresh_hosts_locked(ctx, dev, list, m);
 		} else if (fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags)) {
-			struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+			struct cxlmi_tunnel_info tbuf, *ti;
+			struct cxlmi_endpoint *ep = dcd_ep(dev, &ti, &tbuf);
 
 			fmd_dbg(ctx, "%s: reading the DC tag list again", dev->id);
-			r = hw_refresh_tags(ctx, dev, dev->ep, ti);
+			r = ep ? hw_refresh_tags(ctx, dev, ep, ti) : -EOPNOTSUPP;
 		} else {
 			tried = false;
 		}
@@ -2516,14 +2549,18 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 	if (likely(dev_is_hw(dev))) {
 		struct cxlmi_cmd_fmapi_set_dc_region_config_req req = {0};
-		struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+		struct cxlmi_tunnel_info tbuf, *ti;
+		struct cxlmi_endpoint *ep = dcd_ep(dev, &ti, &tbuf);
 		int rc;
+
+		if (!ep)
+			return -EOPNOTSUPP;
 
 		req.region_id = region->region_id;
 		req.block_sz = block_size;
 		req.sanitize_on_release = sanitize_on_release ? 1 : 0;
 
-		rc = cxlmi_cmd_fmapi_set_dc_region_config(dev->ep, ti, &req);
+		rc = cxlmi_cmd_fmapi_set_dc_region_config(ep, ti, &req);
 		if (rc) {
 			dc_cmd_failed(ctx, dev, "Set DC Region Configuration", rc);
 			if (rc < 0)
@@ -2585,9 +2622,13 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 
 	{
 		struct cxlmi_cmd_fmapi_initiate_dc_add_req *req;
-		struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+		struct cxlmi_tunnel_info tbuf, *ti;
+		struct cxlmi_endpoint *ep = dcd_ep(dev, &ti, &tbuf);
 		int n = (policy == FMD_DC_POLICY_PRESCRIPTIVE) ? ext_count : 0;
 		int rc;
+
+		if (!ep)
+			return -EOPNOTSUPP;
 
 		if (policy == FMD_DC_POLICY_PRESCRIPTIVE && (n <= 0 || !extents))
 			return -EINVAL;
@@ -2636,7 +2677,7 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 			req->extents[i].shared_seq = extents[i]->shared_seq;
 		}
 
-		rc = cxlmi_cmd_fmapi_initiate_dc_add(dev->ep, ti, req);
+		rc = cxlmi_cmd_fmapi_initiate_dc_add(ep, ti, req);
 		free(req);
 		if (rc) {
 			dc_cmd_failed(ctx, dev, "Initiate Dynamic Capacity Add", rc);
@@ -2700,9 +2741,13 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 
 	{
 		struct cxlmi_cmd_fmapi_initiate_dc_release_req *req;
-		struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+		struct cxlmi_tunnel_info tbuf, *ti;
+		struct cxlmi_endpoint *ep = dcd_ep(dev, &ti, &tbuf);
 		int n = (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE) ? ext_count : 0;
 		int rc;
+
+		if (!ep)
+			return -EOPNOTSUPP;
 
 		if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE && (n <= 0 || !extents))
 			return -EINVAL;
@@ -2736,7 +2781,7 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 			req->extents[i].shared_seq = extents[i]->shared_seq;
 		}
 
-		rc = cxlmi_cmd_fmapi_initiate_dc_release(dev->ep, ti, req);
+		rc = cxlmi_cmd_fmapi_initiate_dc_release(ep, ti, req);
 		free(req);
 		if (rc) {
 			dc_cmd_failed(ctx, dev, "Initiate Dynamic Capacity Release", rc);
@@ -2767,17 +2812,20 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 	}
 
 	{
-		struct cxlmi_tunnel_info tbuf, *ti = dcd_tunnel(dev, &tbuf);
+		struct cxlmi_tunnel_info tbuf, *ti;
+		struct cxlmi_endpoint *ep = dcd_ep(dev, &ti, &tbuf);
 		int rc;
 
+		if (!ep)
+			return -EOPNOTSUPP;
 		if (add) {
 			struct cxlmi_cmd_fmapi_dc_add_ref_req req;
 			memcpy(req.tag, tag, FMD_DC_TAG_LEN);
-			rc = cxlmi_cmd_fmapi_dc_add_reference(dev->ep, ti, &req);
+			rc = cxlmi_cmd_fmapi_dc_add_reference(ep, ti, &req);
 		} else {
 			struct cxlmi_cmd_fmapi_dc_remove_ref_req req;
 			memcpy(req.tag, tag, FMD_DC_TAG_LEN);
-			rc = cxlmi_cmd_fmapi_dc_remove_reference(dev->ep, ti, &req);
+			rc = cxlmi_cmd_fmapi_dc_remove_reference(ep, ti, &req);
 		}
 
 		if (rc) {
@@ -2790,7 +2838,7 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		}
 
 		/* carried out: a tag list that cannot be read is stale, as above */
-		rc = hw_refresh_tags(ctx, dev, dev->ep, ti);
+		rc = hw_refresh_tags(ctx, dev, ep, ti);
 		if (rc || fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags)) {
 			fmd_warn(ctx, "%s: %s was carried out, but the tag list could not "
 				 "be read after it", dev->id,

@@ -53,6 +53,9 @@ static const char *dc_common_msg(int rc)
 		return DC_UNKNOWN_MSG;
 	case -EAGAIN:
 		return DC_RETRY_MSG;
+	case -EOPNOTSUPP:
+		return "No route to the LD Pool CCI of the Multi-Headed device is known: "
+		       "nothing was sent";
 	default:
 		return NULL;
 	}

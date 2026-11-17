@@ -786,8 +786,9 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		free(mh_rsp);
 		return 1;
 	}
-	/* answered with no tunnel: see fmd_mhd_pool_route() */
-	mhd->pool_cci = true;
+	/* answered with no tunnel: the LD Pool CCI (enum fmd_cci_role) */
+	fmd_mhd_add_route(mhd, ep, CXLMI_NO_TUNNEL, FMD_CCI_POOL, -1,
+			  mhd->base.msg_limit);
 
 	/*
 	 * Get LD Info (5400h) on the LD Pool CCI: its Memory Size is the
@@ -3582,23 +3583,53 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
 /*
  * The LD Pool CCI of a Multi-Headed device "may be exposed as an MCTP-based
  * CCI or can be accessed via the Tunnel Management Command command through
- * a head's Mailbox CCI" (CXL r4.0 Section 2.5), and the MHD command set
- * "is required on the LD Pool CCI" (Section 7.6.7.5). An endpoint that
- * answered Get Multi-Headed Info (5500h) with no tunnel is taken to be the
- * LD Pool CCI, and is sent its commands with no tunnel: cxl-fmd's
- * inference, as "required" does not say "only". Discovery reads the pool
- * there (Get Multi-Headed Info, then each pool LD through it), so that
- * commands that change the pool go where the pool was read. No other
- * route is known: a head's Mailbox CCI is not discovered as one.
+ * a head's Mailbox CCI" (CXL r4.0 Section 2.5): the first of the device's
+ * routes (struct fmd_route) that is one of the two. An LD Pool CCI is sent
+ * its commands with no tunnel; a head's Mailbox CCI with a tunnel to the
+ * LD Pool CCI, Target Type 1, "The LD Pool CCI in Multi-Headed devices is
+ * targeted using the Target Type field" (Section 7.6.7.3.1). A head's
+ * FM-owned LD, or a CCI whose role is not known, is never taken for one.
  */
-int fmd_mhd_pool_route(const struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
+int fmd_mhd_pool_route(struct fmd_mhd *mhd, struct cxlmi_endpoint **ep,
 		       struct cxlmi_tunnel_info **ti)
 {
-	if (!mhd->pool_cci || !mhd->base.ep)
-		return -EOPNOTSUPP;
-	*ep = mhd->base.ep;
-	*ti = CXLMI_NO_TUNNEL;
-	return 0;
+	for (int i = 0; i < mhd->nroutes; i++) {
+		struct fmd_route *r = &mhd->routes[i];
+
+		if (!r->ep || (r->role != FMD_CCI_POOL &&
+			       r->role != FMD_CCI_HEAD_MAILBOX))
+			continue;
+		*ep = r->ep;
+		*ti = r->tunnel.level ? &r->tunnel : CXLMI_NO_TUNNEL;
+		return 0;
+	}
+	return -EOPNOTSUPP;
+}
+
+/*
+ * Record that @mhd is reached on @ep, through @ti (CXLMI_NO_TUNNEL for
+ * none), at a CCI of @role, of head @head (-1 if not known). A route that
+ * is known already is not added twice; past FMD_MAX_ROUTES, none is.
+ */
+void fmd_mhd_add_route(struct fmd_mhd *mhd, struct cxlmi_endpoint *ep,
+		       const struct cxlmi_tunnel_info *ti, enum fmd_cci_role role,
+		       int head, uint16_t msg_limit)
+{
+	struct fmd_route r = { .ep = ep, .role = role, .head = head,
+			       .msg_limit = msg_limit };
+
+	if (ti)
+		r.tunnel = *ti;
+	for (int i = 0; i < mhd->nroutes; i++) {
+		const struct cxlmi_tunnel_info *t = &mhd->routes[i].tunnel;
+
+		if (mhd->routes[i].ep == ep && t->level == r.tunnel.level &&
+		    (!t->level || (t->port == r.tunnel.port &&
+				   t->ld == r.tunnel.ld && t->mhd == r.tunnel.mhd)))
+			return;
+	}
+	if (mhd->nroutes < FMD_MAX_ROUTES)
+		mhd->routes[mhd->nroutes++] = r;
 }
 
 /*
