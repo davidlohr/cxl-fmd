@@ -105,6 +105,32 @@ class TestBackgroundBind:
 
         assert wait_for(base, response.headers["Location"]).status_code == 201
 
+    def test_access_state_follows_the_binding(self, api_client):
+        """While the switch binds or unbinds, what the Connection reaches is
+        not in use: AccessState Transitioning ("transitioning to a new
+        state", Connection_v1), not Optimized ("in an active and optimized
+        state"). Optimized once the bind is over. Review F13 C5b."""
+        def access_states(conn):
+            status, data = api_client.get(conn)
+            assert status == 200
+            return data["Status"]["State"], [
+                c["AccessState"] for c in data["MemoryChunkInfo"]]
+
+        base = api_client.base_url
+        response = post_connection(base, "switch_0_host0", "sld_0",
+                                   chunk_of(api_client, "sld_0"))
+        assert response.status_code == 202
+        conn = response.json()["Links"]["CreatedResources"][0]["@odata.id"]
+        assert access_states(conn) == ("Starting", ["Transitioning"])
+
+        assert wait_for(base, response.headers["Location"]).status_code == 201
+        assert access_states(conn) == ("Enabled", ["Optimized"])
+
+        response = requests.delete(base + conn, timeout=30)
+        assert response.status_code == 202
+        assert access_states(conn) == ("Updating", ["Transitioning"])
+        assert wait_for(base, response.headers["Location"]).status_code == 204
+
     def test_post_idempotent_starting(self, api_client):
         """The Connection is there, Starting, as soon as the bind is: it is
         in the task's CreatedResources. Asked for again while it is being

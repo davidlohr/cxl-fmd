@@ -961,21 +961,49 @@ static void append_conn_lds(json_t *arr, const struct fmd_conn_view *v)
 	}
 }
 
+struct chunk_info_arg {
+	json_t *arr;
+	const char *access_state;
+};
+
 static int chunk_info(const struct fmd_mem_chunk *chunk, void *arg)
 {
+	struct chunk_info_arg *a = arg;
 	char uri[RF_CHUNK_URI_LEN];
 
 	if (chunk_uri(uri, sizeof(uri), chunk))
 		return 0;
 	/*
 	 * Read and Write: Bind vPPB has no field for how a host may use what
-	 * is bound (Table 7-35). Optimized is cxl-fmd's choice.
+	 * is bound (Table 7-35).
 	 */
-	json_array_append_new(arg, json_pack("{s:{s:s}, s:[s, s], s:s}",
+	json_array_append_new(a->arr, json_pack("{s:{s:s}, s:[s, s], s:s}",
 		"MemoryChunk", "@odata.id", uri,
 		"AccessCapabilities", "Read", "Write",
-		"AccessState", "Optimized"));
+		"AccessState", a->access_state));
 	return 0;
+}
+
+/*
+ * The AccessState of what a Connection in @state reaches, cxl-fmd's
+ * choice among Connection_v1's: Optimized ("in an active and optimized
+ * state") once it is bound; Transitioning ("transitioning to a new
+ * state") while a bind or an unbind of it is under way, as the binding is
+ * then neither made nor gone (Starting, Updating); Unavailable otherwise.
+ * An Absent or Unresolved Connection lists no chunk today (conn_json(),
+ * fmd_conn_for_each_chunk()): Unavailable is for one that would.
+ */
+static const char *conn_access_state(enum fmd_conn_state state)
+{
+	switch (state) {
+	case FMD_CONN_ENABLED:
+		return "Optimized";
+	case FMD_CONN_STARTING:
+	case FMD_CONN_UPDATING:
+		return "Transitioning";
+	default:
+		return "Unavailable";
+	}
 }
 
 /*
@@ -1013,8 +1041,14 @@ static json_t *conn_json(const struct fmd_conn_view *v)
 	}
 
 	append_conn_targets(targets, v);
-	if (v->state != FMD_CONN_ABSENT)
-		fmd_conn_for_each_chunk(v, chunk_info, chunks);
+	if (v->state != FMD_CONN_ABSENT) {
+		struct chunk_info_arg a = {
+			.arr = chunks,
+			.access_state = conn_access_state(v->state),
+		};
+
+		fmd_conn_for_each_chunk(v, chunk_info, &a);
+	}
 
 	links = json_pack("{s:[{s:s}]}", "InitiatorEndpoints", "@odata.id",
 			  rf_uri(0, "/redfish/v1/Fabrics/CXL/Endpoints/%s", v->host->base.id));

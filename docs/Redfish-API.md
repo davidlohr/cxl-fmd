@@ -1138,9 +1138,11 @@ another vPPB is another ID; a `POST` of that target finds it.
 - `MemoryChunkInfo`: one entry per chunk of the target: every chunk of an
   SLD, each chunk on the LD of an LD. A binding exposes the whole of what
   it reaches, and Bind vPPB has no field for how a host may use it (Table
-  7-35): `AccessCapabilities` is always `Read` and `Write`, and
-  `AccessState` `Optimized` (cxl-fmd's choice). Left out while `Absent`,
-  and when the target is not known
+  7-35): `AccessCapabilities` is always `Read` and `Write`. `AccessState`
+  is `Optimized` once it is bound (`Enabled`), and `Transitioning` while a
+  bind or unbind of it is under way (`Starting`, `Updating`): cxl-fmd's
+  choice of Connection_v1's values. Left out while `Absent`, and when the
+  target is not known
 - `Oem.Cxl.Origin` (switch-attached only): see "Forcing an Unbind"
 - `Actions.Oem["#Cxl.ForceUnbind"]` (switch-attached only): see "Forcing
   an Unbind"
@@ -1695,8 +1697,9 @@ types has to change.
   Connection` (was `CXL Memory Connection`, or `CXL SLD Connection` / `CXL
   MLD Connection` for an implicit one). `MemoryChunkInfo` has one entry per
   chunk of the target, not the one chunk the `POST` named, each with
-  `AccessCapabilities` `["Read", "Write"]` and `AccessState` `Optimized`.
-  `Status` can be `Enabled` with `Health` `Warning` (target not known).
+  `AccessCapabilities` `["Read", "Write"]` and `AccessState` `Optimized`
+  (`Transitioning` while it is `Starting` or `Updating`: see "Requests
+  after the design review"). `Status` can be `Enabled` with `Health` `Warning` (target not known).
   `TargetEndpoints` is the LD Endpoint for an LD. New:
   `Oem.Cxl.Origin`, and `Actions.Oem["#Cxl.ForceUnbind"]`.
 - **Tasks.** A bind's `Task` lists the Connection in
@@ -1803,6 +1806,7 @@ Changes from the fixes of the external design review (branch
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
 | `GET` of a DCD's `MemoryRegion` or `MemoryExtent` when the host's LD is in the Pending Reference Bitmap of a tag (5608h), and of an extent a mock topology file declares `pending` | `Pending` `true` in the region's `MemoryExtents[]` and `Status.State` `Starting` for every extent of that host and tag, accepted ones too | `Pending` `false` and `Enabled` for every extent 5603h lists; the add is in the tag's `PendingLDs` of `Oem/Cxl/DynamicCapacityTags` only |
 | `GET` of a `CXLLogicalDevice` of a DCD | `MemorySizeMiB` the static capacity only (Total Capacity, or the LD allocation) | the static capacity plus every extent the LD's host holds, so it changes with an add or a release; a non-DCD device is unchanged |
+| `GET` of a Connection while the switch binds or unbinds it (`Status.State` `Starting` or `Updating`) | `MemoryChunkInfo[].AccessState` `Optimized` | `Transitioning`; `Optimized` once it is `Enabled` |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
 
 Mock topologies and discovery:
