@@ -1178,6 +1178,13 @@ static void test_mhd(bool overcount)
 			      (uint64_t)4 * (ld->ld_id + 1) << 28,
 			      "pool LD %d: %" PRIu64 " bytes", ld->ld_id,
 			      ld->memory_size);
+			/*
+			 * The LD-ID its head gives it is not reported
+			 * (Section 2.5.1): not known, not the pool index
+			 */
+			CHECK(ld->visible_ld_id == FMD_LD_NONE,
+			      "pool LD %d: head-local LD-ID %d", ld->ld_id,
+			      ld->visible_ld_id);
 		}
 		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
 			struct fmd_head *head = fmd_to_head(child);

@@ -166,7 +166,8 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  *
  * fmd_ld serves both MLD and MHD:
  * - Child of fmd_mld: traditional MLD LD (ld_id is what host sees)
- * - Child of fmd_mhd: LD pool entry (ld_id is pool index, visible_ld_id is what host sees)
+ * - Child of fmd_mhd: LD pool entry (ld_id is pool index; visible_ld_id is
+ *   the head-local LD-ID a host sees, FMD_LD_NONE when not known)
  */
 
 /*
@@ -718,7 +719,11 @@ struct fmd_mld {
  * For MHD (parent is fmd_mhd):
  * - ld_id is the pool index (device-wide, 0 to total_lds-1)
  * - binding_point_id is the head ID this LD is mapped to
- * - visible_ld_id is the head-local LD-ID (what host sees, 0-15)
+ * - visible_ld_id is the head-local LD-ID (what host sees, 0-15), or
+ *   FMD_LD_NONE: "The MH-MLD maps the LD-IDs received at a head to the
+ *   device-wide LD index in the MH-MLD's LD pool" (CXL r4.0 Section
+ *   2.5.1), and no command reports that map, so discovery never knows it.
+ *   Only a mock topology gives one.
  *
  * Note: The FM-owned LD (FMLD) at LD-ID FFFFh is separate from these
  * host-bindable LDs and is accessed implicitly via MLD component commands.
@@ -735,7 +740,7 @@ struct fmd_ld {
 
 	/* Host binding/mapping state */
 	uint8_t binding_point_id;            /* vPPB ID (VCS) or head ID (MHD), 0xFF = unbound */
-	uint8_t visible_ld_id;               /* LD-ID as host sees it (may differ for MHD) */
+	uint16_t visible_ld_id;              /* LD-ID as host sees it, or FMD_LD_NONE */
 
 	/* From Get LD Allocations (5401h) */
 	uint64_t memory_size;
@@ -805,7 +810,7 @@ enum fmd_head_state {
  *
  * The mapping from pool LDs to this head is tracked in fmd_ld:
  * - fmd_ld.binding_point_id == head_id indicates LD is mapped here
- * - fmd_ld.visible_ld_id is the head-local LD-ID the host sees
+ * - fmd_ld.visible_ld_id is the head-local LD-ID the host sees, if known
  *
  * Child of fmd_mhd.
  */

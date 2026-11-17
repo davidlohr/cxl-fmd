@@ -929,7 +929,13 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		}
 
 		ld->binding_point_id = binding_point;
-		ld->visible_ld_id = i;  /* Pool index */
+		/*
+		 * Which LD-ID the head gives it is not reported: "The MH-MLD
+		 * maps the LD-IDs received at a head to the device-wide LD
+		 * index in the MH-MLD's LD pool" (Section 2.5.1), and Get
+		 * Multi-Headed Info gives only the head (Table 7-61).
+		 */
+		ld->visible_ld_id = FMD_LD_NONE;
 		ld->base.msg_limit = tunnelled_msg_limit(&mhd->base);
 
 		if (discovered_add(ctx, &ld->base, &mhd->base))
