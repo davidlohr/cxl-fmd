@@ -601,6 +601,13 @@ was read, which hosts, switches and other requests change, and cxl-fmd
 gives no `ETag` or `Last-Modified` that a cache could check a stored one
 against.
 
+A `200` to a `GET` has an `Allow` header, which "Shall be returned with the
+HTTP 200 (OK) status code with any GET or HEAD operation to indicate the
+other allowable operations for this resource" (Table 13): the methods the
+resource takes, the same list a `405` for it has (see "HTTP Status
+Codes"). `HEAD` is not supported (DSP0266 Section 7.4: "Services may
+support the HEAD method"), and is answered `405`.
+
 ---
 
 ## Status from Get Health Info
@@ -2610,6 +2617,7 @@ Changes from the fixes of the external design review (branch
 | On hardware, a Dynamic Capacity add, release or `MemoryExtent` `DELETE` whose host's last read failed or is owed | sent, on what was last read | the host read first; `503`, nothing sent, if it cannot be |
 | `GET /redfish/v1/TaskService/Tasks` | binds and unbinds only | with the Dynamic Capacity tasks; one that is `Running` on hardware has its host read on every `--event-poll` tick |
 | Any request | no `Cache-Control` header | `Cache-Control: no-store` on every response (see "Headers") |
+| `GET` answered `200` | no `Allow` header | `Allow`, the methods the resource takes, as its `405` lists them (see "Headers") |
 
 Mock topologies, discovery and start-up:
 

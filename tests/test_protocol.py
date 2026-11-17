@@ -316,3 +316,102 @@ def test_cache_control_task(api_client):
     assert r.status_code == 202
     cache_control(r)
     cache_control(requests.get(api_client.base_url + r.headers["Location"], timeout=30))
+
+
+# Allow on a 200 to a GET (review F18.6, the DMTF Redfish-Protocol-Validator's
+# RESP_HEADERS_ALLOW_GET_OR_HEAD)
+def crawl_responses(base, extra=()):
+    """Every resource reachable from the service root, and @extra: {uri:
+    the response to its GET}"""
+    from collections import deque
+    from test_oem_schema import links
+
+    seen, todo, out = set(), deque(["/redfish/v1", *extra]), {}
+    while todo:
+        uri = todo.popleft().split("#")[0].rstrip("/") or "/"
+        if uri in seen or not uri.startswith("/redfish"):
+            continue
+        seen.add(uri)
+        response = requests.get(base + uri, timeout=30)
+        out[uri] = response
+        if response.status_code == 200 and \
+           response.headers.get("Content-Type", "").startswith("application/json"):
+            todo.extend(links(response.json()))
+    return out
+
+
+def methods(value):
+    return {m.strip() for m in value.split(",")}
+
+
+def allow_as_405_has_it(base, uri, response):
+    """
+    The Allow header "Shall be returned with the HTTP 200 (OK) status code
+    with any GET or HEAD operation to indicate the other allowable
+    operations for this resource" (DSP0266 1.25.0 Table 13): the same
+    methods a 405 for the resource lists (PUT is taken by none).
+    """
+    assert response.status_code == 200, uri
+    assert "Allow" in response.headers, uri
+    assert methods(response.headers["Allow"]) == \
+        allowed(requests.put(base + uri, json={}, timeout=30)), uri
+
+
+@pytest.mark.parametrize("topology", ["mock/fm-boots-first.json", "mock/dcd-device.json",
+                                      "mock/unit/unit-direct-sld.json"])
+def test_get_has_allow(cxl_fmd_executable, topology):
+    """Every 200 of a GET has Allow; a 405 had it, a 200 did not"""
+    from conftest import _find_free_port, _wait_for_service
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    port = _find_free_port()
+    with tempfile.TemporaryFile() as log:
+        proc = subprocess.Popen([str(cxl_fmd_executable), "--mock", str(root / topology),
+                                 "--port", str(port)], stdout=log, stderr=subprocess.STDOUT)
+        try:
+            base = f"http://localhost:{port}"
+            assert _wait_for_service(base + "/redfish/v1")
+            if topology == "mock/fm-boots-first.json":
+                bound = requests.post(base + CONNECTIONS, timeout=30, json={
+                    "ConnectionType": "Memory",
+                    "Links": {
+                        "InitiatorEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/switch_0_host0"}],
+                        "TargetEndpoints": [{"@odata.id": "/redfish/v1/Fabrics/CXL/Endpoints/sld_0"}]},
+                    "MemoryChunkInfo": [{"MemoryChunk": {"@odata.id":
+                        CHASSIS + "/sld_0/MemoryDomains/sld_0_domain0/MemoryChunks/sld_0_chunk0"}}]})
+                assert bound.status_code == 201
+            if topology == "mock/dcd-device.json":
+                from test_dcd import SLD_ADD, TAG_NEW
+                task = requests.post(base + SLD_ADD, timeout=30, json={
+                    "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
+                assert task.status_code == 202
+            extra = ["/redfish", "/redfish/v1/odata", "/redfish/v1/$metadata",
+                     "/redfish/v1/Schemas/Cxl_v1.xml",
+                     "/redfish/v1/Registries/CxlHealth.1.0.0.json"]
+            if topology == "mock/dcd-device.json":
+                import time
+                monitor = task.headers["Location"]
+                deadline = time.time() + 10
+                while requests.get(base + monitor, timeout=30).status_code == 202:
+                    assert time.time() < deadline
+                    time.sleep(0.05)
+                extra.append(monitor)
+            responses = crawl_responses(base, extra)
+            ok = {u: r for u, r in responses.items() if r.status_code == 200}
+            assert set(extra) <= set(ok)
+            if topology == "mock/dcd-device.json":
+                # the monitor of the add, which the mock host has done
+                assert any("/TaskMonitors/" in u for u in ok)
+            seen = set()
+            for uri, response in ok.items():
+                allow_as_405_has_it(base, uri, response)
+                seen |= methods(response.headers["Allow"])
+            # each method one resource or another takes
+            if topology == "mock/fm-boots-first.json":
+                assert seen == {"GET", "POST", "PATCH", "DELETE"}
+        finally:
+            proc.terminate()
+            assert proc.wait(timeout=10) == 0

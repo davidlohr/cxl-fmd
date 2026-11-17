@@ -109,12 +109,20 @@ static void add_common_headers(struct MHD_Response *response)
 	MHD_add_response_header(response, "Cache-Control", "no-store");
 }
 
+/* Add @headers, pairs of name and value ended by a NULL name, if given */
+static void add_headers(struct MHD_Response *response, const char *const *headers)
+{
+	for (; headers && headers[0]; headers += 2)
+		if (headers[1])
+			MHD_add_response_header(response, headers[0], headers[1]);
+}
+
 /*
- * Send JSON response
+ * Send @json, which is consumed, with @status and @headers (add_headers())
  */
-static enum MHD_Result send_json_response(struct MHD_Connection *conn,
-					  unsigned int status,
-					  json_t *json)
+static enum MHD_Result send_json_headers(struct MHD_Connection *conn,
+					 unsigned int status, json_t *json,
+					 const char *const *headers)
 {
 	struct MHD_Response *response;
 	enum MHD_Result ret;
@@ -140,11 +148,22 @@ static enum MHD_Result send_json_response(struct MHD_Connection *conn,
 	MHD_add_response_header(response, "Content-Type",
 				"application/json; charset=utf-8");
 	add_common_headers(response);
+	add_headers(response, headers);
 
 	ret = MHD_queue_response(conn, status, response);
 	MHD_destroy_response(response);
 
 	return ret;
+}
+
+/*
+ * Send JSON response
+ */
+static enum MHD_Result send_json_response(struct MHD_Connection *conn,
+					  unsigned int status,
+					  json_t *json)
+{
+	return send_json_headers(conn, status, json, NULL);
 }
 
 /*
@@ -383,6 +402,7 @@ static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
 }
 
 static bool route_exists(struct fmd_ctx *ctx, const char *url);
+static void allow_header(struct fmd_ctx *ctx, const char *url, char *buf, size_t len);
 
 /* A bind or unbind that failed with @err: as its task monitor answers */
 static enum MHD_Result send_vppb_failure(struct MHD_Connection *conn,
@@ -532,12 +552,13 @@ static enum MHD_Result send_json_response_with_location(
 
 /*
  * Send @len bytes of @data, which stay valid (a file compiled in), as
- * @type
+ * @type, with @headers (add_headers())
  */
 static enum MHD_Result send_static_response(struct MHD_Connection *conn,
 					    unsigned int status,
 					    const char *data, size_t len,
-					    const char *type)
+					    const char *type,
+					    const char *const *headers)
 {
 	struct MHD_Response *response;
 	enum MHD_Result ret;
@@ -549,6 +570,7 @@ static enum MHD_Result send_static_response(struct MHD_Connection *conn,
 
 	MHD_add_response_header(response, "Content-Type", type);
 	add_common_headers(response);
+	add_headers(response, headers);
 
 	ret = MHD_queue_response(conn, status, response);
 	MHD_destroy_response(response);
@@ -557,11 +579,12 @@ static enum MHD_Result send_static_response(struct MHD_Connection *conn,
 }
 
 /*
- * Send XML response (for $metadata)
+ * Send XML response (for $metadata), with @headers (add_headers())
  */
 static enum MHD_Result send_xml_response(struct MHD_Connection *conn,
 					 unsigned int status,
-					 const char *xml)
+					 const char *xml,
+					 const char *const *headers)
 {
 	struct MHD_Response *response;
 	enum MHD_Result ret;
@@ -581,6 +604,7 @@ static enum MHD_Result send_xml_response(struct MHD_Connection *conn,
 	MHD_add_response_header(response, "Content-Type",
 				"application/xml; charset=utf-8");
 	add_common_headers(response);
+	add_headers(response, headers);
 
 	ret = MHD_queue_response(conn, status, response);
 	MHD_destroy_response(response);
@@ -683,6 +707,14 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 	const char *params[8] = {0};
 	json_t *response = NULL;
 	char *norm_url;
+	/*
+	 * A 200 has an Allow header: it "Shall be returned with the HTTP 200
+	 * (OK) status code with any GET or HEAD operation to indicate the
+	 * other allowable operations for this resource" (DSP0266 1.25.0
+	 * Table 13), as a 405 of the resource has it (allow_header())
+	 */
+	char allow[64];
+	const char *const headers[] = { "Allow", allow, NULL };
 
 	norm_url = normalize_url(url);
 	if (!norm_url) {
@@ -728,7 +760,9 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 					  "Failed to generate metadata",
 					  RF_MSG(FMD_RF_INTERNAL_ERROR));
-		enum MHD_Result ret = send_xml_response(conn, MHD_HTTP_OK, metadata);
+		allow_header(ctx, url, allow, sizeof(allow));
+		enum MHD_Result ret = send_xml_response(conn, MHD_HTTP_OK, metadata,
+							headers);
 		free(metadata);
 		return ret;
 	}
@@ -745,8 +779,9 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 			*exists = true;
 			return MHD_YES;
 		}
+		allow_header(ctx, url, allow, sizeof(allow));
 		return send_static_response(conn, MHD_HTTP_OK, data, len,
-					    "application/xml; charset=utf-8");
+					    "application/xml; charset=utf-8", headers);
 	}
 
 	if (strcmp(norm_url, "/redfish/v1/Registries") == 0) {
@@ -765,8 +800,10 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 				*exists = true;
 				return MHD_YES;
 			}
+			allow_header(ctx, url, allow, sizeof(allow));
 			return send_static_response(conn, MHD_HTTP_OK, data, len,
-						    "application/json; charset=utf-8");
+						    "application/json; charset=utf-8",
+						    headers);
 		}
 		response = fmd_redfish_registry(ctx, params[0]);
 		free_params(params, 8);
@@ -980,6 +1017,10 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 		if (location[0])
 			return send_json_response_with_location(conn, status,
 								response, location);
+		if (status == MHD_HTTP_OK) {
+			allow_header(ctx, url, allow, sizeof(allow));
+			return send_json_headers(conn, status, response, headers);
+		}
 		return send_json_response(conn, status, response);
 	}
 
@@ -1244,7 +1285,8 @@ ok:
 		json_decref(response);
 		return MHD_YES;
 	}
-	return send_json_response(conn, MHD_HTTP_OK, response);
+	allow_header(ctx, url, allow, sizeof(allow));
+	return send_json_headers(conn, MHD_HTTP_OK, response, headers);
 }
 
 static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
@@ -1321,7 +1363,8 @@ static bool deletable(struct fmd_ctx *ctx, const char *url)
  * The Allow header of the resource at @url: the methods it takes, which a
  * 405 has to list ("The response shall include an Allow header that
  * provides a list of methods that the resource identified by the URI in
- * the client request supports", DSP0266 1.25.0, Table 13).
+ * the client request supports", DSP0266 1.25.0, Table 13), and a 200 to a
+ * GET too (route_get()).
  */
 static void allow_header(struct fmd_ctx *ctx, const char *url, char *buf, size_t len)
 {
