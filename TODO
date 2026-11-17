@@ -1,6 +1,5 @@
 - Support for MHD at the CXL topology level, Redfish modeling is pretty much done - some missing links.
 - Support for SSL (https://...)
-- DCD: map MCTP Event Notifications to the sending EID instead of draining every DCD; Task support for add/release
 - Support GFD
 - Support BG commands/context
 - Users of cxl-fmd (authentication)
