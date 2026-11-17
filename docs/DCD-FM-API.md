@@ -890,6 +890,39 @@ whether an LD answers them.
 The `Systems/{host}` that ultimately receives the capacity is found through
 the existing `Connection` for that LD; no new routing is needed.
 
+### Writes on a Multi-Headed DCD
+
+That the Host ID of a Multi-Headed DCD is the pool LD-ID is not verified:
+not on hardware, and not by the specification. The Host ID of Initiate
+Dynamic Capacity Add is "For an LD-FAM device, the LD-ID of the host
+interface to which the capacity is being added" (Table 7-72), and of
+Initiate Dynamic Capacity Release "For an LD-FAM device, the LD-ID of the
+host interface from which the capacity is being released" (Table 7-73).
+A Multi-Headed device has two numberings of LD-IDs: "MLDs exposed via the
+heads of an MH-MLD use LD-IDs from 0 to n-1 relative to that head, where n
+is the number of LDs mapped to the head. The MH-MLD maps the LD-IDs
+received at a head to the device-wide LD index in the MH-MLD's LD pool"
+(Section 2.5.1). Which of the two the 56xxh commands take, the tables do
+not say.
+
+All the same, cxl-fmd sends the DC writes that name a host, Initiate
+Dynamic Capacity Add and Release (the actions, and `DELETE` of a
+`MemoryExtent`), to a Multi-Headed DCD with the pool LD-ID as the Host
+ID, as to any DCD; Set DC Region Configuration and Add and Remove
+Reference name no host (Tables 7-69, 7-74 and 7-75) and are sent as on
+any DCD. Nothing gates them, and no option turns them off: this is the
+maintainer's decision, recorded here so that it is not taken for
+something verified. A device that reads the Host ID as a head-local LD-ID
+would take the request for another LD than the one the `CXLLogicalDevice`
+is: on an MH-MLD, LD-ID `n` of some head, which may be another host's.
+The reads, Get Host DC Region Configuration and Get DC Region Extent
+Lists, use the same Host ID, so what is shown of a host has the same
+doubt. The commands go on the route to the LD Pool CCI
+(`fmd_mhd_pool_route()`, see [Get DCD Info (5600h)](#get-dcd-info-5600h)),
+not to a head. `test_mhd_route_head_mailbox` in `tests/discovery-tests.c`
+checks that Initiate Dynamic Capacity Add on pool LD 2 is sent with Host
+ID 2. See Open Question 17.
+
 ---
 
 ## Proposed cxl-fmd Changes
@@ -1215,7 +1248,12 @@ where it says so), not the specification's.
     list, and DC event records naming it are logged and left.
 17. **Host ID of a Multi-Headed DCD**: the pool LD-ID (see
     [Host ID Resolution](#host-id-resolution)), not verified; the `<ld>`
-    of extent Ids inherits it.
+    of extent Ids inherits it. Choice (the maintainer's): DC writes on a
+    Multi-Headed DCD are sent with it all the same, with no gate and no
+    option to refuse them (see
+    [Writes on a Multi-Headed DCD](#writes-on-a-multi-headed-dcd)). Until
+    hardware or a CXL clarification settles it, a write on an MH-MLD may
+    reach a head-local LD of the same number, another host's.
 18. **One `MemoryExtent` per host, or per shared capacity, and what
     `ExtentOffsetMiB` is when hosts differ.** The schema says "the device
     address range". Choice: one resource per host's extent, its offset in
