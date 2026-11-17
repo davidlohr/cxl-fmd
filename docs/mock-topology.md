@@ -488,6 +488,7 @@ host's DPA space. `mock/dcd-shared-perhost.json` uses all of what follows.
 | `regions` | array | [] | DC region configurations |
 | `extents` | array | [] | Capacity already allocated, see Extent Fields |
 | `tags` | array | [] | Entries of the 5608h tag list besides those the extents give, see Tag Fields |
+| `host_response` | object | none: the hosts answer at once | How the device's hosts answer an add or a release, see Host Response Fields |
 
 #### Region Fields (Get Host DC Region Configuration 0x5601)
 
@@ -562,12 +563,44 @@ Validity Bitmap says both bitmaps are valid. `tags` adds to it:
 | `fm_referenced` | boolean | false | The FM holds a reference on the tag |
 | `pending_hosts` | array | [] | Host IDs set in the tag's Pending Reference Bitmap with no extent: an add the host has not answered, which the device's 5603h does not list. Whether a device lists such an add, the specification does not say; this is the mock's means to show one that does not |
 
+#### Host Response Fields
+
+The device's hosts take capacity, or give it back, when the add or release
+is carried out, unless `host_response` says otherwise. It is the mock's
+means to show what a `Task` of an add or a release does while a host has
+not answered, and when it answers in part or not at all (see "Tasks of an
+add or a release" in [DCD-FM-API.md](DCD-FM-API.md#tasks-of-an-add-or-a-release)):
+
+```json
+"host_response": { "after_ticks": 20, "add": "part", "release": "never" }
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `after_ticks` | integer | 0 | Turns of cxl-fmd's event loop (100 ms each while a task runs) before a host answers, from 0 to 100000 |
+| `add` | string | `all` | What a host accepts of an add: `all`; `part`, the first half of the capacity in whole blocks (at least one); `none`; or `never`, no answer. `part` is refused on a device with a Sharable region: a host "shall accept all or none of the sharable capacity" (CXL r4.0 Section 8.2.10.9.9.3) |
+| `release` | string | `all` | What a host gives back of a release that is not forced: `all`; `part`, the first extent of it and nothing more; or `never` |
+
+Until a host answers an add, the capacity is taken in its region, counts
+against its `AvailableExtents` and `AvailableTags` (Section 9.13.3.3 counts
+"the Pending, Added, and FM-referenced states"), and its LD is in the
+tag's Pending Reference Bitmap; it is no extent of the host's list, as an
+add the host has not answered is not in it (Section 9.13.3). What the
+host does not accept is given back. An answer of `none` is also what an
+Add Capacity Response record of no capacity would say (an untagged add
+has no bitmap to show it). Until a host answers a release, its extents
+stay listed; a release with `ForcedRemoval` `true` does not wait: "Device
+does not wait for a Release Dynamic Capacity command from the host. Host
+immediately loses access to released capacity" (Table 7-73). The
+answers are the mock's choices, made to exercise cxl-fmd; a host's own
+choices are not modelled.
+
 #### What the mock does
 
 Mock add and release operate on this state:
 
-- The mock host accepts added capacity immediately, so new extents are
-  never pending.
+- Without `host_response`, the mock host accepts added capacity
+  immediately, so new extents are never pending.
 - Free and Contiguous take capacity at an offset into the region that no
   host, and no FM reference, has. In a Sharable region the new extents'
   Shared Extent Sequences go on from the host's extents with the tag;

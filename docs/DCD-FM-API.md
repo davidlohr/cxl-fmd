@@ -908,7 +908,9 @@ command, after a DC event record names it, and on every `--event-poll`
 tick while a task follows it (the host is read on the tick for that
 reason alone). With `--event-poll 0`, only a record or a request that
 reads that host moves its tasks. In the mock, on every turn of the event
-loop (100 ms while one runs); the mock's host has answered by then.
+loop (100 ms while one runs); the mock's host has answered by then,
+unless the topology file's `host_response` makes it answer later, in
+part, or not at all (see [docs/mock-topology.md](mock-topology.md)).
 
 **The monitor.** While the task runs, `202` and the `Task`. Once it is
 over, "The headers and response body of the initial operation, as if it
@@ -1485,10 +1487,13 @@ where it says so), not the specification's.
 21. **The earlier extent Ids `ext_<hex DPA>`.** Choice: `404`, no alias:
     they are ambiguous across hosts, and Ids are the service's to assign.
     cxl-fmd keeps no release notes; this document is where it is said.
-22. **When the mock host accepts.** Choice: at once; pending state comes
-    only from the topology file (`per_host` `pending`, `tags`
-    `pending_hosts`). Its tasks are `Completed` on the next turn of the
-    event loop. There are no timers or knobs.
+22. **When the mock host accepts.** Choice: at once, so its tasks are
+    `Completed` on the next turn of the event loop, unless the device's
+    `host_response` in the topology file says it answers after so many
+    turns, in part, not at all, or never (see
+    [docs/mock-topology.md](mock-topology.md)). Pending state of a file's
+    own extents comes from it too (`per_host` `pending`, `tags`
+    `pending_hosts`).
 23. **An extent being released.** Section 9.13.3 says of the Extent
     List a host sees: "The Extent List does not contain extents that are
     still pending acceptance from the host via the Add Dynamic Capacity

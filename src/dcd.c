@@ -274,6 +274,17 @@ unsigned int fmd_dc_host_extent_count(struct fmd_component *dev, int host_id,
 	return count;
 }
 
+static void mock_offers_free(struct fmd_dc_mock_offer **list)
+{
+	while (*list) {
+		struct fmd_dc_mock_offer *o = *list;
+
+		*list = o->next;
+		free(o->pieces);
+		free(o);
+	}
+}
+
 void fmd_dcd_info_free(struct fmd_dcd_info *dcd)
 {
 	struct fmd_dc_mock_hold *h, *next;
@@ -284,6 +295,8 @@ void fmd_dcd_info_free(struct fmd_dcd_info *dcd)
 		next = h->next;
 		free(h);
 	}
+	mock_offers_free(&dcd->mock_offers);
+	mock_offers_free(&dcd->mock_releases);
 	free(dcd->mock_refs);
 	free(dcd->mock_tags);
 	free(dcd->tags.v);
@@ -618,6 +631,15 @@ void fmd_dc_mock_retag(struct fmd_component *dev)
 	}
 	for (hold = dcd->mock_orphans; hold; hold = hold->next)
 		mock_tag_row(dcd, hold->tag);
+	/* an add the host has not answered: "no host response yet" */
+	for (struct fmd_dc_mock_offer *o = dcd->mock_offers; o; o = o->next) {
+		struct fmd_dc_tag *t;
+
+		if (dc_tag_is_zero(o->tag) || o->host_id > FMD_DC_MAX_HOST_ID ||
+		    !(t = mock_tag_row(dcd, o->tag)))
+			continue;
+		t->pend[o->host_id / 8] |= 1 << (o->host_id % 8);
+	}
 	for (uint32_t i = 0; i < dcd->n_mock_refs; i++) {
 		struct fmd_dc_tag *t = mock_tag_row(dcd, dcd->mock_refs[i]);
 
@@ -717,6 +739,8 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 		n_ext++;
 	for (hold = dcd->mock_orphans; hold; hold = hold->next)
 		n_ext++;
+	for (struct fmd_dc_mock_offer *o = dcd->mock_offers; o; o = o->next)
+		n_ext++;
 	tags = calloc(n_ext ? n_ext : 1, sizeof(*tags));
 	if (!tags)
 		return;
@@ -740,6 +764,23 @@ void fmd_dc_mock_recount(struct fmd_component *dev)
 			tag_avail = &dcd->tags_available;
 			ext_sup = dcd->extents_supported;
 			tag_sup = dcd->tags_supported;
+		}
+
+		/* "in the Pending, Added, and FM-referenced states" */
+		for (struct fmd_dc_mock_offer *o = dcd->mock_offers; o; o = o->next) {
+			uint32_t t;
+
+			if (o->host_id != h)
+				continue;
+			extents += o->n;
+			if (dc_tag_is_zero(o->tag))
+				continue;
+			for (t = 0; t < n_tags; t++) {
+				if (!memcmp(tags[t], o->tag, FMD_DC_TAG_LEN))
+					break;
+			}
+			if (t == n_tags)
+				tags[n_tags++] = o->tag;
 		}
 
 		child = dev->first_child;
@@ -825,6 +866,10 @@ static int collect_region_ranges(struct fmd_component *dev, struct fmd_dc_region
 		if (hold->region_id == region->region_id)
 			count++;
 	}
+	for (struct fmd_dc_mock_offer *o = dcd->mock_offers; o; o = o->next) {
+		if (o->region_id == region->region_id)
+			count += o->n;
+	}
 
 	ranges = calloc(count ? count : 1, sizeof(*ranges));
 	if (!ranges)
@@ -847,10 +892,49 @@ static int collect_region_ranges(struct fmd_component *dev, struct fmd_dc_region
 			count++;
 		}
 	}
+	/* capacity offered to a host that has not answered is taken too */
+	for (struct fmd_dc_mock_offer *o = dcd->mock_offers; o; o = o->next) {
+		if (o->region_id != region->region_id)
+			continue;
+		for (int i = 0; i < o->n; i++) {
+			ranges[count].start = region->base_dpa + o->pieces[i].phys;
+			ranges[count].end = ranges[count].start + o->pieces[i].len;
+			count++;
+		}
+	}
 
 	qsort(ranges, count, sizeof(*ranges), cmp_range);
 	*out = ranges;
 	return count;
+}
+
+/*
+ * An add @host_id has not answered, of @n pieces, last in the list: the
+ * host answers it after the file's after_ticks turns of the event loop
+ * (fmd_dc_mock_tick()). NULL if out of memory.
+ */
+static struct fmd_dc_mock_offer *mock_offer_new(struct fmd_dcd_info *dcd, int host_id,
+						const uint8_t *tag, uint8_t region_id,
+						int n)
+{
+	struct fmd_dc_mock_offer *o = calloc(1, sizeof(*o)), **pp;
+
+	if (o)
+		o->pieces = calloc(n ? n : 1, sizeof(*o->pieces));
+	if (!o || !o->pieces) {
+		free(o);
+		return NULL;
+	}
+	o->host_id = host_id;
+	if (tag)
+		memcpy(o->tag, tag, FMD_DC_TAG_LEN);
+	o->region_id = region_id;
+	o->ticks = dcd->mock_host.after_ticks;
+	o->n = n;
+	for (pp = &dcd->mock_offers; *pp; pp = &(*pp)->next)
+		;
+	*pp = o;
+	return o;
 }
 
 /*
@@ -932,6 +1016,27 @@ static int mock_allocate(struct fmd_ctx *ctx, struct fmd_component *dev, int hos
 		}
 	}
 
+	/* a host that answers later: the capacity is offered, not its yet */
+	if (fmd_memdev_dcd(dev)->mock_host.set) {
+		bool shared = region->flags & FMD_DC_REGION_SHAREABLE;
+		struct fmd_dc_mock_offer *o = mock_offer_new(fmd_memdev_dcd(dev), host_id,
+							     tag, region->region_id,
+							     n_pieces);
+
+		if (!o) {
+			rc = -ENOMEM;
+			goto out;
+		}
+		for (int i = 0; i < n_pieces; i++) {
+			o->pieces[i].phys = pieces[i].start - region->base_dpa;
+			o->pieces[i].len = pieces[i].end - pieces[i].start;
+			o->pieces[i].shared_seq = shared ? seq + i : 0;
+		}
+		fmd_info(ctx, "%s: mock DC add host %d region %u offered, %d piece(s)",
+			 dev->id, host_id, region->region_id, n_pieces);
+		goto out;
+	}
+
 	for (int i = 0; i < n_pieces; i++) {
 		bool shared = region->flags & FMD_DC_REGION_SHAREABLE;
 		struct fmd_dc_extent *ext = fmd_dc_extent_add(ctx, dev, host_id, pieces[i].start,
@@ -976,6 +1081,46 @@ static int mock_share(struct fmd_ctx *ctx, struct fmd_component *dev, int host_i
 		    !memcmp(ext->tag, tag, FMD_DC_TAG_LEN) &&
 		    (src < 0 || ext->host_id < src))
 			src = ext->host_id;
+	}
+
+	if (dcd->mock_host.set) {
+		struct fmd_dc_mock_offer *o;
+		int n = 0;
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			n += src >= 0 && ext->host_id == src &&
+			     ext->region_id == region->region_id &&
+			     !memcmp(ext->tag, tag, FMD_DC_TAG_LEN);
+		}
+		for (hold = dcd->mock_orphans; src < 0 && hold; hold = hold->next)
+			n += hold->region_id == region->region_id &&
+			     !memcmp(hold->tag, tag, FMD_DC_TAG_LEN);
+		o = mock_offer_new(dcd, host_id, tag, region->region_id, n);
+		if (!o)
+			return -ENOMEM;
+		n = 0;
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			if (src < 0 || ext->host_id != src ||
+			    ext->region_id != region->region_id ||
+			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN))
+				continue;
+			o->pieces[n].phys = extent_phys(dev, ext);
+			o->pieces[n].len = ext->len;
+			o->pieces[n++].shared_seq = ext->shared_seq;
+		}
+		for (hold = dcd->mock_orphans; src < 0 && hold; hold = hold->next) {
+			if (hold->region_id != region->region_id ||
+			    memcmp(hold->tag, tag, FMD_DC_TAG_LEN))
+				continue;
+			o->pieces[n].phys = hold->phys;
+			o->pieces[n].len = hold->len;
+			o->pieces[n++].shared_seq = hold->shared_seq;
+		}
+		return 0;
 	}
 
 	if (src >= 0) {
@@ -1108,6 +1253,76 @@ static int mock_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_
 	}
 }
 
+/*
+ * Release the @n ranges of @pieces (@phys the host's DPA) from @host_id:
+ * the extent each is in goes, or loses its tail or head. Ranges no extent
+ * of the host has any more are left.
+ */
+static void mock_release_apply(struct fmd_ctx *ctx, struct fmd_component *dev,
+			       int host_id, const struct fmd_dc_mock_piece *pieces,
+			       int n)
+{
+	for (int i = 0; i < n; i++) {
+		struct fmd_component *child;
+		uint64_t dpa = pieces[i].phys, len = pieces[i].len;
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			if (ext->host_id != host_id || dpa < ext->start_dpa ||
+			    dpa - ext->start_dpa >= ext->len)
+				continue;
+			if (dpa == ext->start_dpa && len >= ext->len) {
+				mock_extent_remove(ctx, dev, ext);
+			} else if (dpa + len == ext->start_dpa + ext->len) {
+				ext->len -= len;
+			} else if (dpa == ext->start_dpa) {
+				ext->start_dpa += len;
+				ext->len -= len;
+			}
+			break;
+		}
+	}
+}
+
+/*
+ * The release of @pieces from @host_id, which takes them (freed here): at
+ * once, or, when the file's host answers later and the removal is not
+ * forced, when the host carries it out (fmd_dc_mock_tick()). Of Forced
+ * Removal, "Device does not wait for a Release Dynamic Capacity command
+ * from the host. Host immediately loses access to released capacity"
+ * (Table 7-73): the mock removes it at once.
+ */
+static int mock_release_pieces(struct fmd_ctx *ctx, struct fmd_component *dev,
+			       int host_id, bool forced, struct fmd_dc_mock_piece *pieces,
+			       int n)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	struct fmd_dc_mock_offer *o, **pp;
+
+	if (!dcd->mock_host.set || forced) {
+		mock_release_apply(ctx, dev, host_id, pieces, n);
+		free(pieces);
+		return 0;
+	}
+	o = calloc(1, sizeof(*o));
+	if (!o) {
+		free(pieces);
+		return -ENOMEM;
+	}
+	o->host_id = host_id;
+	o->region_id = FMD_DC_REGION_NONE;
+	o->ticks = dcd->mock_host.after_ticks;
+	o->n = n;
+	o->pieces = pieces;
+	for (pp = &dcd->mock_releases; *pp; pp = &(*pp)->next)
+		;
+	*pp = o;
+	fmd_info(ctx, "%s: mock DC release from host %d of %d piece(s) waits for the host",
+		 dev->id, host_id, n);
+	return 0;
+}
+
 /* Whether @ext is in a Sharable region of its own host and has a tag */
 static bool extent_sharable_tagged(struct fmd_component *dev, struct fmd_dc_extent *ext)
 {
@@ -1121,8 +1336,10 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			   struct fmd_dc_extent **extents, int ext_count)
 {
 	struct fmd_component *child, *next;
+	struct fmd_dc_mock_piece *pieces;
 	uint64_t remaining = length, held = 0;
 	bool sharable = false;
+	int n = 0;
 
 	switch (policy) {
 	case FMD_DC_REL_POLICY_TAG_BASED:
@@ -1157,8 +1374,19 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 		if (sharable && length < held)
 			return -EINVAL;
 
+		/* the tail of each extent with the tag, in order, until Length */
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+			n += ext->host_id == host_id && !memcmp(ext->tag, tag, FMD_DC_TAG_LEN);
+		}
+		pieces = calloc(n ? n : 1, sizeof(*pieces));
+		if (!pieces)
+			return -ENOMEM;
+		n = 0;
 		for (child = dev->first_child; child && remaining; child = next) {
 			struct fmd_dc_extent *ext;
+			uint64_t take;
 
 			next = child->next_sibling;
 			if (child->type != FMD_COMPONENT_DC_EXTENT)
@@ -1167,17 +1395,12 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 			if (ext->host_id != host_id ||
 			    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) != 0)
 				continue;
-
-			if (remaining < ext->len) {
-				ext->len -= remaining;
-				remaining = 0;
-				continue;
-			}
-			remaining -= ext->len;
-
-			mock_extent_remove(ctx, dev, ext);
+			take = remaining < ext->len ? remaining : ext->len;
+			pieces[n].phys = ext->start_dpa + ext->len - take;
+			pieces[n++].len = take;
+			remaining -= take;
 		}
-		return 0;
+		return mock_release_pieces(ctx, dev, host_id, forced, pieces, n);
 
 	case FMD_DC_REL_POLICY_PRESCRIPTIVE:
 		if (ext_count <= 0 || !extents)
@@ -1218,10 +1441,14 @@ static int mock_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 					return -EINVAL;
 			}
 		}
+		pieces = calloc(ext_count, sizeof(*pieces));
+		if (!pieces)
+			return -ENOMEM;
 		for (int i = 0; i < ext_count; i++) {
-			mock_extent_remove(ctx, dev, extents[i]);
+			pieces[i].phys = extents[i]->start_dpa;
+			pieces[i].len = extents[i]->len;
 		}
-		return 0;
+		return mock_release_pieces(ctx, dev, host_id, forced, pieces, ext_count);
 
 	default:
 		return -EINVAL;
@@ -3354,9 +3581,20 @@ void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 void fmd_dc_tasks_poll(struct fmd_ctx *ctx)
 {
+	static const enum fmd_component_type types[] = {
+		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
+	};
+	struct fmd_component *comp;
 	struct fmd_task *task;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
+	/* a turn of the loop for the mock's hosts, then what they did is judged */
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, types[t]) {
+			if (!dev_is_hw(comp))
+				fmd_dc_mock_tick(ctx, comp);
+		}
+	}
 	for (task = ctx->tasks; task; task = task->next) {
 		struct fmd_component *dev;
 
@@ -3374,4 +3612,113 @@ void fmd_dc_tasks_poll(struct fmd_ctx *ctx)
 		dc_task_judge(ctx, dev, task);
 	}
 	pthread_mutex_unlock(&ctx->dcd_lock);
+}
+
+/*
+ * The mock host answers the add @o, unlinked: what the file's
+ * host_response says it accepts becomes its extents, the rest is given
+ * back. "part" is the first half of the capacity, in whole blocks, at
+ * least one (the mock's choice). An answer of none is what an Add Capacity
+ * Response record of no capacity would say (dc_tasks_add_response()).
+ */
+static void mock_offer_answer(struct fmd_ctx *ctx, struct fmd_component *dev,
+			      struct fmd_dc_mock_offer *o, enum fmd_dc_mock_answer answer)
+{
+	struct fmd_dc_region *region = fmd_dc_find_region(dev, o->host_id, o->region_id);
+	uint64_t total = 0, keep, bs;
+	bool any = false;
+
+	if (!region)
+		return;
+	bs = region->block_size ? region->block_size : CXL_CAPACITY_UNIT;
+	for (int i = 0; i < o->n; i++)
+		total += o->pieces[i].len;
+	switch (answer) {
+	case FMD_DC_MOCK_ALL:
+		keep = total;
+		break;
+	case FMD_DC_MOCK_PART:
+		keep = total / 2 - (total / 2) % bs;
+		if (!keep)
+			keep = bs < total ? bs : total;
+		break;
+	default:
+		keep = 0;
+		break;
+	}
+
+	for (int i = 0; i < o->n && keep; i++) {
+		uint64_t take = o->pieces[i].len < keep ? o->pieces[i].len : keep;
+
+		if (fmd_dc_extent_add(ctx, dev, o->host_id, region->base_dpa + o->pieces[i].phys,
+				      take, o->tag, o->pieces[i].shared_seq, o->region_id))
+			any = true;
+		keep -= take;
+	}
+	fmd_info(ctx, "%s: mock host %d answered an add: %s", dev->id, o->host_id,
+		 answer == FMD_DC_MOCK_ALL ? "all of it" :
+		 answer == FMD_DC_MOCK_PART ? "part of it" : "none of it");
+	if (any) {
+		/* a host holds it now */
+		mock_orphans_drop(fmd_memdev_dcd(dev), o->tag);
+	} else {
+		uint8_t d[0x50] = { 0 };
+
+		/* the extent at 38h: Length 0, the Tag at 10h of it */
+		memcpy(d + 0x08 + 0x10, o->tag, FMD_DC_TAG_LEN);
+		dc_tasks_add_response(ctx, dev, o->host_id, d);
+	}
+}
+
+void fmd_dc_mock_tick(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	struct fmd_dc_mock_offer **pp, *o;
+	bool changed = false;
+
+	if (!dcd || !dcd->mock_host.set)
+		return;
+
+	for (pp = &dcd->mock_offers; (o = *pp); ) {
+		if (dcd->mock_host.add == FMD_DC_MOCK_NEVER || o->ticks > 0) {
+			if (o->ticks > 0)
+				o->ticks--;
+			pp = &o->next;
+			continue;
+		}
+		*pp = o->next;
+		mock_offer_answer(ctx, dev, o, dcd->mock_host.add);
+		free(o->pieces);
+		free(o);
+		changed = true;
+	}
+
+	/*
+	 * A release the host carries out: all of it, or "part", the first
+	 * extent of it and nothing more (a host "may call Release Dynamic
+	 * Capacity multiple times, returning different portions of the total
+	 * capacity over time", Section 9.13.3; this one stops after one).
+	 */
+	for (pp = &dcd->mock_releases; (o = *pp); ) {
+		if (dcd->mock_host.release == FMD_DC_MOCK_NEVER || o->ticks > 0) {
+			if (o->ticks > 0)
+				o->ticks--;
+			pp = &o->next;
+			continue;
+		}
+		*pp = o->next;
+		mock_release_apply(ctx, dev, o->host_id, o->pieces,
+				   dcd->mock_host.release == FMD_DC_MOCK_PART ? 1 : o->n);
+		fmd_info(ctx, "%s: mock host %d carried out a release%s", dev->id,
+			 o->host_id, dcd->mock_host.release == FMD_DC_MOCK_PART ?
+			 ", in part" : "");
+		free(o->pieces);
+		free(o);
+		changed = true;
+	}
+
+	if (changed) {
+		fmd_dc_mock_recount(dev);
+		fmd_dc_mock_retag(dev);
+	}
 }

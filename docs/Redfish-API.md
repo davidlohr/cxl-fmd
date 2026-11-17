@@ -2491,6 +2491,14 @@ Changes from the fixes of the external design review (branch
 
 Mock topologies and discovery:
 
+- A DCD's `host_response` (`after_ticks`, `add`, `release`) makes the
+  mock's hosts answer an add or a release late, in part, not at all, or
+  never, so that a Dynamic Capacity `Task` can be seen `Running`,
+  `Completed` with `TaskStatus` `Warning`, and in `Exception`; without it
+  they answer at once, as before. `part` of an add on a device with a
+  Sharable region, and a value that is none of these, are refused by
+  `--check` (see mock-topology.md).
+
 - Two components with one ID, and two LDs of an MLD with one LD-ID, are
   refused while the file is loaded ("two components with ID ...", "two
   LDs with LD-ID ..."), as they were by the validation after it. On

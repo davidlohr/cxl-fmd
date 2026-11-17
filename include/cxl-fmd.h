@@ -1129,6 +1129,42 @@ static inline bool fmd_dc_bm_test(const uint8_t *bm, unsigned int ld)
 	return ld <= FMD_DC_MAX_HOST_ID && ((bm[ld / 8] >> (ld % 8)) & 1);
 }
 
+/* How a mock host answers (struct fmd_dcd_info's mock_host) */
+enum fmd_dc_mock_answer {
+	FMD_DC_MOCK_ALL,	/* accepts, or releases, all of it */
+	FMD_DC_MOCK_PART,	/* the first half of an add; the first extent of a release */
+	FMD_DC_MOCK_NONE,	/* accepts none of an add */
+	FMD_DC_MOCK_NEVER,	/* does not answer */
+};
+
+struct fmd_dc_mock_host {
+	bool set;			/* the file has "host_response" */
+	int after_ticks;		/* turns of the event loop before it answers */
+	enum fmd_dc_mock_answer add;
+	enum fmd_dc_mock_answer release;
+};
+
+/*
+ * Mock only: an add a host has not answered, or a release it has not
+ * carried out: its capacity, as offsets into the host's region (@phys),
+ * and the turns of the event loop left before the host answers.
+ */
+struct fmd_dc_mock_piece {
+	uint64_t phys;
+	uint64_t len;
+	uint16_t shared_seq;
+};
+
+struct fmd_dc_mock_offer {
+	int host_id;
+	uint8_t tag[FMD_DC_TAG_LEN];
+	uint8_t region_id;
+	int ticks;
+	int n;
+	struct fmd_dc_mock_piece *pieces;
+	struct fmd_dc_mock_offer *next;
+};
+
 /*
  * Device-wide Dynamic Capacity capabilities
  *
@@ -1171,6 +1207,15 @@ struct fmd_dcd_info {
 	 */
 	struct fmd_dc_tag *mock_tags;
 	uint32_t n_mock_tags;
+	/*
+	 * Mock only: how the mock's hosts answer an add or a release, the
+	 * file's "host_response" (docs/mock-topology.md). Without one a host
+	 * answers at once, as the command is carried out.
+	 */
+	struct fmd_dc_mock_host mock_host;
+	/* Mock only: adds the hosts have not answered, and releases */
+	struct fmd_dc_mock_offer *mock_offers;
+	struct fmd_dc_mock_offer *mock_releases;
 };
 
 /*
@@ -2658,6 +2703,8 @@ void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
 		       struct fmd_task *task, bool stale);
 /* from fmd_tasks_poll(): DC tasks whose device is gone, and the mock's hosts */
 void fmd_dc_tasks_poll(struct fmd_ctx *ctx);
+/* Mock: one turn of the event loop for the hosts of @dev (dcd_lock held) */
+void fmd_dc_mock_tick(struct fmd_ctx *ctx, struct fmd_component *dev);
 
 /*
  * Drain the Dynamic Capacity Event Log of every DCD and refresh the hosts

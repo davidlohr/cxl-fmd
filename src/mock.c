@@ -1245,6 +1245,74 @@ static void mock_record_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 	ext->pending = pending;
 }
 
+/* "all", "part", "none" or "never" into @out; false if it is none of them */
+static bool parse_mock_answer(json_t *v, bool add, enum fmd_dc_mock_answer *out)
+{
+	const char *s = json_string_value(v);
+
+	if (!v)
+		return true;
+	if (!s)
+		return false;
+	if (!strcmp(s, "all"))
+		*out = FMD_DC_MOCK_ALL;
+	else if (!strcmp(s, "part"))
+		*out = FMD_DC_MOCK_PART;
+	else if (!strcmp(s, "none") && add)
+		*out = FMD_DC_MOCK_NONE;
+	else if (!strcmp(s, "never"))
+		*out = FMD_DC_MOCK_NEVER;
+	else
+		return false;
+	return true;
+}
+
+/*
+ * "host_response": { "after_ticks": 3, "add": "part", "release": "never" }
+ * How the hosts of the device answer an add or a release, after that many
+ * turns of the event loop (docs/mock-topology.md). Without it they answer
+ * at once. A host "shall accept all or none of the sharable capacity"
+ * (CXL r4.0 Section 8.2.10.9.9.3): "part" of an add is refused on a device
+ * with a Sharable region.
+ */
+static void parse_host_response(struct fmd_component *dev, struct fmd_dcd_info *dcd,
+				json_t *obj)
+{
+	json_t *ticks;
+
+	if (!obj)
+		return;
+	if (!json_is_object(obj)) {
+		load_error("%s: dcd host_response is not an object", dev->id);
+		return;
+	}
+	dcd->mock_host.set = true;
+	ticks = json_object_get(obj, "after_ticks");
+	if (ticks && (!json_is_integer(ticks) || json_integer_value(ticks) < 0 ||
+		      json_integer_value(ticks) > 100000))
+		load_error("%s: dcd host_response after_ticks is not an integer from 0 "
+			   "to 100000", dev->id);
+	else if (ticks)
+		dcd->mock_host.after_ticks = (int)json_integer_value(ticks);
+	if (!parse_mock_answer(json_object_get(obj, "add"), true, &dcd->mock_host.add))
+		load_error("%s: dcd host_response add is not all, part, none or never",
+			   dev->id);
+	if (!parse_mock_answer(json_object_get(obj, "release"), false,
+			       &dcd->mock_host.release))
+		load_error("%s: dcd host_response release is not all, part or never",
+			   dev->id);
+	{
+		const char *key;
+		json_t *v;
+
+		json_object_foreach(obj, key, v) {
+			if (strcmp(key, "after_ticks") && strcmp(key, "add") &&
+			    strcmp(key, "release") && strcmp(key, "_comment"))
+				load_error("%s: dcd host_response has no '%s'", dev->id, key);
+		}
+	}
+}
+
 /*
  * "tags": [ { "tag": "<uuid>", "fm_referenced": true, "pending_hosts": [2] } ]
  * Entries of the device's 5608h list besides those its extents give.
@@ -1563,6 +1631,8 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 			dcd->total_dc_capacity += region_len[r];
 	}
 
+	parse_host_response(dev, dcd, json_object_get(jdcd, "host_response"));
+
 	/* Attach before extents so the counters can be adjusted */
 	switch (dev->type) {
 	case FMD_COMPONENT_SLD:
@@ -1717,6 +1787,27 @@ static int parse_dcd(struct fmd_ctx *ctx, json_t *jdev, struct fmd_component *de
 	}
 	parse_dc_tags(dev, dcd, json_object_get(jdcd, "tags"));
 	check_mock_phys(dev, dcd);
+
+	/* "it shall accept all or none of the sharable capacity" (8.2.10.9.9.3) */
+	if (dcd->mock_host.set && dcd->mock_host.add == FMD_DC_MOCK_PART) {
+		for (int h = 0; h < dcd->num_hosts; h++) {
+			struct fmd_component *owner = fmd_dc_host_component(dev, h);
+			struct fmd_component *rc;
+			bool sharable = false;
+
+			if (!owner)
+				continue;
+			fmd_for_each_child_type(owner, rc, FMD_COMPONENT_DC_REGION)
+				sharable |= !!(fmd_to_dc_region(rc)->flags &
+					       FMD_DC_REGION_SHAREABLE);
+			if (sharable) {
+				load_error("%s: dcd host_response add part: a host shall "
+					   "accept all or none of sharable capacity, and "
+					   "host %d has a Sharable region", dev->id, h);
+				break;
+			}
+		}
+	}
 
 	/* Number of Available Extents and Tags, Section 9.13.3.3 */
 	fmd_dc_mock_recount(dev);

@@ -719,6 +719,206 @@ class TestDynamicCapacityTasks:
             assert check_oem(done["@odata.id"], done) == ["Cxl.v1_0_0.Task"]
 
 
+# -----------------------------------------------------------------------------
+# The mock host's host_response: answering late, in part, not at all
+# -----------------------------------------------------------------------------
+
+ZERO_TAG = "00000000-0000-0000-0000-000000000000"
+
+
+def host_response(**knob):
+    """change() for dcd_daemon: the SLD's hosts answer as @knob says"""
+    def change(t):
+        for dev in t["devices"]:
+            if dev["id"] == "cxl_dcd0":
+                dev["dcd"]["host_response"] = knob
+    return change
+
+
+def sld_tag_view(client):
+    status, data = client.get(SLD)
+    assert status == 200
+    return {t["Tag"]: t for t in data["Oem"]["Cxl"]["DynamicCapacityTags"]["Tags"]}
+
+
+def monitor(client, task):
+    r = requests.get(client.base_url + task["TaskMonitor"], timeout=30)
+    return r.status_code, (r.json() if r.content else None)
+
+
+def test_late_host_task_runs_until_it_answers(dcd_daemon):
+    """
+    A host that answers 40 turns of the loop later: the task is Running,
+    the host's LD in the tag's PendingLDs and nothing listed, until it
+    does; then Completed with the capacity.
+    """
+    client = dcd_daemon(host_response(after_ticks=40))
+    task = started(*client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW}))
+    time.sleep(1.3)         # the loop waited up to 1 s; then 100 ms turns
+    status, now = client.get(task["@odata.id"])
+    assert now["TaskState"] == "Running"
+    assert "Pending Reference Bitmap" in now["Messages"][0]["Message"]
+    assert sld_tag_view(client)[TAG_NEW]["PendingLDs"] == [0]
+    assert extent_ids(client) == ["ext_0_400000000"]
+    assert monitor(client, task)[0] == 202
+
+    done = wait_task(client, task)
+    assert done["TaskState"] == "Completed" and done["TaskStatus"] == "OK"
+    assert extent_ids(client) == ["ext_0_400000000", "ext_0_500000000"]
+    assert sld_tag_view(client)[TAG_NEW]["PendingLDs"] == []
+    assert sld_tag_view(client)[TAG_NEW]["AcceptedLDs"] == [0]
+
+
+def test_host_accepts_part(dcd_daemon):
+    """Less than was asked: Completed, TaskStatus Warning, and how much"""
+    client = dcd_daemon(host_response(add="part"))
+    task = started(*client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW}))
+    done = wait_task(client, task)
+    assert done["TaskState"] == "Completed" and done["TaskStatus"] == "Warning"
+    assert done["Oem"]["Cxl"]["DynamicCapacity"]["AcceptedExtents"] == [
+        {"ExtentOffsetBytes": 0x500000000, "ExtentSizeBytes": 512 << 20,
+         "Tag": TAG_NEW}]
+    status, body = monitor(client, task)
+    assert status == 200
+    assert "512 MiB of the 1024 MiB" in body["error"]["message"]
+    status, data = client.get(SLD + "/MemoryExtents/ext_0_500000000")
+    assert data["ExtentSizeMiB"] == 512
+
+
+@pytest.mark.parametrize("tag", [TAG_NEW, ZERO_TAG])
+def test_host_refuses(dcd_daemon, tag):
+    """
+    A host that accepts none: with a tag, its LD leaves the Pending
+    Reference Bitmap with nothing listed; with none (all zeros), the mock
+    host's answer is what an Add Capacity Response record of no capacity
+    says. Exception either way, the monitor 409, the capacity given back.
+    """
+    client = dcd_daemon(host_response(after_ticks=3, add="none"))
+    task = started(*client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": tag}))
+    done = wait_task(client, task)
+    assert done["TaskState"] == "Exception" and done["TaskStatus"] == "Critical"
+    assert "accepted none" in done["Messages"][0]["Message"]
+    assert "Links" not in done
+    status, body = monitor(client, task)
+    assert status == 409
+    assert body["error"]["code"] == "Base.1.24.GeneralError"
+    assert extent_ids(client) == ["ext_0_400000000"]
+    status, data = client.get(SLD_LD0)
+    assert data["AvailableExtents"] == 63
+    # the capacity is free again: the same add goes where it went
+    task = started(*client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": tag}))
+    assert task["TaskState"] == "Running"
+
+
+def test_host_that_never_answers(dcd_daemon):
+    """
+    No answer: the task runs, never made a refusal; another add of its tag
+    to the host is 409 with nothing sent, one of another tag is not.
+    """
+    client = dcd_daemon(host_response(add="never"))
+    task = started(*client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW}))
+    time.sleep(1)
+    status, now = client.get(task["@odata.id"])
+    assert now["TaskState"] == "Running" and "EndTime" not in now
+    status, data, _ = client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
+    assert status == 409
+    assert data["error"]["@Message.ExtendedInfo"][0]["MessageId"] == \
+        "Base.1.24.ResourceInUse"
+    other = "6f1a2c3e-0000-4000-8000-0000000000cc"
+    status, _, _ = client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": other})
+    assert status == 202
+    status, data = client.get("/redfish/v1/TaskService/Tasks")
+    assert data["Members@odata.count"] == 2
+
+
+def test_host_releases_part(dcd_daemon):
+    """
+    A host that gives back the first extent of a release and stops: the
+    task is Running, with what has gone, and the rest is still listed.
+    """
+    client = dcd_daemon(host_response(release="part"))
+    for _ in range(2):
+        assert dc_post(client, SLD_ADD, {
+            "Policy": "Contiguous", "RegionNumber": 1, "Length": 256,
+            "Tag": TAG_NEW})[0] == 200
+    exts = [SLD + "/MemoryExtents/ext_0_c00000000",
+            SLD + "/MemoryExtents/ext_0_c10000000"]
+    task = started(*client.post(SLD_RELEASE, release_body(
+        "Prescriptive", ExtentList=[{"@odata.id": e} for e in exts])))
+    deadline = time.time() + 10
+    while True:
+        status, now = client.get(task["@odata.id"])
+        if now["Oem"]["Cxl"]["DynamicCapacity"]["ReleasedExtents"] or \
+           time.time() > deadline:
+            break
+        time.sleep(0.05)
+    time.sleep(0.5)
+    status, now = client.get(task["@odata.id"])
+    assert now["TaskState"] == "Running"
+    assert now["Oem"]["Cxl"]["DynamicCapacity"]["ReleasedExtents"] == [
+        {"ExtentOffsetBytes": 0xc00000000, "ExtentSizeBytes": 256 << 20,
+         "Tag": TAG_NEW}]
+    assert "256 MiB of the 512 MiB" in now["Messages"][0]["Message"]
+    assert client.get(exts[0])[0] == 404 and client.get(exts[1])[0] == 200
+
+
+def test_forced_release_does_not_wait(dcd_daemon):
+    """Forced Removal: "Device does not wait for a Release Dynamic Capacity
+    command from the host" (Table 7-73)"""
+    client = dcd_daemon(host_response(release="never"))
+    task = started(*client.post(SLD_RELEASE, release_body(
+        "TagBased", Tag=TAG_SEED, Length=4096)))
+    time.sleep(0.5)
+    assert client.get(task["@odata.id"])[1]["TaskState"] == "Running"
+    assert extent_ids(client) == ["ext_0_400000000"]
+
+    client = dcd_daemon(host_response(release="never"))
+    task = started(*client.post(SLD_RELEASE, release_body(
+        "TagBased", Tag=TAG_SEED, Length=4096, ForcedRemoval=True)))
+    assert wait_task(client, task)["TaskState"] == "Completed"
+    assert extent_ids(client) == []
+
+
+@pytest.mark.parametrize("knob, message", [
+    ({"add": "maybe"}, "host_response add is not all, part, none or never"),
+    ({"release": "none"}, "host_response release is not all, part or never"),
+    ({"after_ticks": -1}, "after_ticks is not an integer"),
+    ({"after": 3}, "host_response has no 'after'"),
+])
+def test_host_response_is_checked(cxl_fmd_executable, tmp_path, knob, message):
+    t = copy.deepcopy(DCD_DEVICE)
+    host_response(**knob)(t)
+    path = tmp_path / "topology.json"
+    path.write_text(json.dumps(t))
+    proc = subprocess.run([str(cxl_fmd_executable), "--mock", str(path), "--check"],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0
+    assert message in proc.stdout + proc.stderr
+
+
+def test_part_of_sharable_capacity_is_refused(cxl_fmd_executable, tmp_path):
+    """A host "shall accept all or none of the sharable capacity" (CXL r4.0
+    Section 8.2.10.9.9.3): "part" on a device with a Sharable region is
+    refused by --check."""
+    t = copy.deepcopy(DCD_DEVICE)
+    for dev in t["devices"]:
+        if dev["id"] == "cxl_dcd_mld0":
+            dev["dcd"]["host_response"] = {"add": "part"}
+    path = tmp_path / "topology.json"
+    path.write_text(json.dumps(t))
+    proc = subprocess.run([str(cxl_fmd_executable), "--mock", str(path), "--check"],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0
+    assert "accept all or none of sharable capacity" in proc.stdout + proc.stderr
+
+
 # =============================================================================
 # Dynamic Capacity Release (5605h) and DELETE MemoryExtent
 # =============================================================================

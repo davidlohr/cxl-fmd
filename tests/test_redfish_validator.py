@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from test_dcd import dcd_daemon  # noqa: F401 (a fixture)
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # What the validator may warn of and still pass: a property DSP8010
@@ -267,6 +269,35 @@ class TestRedfishValidator:
             finally:
                 proc.terminate()
                 proc.wait(timeout=10)
+
+
+def test_dcd_task_states_validation(dcd_daemon, schema_dir, validator_venv):
+    """
+    Validate with a Dynamic Capacity task in each state: Completed with
+    TaskStatus Warning (a host that accepts part), Exception (one that
+    accepts none) and Running (one that never gives a release back), the
+    mock's host_response.
+    """
+    from test_dcd import (MLD, SLD_ADD, SLD_RELEASE, TAG_NEW, TAG_SEED,
+                          release_body, started, wait_task)
+
+    def change(t):
+        for dev in t["devices"]:
+            dev["dcd"]["host_response"] = (
+                {"add": "part", "release": "never"} if dev["id"] == "cxl_dcd0"
+                else {"add": "none"})
+    client = dcd_daemon(change)
+    part = started(*client.post(SLD_ADD, {
+        "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW}))
+    none = started(*client.post(
+        MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd",
+        {"Policy": "Free", "RegionNumber": 1, "Length": 256, "Tag": TAG_NEW}))
+    assert wait_task(client, part)["TaskStatus"] == "Warning"
+    assert wait_task(client, none)["TaskState"] == "Exception"
+    running = started(*client.post(SLD_RELEASE, release_body(
+        "TagBased", Tag=TAG_SEED, Length=4096)))
+    assert client.get(running["@odata.id"])[1]["TaskState"] == "Running"
+    TestRedfishValidator()._validate(client.base_url, schema_dir, validator_venv)
 
 
 def test_validator_problems(tmp_path):
