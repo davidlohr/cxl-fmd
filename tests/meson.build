@@ -38,6 +38,12 @@ validator_venv = meson.project_source_root() / '.venv-validator'
 validator_available = fs.is_file(validator_venv / 'bin' / 'rf_service_validator')
 run_validator = get_option('validator').enabled() or \
     (get_option('validator').auto() and validator_available)
+# The DMTF Redfish-Protocol-Validator, in the same environment, on the
+# same terms: with auto, only if it is there already (an environment made
+# before it was is given it only with -Dvalidator=enabled)
+protocol_validator_available = fs.is_file(validator_venv / 'bin' / 'rf_protocol_validator')
+run_protocol_validator = get_option('validator').enabled() or \
+    (get_option('validator').auto() and protocol_validator_available)
 
 if not pytest_available
     warning('pytest not found - tests will be skipped')
@@ -584,6 +590,51 @@ if pytest_available
     )
 endif
 
+# What fails a Protocol Validator run (needs only pytest)
+if pytest_available
+    test(
+        'redfish-protocol-validator-gate',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            '-k', 'test_classify',
+            meson.current_source_dir() / 'test_protocol_validator.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 60,
+        suite: 'unit',
+    )
+endif
+
+# The DMTF Redfish-Protocol-Validator over every mock topology
+if pytest_available and run_protocol_validator
+    test(
+        'redfish-protocol-validator',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            '-k', 'test_protocol_validation',
+            meson.current_source_dir() / 'test_protocol_validator.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 1800,
+        suite: 'validator',
+        is_parallel: false,
+    )
+elif pytest_available and not protocol_validator_available
+    message('the DMTF Redfish-Protocol-Validator is not run: -Dvalidator=enabled to install it in .venv-validator and run it')
+endif
+
 # The validator over mock topologies: one for each, by its test
 if pytest_available and run_validator
     foreach t : [
@@ -624,4 +675,5 @@ summary({
     'pytest': pytest_available,
     'requests': requests_available,
     'redfish_service_validator': run_validator,
+    'redfish_protocol_validator': run_protocol_validator,
 }, section: 'Test Dependencies')

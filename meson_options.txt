@@ -4,5 +4,6 @@
 option('tests', type: 'feature', value: 'auto',
        description: 'Enable test suite')
 option('validator', type: 'feature', value: 'auto',
-       description: 'Run the DMTF Redfish Service Validator over mock topologies: ' +
-                    'it is installed in .venv-validator the first time, which needs network')
+       description: 'Run the DMTF Redfish Service Validator and Redfish-Protocol-Validator ' +
+                    'over mock topologies: they are installed in .venv-validator the first ' +
+                    'time, which needs network')

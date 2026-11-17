@@ -76,6 +76,11 @@ VENV_DIR = PROJECT_ROOT / ".venv-validator"
 # passes without anything here having changed
 VALIDATOR_VERSION = "3.1.8"
 
+# the version of the DMTF Redfish-Protocol-Validator installed next to it
+# (test_protocol_validator.py), pinned for the same reason. It needs
+# redfish_service_validator>=3.1.6, which the pin above meets.
+PROTOCOL_VALIDATOR_VERSION = "1.3.2"
+
 
 class ValidatorVenv:
     """Manages virtual environment for Redfish validator."""
@@ -84,27 +89,40 @@ class ValidatorVenv:
         self.venv_path = Path(venv_path)
         self.python = self.venv_path / "bin" / "python"
         self.validator = self.venv_path / "bin" / "rf_service_validator"
+        self.protocol_validator = self.venv_path / "bin" / "rf_protocol_validator"
 
     def exists(self):
         """Check if venv exists with validator installed."""
         return self.python.exists() and self.validator.exists()
 
-    def create(self):
-        """Create virtual environment and install validator."""
-        print(f"Creating virtual environment at {self.venv_path}")
-        venv.create(self.venv_path, with_pip=True)
-
-        print("Installing redfish-service-validator...")
+    def install(self):
+        """Install both validators, at their pinned versions."""
+        print("Installing redfish-service-validator and redfish-protocol-validator...")
         subprocess.run(
             [str(self.python), "-m", "pip", "install", "-q",
-             "redfish-service-validator==" + VALIDATOR_VERSION],
+             "redfish-service-validator==" + VALIDATOR_VERSION,
+             "redfish-protocol-validator==" + PROTOCOL_VALIDATOR_VERSION],
             check=True,
         )
+
+    def create(self):
+        """Create virtual environment and install the validators."""
+        print(f"Creating virtual environment at {self.venv_path}")
+        venv.create(self.venv_path, with_pip=True)
+        self.install()
 
     def ensure(self):
         """Ensure venv exists with validator installed."""
         if not self.exists():
             self.create()
+        return self
+
+    def ensure_protocol(self):
+        """Ensure the Protocol Validator is installed too: a venv made
+        before it was is given it (which needs network)."""
+        self.ensure()
+        if not self.protocol_validator.exists():
+            self.install()
         return self
 
 
@@ -126,6 +144,13 @@ def validator_venv():
     venv_mgr = ValidatorVenv(VENV_DIR)
     venv_mgr.ensure()
     return venv_mgr
+
+
+@pytest.fixture(scope="session")
+def protocol_validator_venv():
+    """Ensure the Protocol Validator is installed in the validator virtual
+    environment and return it."""
+    return ValidatorVenv(VENV_DIR).ensure_protocol()
 
 
 @pytest.fixture(scope="session")

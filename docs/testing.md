@@ -40,18 +40,20 @@ Install Python dependencies:
 pip install pytest requests
 ```
 
-The DMTF Redfish Service Validator runs from its own virtual environment,
-`.venv-validator` in the source tree, at the version `tests/conftest.py`
-names (`VALIDATOR_VERSION`). Its tests run when that environment is there, or
-when asked for with `-Dvalidator=enabled`, in which case the first of them
-makes it, which needs network:
+The DMTF Redfish Service Validator and Redfish-Protocol-Validator run from
+their own virtual environment, `.venv-validator` in the source tree, at the
+versions `tests/conftest.py` names (`VALIDATOR_VERSION`,
+`PROTOCOL_VALIDATOR_VERSION`). The tests of each run when it is installed
+there, or when asked for with `-Dvalidator=enabled`, in which case the
+first of them installs what is missing, which needs network:
 
 ```bash
 meson setup build -Dvalidator=enabled
 # Shows: Test Dependencies
-#   pytest                    : YES
-#   requests                  : YES
-#   redfish_service_validator : YES
+#   pytest                     : YES
+#   requests                   : YES
+#   redfish_service_validator  : YES
+#   redfish_protocol_validator : YES
 ```
 
 `-Dvalidator=disabled` leaves them out. CI runs them in a job of their own.
@@ -86,8 +88,8 @@ meson test -C build --list
 | `redfish` | redfish-endpoints | Basic endpoint accessibility | pytest |
 | `api` | topology-inventory, orchestration, tasks, hot-removal, event-logs, concurrency, memory-lifecycle, connections, cxl-business-rules, error-handling, dcd, mock-bindings | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
-| `unit` | discovery, mock-topologies, manpage, lock-file, docs, unit-topologies, redfish-validator-gate | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, one cxl-fmd per lock file (`test_lock_file.py`), statements the docs must keep (`test_docs.py`: one cxl-fmd per fabric, a lock file that fences one host only, the DCD `DELETE` and zero-Tag contracts, the deferred TLS, authentication and listen address), 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch), and what fails a validator run (below) | pytest, requests (the pytest ones) |
-| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost, redfish-validator-degraded, redfish-validator-all | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, `dcd-shared-perhost.json`, `degraded-device.json` (`Status.Conditions` and the `CxlHealth` registry), and (`redfish-validator-all`) every other topology in `mock/` and `mock/unit/`. Oem extensions are checked (no `--nooemcheck`), against cxl-fmd's Oem schema `Cxl_v1.xml`, which the validator fetches from `/redfish/v1/Schemas` through `$metadata` (the copy it saves in `schema/dmtf/csdl` is removed after each run). A run fails on any `FAIL`, and on any `WARN` but the deprecated `TemporaryThroughputReductionSupported` cxl-fmd still serves: the validator reports a bad Oem extension only as a `WARN` | pytest, `.venv-validator` |
+| `unit` | discovery, mock-topologies, manpage, lock-file, docs, unit-topologies, redfish-validator-gate, redfish-protocol-validator-gate | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, one cxl-fmd per lock file (`test_lock_file.py`), statements the docs must keep (`test_docs.py`: one cxl-fmd per fabric, a lock file that fences one host only, the DCD `DELETE` and zero-Tag contracts, the deferred TLS, authentication and listen address), 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch), and what fails a run of either validator (below) | pytest, requests (the pytest ones) |
+| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost, redfish-validator-degraded, redfish-validator-all, redfish-protocol-validator | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, `dcd-shared-perhost.json`, `degraded-device.json` (`Status.Conditions` and the `CxlHealth` registry), and (`redfish-validator-all`) every other topology in `mock/` and `mock/unit/`. Oem extensions are checked (no `--nooemcheck`), against cxl-fmd's Oem schema `Cxl_v1.xml`, which the validator fetches from `/redfish/v1/Schemas` through `$metadata` (the copy it saves in `schema/dmtf/csdl` is removed after each run). A run fails on any `FAIL`, and on any `WARN` but the deprecated `TemporaryThroughputReductionSupported` cxl-fmd still serves: the validator reports a bad Oem extension only as a `WARN`. `redfish-protocol-validator` runs the DMTF Redfish-Protocol-Validator over every topology in `mock/` and `mock/unit/` (see "DMTF Redfish-Protocol-Validator") | pytest, `.venv-validator` |
 
 ### Test Timeouts
 
@@ -97,7 +99,7 @@ meson test -C build --list
 | api | 180s |
 | security | 180s (fuzzing), 300s (adversarial) |
 | unit | 60s (manpage), 120s (mock-topologies, lock-file), 300s (unit-topologies) |
-| validator | 600s |
+| validator | 600s; 1800s (redfish-validator-all, redfish-protocol-validator) |
 
 Override timeouts:
 
@@ -246,6 +248,78 @@ done
 | 3 | Daemon startup timeout |
 | 4 | Other error |
 
+## DMTF Redfish-Protocol-Validator
+
+The [DMTF Redfish-Protocol-Validator](https://github.com/DMTF/Redfish-Protocol-Validator)
+checks the protocol of DSP0266: methods, request and response headers,
+status codes, error responses, and the security requirements, each
+reported as an assertion that passes, fails, warns or is not tested.
+`tests/test_protocol_validator.py` runs it, at `PROTOCOL_VALIDATOR_VERSION`,
+over each topology in `mock/` and `mock/unit/` (`redfish-protocol-validator`
+in the `validator` suite, and the CI validator job). A run takes about 20
+seconds; all 23 about 8 minutes.
+
+A run fails on any `FAIL` or `WARN` the table below does not name, and on
+an entry of the table the run no longer reports, so that the list cannot
+outlive what it excuses (`redfish-protocol-validator-gate` tests this).
+Each entry is matched on its assertion, method, status, URI and message.
+It fails each because cxl-fmd has no authentication, login sessions,
+accounts, roles or TLS, which the maintainer has deferred (see
+"Authentication" in [Redfish-API.md](Redfish-API.md)), or because the
+validator tests the requirement only through them. The requirement is the
+validator's text of it:
+
+| Assertion | Requirement | What cxl-fmd does |
+|-----------|-------------|-------------------|
+| `PROTO_HTTP_SUPPORTED_METHODS` (POST) | "Services shall support the POST, GET, PATCH, and DELETE HTTP methods." | The validator POSTs only to the Sessions and Accounts collections. cxl-fmd takes POST on its Connections and MemoryChunks collections and on actions (`test_connections.py`, `test_memory_lifecycle.py`, `test_protocol.py`) |
+| `REQ_POST_CREATE_TO_MEMBERS_PROP` | "Submitting a POST request to a resource collection is equivalent to submitting the same request to the Members property of that resource collection. Services that support the addition of Members to a resource collection shall support both forms." | Tried on `SessionService/Sessions/Members` only (`404`): cxl-fmd has no sessions. Its own collections that take POST take it on `Members` too (`test_protocol.py`) |
+| `REQ_POST_CREATE_VIA_COLLECTION` | "To create a resource, services shall support the POST method on resource collections." | Tried on `SessionService/Sessions` only, which is `405`: no sessions |
+| `SEC_REQUIRE_LOGIN_SESSIONS` | "Service shall provide login sessions that conform with this specification." | No sessions: a POST to `SessionService/Sessions` is `405` |
+| `SEC_BASIC_AUTH_OVER_HTTPS` | "All requests that use HTTP Basic authentication shall require HTTPS." | No TLS, and no authentication: a request with Basic credentials is served over HTTP |
+| `SEC_PRIV_SUPPORT_PREDEFINED_ROLES` (three: Administrator, Operator, ReadOnly) | "Services shall support the Administrator, Operator, and ReadOnly standard roles." | No `AccountService`, accounts or roles |
+| `SEC_READ_REQUIRES_AUTH` (each URI it tries) | "Resources shall not be available as unauthenticated, with some exceptions." | No authentication: every GET is served |
+| `SEC_WRITE_REQUIRES_AUTH` | "Services shall authenticate all write requests to Redfish resources, with some exceptions." | No authentication; tried as a POST to `SessionService/Sessions`, `405` |
+
+What it reports `NOT_TESTED` does not fail a run. On a mock topology that
+is, by what it says it lacks:
+
+- Sessions, accounts and their ETags (deferred): the `PROTO_ETAG_*`
+  assertions ("Failed to create an account"), `REQ_HEADERS_IF_MATCH`,
+  `RESP_HEADERS_ETAG`, `RESP_HEADERS_X_AUTH_TOKEN`,
+  `REQ_POST_CREATE_NOT_IDEMPOTENT`, `REQ_POST_CREATE_URI_IN_LOCATION_HDR`,
+  `RESP_HEADERS_LOCATION`, `RESP_HEADERS_WWW_AUTHENTICATE`, and the `SEC_*`
+  assertions of sessions, accounts, passwords, privileges, cookies and
+  certificates (`SEC_CERTS_CONFORM_X509V3`: the service is not HTTPS).
+  `REQ_GET_COLLECTION_COUNT_PROP_*`, `REQ_HEADERS_X_AUTH_TOKEN` and
+  `SEC_BOTH_AUTH_TYPES` say no successful GET of
+  `/redfish/v1/SessionService/Sessions` was found: the validator GETs
+  that collection only through the service root's `SessionService`, which
+  cxl-fmd does not serve (it serves the empty collection the service
+  root's `Links.Sessions` names, answered `200`).
+- The PATCH and DELETE it would make, of an account it could not create:
+  `PROTO_HTTP_SUPPORTED_METHODS` (PATCH, DELETE), `REQ_DELETE_METHOD_REQUIRED`,
+  `REQ_PATCH_*`, `REQ_HEADERS_CONTENT_TYPE`, `REQ_DATA_MOD_ERRORS`; and
+  `RESP_STATUS_BAD_REQUEST` and `RESP_STATUS_INTERNAL_SERVER_ERROR`, which
+  look for a `400` or a `500` among the responses to its own requests and
+  found none. cxl-fmd's PATCH, DELETE and errors are tested in the api
+  suite.
+- Optional features cxl-fmd does not provide: `HEAD` ("Services may
+  support the HEAD method", DSP0266 Section 7.4: `REQ_HEAD_DIFFERS_FROM_GET`,
+  and the `HEAD` half of `RESP_HEADERS_LINK_REL_DESCRIBED_BY`); an OpenAPI
+  document (`REQ_HEADERS_ACCEPT`, `RESP_HEADERS_CONTENT_TYPE` for
+  `openapi.yaml`); query parameters (`REQ_QUERY_PROTOCOL_FEATURES_SUPPORTED`:
+  the service root has no `ProtocolFeaturesSupported`); an EventService,
+  with subscriptions and Server-Sent Events (`SERV_EVENT_*`, `SERV_SSE_*`,
+  `SEC_SESSION_TERMINATION_SIDE_EFFECTS`); SSDP (`SERV_SSDP_*`: the
+  service root has no `UUID`); HTTP redirects
+  (`PROTO_REDIRECT_ENFORCES_TARGET_PRIVS`).
+
+The headers it checks that cxl-fmd did not send, and the `OData-Version`
+it did not check, are fixed (`Cache-Control`, `Allow` and `Link` on a
+`GET`, `412` for an `OData-Version` other than `4.0`; see "Headers" in
+[Redfish-API.md](Redfish-API.md)), as is a POST to a collection's
+`Members`; `test_protocol.py` tests each without the validator.
+
 ## pytest Test Suite
 
 The pytest test suite provides comprehensive API testing against mock topologies.
@@ -275,7 +349,8 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 17 |
 | `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
 | `test_oem_schema.py` | Every `Oem.Cxl` object and Oem action against cxl-fmd's Oem schema `Cxl_v1.xml` | 7 |
-| **Total** | | **811** |
+| `test_protocol_validator.py` | The DMTF Redfish-Protocol-Validator over every mock topology, and what fails a run of it | 24 |
+| **Total** | | **835** |
 
 ### Running Tests
 

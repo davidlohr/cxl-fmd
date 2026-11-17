@@ -295,7 +295,7 @@ meson test -C build --suite redfish    # Quick endpoint tests
 meson test -C build --suite api        # Full API tests
 meson test -C build --suite security   # Fuzzing and adversarial tests
 meson test -C build --suite unit       # discovery-tests, the mock topologies, the man page, the docs, and 7 attachment/device combinations
-meson test -C build --suite validator  # DMTF schema validation
+meson test -C build --suite validator  # DMTF schema and protocol validation
 ```
 
 ### Standalone Validator
@@ -312,6 +312,8 @@ python scripts/run_redfish_validator.py --mock-topology mock/mld-device.json
 # Save validator logs
 python scripts/run_redfish_validator.py --output-dir ./logs
 ```
+
+The [DMTF Redfish-Protocol-Validator](https://github.com/DMTF/Redfish-Protocol-Validator) checks the protocol of DSP0266: methods, request and response headers, status codes and the security requirements. `meson test -C build --suite validator` runs it over every mock topology (`tests/test_protocol_validator.py`); what it reports that cxl-fmd does not meet, because authentication, sessions and TLS are deferred, is listed in [docs/testing.md](docs/testing.md).
 
 ## Dynamic Capacity
 

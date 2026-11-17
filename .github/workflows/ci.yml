@@ -3,7 +3,7 @@
 # Build cxl-fmd and run everything that needs no hardware: the discovery
 # harness against libcxlmi mock endpoints, the mock topology checks, the
 # Redfish API suites against the daemon in --mock mode, and the DMTF
-# Redfish Service Validator over it.
+# Redfish Service Validator and Redfish-Protocol-Validator over it.
 
 name: CI
 
@@ -127,9 +127,13 @@ jobs:
   # The DMTF Redfish Service Validator over mock topologies: every resource
   # it can reach from the service root, against the schemas in schema/dmtf.
   # It follows every link, so a resource that crashes the daemon or does not
-  # match its schema fails here.
+  # match its schema fails here. The DMTF Redfish-Protocol-Validator runs
+  # here too, over every mock topology: the protocol of DSP0266 (methods,
+  # headers, status codes, errors), with the failures that need the
+  # deferred authentication, sessions and TLS expected
+  # (tests/test_protocol_validator.py).
   redfish-validator:
-    name: Redfish Service Validator
+    name: Redfish Service and Protocol Validators
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -141,12 +145,14 @@ jobs:
             libmicrohttpd-dev libjansson-dev libdbus-1-dev \
             python3-pytest python3-requests python3-venv
 
-      # the version tests/conftest.py names
-      - name: Install the validator
+      # the versions tests/conftest.py names
+      - name: Install the validators
         run: |
           version=$(sed -n 's/^VALIDATOR_VERSION = "\(.*\)"/\1/p' tests/conftest.py)
+          protocol=$(sed -n 's/^PROTOCOL_VALIDATOR_VERSION = "\(.*\)"/\1/p' tests/conftest.py)
           python3 -m venv .venv-validator
-          .venv-validator/bin/python -m pip install -q "redfish-service-validator==$version"
+          .venv-validator/bin/python -m pip install -q "redfish-service-validator==$version" \
+            "redfish-protocol-validator==$protocol"
 
       - name: Build
         run: |
