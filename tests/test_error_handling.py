@@ -303,14 +303,13 @@ class TestUnsupportedMethodResponses:
             "/redfish/v1/Chassis/cxl_mem0",
             {"Name": "New Name"}
         )
-        # POST not allowed on individual Chassis - implementation returns 501
-        assert status in [405, 400, 404, 501]
+        # a Chassis takes GET only
+        assert status == 405
 
     def test_delete_chassis_rejected(self, api_client):
         """Verify DELETE on Chassis is rejected."""
         status = api_client.delete("/redfish/v1/Chassis/cxl_mem0")
-        # DELETE not allowed on Chassis - implementation returns 501
-        assert status in [405, 400, 404, 501]
+        assert status == 405
 
     def test_post_to_fabric_rejected(self, api_client):
         """Verify POST to Fabric is rejected."""
@@ -318,5 +317,4 @@ class TestUnsupportedMethodResponses:
             "/redfish/v1/Fabrics/CXL",
             {"Name": "New Fabric"}
         )
-        # Implementation returns 501 for unimplemented methods
-        assert status in [405, 400, 404, 501]
+        assert status == 405

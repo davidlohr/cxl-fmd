@@ -165,6 +165,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Query parameters, and methods a resource does not take
+    test(
+        'protocol',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_protocol.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # The mock switch's bind and unbind outcomes, and binds made elsewhere
     test(
         'mock-bindings',

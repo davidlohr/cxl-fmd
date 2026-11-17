@@ -380,20 +380,31 @@ static int request_context_append(struct request_context *rctx,
 /*
  * Handle GET request - route to appropriate handler
  */
-static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
-					  struct MHD_Connection *conn,
-					  const char *url)
+/*
+ * GET @url. With @exists, nothing is sent: *@exists is whether @url is a
+ * resource this service serves, for route_exists(). The builders called
+ * here only read what cxl-fmd holds: none sends a command.
+ */
+static enum MHD_Result route_get(struct fmd_ctx *ctx,
+				 struct MHD_Connection *conn,
+				 const char *url, bool *exists)
 {
 	const char *params[8] = {0};
 	json_t *response = NULL;
 	char *norm_url;
 
 	norm_url = normalize_url(url);
-	if (!norm_url)
+	if (!norm_url) {
+		if (exists) {
+			*exists = false;
+			return MHD_YES;
+		}
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Memory allocation failed");
+	}
 
-	fmd_dbg(ctx, "GET %s", norm_url);
+	if (!exists)
+		fmd_dbg(ctx, "GET %s", norm_url);
 
 	/* Route matching */
 	if (strcmp(norm_url, "/redfish") == 0) {
@@ -412,7 +423,14 @@ static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
 	}
 
 	if (strcmp(norm_url, "/redfish/v1/$metadata") == 0) {
-		char *metadata = fmd_redfish_metadata(ctx);
+		char *metadata;
+
+		if (exists) {
+			free(norm_url);
+			*exists = true;
+			return MHD_YES;
+		}
+		metadata = fmd_redfish_metadata(ctx);
 		free(norm_url);
 		if (!metadata)
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
@@ -613,6 +631,11 @@ static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
 
 		free_params(params, 8);
 		free(norm_url);
+		if (exists) {
+			json_decref(response);
+			*exists = status != 404;
+			return MHD_YES;
+		}
 		if (status == 404)
 			return send_error(conn, MHD_HTTP_NOT_FOUND, "Task not found");
 		if (status == 204)
@@ -871,11 +894,128 @@ static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
 
 not_found:
 	free(norm_url);
+	if (exists) {
+		*exists = false;
+		return MHD_YES;
+	}
 	return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource not found");
 
 ok:
 	free(norm_url);
+	if (exists) {
+		*exists = response != NULL;
+		json_decref(response);
+		return MHD_YES;
+	}
 	return send_json_response(conn, MHD_HTTP_OK, response);
+}
+
+static enum MHD_Result handle_request_get(struct fmd_ctx *ctx,
+					  struct MHD_Connection *conn,
+					  const char *url)
+{
+	return route_get(ctx, conn, url, NULL);
+}
+
+/* Whether @url is a resource a GET of answers 200 (or 202, a task monitor) */
+static bool route_exists(struct fmd_ctx *ctx, const char *url)
+{
+	bool exists = false;
+
+	route_get(ctx, NULL, url, &exists);
+	return exists;
+}
+
+/*
+ * The routes of resources that take more than GET, as the handlers below
+ * serve them. A direct-attached Connection takes no DELETE (rc -4 there),
+ * so allow_header() leaves it out for one.
+ */
+static const char *const post_routes[] = {
+	"/redfish/v1/Fabrics/{id}/Connections",
+	"/redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks",
+};
+
+static const char *const patch_routes[] = {
+	"/redfish/v1/Chassis/{id}/PCIeDevices/{dev}",
+	"/redfish/v1/Chassis/{id}/Memory/{mem}",
+	"/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}",
+};
+
+static const char *const delete_routes[] = {
+	"/redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}",
+	"/redfish/v1/Fabrics/{id}/Connections/{conn}",
+	"/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}",
+};
+
+#define ROUTES(a) (sizeof(a) / sizeof((a)[0]))
+
+static bool matches_any(const char *const *routes, size_t n, const char *url)
+{
+	const char *params[8] = {0};
+
+	for (size_t i = 0; i < n; i++) {
+		if (match_route(routes[i], url, params, 8)) {
+			free_params(params, 8);
+			return true;
+		}
+	}
+	return false;
+}
+
+/* A switch-attached Connection: one a DELETE unbinds */
+static bool deletable(struct fmd_ctx *ctx, const char *url)
+{
+	const char *params[8] = {0};
+	json_t *conn;
+	bool ok;
+
+	if (!match_route("/redfish/v1/Fabrics/{id}/Connections/{conn}", url, params, 8))
+		return true;
+	conn = fmd_redfish_connection(ctx, params[0], params[1]);
+	free_params(params, 8);
+	/* only a vPPB binding has ForceUnbind (conn_json()) */
+	ok = conn && json_object_get(conn, "Actions");
+	json_decref(conn);
+	return ok;
+}
+
+/*
+ * The Allow header of the resource at @url: the methods it takes, which a
+ * 405 has to list ("The response shall include an Allow header that
+ * provides a list of methods that the resource identified by the URI in
+ * the client request supports", DSP0266 1.25.0, Table 13).
+ */
+static void allow_header(struct fmd_ctx *ctx, const char *url, char *buf, size_t len)
+{
+	char *norm_url = normalize_url(url);
+	const char *u = norm_url ? norm_url : url;
+
+	snprintf(buf, len, "GET%s%s%s",
+		 matches_any(post_routes, ROUTES(post_routes), u) ? ", POST" : "",
+		 matches_any(patch_routes, ROUTES(patch_routes), u) ? ", PATCH" : "",
+		 matches_any(delete_routes, ROUTES(delete_routes), u) &&
+		 deletable(ctx, u) ? ", DELETE" : "");
+	free(norm_url);
+}
+
+/*
+ * The answer to @method on @url when no handler takes it: 405 with an
+ * Allow header if @url is a resource ("If the resource exists but does not
+ * support the requested operation, services shall return the HTTP 405
+ * Method Not Allowed status code", DSP0266 1.25.0 Section 7.5.3), else 404.
+ */
+static enum MHD_Result send_method_not_allowed(struct fmd_ctx *ctx,
+					       struct MHD_Connection *conn,
+					       const char *method, const char *url)
+{
+	char allow[64], msg[96];
+
+	if (!route_exists(ctx, url))
+		return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource not found");
+	allow_header(ctx, url, allow, sizeof(allow));
+	snprintf(msg, sizeof(msg), "%.16s is not supported for this resource", method);
+	return send_error_allow(conn, MHD_HTTP_METHOD_NOT_ALLOWED, msg, allow);
 }
 
 /*
@@ -1301,8 +1441,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 	}
 
 	free(norm_url);
-	return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
-			  "POST not supported for this resource");
+	return send_method_not_allowed(ctx, conn, "POST", url);
 }
 
 /*
@@ -1318,9 +1457,8 @@ static enum MHD_Result handle_request_put(struct fmd_ctx *ctx,
 
 	fmd_dbg(ctx, "PUT %s (%zu bytes body)", url, body_size);
 
-	/* TODO: implement PUT handlers */
-	return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
-			  "PUT not yet implemented");
+	/* no resource takes a PUT */
+	return send_method_not_allowed(ctx, conn, "PUT", url);
 }
 
 /*
@@ -1348,11 +1486,18 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 	 * (cxl-fmd's choice, though Connection_v1 lets a service update it).
 	 */
 	if (match_route("/redfish/v1/Fabrics/{id}/Connections/{conn}", norm_url, params, 8)) {
+		char allow[64];
+
 		free_params(params, 8);
+		if (!route_exists(ctx, norm_url)) {
+			free(norm_url);
+			return send_error(conn, MHD_HTTP_NOT_FOUND, "Resource not found");
+		}
+		allow_header(ctx, norm_url, allow, sizeof(allow));
 		free(norm_url);
 		return send_error_allow(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
 					"A Connection is the switch's binding: POST and DELETE change it",
-					"GET, DELETE");
+					allow);
 	}
 
 	/* PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev} */
@@ -1411,8 +1556,7 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 	}
 
 	free(norm_url);
-	return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
-			  "PATCH not supported for this resource");
+	return send_method_not_allowed(ctx, conn, "PATCH", url);
 }
 
 /*
@@ -1526,8 +1670,72 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 	}
 
 	free(norm_url);
-	return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
-			  "DELETE not supported for this resource");
+	return send_method_not_allowed(ctx, conn, "DELETE", url);
+}
+
+/* The query parameters of a request that start with $ */
+static enum MHD_Result collect_dollar_param(void *cls, enum MHD_ValueKind kind,
+					    const char *key, const char *value)
+{
+	json_t *found = cls;
+
+	(void)kind;
+	(void)value;
+	if (key && key[0] == '$')
+		json_array_append_new(found, json_string(key));
+	return MHD_YES;
+}
+
+/*
+ * cxl-fmd supports no query parameter, and its service root has no
+ * ProtocolFeaturesSupported ("Shall include the ProtocolFeaturesSupported
+ * object in the service root, if the service supports query parameters",
+ * DSP0266 1.25.0 Section 7.3.1). That clause has services return "The HTTP
+ * 501 Not Implemented status code for any unsupported query parameters
+ * that start with $" and "An extended error that indicates the
+ * unsupported query parameters for this resource"; the others are
+ * ignored ("Shall ignore unknown or unsupported query parameters that do
+ * not begin with $"). The extended error has one Base
+ * QueryParameterUnsupported message ("Query parameter '%1' is not
+ * supported.", Base 1.15.0) for each. A request of any method is
+ * answered so: cxl-fmd's choice, as the clause has query parameters only
+ * on GET. Returns false if there is none, and the request is handled as
+ * usual; else true, the answer sent, and *@result what sending it gave.
+ */
+static bool send_unsupported_query(struct MHD_Connection *conn,
+				   enum MHD_Result *result)
+{
+	json_t *found = json_array(), *info, *v;
+	size_t i;
+
+	if (!found)
+		return false;
+	MHD_get_connection_values(conn, MHD_GET_ARGUMENT_KIND,
+				  collect_dollar_param, found);
+	if (!json_array_size(found)) {
+		json_decref(found);
+		return false;
+	}
+	info = json_array();
+	json_array_foreach(found, i, v) {
+		char msg[160];
+
+		snprintf(msg, sizeof(msg), "Query parameter '%.100s' is not supported.",
+			 json_string_value(v));
+		json_array_append_new(info, json_pack("{s:s, s:s, s:[O], s:s, s:s}",
+			"MessageId", "Base.1.15.0.QueryParameterUnsupported",
+			"Message", msg,
+			"MessageArgs", v,
+			"Severity", "Warning",
+			"Resolution", "Correct or remove the query parameter and resubmit the request."));
+	}
+	json_decref(found);
+	*result = send_json_response(conn, MHD_HTTP_NOT_IMPLEMENTED,
+		json_pack("{s:{s:s, s:s, s:o}}", "error",
+			  "code", "Base.1.15.0.QueryParameterUnsupported",
+			  "message", "Query parameters that start with $ are not supported",
+			  "@Message.ExtendedInfo", info));
+	return true;
 }
 
 /*
@@ -1610,6 +1818,9 @@ static enum MHD_Result handle_request(void *cls,
 	 */
 	enum MHD_Result result;
 
+	if (send_unsupported_query(conn, &result))
+		return result;
+
 	if (strcmp(method, "GET") == 0) {
 		pthread_rwlock_rdlock(&ctx->fabric_lock);
 		result = handle_request_get(ctx, conn, url);
@@ -1630,8 +1841,7 @@ static enum MHD_Result handle_request(void *cls,
 	else if (strcmp(method, "DELETE") == 0)
 		result = handle_request_delete(ctx, conn, url);
 	else
-		result = send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
-				    "Method not allowed");
+		result = send_method_not_allowed(ctx, conn, method, url);
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 
 	return result;

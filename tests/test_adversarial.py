@@ -657,12 +657,12 @@ class TestStateMachineViolations:
             "/redfish/v1/Chassis",
             {"Name": "NewChassis"}
         )
-        assert status in [405, 501]  # Method Not Allowed or Not Implemented
+        assert status == 405
 
     def test_delete_readonly_resource(self, api_client):
         """DELETE a resource that can't be deleted."""
         status = api_client.delete("/redfish/v1/Chassis/sld_0")
-        assert status in [405, 501]
+        assert status == 405
 
     def test_create_chunk_in_nonexistent_domain(self, api_client):
         """Create chunk in domain that doesn't exist."""

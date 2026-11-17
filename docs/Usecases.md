@@ -16,7 +16,8 @@ Architectures", and the parts of "Middleware Value Proposition" marked so. None 
 OpenStack, vSphere, container runtime or Prometheus components named there
 exists in this repository. cxl-fmd itself has no EventService, no Prometheus
 metrics endpoint (it serves Redfish `PortMetrics` and `MemoryMetrics`), no authentication or audit log, no `PATCH` of a `Connection` (405) or a
-`CXLLogicalDevice`, and no `$filter` query (a query string is ignored). The
+`CXLLogicalDevice`, and no `$filter` query (a query parameter that starts with `$` is answered
+501; any other is ignored). The
 known gaps of what it does implement are listed under "Known Gaps" in
 `docs/Redfish-API.md`.
 
@@ -575,7 +576,7 @@ Tier 3: CXL-attached Persistent Memory (highest latency, persistent)
 - Monitor tier utilization for placement decisions
 - Support memory migration hints to kernel
 
-**QoS Configuration** (not implemented: this `PATCH` is answered 501; the
+**QoS Configuration** (not implemented: this `PATCH` is answered 405; the
 schema's properties are `AllocatedBandwidth` and `LimitPercent`):
 ```
 PATCH /redfish/v1/Chassis/{dev}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}

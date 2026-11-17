@@ -296,20 +296,23 @@ class TestURLHandling:
 class TestHTTPMethods:
     """Tests for HTTP method handling."""
 
-    def test_patch_returns_501(self, api_client):
-        """PATCH returns 501 Not Implemented."""
+    def test_patch_returns_405(self, api_client):
+        """PATCH of a Chassis, which takes none, is 405 with an Allow
+        header (DSP0266 Section 7.5.3); it was 501."""
         import requests
         resp = requests.patch(
             f"{api_client.base_url}/redfish/v1/Chassis/sld_0",
             json={"Name": "test"}
         )
-        assert resp.status_code == 501
+        assert resp.status_code == 405
+        assert resp.headers["Allow"] == "GET"
 
     def test_options_returns_405(self, api_client):
         """OPTIONS returns 405."""
         import requests
         resp = requests.options(f"{api_client.base_url}/redfish/v1")
         assert resp.status_code == 405
+        assert resp.headers["Allow"] == "GET"
 
     def test_trace_returns_405(self, api_client):
         """TRACE returns 405."""
