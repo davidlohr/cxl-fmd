@@ -352,6 +352,9 @@ static int start_cxl_fmd(void)
 {
 	printf("Starting cxl-fmd...\n");
 
+	/* where cxl-fmd makes /run/cxl-fmd for its lock file */
+	mkdir("/run", 0755);
+
 	fmd_pid = fork();
 	if (fmd_pid < 0) {
 		perror("fork");

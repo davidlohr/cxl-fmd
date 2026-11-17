@@ -2163,8 +2163,9 @@ In summary:
     Info, which without it are `409` for every client but on an SLD on
     the kernel's mailbox, item 11). Its service root links an empty
     `Sessions` collection, and there is no `SessionService` or
-    `AccountService` (see "Authentication"). Nothing keeps a second
-    cxl-fmd, on another port, from driving the same devices. DSP0266
+    `AccountService` (see "Authentication"). A second cxl-fmd on this
+    host is refused only when it has the same lock file, and one on
+    another host is not refused at all (item 15). DSP0266
     1.25.0 requires what is missing: "Implementations shall support the
     Transport Layer Security (TLS) protocol v1.2 with RFC7525 recommendations or later" (Section
     13.1.1); services "Shall support both HTTP Basic authentication and
@@ -2183,6 +2184,38 @@ In summary:
     read late, on a `--rescan`, has its Dynamic Capacity event log read not
     when it is found but on the next `--event-poll` tick, or on an Event
     Notification from it (with `--event-poll 0`, only then).
+15. One cxl-fmd per host, not per fabric. A cxl-fmd that drives devices
+    (not `--mock`, unless `--lock-file` is given) holds an exclusive
+    `flock(2)` on its lock file from before discovery until it exits:
+    `--lock-file`, by default `cxl-fmd.lock` in the first directory of
+    `$RUNTIME_DIRECTORY`, or else in `/run/cxl-fmd`, made if it is not
+    there. A second one with the same lock file exits with status 1 and
+    sends nothing; one that cannot make or open its lock file does too.
+    That fences the processes of one host that share the file and
+    nothing more: a cxl-fmd on another host, one on this host with
+    another lock file (or in a container with a `/run` of its own),
+    another Fabric Manager, and the software of a host on a device's
+    other CCIs, are not seen, and each would act on what the other does
+    (a `DELETE` unbinds whoever made the binding). CXL r4.0 gives an HBR
+    switch or an MLD no means to keep a second FM out. Of a component
+    with several CCIs it requires that it "process commands from those
+    CCIs in a manner that avoids starvation so that commands submitted to
+    one CCI do not prevent commands from other CCIs from being handled",
+    and its Implementation Note reads "Coordination between management
+    entities attempting concurrent commands over separate CCIs that have
+    component-level impact (e.g., FW update, etc.) is beyond the scope of
+    this specification" (Section 9.20.1). An FM registers as the owner
+    only of a PBR component: "Management of a PBR device requires that a
+    primary FM is registered. A PBR device shall accept only the
+    following commands from an FM that is not registered as the primary
+    FM" (Section 7.7.12.2), and "Registration of FMs and assignment of a
+    PID apply to all CCIs on a PBR component" (Claim Ownership, opcode
+    0701h, Section 8.2.10.8.2). cxl-fmd sends no PBR command, Claim
+    Ownership among them. That nothing in CXL r4.0 fences a fabric of HBR
+    switches and MLDs is cxl-fmd's reading of these sections, as are the
+    lock file and its scope; keeping to one Fabric Manager per fabric is
+    the deployment's job (see "Kubernetes MFM Deployment" in
+    [Usecases.md](Usecases.md)).
 
 ### Event logs and switch events
 
@@ -2566,8 +2599,19 @@ Changes from the fixes of the external design review (branch
 | On hardware, a Dynamic Capacity add, release or `MemoryExtent` `DELETE` whose host's last read failed or is owed | sent, on what was last read | the host read first; `503`, nothing sent, if it cannot be |
 | `GET /redfish/v1/TaskService/Tasks` | binds and unbinds only | with the Dynamic Capacity tasks; one that is `Running` on hardware has its host read on every `--event-poll` tick |
 
-Mock topologies and discovery:
+Mock topologies, discovery and start-up:
 
+- The lock file (review F13.C6b). A cxl-fmd that drives devices takes an
+  exclusive `flock(2)` on `--lock-file PATH`, by default `cxl-fmd.lock`
+  in `$RUNTIME_DIRECTORY` (its first directory) or else in
+  `/run/cxl-fmd`, before discovery, and holds it until it exits; a second
+  one with the same lock file exits with status 1 ("another cxl-fmd (PID
+  N) holds the lock file PATH"). Started as a user that cannot make
+  `/run/cxl-fmd`, with no `$RUNTIME_DIRECTORY`, cxl-fmd now exits with
+  status 1 ("cannot create /run/cxl-fmd for the lock file"), where it
+  started before: give it `--lock-file`. With `--mock` no lock is taken
+  unless `--lock-file` is given. It fences one host only (Known Gaps,
+  item 15).
 - A DCD's `host_response` (`after_ticks`, `add`, `release`) makes the
   mock's hosts answer an add or a release late, in part, not at all, or
   never, so that a Dynamic Capacity `Task` can be seen `Running`,

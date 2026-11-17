@@ -15,6 +15,8 @@ cxl-fmd \- CXL Fabric Manager daemon with a Redfish API
 .RB [ \-N
 .IR threads ]
 .RB [ \-\-allow\-mctp\-restricted ]
+.RB [ \-\-lock\-file
+.IR path ]
 .RB [ \-v ...]
 .br
 .B cxl-fmd
@@ -25,6 +27,8 @@ cxl-fmd \- CXL Fabric Manager daemon with a Redfish API
 .IR port ]
 .RB [ \-N
 .IR threads ]
+.RB [ \-\-lock\-file
+.IR path ]
 .RB [ \-v ...]
 .br
 .B cxl-fmd
@@ -143,6 +147,33 @@ not advertised; only an SLD reached through the kernel's mailbox
 is sent them.
 The devices of a mock topology are taken as on MCTP.
 Give it only when no host drives the devices.
+.TP
+.BI \-\-lock\-file\  path
+Hold an exclusive
+.BR flock (2)
+on
+.I path
+from before discovery until
+.B cxl-fmd
+exits, and exit with status 1, sending nothing, if another process holds it.
+The file is made if it is not there, holds the PID of the
+.B cxl-fmd
+that has it, and is never removed.
+The default is
+.I cxl-fmd.lock
+in the first directory of
+.BR $RUNTIME_DIRECTORY ,
+or else in
+.IR /run/cxl-fmd ,
+which is made if it is not there; if it cannot be,
+.B cxl-fmd
+exits with status 1 and asks for this option.
+With
+.B \-M
+no lock is taken unless this option is given.
+See
+.B ONE FABRIC MANAGER
+below.
 .TP
 .BR \-v ", " \-\-verbose
 Log more.
@@ -311,6 +342,30 @@ The connection's
 action, which is
 .BR cxl-fmd 's
 own, sends the unbind again as a simulated surprise hot-removal.
+.SH ONE FABRIC MANAGER
+Two Fabric Managers driving one switch would each act on what the other
+does: a connection is each vPPB found bound, whoever bound it, and deleting
+it unbinds the vPPB.
+The lock file keeps a second
+.B cxl-fmd
+from starting on the same host with the same lock file, and that is all it
+does.
+A
+.B cxl-fmd
+on another host, one with another lock file (or in a container with a
+.I /run
+of its own), and another Fabric Manager are not detected.
+CXL r4.0 defines registration of a primary Fabric Manager for PBR
+components (Claim Ownership, Section 8.2.10.8.2);
+.B cxl-fmd
+reads it as giving HBR switches and MLDs none, and sends no PBR command.
+Of components with several CCIs the specification says that
+\(lqCoordination between management entities attempting concurrent commands
+over separate CCIs that have component-level impact (e.g., FW update, etc.)
+is beyond the scope of this specification\(rq (Section 9.20.1).
+Run one
+.B cxl-fmd
+per fabric (see Known Gaps in docs/Redfish-API.md).
 .SH SIGNALS
 .TP
 .BR SIGINT ", " SIGTERM
@@ -337,8 +392,9 @@ or
 was given.
 .TP
 .B 1
-An option is invalid, the topology file could not be read or is not a valid
-fabric, discovery failed, or the HTTP port could not be opened.
+An option is invalid, the lock file is held by another process or could not
+be made, the topology file could not be read or is not a valid fabric,
+discovery failed, or the HTTP port could not be opened.
 .SH SECURITY
 .B cxl-fmd
 serves plain HTTP on every interface and does not authenticate clients.
@@ -348,7 +404,10 @@ authentication; adding them has been deferred (see Known Gaps in
 docs/Redfish-API.md).
 Nor does anything keep a second
 .B cxl-fmd
-on another port from driving the same devices.
+on another host, or on this one with another lock file, from driving the
+same devices (see
+.B ONE FABRIC MANAGER
+above).
 Run it on a management network, or behind a reverse proxy that provides TLS
 and authentication.
 .SH EXAMPLES

@@ -11,6 +11,10 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 
 #include "config.h"
 #include "cxl-fmd.h"
@@ -52,7 +56,88 @@ static void signal_handler(int sig)
 /* Long options with no short one */
 enum {
 	OPT_ALLOW_MCTP_RESTRICTED = 256,
+	OPT_LOCK_FILE,
 };
+
+/* Where the lock file is when --lock-file does not say */
+#define FMD_LOCK_DIR	"/run/cxl-fmd"
+#define FMD_LOCK_NAME	"cxl-fmd.lock"
+
+/*
+ * The lock file's path when none is given: in the first directory of
+ * $RUNTIME_DIRECTORY (systemd's RuntimeDirectory=, a list separated by
+ * colons), else in /run/cxl-fmd. The directory is made if it is not there.
+ */
+static int lock_default_path(char *path, size_t len)
+{
+	const char *rd = getenv("RUNTIME_DIRECTORY");
+	char dir[PATH_MAX];
+
+	if (rd && *rd)
+		snprintf(dir, sizeof(dir), "%.*s", (int)strcspn(rd, ":"), rd);
+	else
+		snprintf(dir, sizeof(dir), "%s", FMD_LOCK_DIR);
+
+	if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+		fprintf(stderr, "cxl-fmd: cannot create %s for the lock file: %s; "
+			"give --lock-file PATH\n", dir, strerror(errno));
+		return -1;
+	}
+	if ((size_t)snprintf(path, len, "%s/%s", dir, FMD_LOCK_NAME) >= len) {
+		fprintf(stderr, "cxl-fmd: lock file path too long: %s/%s\n",
+			dir, FMD_LOCK_NAME);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * One cxl-fmd on a host drives the devices: a second would act on what
+ * the first does, and unbind what it bound. Each takes an exclusive flock
+ * on the lock file and keeps it until it exits; the file holds the PID of
+ * the one that has it. It is never removed: one that was could be locked
+ * again by a third, while the second still holds the old one.
+ *
+ * This fences one host only. Another host, or another Fabric Manager,
+ * driving the same switch is not seen (see Known Gaps in Redfish-API.md).
+ */
+static int lock_take(const char *path)
+{
+	char holder[32] = "";
+	ssize_t n;
+	int fd;
+
+	fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		fprintf(stderr, "cxl-fmd: cannot open the lock file %s: %s; "
+			"give --lock-file PATH\n", path, strerror(errno));
+		return -1;
+	}
+	if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+		int err = errno;
+
+		if (err != EWOULDBLOCK) {
+			fprintf(stderr, "cxl-fmd: cannot lock %s: %s\n", path,
+				strerror(err));
+			close(fd);
+			return -1;
+		}
+		n = pread(fd, holder, sizeof(holder) - 1, 0);
+		holder[n > 0 ? n : 0] = '\0';
+		holder[strcspn(holder, "\n")] = '\0';
+		fprintf(stderr, "cxl-fmd: another cxl-fmd%s%s%s holds the lock "
+			"file %s: it drives these devices already\n",
+			*holder ? " (PID " : "", holder, *holder ? ")" : "", path);
+		close(fd);
+		return -1;
+	}
+
+	n = snprintf(holder, sizeof(holder), "%d\n", (int)getpid());
+	if (ftruncate(fd, 0) < 0 || pwrite(fd, holder, n, 0) != n)
+		fprintf(stderr, "cxl-fmd: could not write the PID to %s: %s\n",
+			path, strerror(errno));
+	return fd;
+}
 
 static void print_usage(const char *prog)
 {
@@ -79,6 +164,9 @@ static void print_usage(const char *prog)
 	       "                        ones too. Only when no host drives the devices:\n"
 	       "                        CXL r4.0 Table 8-308 note 4. Refused (409)\n"
 	       "                        without it.\n"
+	       "      --lock-file PATH  Exit if another cxl-fmd holds PATH, else hold\n"
+	       "                        it (default: cxl-fmd.lock in $RUNTIME_DIRECTORY,\n"
+	       "                        or in %s; none with --mock)\n"
 	       "  -v, --verbose         Increase verbosity (can repeat)\n"
 	       "  -h, --help            Show this help\n"
 	       "  -V, --version         Show version\n"
@@ -90,7 +178,7 @@ static void print_usage(const char *prog)
 	       "\n",
 	       prog, FMD_DEFAULT_PORT, FMD_DEFAULT_EVENT_POLL_SEC,
 	       FMD_DEFAULT_RESCAN_SEC,
-	       FMD_MAX_HTTP_THREADS, FMD_DEFAULT_HTTP_THREADS);
+	       FMD_MAX_HTTP_THREADS, FMD_DEFAULT_HTTP_THREADS, FMD_LOCK_DIR);
 }
 
 static void print_version(void)
@@ -188,6 +276,7 @@ int main(int argc, char *argv[])
 		{"ioctl",   no_argument,       NULL, 'i'},
 		{"event-poll", required_argument, NULL, 'e'},
 		{"allow-mctp-restricted", no_argument, NULL, OPT_ALLOW_MCTP_RESTRICTED},
+		{"lock-file", required_argument, NULL, OPT_LOCK_FILE},
 		{"verbose", no_argument,       NULL, 'v'},
 		{"help",    no_argument,       NULL, 'h'},
 		{"version", no_argument,       NULL, 'V'},
@@ -205,6 +294,9 @@ int main(int argc, char *argv[])
 	const char *mock_path = NULL;
 	bool check_only = false;
 	bool allow_mctp_restricted = false;
+	const char *lock_path = NULL;
+	char lock_default[PATH_MAX];
+	int lock_fd = -1;
 
 	while ((opt = getopt_long(argc, argv, "p:M:cN:r:mie:vhV", long_opts, NULL)) != -1) {
 		switch (opt) {
@@ -269,6 +361,13 @@ int main(int argc, char *argv[])
 		case OPT_ALLOW_MCTP_RESTRICTED:
 			allow_mctp_restricted = true;
 			break;
+		case OPT_LOCK_FILE:
+			if (!*optarg) {
+				fprintf(stderr, "Invalid lock file: an empty path\n");
+				return EXIT_FAILURE;
+			}
+			lock_path = optarg;
+			break;
 		case 'v':
 			verbosity++;
 			break;
@@ -288,11 +387,27 @@ int main(int argc, char *argv[])
 	if (!transport_specified)
 		use_mctp = true;
 
+	/*
+	 * Before anything is sent to a device, discovery included (and so
+	 * with --check too). A mock topology drives no device, so it takes
+	 * no lock unless one is named: test suites run many at once.
+	 */
+	if (!lock_path && !mock_path) {
+		if (lock_default_path(lock_default, sizeof(lock_default)) < 0)
+			return EXIT_FAILURE;
+		lock_path = lock_default;
+	}
+	if (lock_path) {
+		lock_fd = lock_take(lock_path);
+		if (lock_fd < 0)
+			return EXIT_FAILURE;
+	}
+
 	/* Create context */
 	ctx = fmd_ctx_new();
 	if (!ctx) {
 		fprintf(stderr, "Failed to create context\n");
-		return EXIT_FAILURE;
+		goto out;
 	}
 
 	ctx->config.port = port;
@@ -313,6 +428,8 @@ int main(int argc, char *argv[])
 	signal(SIGPIPE, SIG_IGN);
 
 	fmd_info(ctx, "%s version %s starting", FMD_NAME, FMD_VERSION);
+	if (lock_path)
+		fmd_info(ctx, "holding the lock file %s", lock_path);
 	if (allow_mctp_restricted)
 		fmd_warn(ctx, "--allow-mctp-restricted: Set Partition Info, Scan "
 			 "Media and the security commands are sent as MCTP "
@@ -419,5 +536,8 @@ int main(int argc, char *argv[])
 
 out:
 	fmd_ctx_free(ctx);
+	/* closing it lets the lock go; the file stays */
+	if (lock_fd >= 0)
+		close(lock_fd);
 	return ret;
 }

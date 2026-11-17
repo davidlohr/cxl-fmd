@@ -86,7 +86,7 @@ meson test -C build --list
 | `redfish` | redfish-endpoints | Basic endpoint accessibility | pytest |
 | `api` | topology-inventory, orchestration, tasks, hot-removal, event-logs, concurrency, memory-lifecycle, connections, cxl-business-rules, error-handling, dcd, mock-bindings | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
-| `unit` | discovery, mock-topologies, manpage, docs, unit-topologies, redfish-validator-gate | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, statements the docs must keep (`test_docs.py`: one cxl-fmd per fabric, the DCD `DELETE` and zero-Tag contracts, the deferred TLS, authentication and listen address), 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch), and what fails a validator run (below) | pytest, requests (the pytest ones) |
+| `unit` | discovery, mock-topologies, manpage, lock-file, docs, unit-topologies, redfish-validator-gate | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, one cxl-fmd per lock file (`test_lock_file.py`), statements the docs must keep (`test_docs.py`: one cxl-fmd per fabric, a lock file that fences one host only, the DCD `DELETE` and zero-Tag contracts, the deferred TLS, authentication and listen address), 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch), and what fails a validator run (below) | pytest, requests (the pytest ones) |
 | `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost, redfish-validator-degraded, redfish-validator-all | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, `dcd-shared-perhost.json`, `degraded-device.json` (`Status.Conditions` and the `CxlHealth` registry), and (`redfish-validator-all`) every other topology in `mock/` and `mock/unit/`. Oem extensions are checked (no `--nooemcheck`), against cxl-fmd's Oem schema `Cxl_v1.xml`, which the validator fetches from `/redfish/v1/Schemas` through `$metadata` (the copy it saves in `schema/dmtf/csdl` is removed after each run). A run fails on any `FAIL`, and on any `WARN` but the deprecated `TemporaryThroughputReductionSupported` cxl-fmd still serves: the validator reports a bad Oem extension only as a `WARN` | pytest, `.venv-validator` |
 
 ### Test Timeouts
@@ -96,7 +96,7 @@ meson test -C build --list
 | redfish | 120s |
 | api | 180s |
 | security | 180s (fuzzing), 300s (adversarial) |
-| unit | 60s (manpage), 120s (mock-topologies), 300s (unit-topologies) |
+| unit | 60s (manpage), 120s (mock-topologies, lock-file), 300s (unit-topologies) |
 | validator | 600s |
 
 Override timeouts:
@@ -270,11 +270,12 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_dcd.py` | Dynamic capacity, the tasks of an add or a release, and when each DC read was made | 111 |
 | `test_mock_topologies.py` | The mock topologies, and the checker refusing invalid ones | 97 |
 | `test_manpage.py` | The man page against `--help` | 5 |
+| `test_lock_file.py` | A second cxl-fmd with the same lock file exits; the default lock file, taken before discovery | 9 |
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 83 |
 | `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 17 |
 | `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
 | `test_oem_schema.py` | Every `Oem.Cxl` object and Oem action against cxl-fmd's Oem schema `Cxl_v1.xml` | 7 |
-| **Total** | | **802** |
+| **Total** | | **811** |
 
 ### Running Tests
 

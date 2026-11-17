@@ -1962,9 +1962,13 @@ Dedicated management appliance for large CXL fabrics.
 - Centralized policy enforcement
 
 High availability is not implemented: cxl-fmd has no fail-over, leader
-election, lease or fencing, and two instances driving one switch would
-each act on bindings the other made (a `DELETE` unbinds whoever made the
-binding). Run one cxl-fmd per fabric.
+election or lease, and two instances driving one switch would each act on
+bindings the other made (a `DELETE` unbinds whoever made the binding). The
+only fence is the lock file (`--lock-file`, by default `cxl-fmd.lock` in
+`$RUNTIME_DIRECTORY`, or in `/run/cxl-fmd`): a second cxl-fmd on the same
+host with the same lock file exits. One on another host, or with another lock file, is
+not detected (Known Gaps, item 15, in Redfish-API.md). Run one cxl-fmd per
+fabric.
 
 ### Kubernetes MFM Deployment (OCP Architecture)
 
@@ -1979,8 +1983,11 @@ that contains CXL attachment points" (Section 7). In this sketch cxl-fmd is
 that central point: one instance for the fabric, as a Deployment with one
 replica on the node that has the fabric's management interface, behind a
 Service. The Node Agent is the DaemonSet, and calls cxl-fmd through the
-Service. cxl-fmd does not stop a second instance; keeping it to one is the
-deployment's job.
+Service. cxl-fmd stops a second instance only on the same node, and only
+through its lock file: a container's `/run` is its own, so the example
+mounts the node's `/run/cxl-fmd` for two pods on one node to share it. A
+pod on another node is not stopped; keeping it to one is the deployment's
+job.
 
 ```yaml
 apiVersion: apps/v1
@@ -2016,6 +2023,8 @@ spec:
           mountPath: /dev
         - name: sys
           mountPath: /sys
+        - name: lock                    # the node's lock file: one cxl-fmd per node
+          mountPath: /run/cxl-fmd
         ports:
         - containerPort: 8080
           name: redfish
@@ -2026,6 +2035,10 @@ spec:
       - name: sys
         hostPath:
           path: /sys
+      - name: lock
+        hostPath:
+          path: /run/cxl-fmd
+          type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

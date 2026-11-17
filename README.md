@@ -84,6 +84,7 @@ See [docs/mock-topology.md](docs/mock-topology.md) for available topologies and 
 | `--rescan SECS` | `-r` | Look for new devices every SECS seconds (default: 30, 0 disables) |
 | `--threads N` | `-N` | Serve requests on N threads, 1 to 256 (default: 8). Requests that only read run together; a change runs alone |
 | `--allow-mctp-restricted` | | Send Set Partition Info, Scan Media and the security commands as MCTP messages, tunnelled ones too. Without it they are refused (409): CXL r4.0 Table 8-308 note 4. Only when no host drives the devices (see [docs/Redfish-API.md](docs/Redfish-API.md#commands-restricted-on-mctp)) |
+| `--lock-file PATH` | | Exit if another cxl-fmd holds PATH, else hold it while running (default: `cxl-fmd.lock` in `$RUNTIME_DIRECTORY`, or in `/run/cxl-fmd`; none with `--mock` unless given). This fences one host only (see [docs/Redfish-API.md](docs/Redfish-API.md#known-gaps), item 15) |
 | `--verbose` | `-v` | Increase verbosity (repeatable) |
 | `--help` | `-h` | Show help message |
 | `--version` | `-V` | Show version |

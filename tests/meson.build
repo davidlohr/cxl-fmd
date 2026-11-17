@@ -88,6 +88,26 @@ if pytest_available
     )
 endif
 
+# One cxl-fmd per host: the lock file (review F13.C6b)
+if pytest_available
+    test(
+        'lock-file',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            meson.current_source_dir() / 'test_lock_file.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 120,
+        suite: 'unit',
+    )
+endif
+
 # What the docs say of deployment, the DCD contracts and the trust boundary
 if pytest_available
     test(

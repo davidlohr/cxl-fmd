@@ -123,3 +123,35 @@ def test_trust_boundary_gaps_are_listed():
     assert "deferred" in flat(section(text, "## Authentication"))
     man = flat((DOCS.parent / "man" / "cxl-fmd.8").read_text())
     assert "there is no TLS or authentication; adding them has been deferred" in man
+
+
+def test_the_lock_file_fences_one_host_only():
+    """The lock file keeps a second cxl-fmd off one host (review F13.C6b):
+    the Known Gaps say it fences nothing more, and why, with the
+    specification's words; the man page says so; and the Deployment shares
+    the node's lock directory, as a container's /run is its own."""
+    text = (DOCS / "Redfish-API.md").read_text()
+    gaps = flat(section(text, "## Known Gaps"))
+    item = re.search(r" 15\. (.*?)(?: 16\. |$)", gaps)
+    assert item, "no item 15 in the Known Gaps"
+    item = item.group(1)
+    for words in ("One cxl-fmd per host, not per fabric", "--lock-file",
+                  "a cxl-fmd on another host", "another Fabric Manager",
+                  "is beyond the scope of this specification\" (Section 9.20.1)",
+                  "Management of a PBR device requires that a primary FM is "
+                  "registered.", "(Section 7.7.12.2)", "Section 8.2.10.8.2",
+                  "cxl-fmd sends no PBR command",
+                  "is cxl-fmd's reading of these sections"):
+        assert words in item, words
+    assert "item 15" in flat(section(text, "## Changes for Clients"))
+    man = flat((DOCS.parent / "man" / "cxl-fmd.8").read_text())
+    assert ".SH ONE FABRIC MANAGER" in man
+    assert "another Fabric Manager are not detected" in man
+    usecases = (DOCS / "Usecases.md").read_text()
+    deployments = [doc for doc in manifests(usecases) if runs_cxl_fmd(doc)
+                   and re.search(r"^kind:\s*Deployment", doc, re.M)
+                   and re.search(r"^\s+hostNetwork: true", doc, re.M)]
+    assert deployments
+    for doc in deployments:
+        assert re.search(r"mountPath: /run/cxl-fmd\b", doc), doc
+        assert re.search(r"hostPath:\s*\n\s+path: /run/cxl-fmd\b", doc), doc
