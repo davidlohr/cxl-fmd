@@ -224,3 +224,116 @@ const char fmd_redfish_error_fallback[] =
 	"\"MessageSeverity\":\"Critical\",\"Severity\":\"Critical\","
 	"\"Resolution\":\"Read the resource before the request is sent again: "
 	"whether it was carried out is not said.\"}]}}";
+
+/*
+ * Status.Conditions (DSP0288 1.4.0 Table 1, Comments 3 and 4) are made of
+ * the messages of cxl-fmd's registry CxlHealth.1.0.0.json (in
+ * schema/oem/registries, served at /redfish/v1/Registries): DMTF's have
+ * none for what Get Health Info reports (CXL r4.0 Table 8-315). The
+ * registry's name, CxlHealth, is "Cxl", the identifier of cxl-fmd's Oem
+ * properties, with "Health" after it ("the defining organization's unique
+ * OEM identifier ... should be prepended to the registry name", DSP0266
+ * 1.25.0 Section 9.8.5). Copied from the registry; tests/test_conditions.py
+ * compares them.
+ */
+static const struct rf_registry_msg health_msgs[FMD_COND_COUNT] = {
+	[FMD_COND_MAINTENANCE_NEEDED] = {
+		"MaintenanceNeeded", 0, "Warning",
+		"The device requires maintenance.",
+		"Maintain the device." },
+	[FMD_COND_PERFORMANCE_DEGRADED] = {
+		"PerformanceDegraded", 0, "Warning",
+		"The device is no longer operating at optimal performance.",
+		"None." },
+	[FMD_COND_HW_REPLACEMENT_NEEDED] = {
+		"HardwareReplacementNeeded", 0, "Critical",
+		"The device should immediately be replaced.",
+		"Replace the device." },
+	[FMD_COND_CAPACITY_DEGRADED] = {
+		"MemoryCapacityDegraded", 0, "Warning",
+		"The device is no longer operating at the expected memory capacity.",
+		"None." },
+	[FMD_COND_WRITE_PERSISTENCY_LOST] = {
+		"WritePersistencyLost", 0, "Warning",
+		"The device cannot persist write requests but is able to read stored data.",
+		"None." },
+	[FMD_COND_ALL_DATA_LOST] = {
+		"AllDataLost", 0, "Critical",
+		"All data has been lost from the device.",
+		"None." },
+	[FMD_COND_WRITE_LOSS_POWER_LOSS] = {
+		"WritePersistencyLossOnPowerLoss", 0, "Warning",
+		"The device's ability to persist subsequent write requests may be lost in the event of a power loss.",
+		"None." },
+	[FMD_COND_WRITE_LOSS_SHUTDOWN] = {
+		"WritePersistencyLossOnShutdown", 0, "Warning",
+		"The device's ability to persist subsequent write requests may be lost when the device is shut down.",
+		"None." },
+	[FMD_COND_WRITE_LOSS_IMMINENT] = {
+		"WritePersistencyLossImminent", 0, "Warning",
+		"The device's ability to persist subsequent write requests may be lost.",
+		"None." },
+	[FMD_COND_DATA_LOSS_POWER_LOSS] = {
+		"AllDataLossOnPowerLoss", 0, "Warning",
+		"All data on the device may be lost in the event of a power loss.",
+		"None." },
+	[FMD_COND_DATA_LOSS_SHUTDOWN] = {
+		"AllDataLossOnShutdown", 0, "Warning",
+		"All data on the device may be lost when the device is shut down.",
+		"None." },
+	[FMD_COND_DATA_LOSS_IMMINENT] = {
+		"AllDataLossImminent", 0, "Warning",
+		"All data on the device may be lost.",
+		"None." },
+	[FMD_COND_MEDIA_RESERVED] = {
+		"MediaStatusReserved", 1, "Warning",
+		"The device reported the reserved Media Status %1.",
+		"None." },
+	[FMD_COND_CORRECTED_VOLATILE] = {
+		"CorrectedVolatileErrorCount", 0, "Warning",
+		"The device's count of total corrected volatile errors has risen to or above the user-programmable Warning or Failure threshold.",
+		"None." },
+	[FMD_COND_CORRECTED_PERSISTENT] = {
+		"CorrectedPersistentErrorCount", 0, "Warning",
+		"The device's count of total corrected persistent errors has risen to or above the user-programmable warning threshold.",
+		"None." },
+};
+
+const char *fmd_redfish_condition_key(enum fmd_rf_cond id)
+{
+	return id < FMD_COND_COUNT ? health_msgs[id].key : NULL;
+}
+
+/*
+ * A Resource.Condition: MessageId (the one property it requires), Message,
+ * MessageArgs, Severity and Resolution, the registry's. No Timestamp:
+ * cxl-fmd does not know when the device's condition began.
+ */
+json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg)
+{
+	const struct rf_registry_msg *m;
+	const char *args[1] = { arg ? arg : "" };
+	char msgid[96];
+	json_t *obj;
+	char *text;
+
+	if (id >= FMD_COND_COUNT)
+		return NULL;
+	m = &health_msgs[id];
+	text = substitute(m->message, args, m->nargs);
+	if (!text)
+		return NULL;
+	snprintf(msgid, sizeof(msgid), "%s.%s", FMD_RF_HEALTH_REGISTRY, m->key);
+	obj = json_pack("{s:s, s:s, s:s, s:s}",
+			"MessageId", msgid,
+			"Message", text,
+			"Severity", m->severity,
+			"Resolution", m->resolution);
+	free(text);
+	if (obj && m->nargs &&
+	    json_object_set_new(obj, "MessageArgs", json_pack("[s]", args[0]))) {
+		json_decref(obj);
+		return NULL;
+	}
+	return obj;
+}

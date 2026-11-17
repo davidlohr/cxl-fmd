@@ -76,6 +76,12 @@ json_t *fmd_redfish_odata(struct fmd_ctx *ctx)
 		"kind", "Singleton",
 		"url", "/redfish/v1/Managers"));
 
+	json_array_append_new(values, json_pack(
+		"{s:s, s:s, s:s}",
+		"name", "Registries",
+		"kind", "Singleton",
+		"url", "/redfish/v1/Registries"));
+
 	return json_pack(
 		"{"
 		"  s:s,"    /* @odata.context */
@@ -107,6 +113,7 @@ json_t *fmd_redfish_service_root(struct fmd_ctx *ctx)
 		"  s:{s:s},"  /* Systems */
 		"  s:{s:s},"  /* Managers */
 		"  s:{s:s},"  /* Tasks */
+		"  s:{s:s},"  /* Registries */
 		"  s:{s:{s:s}}"  /* Links.Sessions (mandatory) */
 		"}",
 		"@odata.id", "/redfish/v1",
@@ -119,6 +126,7 @@ json_t *fmd_redfish_service_root(struct fmd_ctx *ctx)
 		"Systems", "@odata.id", "/redfish/v1/Systems",
 		"Managers", "@odata.id", "/redfish/v1/Managers",
 		"Tasks", "@odata.id", "/redfish/v1/TaskService",
+		"Registries", "@odata.id", "/redfish/v1/Registries",
 		"Links", "Sessions", "@odata.id", "/redfish/v1/SessionService/Sessions"
 	);
 }
@@ -2629,25 +2637,81 @@ json_t *fmd_redfish_chassis_collection(struct fmd_ctx *ctx)
 }
 
 /*
+ * The Conditions of @r: "The Conditions property within the Status
+ * property is used to show why the Health property contains a value other
+ * than OK" (DSP0288 1.4.0 Table 1, Comment 3, of "Get Health Info, Health
+ * Status, Many, Status"; Section 3: implementations "shall adhere to the
+ * numbered comments"). One for each Health Status bit set, and for each
+ * Media Status read that makes Health other than OK (02h to 09h, and a
+ * reserved one: see fmd_rollup_status()); none for 00h, or 01h, Not
+ * Ready, which leaves Health OK. With @corrected, for a Memory, one for
+ * each of Additional Status Bit[4] and Bit[5] set: "The Conditions
+ * property within the Status property of the Memory resource shall
+ * contain messages to indicate either the Corrected Volatile Error Count
+ * or Corrected Persistent Error Count flags are set" (Comment 4). Those
+ * leave Health as the Health Status bits and Media Status make it:
+ * DSP0288 maps only Health Status to Health, and a condition "may affect
+ * the Health" (Resource_v1 Conditions), cxl-fmd's choice being that they
+ * do not. Of several LDs, the Conditions are those of all of them, with
+ * no OriginOfCondition (cxl-fmd's choice: Resource_v1 has them for "this
+ * or a related resource"). NULL when there is none.
+ */
+static json_t *rollup_conditions(const struct fmd_status_rollup *r, bool corrected)
+{
+	json_t *conds = json_array();
+
+	for (int bit = 0; bit < 4; bit++) {
+		if (r->health_bits & (1u << bit))
+			json_array_append_new(conds, fmd_redfish_condition(
+				FMD_COND_MAINTENANCE_NEEDED + bit, NULL));
+	}
+	for (int media = 0x02; media <= 0x09; media++) {
+		if (r->media_seen & (1u << media))
+			json_array_append_new(conds, fmd_redfish_condition(
+				FMD_COND_WRITE_PERSISTENCY_LOST + (media - 0x02), NULL));
+	}
+	if (r->media_reserved) {
+		char val[8];
+
+		snprintf(val, sizeof(val), "%02Xh", r->media_reserved);
+		json_array_append_new(conds, fmd_redfish_condition(FMD_COND_MEDIA_RESERVED, val));
+	}
+	if (corrected && (r->additional & 0x10))
+		json_array_append_new(conds, fmd_redfish_condition(FMD_COND_CORRECTED_VOLATILE, NULL));
+	if (corrected && (r->additional & 0x20))
+		json_array_append_new(conds, fmd_redfish_condition(FMD_COND_CORRECTED_PERSISTENT, NULL));
+
+	if (!json_array_size(conds)) {
+		json_decref(conds);
+		return NULL;
+	}
+	return conds;
+}
+
+/*
  * A Status from @r (fmd_rollup_status()): State, and Health if @health
  * and HealthRollup if @rollup, each only when it is known. Health "shall
  * represent the health state of the resource without considering its
  * dependent resources", HealthRollup "the resource and its dependent
  * resources" (Resource_v1). Neither is required: one that is not known is
- * left out, not reported OK.
+ * left out, not reported OK. Conditions as rollup_conditions() makes them,
+ * those of Additional Status with @corrected (a Memory).
  */
 static json_t *rf_rollup_status(const struct fmd_status_rollup *r, bool health,
-				bool rollup)
+				bool rollup, bool corrected)
 {
 	enum rf_health h;
 	enum rf_state st;
 	bool known = fmd_rollup_status(r, &h, &st);
 	json_t *status = json_pack("{s:s}", "State", rf_state_to_str(st));
+	json_t *conds = rollup_conditions(r, corrected);
 
 	if (known && health)
 		json_object_set_new(status, "Health", json_string(rf_health_to_str(h)));
 	if (known && rollup)
 		json_object_set_new(status, "HealthRollup", json_string(rf_health_to_str(h)));
+	if (conds)
+		json_object_set_new(status, "Conditions", conds);
 	return status;
 }
 
@@ -2661,7 +2725,7 @@ static json_t *rf_rollup_status(const struct fmd_status_rollup *r, bool health,
 static json_t *chunk_status(const struct fmd_status_rollup *r,
 			    const struct fmd_mem_chunk *chunk)
 {
-	json_t *status = rf_rollup_status(r, true, false);
+	json_t *status = rf_rollup_status(r, true, false, false);
 
 	if (chunk && chunk->staged)
 		json_object_set_new(status, "State", json_string("StandbyOffline"));
@@ -2791,7 +2855,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		 * among them. It is Enabled, with no Health; what its devices
 		 * report is its HealthRollup (cxl-fmd's choice).
 		 */
-		json_t *status = rf_rollup_status(&r, false, true);
+		json_t *status = rf_rollup_status(&r, false, true, false);
 
 		json_object_set_new(status, "State", json_string("Enabled"));
 
@@ -2908,7 +2972,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		"Description", description,
 		"ChassisType", chassis_type,
 		"SerialNumber", serial_str,
-		"Status", rf_rollup_status(&r, true, true),
+		"Status", rf_rollup_status(&r, true, true, false),
 		"PCIeDevices", "@odata.id", pcie_uri,
 		"Memory", "@odata.id", memory_uri,
 		"MemoryDomains", "@odata.id", domains_uri
@@ -3025,7 +3089,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"Id", dev_id,
 		"Name", dev_name,
 		"DeviceType", "SingleFunction",
-		"Status", rf_rollup_status(&r, true, false),
+		"Status", rf_rollup_status(&r, true, false, false),
 		"CXLLogicalDevices", "@odata.id", ld_uri
 	);
 
@@ -3470,7 +3534,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"Name", name,
 		"MemorySizeMiB", (json_int_t)(mem_size_bytes / FMD_MIB),
 		"SemanticsSupported", semantics,
-		"Status", rf_rollup_status(&r, true, false)
+		"Status", rf_rollup_status(&r, true, false, false)
 	);
 
 	/*
@@ -3858,7 +3922,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 		"CapacityMiB", (json_int_t)capacity_mib,
 		"MemoryType", mem_type,
 		"MemoryDeviceType", mem_dev_type,
-		"Status", rf_rollup_status(&r, true, false),
+		"Status", rf_rollup_status(&r, true, false, true),
 		"Metrics", "@odata.id", metrics_uri
 	);
 
@@ -4036,7 +4100,7 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 		"Name", domain_name,
 		"MemorySizeMiB", (json_int_t)capacity_mib,
 		"MemoryChunks", "@odata.id", chunks_uri,
-		"Status", rf_rollup_status(&r, true, false)
+		"Status", rf_rollup_status(&r, true, false, false)
 	);
 
 	/* Add MemoryChunkIncrementMiB for MLDs (DSP0288 Table 2: Get LD Allocations) */
@@ -5447,6 +5511,13 @@ char *fmd_redfish_metadata(struct fmd_ctx *ctx)
 		"  </edmx:Reference>\n"
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MemoryExtentCollection_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"MemoryExtentCollection\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MessageRegistryFileCollection_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"MessageRegistryFileCollection\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MessageRegistryFile_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"MessageRegistryFile\"/>\n"
+		"    <edmx:Include Namespace=\"MessageRegistryFile.v1_1_5\"/>\n"
 		"  </edmx:Reference>\n"
 		"  <edmx:DataServices>\n"
 		"    <Schema xmlns=\"http://docs.oasis-open.org/odata/ns/edm\" Namespace=\"Service\">\n"

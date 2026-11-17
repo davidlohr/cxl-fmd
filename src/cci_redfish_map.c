@@ -145,6 +145,12 @@ void fmd_rollup_add(struct fmd_status_rollup *r,
 	}
 	/* Health Status is a bit field, Media Status an enumeration */
 	r->health_bits |= h->health_status;
+	if (h->media_status <= CXL_MEDIA_ALL_DATA_LOSS_IMMINENT)
+		r->media_seen |= 1u << h->media_status;
+	else if (!r->media_reserved)
+		r->media_reserved = h->media_status;
+	/* Bit[4], Corrected Volatile, and Bit[5], Corrected Persistent, Error Count */
+	r->additional |= h->additional_status & 0x30;
 	r->media = r->known ? fmd_worse_media_status(r->media, h->media_status) :
 			      h->media_status;
 	r->known++;

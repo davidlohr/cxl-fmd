@@ -40,6 +40,7 @@
             "health_info": {
                 "health_status": 1,
                 "media_status": 0,
+                "additional_status": 48,
                 "life_used": 75,
                 "temperature": 55
             }

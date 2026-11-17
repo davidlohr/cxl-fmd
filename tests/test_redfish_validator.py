@@ -203,6 +203,21 @@ class TestRedfishValidator:
 
         assert result.returncode == 0, f"Validator failed with code {result.returncode}"
 
+    @pytest.mark.mock_topology("mock/degraded-device.json")
+    def test_degraded_validation(self, cxl_fmd_daemon, schema_dir, validator_venv):
+        """Validate devices whose Get Health Info is not healthy: their
+        Status.Conditions, and the registry they are from."""
+        result = self._run_validator(
+            validator_venv.validator, cxl_fmd_daemon["url"], schema_dir)
+
+        print("=== Validator stdout ===")
+        print(result.stdout)
+        if result.stderr:
+            print("=== Validator stderr ===")
+            print(result.stderr)
+
+        assert result.returncode == 0, f"Validator failed with code {result.returncode}"
+
     @pytest.mark.mock_topology("mock/mld-device.json")
     def test_mld_validation(self, cxl_fmd_daemon, schema_dir, validator_venv):
         """Validate MLD topology against Redfish schemas."""

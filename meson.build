@@ -38,6 +38,7 @@ configure_file(
 
 # Install schemas (for static hosting by external web server if needed)
 subdir('schema/dmtf')
+subdir('schema/oem')
 
 # Include directories
 inc = include_directories('include', '.')
@@ -58,10 +59,25 @@ src = files(
     'src/dcd.c',
     'src/events.c',
     'src/redfish/messages.c',
+    'src/redfish/files.c',
     'src/redfish/server.c',
     'src/redfish/handlers.c',
     'src/redfish/dcd_handlers.c',
 )
+
+# cxl-fmd's own registry and schema files, served from the binary
+# (src/redfish/files.c): see schema/oem
+embed_file = find_program('scripts/embed_file.py')
+foreach f : [
+    ['CxlHealth.1.0.0.json', 'schema/oem/registries/CxlHealth.1.0.0.json', 'fmd_file_cxl_health_registry'],
+]
+    src += custom_target(
+        'embed-' + f[0],
+        input: f[1],
+        output: f[0] + '.c',
+        command: [embed_file, '@INPUT@', '@OUTPUT@', f[2]],
+    )
+endforeach
 
 # Build executable
 executable(

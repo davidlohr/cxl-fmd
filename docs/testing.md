@@ -87,7 +87,7 @@ meson test -C build --list
 | `api` | topology-inventory, orchestration, tasks, hot-removal, event-logs, concurrency, memory-lifecycle, connections, cxl-business-rules, error-handling, dcd, mock-bindings | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
 | `unit` | discovery, mock-topologies, manpage, unit-topologies | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, and 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch) | pytest, requests (the pytest ones) |
-| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, and `dcd-shared-perhost.json`. The validator is run with `--nooemcheck` on all of them: cxl-fmd's `Oem` properties (the tag view `Oem/Cxl/DynamicCapacityTags`, a Connection's `Oem/Cxl/Origin`) have no schema | pytest, `.venv-validator` |
+| `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost, redfish-validator-degraded | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, `dcd-shared-perhost.json`, and `degraded-device.json` (`Status.Conditions` and the `CxlHealth` registry). The validator is run with `--nooemcheck` on all of them: cxl-fmd's `Oem` properties (the tag view `Oem/Cxl/DynamicCapacityTags`, a Connection's `Oem/Cxl/Origin`) have no schema | pytest, `.venv-validator` |
 
 ### Test Timeouts
 
@@ -272,7 +272,8 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_manpage.py` | The man page against `--help` | 5 |
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 83 |
 | `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 16 |
-| **Total** | | **650** |
+| `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
+| **Total** | | **670** |
 
 ### Running Tests
 

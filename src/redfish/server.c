@@ -491,6 +491,32 @@ static enum MHD_Result send_json_response_with_location(
 }
 
 /*
+ * Send @len bytes of @data, which stay valid (a file compiled in), as
+ * @type
+ */
+static enum MHD_Result send_static_response(struct MHD_Connection *conn,
+					    unsigned int status,
+					    const char *data, size_t len,
+					    const char *type)
+{
+	struct MHD_Response *response;
+	enum MHD_Result ret;
+
+	response = MHD_create_response_from_buffer(len, (void *)data,
+						   MHD_RESPMEM_PERSISTENT);
+	if (!response)
+		return MHD_NO;
+
+	MHD_add_response_header(response, "Content-Type", type);
+	MHD_add_response_header(response, "OData-Version", "4.0");
+
+	ret = MHD_queue_response(conn, status, response);
+	MHD_destroy_response(response);
+
+	return ret;
+}
+
+/*
  * Send XML response (for $metadata)
  */
 static enum MHD_Result send_xml_response(struct MHD_Connection *conn,
@@ -665,6 +691,32 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 		enum MHD_Result ret = send_xml_response(conn, MHD_HTTP_OK, metadata);
 		free(metadata);
 		return ret;
+	}
+
+	if (strcmp(norm_url, "/redfish/v1/Registries") == 0) {
+		response = fmd_redfish_registries(ctx);
+		goto ok;
+	}
+
+	if (match_route("/redfish/v1/Registries/{file}", norm_url, params, 8)) {
+		size_t len;
+		const char *data = fmd_redfish_registry_file(params[0], &len);
+
+		if (data) {
+			free_params(params, 8);
+			free(norm_url);
+			if (exists) {
+				*exists = true;
+				return MHD_YES;
+			}
+			return send_static_response(conn, MHD_HTTP_OK, data, len,
+						    "application/json; charset=utf-8");
+		}
+		response = fmd_redfish_registry(ctx, params[0]);
+		free_params(params, 8);
+		if (response)
+			goto ok;
+		goto not_found;
 	}
 
 	if (strcmp(norm_url, "/redfish/v1/Systems") == 0) {

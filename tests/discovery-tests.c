@@ -1588,12 +1588,41 @@ static void test_health_mapping(void)
 	report("health and media status", before);
 }
 
-/* Status of @j as JSON text, for the checks below; the caller frees it */
+/*
+ * Status of @j as JSON text, without its Conditions (test_conditions()
+ * checks them), for the checks below; the caller frees it
+ */
 static char *status_text(json_t *j)
 {
 	json_t *st = j ? json_object_get(j, "Status") : NULL;
+	json_t *copy;
+	char *text;
 
-	return st ? json_dumps(st, JSON_COMPACT | JSON_SORT_KEYS) : strdup("(none)");
+	if (!st)
+		return strdup("(none)");
+	copy = json_copy(st);
+	json_object_del(copy, "Conditions");
+	text = json_dumps(copy, JSON_COMPACT | JSON_SORT_KEYS);
+	json_decref(copy);
+	return text;
+}
+
+/* The MessageKeys of the Status.Conditions of @j, space separated */
+static void condition_keys(json_t *j, char *buf, size_t len)
+{
+	json_t *st = j ? json_object_get(j, "Status") : NULL;
+	json_t *conds = st ? json_object_get(st, "Conditions") : NULL;
+	json_t *c;
+	size_t i;
+
+	buf[0] = '\0';
+	json_array_foreach(conds, i, c) {
+		const char *id = json_string_value(json_object_get(c, "MessageId"));
+		const char *key = id ? strrchr(id, '.') : NULL;
+
+		snprintf(buf + strlen(buf), len - strlen(buf), "%s%s",
+			 i ? " " : "", key ? key + 1 : "?");
+	}
 }
 
 /*
@@ -1720,6 +1749,165 @@ static void test_health_read_failed(void)
 	json_decref(views[0]);
 	fmd_ctx_free(ctx);
 	report("a failed health read is not OK", before);
+}
+
+/*
+ * Status.Conditions from Get Health Info (CXL r4.0 Table 8-315). DSP0288
+ * 1.4.0 Table 1, Comment 3: "The Conditions property within the Status
+ * property is used to show why the Health property contains a value other
+ * than OK"; Comment 4: "The Conditions property within the Status property
+ * of the Memory resource shall contain messages to indicate either the
+ * Corrected Volatile Error Count or Corrected Persistent Error Count flags
+ * are set". There were none: Additional Status 30h was read and stored,
+ * and the Memory was {Enabled, OK}. Review F17 claim 2 (its case C).
+ */
+static json_t *health_sld_view(struct fmd_ctx **ctxp, uint16_t serial, uint8_t health,
+			       uint8_t media, uint8_t additional, int view)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t pl[0x12] = { 0 };
+	char id[FMD_MAX_ID_LEN];
+	json_t *j = NULL;
+
+	answer_identify(ep, serial, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	pl[0] = health;
+	pl[1] = media;
+	pl[2] = additional;
+	answer(ep, 0x4200, pl, sizeof(pl));
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), serial);
+	switch (view) {
+	case 0:
+		j = fmd_redfish_memory(ctx, id, id);
+		break;
+	case 1:
+		j = fmd_redfish_chassis(ctx, id);
+		break;
+	case 2:
+		j = fmd_redfish_pcie_device(ctx, id, id);
+		break;
+	case 3:
+		j = fmd_redfish_cxl_logical_device(ctx, id, id, "0");
+		break;
+	}
+	*ctxp = ctx;
+	return j;
+}
+
+static void test_conditions(void)
+{
+	struct fmd_ctx *ctx;
+	char keys[512];
+	int before = failures;
+	json_t *j, *c;
+	char *text;
+
+	/* case C: Additional Status Bit[4] and Bit[5], Health OK */
+	j = health_sld_view(&ctx, 0x1711, 0, 0, 0x30, 0);
+	condition_keys(j, keys, sizeof(keys));
+	CHECK(!strcmp(keys, "CorrectedVolatileErrorCount CorrectedPersistentErrorCount"),
+	      "Memory Conditions for Additional Status 30h: \"%s\"", keys);
+	text = status_text(j);
+	CHECK(!strcmp(text, "{\"Health\":\"OK\",\"State\":\"Enabled\"}"),
+	      "Memory Status %s", text);
+	free(text);
+	c = json_array_get(json_object_get(json_object_get(j, "Status"), "Conditions"), 0);
+	CHECK(c && !strcmp(json_string_value(json_object_get(c, "MessageId")) ?: "",
+			   "CxlHealth.1.0.CorrectedVolatileErrorCount") &&
+	      !strcmp(json_string_value(json_object_get(c, "Severity")) ?: "", "Warning") &&
+	      json_object_get(c, "Message") && !json_object_get(c, "MessageArgs") &&
+	      !json_object_get(c, "Timestamp"), "the Condition's properties");
+	json_decref(j);
+	fmd_ctx_free(ctx);
+
+	/* only Bit[5]; Bits[3:0] (Life Used, Device Temperature) give none */
+	j = health_sld_view(&ctx, 0x1712, 0, 0, 0x2f, 0);
+	condition_keys(j, keys, sizeof(keys));
+	CHECK(!strcmp(keys, "CorrectedPersistentErrorCount"), "Additional Status 2Fh: \"%s\"", keys);
+	json_decref(j);
+	fmd_ctx_free(ctx);
+
+	/* Comment 4 is the Memory's: the other views have none for them */
+	for (int view = 1; view <= 3; view++) {
+		j = health_sld_view(&ctx, 0x1713, 0, 0, 0x30, view);
+		CHECK(j && !json_object_get(json_object_get(j, "Status"), "Conditions"),
+		      "view %d has Conditions for Additional Status", view);
+		json_decref(j);
+		fmd_ctx_free(ctx);
+	}
+
+	/* Comment 3: every Health Status bit, in every view */
+	for (int view = 0; view <= 3; view++) {
+		j = health_sld_view(&ctx, 0x1714, 0x0f, 0, 0, view);
+		condition_keys(j, keys, sizeof(keys));
+		CHECK(!strcmp(keys, "MaintenanceNeeded PerformanceDegraded "
+			      "HardwareReplacementNeeded MemoryCapacityDegraded"),
+		      "view %d, Health Status 0Fh: \"%s\"", view, keys);
+		json_decref(j);
+		fmd_ctx_free(ctx);
+	}
+
+	/* each Media Status: none for 00h and 01h, which leave Health OK */
+	{
+		static const char *const media_keys[] = {
+			"", "", "WritePersistencyLost", "AllDataLost",
+			"WritePersistencyLossOnPowerLoss", "WritePersistencyLossOnShutdown",
+			"WritePersistencyLossImminent", "AllDataLossOnPowerLoss",
+			"AllDataLossOnShutdown", "AllDataLossImminent",
+		};
+
+		for (int media = 0; media <= 9; media++) {
+			j = health_sld_view(&ctx, 0x1715, 0, media, 0, 0);
+			condition_keys(j, keys, sizeof(keys));
+			CHECK(!strcmp(keys, media_keys[media]),
+			      "Media Status %02xh: \"%s\"", media, keys);
+			json_decref(j);
+			fmd_ctx_free(ctx);
+		}
+	}
+
+	/* a reserved Media Status, with its value as the argument */
+	j = health_sld_view(&ctx, 0x1716, 0x04, 0x0a, 0, 1);
+	condition_keys(j, keys, sizeof(keys));
+	CHECK(!strcmp(keys, "HardwareReplacementNeeded MediaStatusReserved"),
+	      "Health Status 04h, Media Status 0Ah: \"%s\"", keys);
+	c = json_array_get(json_object_get(json_object_get(j, "Status"), "Conditions"), 1);
+	CHECK(c && json_equal(json_object_get(c, "MessageArgs"), json_pack("[s]", "0Ah")) &&
+	      !strcmp(json_string_value(json_object_get(c, "Message")) ?: "",
+		      "The device reported the reserved Media Status 0Ah."),
+	      "the reserved Media Status's argument");
+	json_decref(j);
+	fmd_ctx_free(ctx);
+
+	/* nothing to show: no Conditions */
+	j = health_sld_view(&ctx, 0x1717, 0, 0, 0, 0);
+	CHECK(j && !json_object_get(json_object_get(j, "Status"), "Conditions"),
+	      "a healthy device has Conditions");
+	json_decref(j);
+	fmd_ctx_free(ctx);
+
+	/* not read: no Health and no Conditions */
+	{
+		struct cxlmi_endpoint *ep;
+		char id[FMD_MAX_ID_LEN];
+
+		ctx = new_ctx();
+		ep = new_device(ctx);
+		answer_identify(ep, 0x1718, 0x03);
+		answer_memdev_identify(ep, 64, 64, 0);
+		answer_rc(ep, 0x4200, CXLMI_RET_INTERNAL);
+		fmd_discover(ctx);
+		device_id(id, sizeof(id), 0x1718);
+		j = fmd_redfish_memory(ctx, id, id);
+		CHECK(j && !json_object_get(json_object_get(j, "Status"), "Conditions"),
+		      "a device not read has Conditions");
+		json_decref(j);
+		fmd_ctx_free(ctx);
+	}
+
+	report("Status.Conditions from Get Health Info", before);
 }
 
 /*
@@ -11005,6 +11193,7 @@ int main(void)
 	test_health_mapping();
 	test_health_rollup();
 	test_health_read_failed();
+	test_conditions();
 	test_scan_media();
 	test_life_used();
 	test_switch_sld_placeholder();

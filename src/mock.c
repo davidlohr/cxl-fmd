@@ -704,6 +704,8 @@ static struct fmd_sld *parse_sld(struct fmd_ctx *ctx, json_t *jdev,
 			(uint8_t)json_int_or(obj, "health_status", 0);
 		sld->health.media_status =
 			(uint8_t)json_int_or(obj, "media_status", 0);
+		sld->health.additional_status =
+			(uint8_t)json_int_or(obj, "additional_status", 0);
 		sld->health.life_used =
 			(uint8_t)json_int_or(obj, "life_used", 0);
 		sld->health.device_temperature =
@@ -863,6 +865,8 @@ static struct fmd_ld *parse_ld(struct fmd_ctx *ctx, json_t *jld,
 	if (obj) {
 		ld->health.health_status = (uint8_t)json_int_or(obj, "health_status", 0);
 		ld->health.media_status = (uint8_t)json_int_or(obj, "media_status", 0);
+		ld->health.additional_status =
+			(uint8_t)json_int_or(obj, "additional_status", 0);
 	} else {
 		ld->health.health_status = default_health;
 		ld->health.media_status = default_media;
@@ -1057,6 +1061,8 @@ static struct fmd_ld *parse_ld_pool_entry(struct fmd_ctx *ctx, json_t *jld,
 	if (obj) {
 		ld->health.health_status = (uint8_t)json_int_or(obj, "health_status", 0);
 		ld->health.media_status = (uint8_t)json_int_or(obj, "media_status", 0);
+		ld->health.additional_status =
+			(uint8_t)json_int_or(obj, "additional_status", 0);
 	} else {
 		ld->health.health_status = default_health;
 		ld->health.media_status = default_media;

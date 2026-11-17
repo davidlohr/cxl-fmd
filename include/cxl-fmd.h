@@ -2708,6 +2708,40 @@ json_t *fmd_redfish_error_body(const char *message, json_t *info);
 /* the error body sent when one cannot be made */
 extern const char fmd_redfish_error_fallback[];
 
+/*
+ * Status.Conditions (src/redfish/messages.c): the messages of cxl-fmd's
+ * registry CxlHealth.1.0.0.json, one for each thing Get Health Info
+ * (CXL r4.0 Table 8-315) reports that DSP0288 asks a Condition for.
+ */
+#define FMD_RF_HEALTH_REGISTRY "CxlHealth.1.0"
+
+enum fmd_rf_cond {
+	/* Health Status Bit[0] to Bit[3] */
+	FMD_COND_MAINTENANCE_NEEDED,
+	FMD_COND_PERFORMANCE_DEGRADED,
+	FMD_COND_HW_REPLACEMENT_NEEDED,
+	FMD_COND_CAPACITY_DEGRADED,
+	/* Media Status 02h to 09h, in order, and a reserved one */
+	FMD_COND_WRITE_PERSISTENCY_LOST,
+	FMD_COND_ALL_DATA_LOST,
+	FMD_COND_WRITE_LOSS_POWER_LOSS,
+	FMD_COND_WRITE_LOSS_SHUTDOWN,
+	FMD_COND_WRITE_LOSS_IMMINENT,
+	FMD_COND_DATA_LOSS_POWER_LOSS,
+	FMD_COND_DATA_LOSS_SHUTDOWN,
+	FMD_COND_DATA_LOSS_IMMINENT,
+	FMD_COND_MEDIA_RESERVED,		/* 1 arg: the value, "0Ah" */
+	/* Additional Status Bit[4] and Bit[5] */
+	FMD_COND_CORRECTED_VOLATILE,
+	FMD_COND_CORRECTED_PERSISTENT,
+	FMD_COND_COUNT
+};
+
+/* the MessageKey of @id, NULL if there is none */
+const char *fmd_redfish_condition_key(enum fmd_rf_cond id);
+/* one Resource.Condition of @id, @arg its argument if it has one */
+json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg);
+
 /* cxl-fmd's Resolutions, where the registry's would not say what to do */
 #define FMD_RES_RETRY "Resubmit the request later: the device was busy, or " \
 	"asked for the command to be sent again."
@@ -2737,6 +2771,11 @@ unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
 /* Service root and metadata */
 json_t *fmd_redfish_odata(struct fmd_ctx *ctx);
 char *fmd_redfish_metadata(struct fmd_ctx *ctx);
+/* cxl-fmd's registries (src/redfish/files.c) */
+json_t *fmd_redfish_registries(struct fmd_ctx *ctx);
+json_t *fmd_redfish_registry(struct fmd_ctx *ctx, const char *id);
+/* the bytes of registry file @file, *@len of them; NULL if there is none */
+const char *fmd_redfish_registry_file(const char *file, size_t *len);
 json_t *fmd_redfish_service_root(struct fmd_ctx *ctx);
 
 /* Collections */
@@ -2917,6 +2956,9 @@ uint8_t fmd_worse_media_status(uint8_t a, uint8_t b);
 struct fmd_status_rollup {
 	uint8_t health_bits;		/* Health Status of each, OR-ed */
 	uint8_t media;			/* the worst Media Status */
+	uint16_t media_seen;		/* bit n: Media Status n (00h-09h) read */
+	uint8_t media_reserved;		/* a reserved Media Status read, or 0 */
+	uint8_t additional;		/* Additional Status Bits[5:4], OR-ed */
 	unsigned int known;		/* how many were read */
 	unsigned int unknown;		/* how many were not */
 };

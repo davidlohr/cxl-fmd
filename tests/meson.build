@@ -181,6 +181,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Status.Conditions from Get Health Info, and cxl-fmd's registry
+    test(
+        'conditions',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_conditions.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 300,
+        suite: 'api',
+    )
+
     # Status from Get Health Info, alike in every view
     test(
         'health',
@@ -515,6 +533,7 @@ if pytest_available and run_validator
         ['redfish-validator-hot-removal', 'test_hot_removal_validation'],
         ['redfish-validator-dcd', 'test_dcd_validation'],
         ['redfish-validator-dcd-perhost', 'test_dcd_perhost_validation'],
+        ['redfish-validator-degraded', 'test_degraded_validation'],
     ]
         test(
             t[0],

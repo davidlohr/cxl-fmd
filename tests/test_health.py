@@ -114,7 +114,11 @@ class TestSwitchChassis:
         Enabled, no Health, and HealthRollup Warning."""
         code, data = api_client.get("/redfish/v1/Chassis/cxl_switch_0")
         assert code == 200
+        conditions = data["Status"].pop("Conditions")
         assert data["Status"] == {"State": "Enabled", "HealthRollup": "Warning"}
+        # and why (test_conditions.py): its devices' bits
+        assert [c["MessageId"] for c in conditions] == [
+            "CxlHealth.1.0.MaintenanceNeeded", "CxlHealth.1.0.PerformanceDegraded"]
 
     def test_device_chassis_agree(self, api_client):
         for dev, health in [("cxl_switch0_degraded", "Warning"),

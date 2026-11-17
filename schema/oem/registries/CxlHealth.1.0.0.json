@@ -1,0 +1,141 @@
+{
+    "@odata.type": "#MessageRegistry.v1_9_0.MessageRegistry",
+    "Id": "CxlHealth.1.0.0",
+    "Name": "cxl-fmd CXL Health Message Registry",
+    "Language": "en",
+    "Description": "This registry defines the messages cxl-fmd puts in Status.Conditions for what a CXL memory device reports in Get Health Info (4200h, CXL r4.0 Table 8-315): each Health Status bit, each Media Status that is not Normal or Not Ready, and Additional Status Bit[4] and Bit[5].  The messages of Health Status and Media Status are the descriptions Table 8-315 gives; those of Additional Status are its \"The device's count of total corrected errors has risen to or above the user-programmable ... threshold\" with volatile or persistent added (cxl-fmd's wording), and MediaStatusReserved and the Resolutions are cxl-fmd's.",
+    "RegistryPrefix": "CxlHealth",
+    "RegistryVersion": "1.0.0",
+    "OwningEntity": "cxl-fmd",
+    "Messages": {
+        "MaintenanceNeeded": {
+            "Description": "Indicates that Health Status Bit[0], Maintenance Needed, is set (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Bit[0], Maintenance Needed, of the Health Status field of Get Health Info.",
+            "Message": "The device requires maintenance.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "Maintain the device."
+        },
+        "PerformanceDegraded": {
+            "Description": "Indicates that Health Status Bit[1], Performance Degraded, is set (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Bit[1], Performance Degraded, of the Health Status field of Get Health Info.",
+            "Message": "The device is no longer operating at optimal performance.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "HardwareReplacementNeeded": {
+            "Description": "Indicates that Health Status Bit[2], Hardware Replacement Needed, is set (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Bit[2], Hardware Replacement Needed, of the Health Status field of Get Health Info.",
+            "Message": "The device should immediately be replaced.",
+            "MessageSeverity": "Critical",
+            "NumberOfArgs": 0,
+            "Resolution": "Replace the device."
+        },
+        "MemoryCapacityDegraded": {
+            "Description": "Indicates that Health Status Bit[3], Memory Capacity Degraded, is set (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Bit[3], Memory Capacity Degraded, of the Health Status field of Get Health Info.",
+            "Message": "The device is no longer operating at the expected memory capacity.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "WritePersistencyLost": {
+            "Description": "Indicates that the Media Status is 02h, Write persistency Lost (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 02h in Get Health Info.",
+            "Message": "The device cannot persist write requests but is able to read stored data.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "AllDataLost": {
+            "Description": "Indicates that the Media Status is 03h, All data lost (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 03h in Get Health Info.",
+            "Message": "All data has been lost from the device.",
+            "MessageSeverity": "Critical",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "WritePersistencyLossOnPowerLoss": {
+            "Description": "Indicates that the Media Status is 04h, Write Persistency Loss in the Event of Power Loss (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 04h in Get Health Info.",
+            "Message": "The device's ability to persist subsequent write requests may be lost in the event of a power loss.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "WritePersistencyLossOnShutdown": {
+            "Description": "Indicates that the Media Status is 05h, Write Persistency Loss in Event of Shutdown (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 05h in Get Health Info.",
+            "Message": "The device's ability to persist subsequent write requests may be lost when the device is shut down.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "WritePersistencyLossImminent": {
+            "Description": "Indicates that the Media Status is 06h, Write Persistency Loss Imminent (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 06h in Get Health Info.",
+            "Message": "The device's ability to persist subsequent write requests may be lost.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "AllDataLossOnPowerLoss": {
+            "Description": "Indicates that the Media Status is 07h, All Data Loss in the Event of Power Loss (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 07h in Get Health Info.",
+            "Message": "All data on the device may be lost in the event of a power loss.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "AllDataLossOnShutdown": {
+            "Description": "Indicates that the Media Status is 08h, All Data Loss in the Event of Shutdown (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 08h in Get Health Info.",
+            "Message": "All data on the device may be lost when the device is shut down.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "AllDataLossImminent": {
+            "Description": "Indicates that the Media Status is 09h, All Data Loss Imminent (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Media Status 09h in Get Health Info.",
+            "Message": "All data on the device may be lost.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "MediaStatusReserved": {
+            "Description": "Indicates that the device reported a Media Status that CXL r4.0 Table 8-315 reserves (\"All other encodings are reserved\").",
+            "LongDescription": "This message shall indicate that the device reported, in Get Health Info, a Media Status that is not one of 00h to 09h.",
+            "Message": "The device reported the reserved Media Status %1.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 1,
+            "ParamTypes": [
+                "string"
+            ],
+            "ArgDescriptions": [
+                "The Media Status, in hexadecimal."
+            ],
+            "ArgLongDescriptions": [
+                "This argument shall contain the Media Status the device reported, as two hexadecimal digits followed by h, such as 0Ah."
+            ],
+            "Resolution": "None."
+        },
+        "CorrectedVolatileErrorCount": {
+            "Description": "Indicates that Additional Status Bit[4], Corrected Volatile Error Count, is set (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Bit[4], Corrected Volatile Error Count, of the Additional Status field of Get Health Info set to 1, Warning or Failure.",
+            "Message": "The device's count of total corrected volatile errors has risen to or above the user-programmable Warning or Failure threshold.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        },
+        "CorrectedPersistentErrorCount": {
+            "Description": "Indicates that Additional Status Bit[5], Corrected Persistent Error Count, is set (CXL r4.0 Table 8-315).",
+            "LongDescription": "This message shall indicate that the device reported Bit[5], Corrected Persistent Error Count, of the Additional Status field of Get Health Info set to 1, Warning.",
+            "Message": "The device's count of total corrected persistent errors has risen to or above the user-programmable warning threshold.",
+            "MessageSeverity": "Warning",
+            "NumberOfArgs": 0,
+            "Resolution": "None."
+        }
+    }
+}

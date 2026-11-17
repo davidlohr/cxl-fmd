@@ -87,12 +87,12 @@ whether it serves the mapping, and where it serves it under another name.
 | Get Partition Info | Next Persistent Capacity | `Memory` | `StagedPersistentSizeMiB` | | Yes, as `CXL/StagedNonVolatileSizeMiB`: DSP8010 has no `StagedPersistentSizeMiB` (see "Set Partition Info" below) |
 | Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | | Yes, as `CXL/StagedVolatileSizeMiB` (see "Set Partition Info" below) |
 | Set Partition Info | Next Persistent Capacity | `Memory` | `StagedPersistentSizeMiB` | | Yes, as `CXL/StagedNonVolatileSizeMiB` (see "Set Partition Info" below) |
-| Get Health Info | Health Status | Many | `Status` | See Comment 3. | Partial: `Status/Health` and `Status/State` are served (see "Status from Get Health Info"); `Status/Conditions`, which Comment 3 describes, is not |
+| Get Health Info | Health Status | Many | `Status` | See Comment 3. | Yes: `Status/Health`, `Status/State`, and `Status/Conditions` for each bit set (see "Status from Get Health Info") |
 | Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | | No (deviation, see "Life Used" below) |
 | Get Health Info | Corrected Volatile Error Count | `MemoryMetrics` | `CorrectedVolatileErrorCount` | | Yes |
 | Get Health Info | Corrected Persistent Error Count | `MemoryMetrics` | `CorrectedPersistentErrorCount` | | Yes |
-| Get Health Info | Additional Status[4]: Corrected Volatile Error Count | `Memory` | `Status/Conditions` | See Comment 4. | No |
-| Get Health Info | Additional Status[5]: Corrected Persistent Error Count | `Memory` | `Status/Conditions` | See Comment 4. | No |
+| Get Health Info | Additional Status[4]: Corrected Volatile Error Count | `Memory` | `Status/Conditions` | See Comment 4. | Yes, `CxlHealth.1.0.CorrectedVolatileErrorCount` (see "Status from Get Health Info") |
+| Get Health Info | Additional Status[5]: Corrected Persistent Error Count | `Memory` | `Status/Conditions` | See Comment 4. | Yes, `CxlHealth.1.0.CorrectedPersistentErrorCount` (see "Status from Get Health Info") |
 | Get Health Info | Dirty Shutdown Count | `MemoryMetrics` | `DirtyShutdownCount` | | Yes |
 | Get Alert Configuration | Valid Alerts and Programmable Alerts | `MemoryMetrics` | `CXL/AlertCapabilities` | | No |
 | Scan Media | N/A | `Memory` | `ScanMedia` action | | Yes |
@@ -620,6 +620,59 @@ Status to `Status`, Comment 3, and Media Status to nothing):
   represent the health state of the resource without considering its
   dependent resources", HealthRollup "the resource and its dependent
   resources").
+- `Conditions` say why. DSP0288 1.4.0 Section 3 says implementations
+  "shall adhere to the numbered comments referenced in the Comment
+  column", and Table 1 maps Health Status to `Status` with Comment 3:
+  "The Conditions property within the Status property is used to show why
+  the Health property contains a value other than OK". So every view
+  above has one Condition for each Health Status bit set, and one for each
+  Media Status read that makes `Health` other than `OK` (02h to 09h, and
+  a reserved value, with the value as its argument); 00h and 01h have
+  none. A `Memory` also has one for each of Additional Status Bit[4],
+  Corrected Volatile Error Count, and Bit[5], Corrected Persistent Error
+  Count: "The Conditions property within the Status property of the
+  Memory resource shall contain messages to indicate either the Corrected
+  Volatile Error Count or Corrected Persistent Error Count flags are set"
+  (Comment 4). These two do not change `Health` (cxl-fmd's choice:
+  DSP0288 maps only Health Status to it, and Resource_v1 says the
+  conditions "may affect the `Health`"), so a `Memory` can be `OK` with
+  them. Of several LDs (an MLD's `Chassis`, a switch's), the `Conditions`
+  are those of every LD read, with no `OriginOfCondition`. A Get Health
+  Info that was not read gives none. There is no `Timestamp`: cxl-fmd does
+  not know when a condition began.
+- The messages are from cxl-fmd's registry `CxlHealth.1.0.0.json`
+  (MessageIds `CxlHealth.1.0.<Key>`), served at
+  `/redfish/v1/Registries/CxlHealth.1.0.0.json` and listed in
+  `/redfish/v1/Registries` ("Local copy of a Redfish registry file", DSP0266
+  1.25.0 Table 4). No DMTF registry has messages for these: the closest,
+  ResourceEvent 1.5.0's `ResourceWarningThresholdExceeded`, takes the
+  threshold as an argument, which cxl-fmd does not read. Each message is
+  the description Table 8-315 gives (Health Status bits, Media Status);
+  those of Additional Status are its "The device's count of total
+  corrected errors has risen to or above the user-programmable ...
+  threshold" with "volatile" or "persistent" put in. The name is cxl-fmd's
+  Oem identifier `Cxl` followed by `Health` ("the defining organization's
+  unique OEM identifier ... should be prepended to the registry name",
+  Section 9.8.5); see "Oem identifier" under Known Gaps for what that
+  identifier is.
+
+| Get Health Info | `Status/Conditions` MessageId (`CxlHealth.1.0.`) | Severity | Views |
+|-----------------|-------------------------------------------------|----------|-------|
+| Health Status Bit[0] | `MaintenanceNeeded` | Warning | all |
+| Health Status Bit[1] | `PerformanceDegraded` | Warning | all |
+| Health Status Bit[2] | `HardwareReplacementNeeded` | Critical | all |
+| Health Status Bit[3] | `MemoryCapacityDegraded` | Warning | all |
+| Media Status 02h | `WritePersistencyLost` | Warning | all |
+| Media Status 03h | `AllDataLost` | Critical | all |
+| Media Status 04h | `WritePersistencyLossOnPowerLoss` | Warning | all |
+| Media Status 05h | `WritePersistencyLossOnShutdown` | Warning | all |
+| Media Status 06h | `WritePersistencyLossImminent` | Warning | all |
+| Media Status 07h | `AllDataLossOnPowerLoss` | Warning | all |
+| Media Status 08h | `AllDataLossOnShutdown` | Warning | all |
+| Media Status 09h | `AllDataLossImminent` | Warning | all |
+| Media Status 0Ah to FFh | `MediaStatusReserved` (the value, `0Ah`) | Warning | all |
+| Additional Status Bit[4] | `CorrectedVolatileErrorCount` | Warning | `Memory` |
+| Additional Status Bit[5] | `CorrectedPersistentErrorCount` | Warning | `Memory` |
 
 ## Error Responses
 
@@ -812,6 +865,9 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_mem0/MemoryDomains/
 | `GET /redfish/v1` | Service Root |
 | `GET /redfish/v1/odata` | OData Service Document |
 | `GET /redfish/v1/$metadata` | OData Metadata Document |
+| `GET /redfish/v1/Registries` | cxl-fmd's registries (`MessageRegistryFileCollection`) |
+| `GET /redfish/v1/Registries/CxlHealth` | The `MessageRegistryFile` of `CxlHealth.1.0` |
+| `GET /redfish/v1/Registries/CxlHealth.1.0.0.json` | The registry of the `Status/Conditions` messages (see "Status from Get Health Info") |
 
 ### Systems Model
 
@@ -1949,7 +2005,7 @@ In summary:
 8. A bind or unbind is followed for as long as the switch takes: there is
    no time limit and no automatic abort. `#Cxl.ForceUnbind` is the
    recourse for an unbind (see "Binding").
-9. `Status/Conditions` is not served. Get Health Info is read at
+9. Get Health Info is read at
    discovery, on the `--rescan` timer and after a record in a device's
    Warning, Failure or Fatal Event Log, so a `Status` is as old as the
    last of these, and a bit that goes back to 0 is seen only on the
@@ -2047,8 +2103,6 @@ These are known gaps against DSP0288 1.4.0 (see Tables 1 and 2):
 - The security actions DSP0288 1.2.0 mapped to `Memory` are still served
   there, as deprecated aliases of the `CXLLogicalDevice` actions (see
   "Security actions").
-- `Status/Conditions` is not served: Comments 3 and 4 of Table 1 are not
-  met.
 
 ### Memory device writes
 
@@ -2068,6 +2122,18 @@ These are known gaps in what cxl-fmd does:
   Partition Info, in the CEL) is not read, and nothing tells cxl-fmd that
   the device was reset: a staged chunk (see "Staged chunks") is looked at
   again only on a `--rescan`, so with none it stays `StandbyOffline`.
+
+### Oem identifier
+
+cxl-fmd's Oem properties are under `Oem.Cxl`, its Oem actions are
+`#Cxl.<Action>`, and its registry is `CxlHealth`. "The identifier shall be
+either an ICANN-recognized domain name (including the top-level domain
+suffix), with all dot ( . ) separators replaced with underscores ( _ ), or
+an IANA-assigned Enterprise Number prefixed with "EID_."" (DSP0266 1.25.0
+Section 9.8.3). `Cxl` is neither: it is not a domain cxl-fmd's project
+holds, nor an Enterprise Number. It is kept, as clients use it; moving to
+a conforming identifier would rename every Oem property, the action and
+the registry.
 
 ### Properties not served
 
@@ -2322,6 +2388,10 @@ Changes from the fixes of the external design review (branch
 | The same, ended with another return code (Internal Error) | `500`, `message` the task's | `500`, `message` "Failed to create connection" or "Failed to delete connection", as at once |
 | The task monitor of a task whose switch is gone | `500`, "The switch is gone" | `500`, "Outcome unknown: The switch is gone, and whether it bound (unbound) the vPPB before it went is not known" |
 | A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match` (a `PATCH` of a `MemoryRegion` with a stale `If-Match`) | the header ignored, the request carried out (Set DC Region Configuration sent) | `412`, nothing done; a `404` or `405` stays so (but for an action a resource that is there does not have, which is `412`); a `GET` is unchanged |
+| `GET` of a `Chassis`, `PCIeDevice`, `CXLLogicalDevice`, `Memory`, `MemoryDomain` or `MemoryChunk` of a device whose Get Health Info has a Health Status bit set, or a Media Status other than 00h or 01h | no `Status.Conditions` | `Status.Conditions`, one per bit and per Media Status, with MessageIds `CxlHealth.1.0.<Key>` (see "Status from Get Health Info"); a switch's `Chassis` those of its devices |
+| `GET` of the `Memory` of a device or LD whose Additional Status has Bit[4] or Bit[5] set | no `Status.Conditions`; the value was read and not used | `CorrectedVolatileErrorCount`, `CorrectedPersistentErrorCount` Conditions; `Health` unchanged |
+| `GET /redfish/v1`, `/redfish/v1/odata`, `/redfish/v1/$metadata` | no `Registries` | `Registries`, `/redfish/v1/Registries`, with cxl-fmd's `CxlHealth` registry at `/redfish/v1/Registries/CxlHealth.1.0.0.json` |
+| A mock topology's `health_info.additional_status` | ignored, though mock-topology.md listed it | read, for an SLD and for an LD in its own `health_info` |
 
 Mock topologies and discovery:
 

@@ -191,7 +191,7 @@ The `health_info` object defines device health state, which is mapped to Redfish
 |-------|------|---------|-------------|
 | `health_status` | integer | 0 | Health status bitmask (see below) |
 | `media_status` | integer | 0 | Media status code (see below) |
-| `additional_status` | integer | 0 | Additional status flags |
+| `additional_status` | integer | 0 | Additional Status (Table 8-315): Bit[4], Corrected Volatile Error Count, and Bit[5], Corrected Persistent Error Count, give the `Memory` a `Status.Conditions` entry each (see Redfish-API.md, "Status from Get Health Info"). Read for an SLD, and for an LD in its own `health_info` (not from its device's) |
 | `life_used` | integer | 0 | Percentage of life used (0-100) |
 | `temperature` | integer | 25 | Device temperature in Celsius |
 | `dirty_shutdown_count` | integer | 0 | Count of dirty shutdowns |
