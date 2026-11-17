@@ -93,6 +93,10 @@ static const struct rf_registry_msg base_msgs[FMD_RF_MSG_COUNT] = {
 		"QueryParameterUnsupported", 1, "Warning",
 		"Query parameter '%1' is not supported.",
 		"Correct or remove the query parameter and resubmit the request." },
+	[FMD_RF_HEADER_INVALID] = {
+		"HeaderInvalid", 1, "Critical",
+		"Header '%1' is invalid.",
+		"Resubmit the request with a valid request header." },
 };
 
 void fmd_redfish_message_id(enum fmd_rf_msg id, char *buf, size_t len)

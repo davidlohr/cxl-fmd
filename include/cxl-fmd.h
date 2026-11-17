@@ -2896,6 +2896,7 @@ enum fmd_rf_msg {
 	FMD_RF_ACTION_NOT_SUPPORTED,		/* 1 arg: the action */
 	FMD_RF_RESOURCE_CANNOT_BE_DELETED,
 	FMD_RF_QUERY_PARAMETER_UNSUPPORTED,	/* 1 arg: the parameter */
+	FMD_RF_HEADER_INVALID,			/* 1 arg: the header, name and value */
 	FMD_RF_MSG_COUNT
 };
 

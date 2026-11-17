@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: LGPL-2.1
 """
 Query parameters and methods a resource does not take (review F18 claims
-1 and 3).
+1 and 3); the headers of requests and responses the DMTF
+Redfish-Protocol-Validator checks (review F18.6).
 
 DSP0266 1.25.0 Section 7.3.1: services return "The HTTP 501 Not
 Implemented status code for any unsupported query parameters that start
@@ -462,3 +463,53 @@ def test_get_has_allow_and_link(cxl_fmd_executable, topology):
         finally:
             proc.terminate()
             assert proc.wait(timeout=10) == 0
+
+
+# OData-Version of a request (review F18.6, the DMTF
+# Redfish-Protocol-Validator's REQ_HEADERS_ODATA_VERSION)
+def odata_version_refused(response, value):
+    """
+    "Services shall reject requests that specify an unsupported OData
+    version. If a service encounters an unsupported OData version, it
+    should reject the request with the HTTP 412 Precondition Failed status
+    code." (DSP0266 1.25.0 Table 12); Base HeaderInvalid with the header.
+    """
+    assert response.status_code == 412, response.text
+    info = response.json()["error"]["@Message.ExtendedInfo"]
+    assert [m["MessageId"] for m in info] == ["Base.1.24.HeaderInvalid"]
+    assert info[0]["MessageArgs"] == [f"OData-Version: {value}"]
+
+
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestODataVersion:
+
+    @pytest.mark.parametrize("value", ["4.1", "4.01", "3.0", "5", "x"])
+    @pytest.mark.parametrize("uri", ["/redfish/v1", CHASSIS, "/redfish/v1/$metadata",
+                                     "/redfish/v1/Nonexistent"])
+    def test_get_is_412(self, api_client, uri, value):
+        """It was answered as if it had none"""
+        response = requests.get(api_client.base_url + uri,
+                                headers={"OData-Version": value}, timeout=30)
+        odata_version_refused(response, value)
+
+    @pytest.mark.parametrize("headers", [{"OData-Version": "4.0"}, {}])
+    def test_4_0_or_none_is_served(self, api_client, headers):
+        response = requests.get(api_client.base_url + "/redfish/v1",
+                                headers=headers, timeout=30)
+        assert response.status_code == 200
+
+    def test_writes_do_nothing(self, api_client):
+        """A POST, a PATCH and a DELETE with 4.1 change nothing"""
+        base, h = api_client.base_url, {"OData-Version": "4.1"}
+        chunk = api_client.get(SLD_CHUNKS)[1]["Members"][0]["@odata.id"]
+        odata_version_refused(requests.delete(base + chunk, headers=h, timeout=30), "4.1")
+        assert api_client.get(chunk)[0] == 200
+        assert api_client.delete(chunk) == 204
+        odata_version_refused(requests.post(base + SLD_CHUNKS, headers=h, timeout=30,
+                                            json={"MemoryChunkSizeMiB": 256}), "4.1")
+        assert api_client.get(SLD_CHUNKS)[1]["Members"] == []
+        memory = "/redfish/v1/Chassis/cxl_mem0/PCIeDevices/cxl_mem0"
+        before = api_client.get(memory)[1]
+        odata_version_refused(requests.patch(base + memory, headers=h, timeout=30,
+                                             json={"CXLDevice": {"Timestamp": 1}}), "4.1")
+        assert api_client.get(memory)[1] == before

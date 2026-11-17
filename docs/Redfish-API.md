@@ -627,6 +627,18 @@ schemas, the message object of a completed Dynamic Capacity task monitor)
 has no `Link`. No annotation `Link` is sent (Section 8.2: one "should be
 returned").
 
+A request whose `OData-Version` header is other than `4.0` is answered
+`412 Precondition Failed`, whatever its method and URI, and nothing is
+done: "Services shall reject requests that specify an unsupported OData
+version. If a service encounters an unsupported OData version, it should
+reject the request with the HTTP 412 Precondition Failed status code"
+(DSP0266 Table 12). Its `@Message.ExtendedInfo` is Base `HeaderInvalid`,
+whose argument "shall contain the full request header, including the
+field name and field value" (Base.1.24.0.json): `OData-Version: 4.1`. A
+request with no `OData-Version` is served as one of `4.0`: DSP0266
+"Removed requirement for clients to include the OData-Version HTTP header
+in all requests" (its change log).
+
 ---
 
 ## Status from Get Health Info
@@ -783,7 +795,7 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
-| 412 Precondition Failed | A precondition cxl-fmd cannot check | A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match`, whatever its value, that would otherwise be carried out: nothing is done (see "Conditional Requests") |
+| 412 Precondition Failed | A precondition cxl-fmd cannot check | A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match`, whatever its value, that would otherwise be carried out: nothing is done (see "Conditional Requests"); a request of any method, to any URI, with an `OData-Version` other than `4.0`: nothing is done (see "Headers") |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` with a return code other than Invalid Input, Unsupported, Busy or Retry Required, with none, or whose switch is gone ("Outcome unknown"), or of a Dynamic Capacity task whose device is gone ("Outcome unknown"); "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
 | 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported, at once or as the return code of the background operation (the task monitor) (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
@@ -823,6 +835,9 @@ does not have is `412` with the header, and `404` without (cxl-fmd's
 simplification). A `GET` is answered
 as one without the header: a conditional GET is "If supported by the
 service" (DSP0266 Section 7.2.1), and cxl-fmd does not support it.
+
+An `OData-Version` other than `4.0` is checked before any of this, and is
+`412` whatever the method and URI (see "Headers").
 
 ### Error Response Format
 
@@ -869,6 +884,7 @@ The messages cxl-fmd uses, and when (cxl-fmd's choices):
 | `PayloadTooLarge` | `413` |
 | `InternalError` | `500` when cxl-fmd runs out of memory |
 | `QueryParameterUnsupported` | `501`, one for each query parameter that starts with `$` |
+| `HeaderInvalid` | `412` for an `OData-Version` other than `4.0`, with the header (`OData-Version: 4.1`) |
 | `GeneralError` | everything else, with a `Resolution` of cxl-fmd's; a `500` "Outcome unknown" has "Read the resource to learn whether the request was carried out before it is resubmitted: cxl-fmd does not know." |
 
 ### Common Errors
@@ -2638,6 +2654,7 @@ Changes from the fixes of the external design review (branch
 | Any request | no `Cache-Control` header | `Cache-Control: no-store` on every response (see "Headers") |
 | `GET` answered `200` | no `Allow` header | `Allow`, the methods the resource takes, as its `405` lists them (see "Headers") |
 | `GET` of a resource answered `200` | no `Link` header | `Link: <http://redfish.dmtf.org/schemas/v1/{type}.json>; rel=describedby`, the JSON Schema of its `@odata.type` (see "Headers") |
+| A request with an `OData-Version` other than `4.0` (`4.1`) | served as if it had none | `412`, `HeaderInvalid`, nothing done (see "Headers") |
 
 Mock topologies, discovery and start-up:
 

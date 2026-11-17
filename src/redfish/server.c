@@ -2377,6 +2377,39 @@ static bool send_unsupported_query(struct MHD_Connection *conn,
 }
 
 /*
+ * A request whose OData-Version is not 4.0: "Services shall reject
+ * requests that specify an unsupported OData version. If a service
+ * encounters an unsupported OData version, it should reject the request
+ * with the HTTP 412 Precondition Failed status code." (DSP0266 1.25.0
+ * Table 12). cxl-fmd supports 4.0 only, the version it answers with. A
+ * request with none is taken as one of 4.0 ("Removed requirement for
+ * clients to include the OData-Version HTTP header in all requests",
+ * DSP0266's change log). Any method and any URI, before anything else is
+ * looked at, so nothing is done. Base HeaderInvalid, whose argument
+ * "shall contain the full request header, including the field name and
+ * field value" (Base.1.24.0.json). Returns true, the answer sent and
+ * *@result what sending it gave, if the request is answered so.
+ */
+static bool send_unsupported_odata_version(struct MHD_Connection *conn,
+					   enum MHD_Result *result)
+{
+	const char *v = MHD_lookup_connection_value(conn, MHD_HEADER_KIND,
+						    "OData-Version");
+	char header[128];
+
+	if (!v || !strcmp(v, "4.0"))
+		return false;
+	snprintf(header, sizeof(header), "OData-Version: %.100s", v);
+	*result = send_error(conn, MHD_HTTP_PRECONDITION_FAILED,
+			     "OData-Version is not supported: cxl-fmd supports 4.0 only. "
+			     "Nothing was done",
+			     fmd_redfish_message(FMD_RF_HEADER_INVALID,
+				"Resubmit the request with OData-Version 4.0, or without "
+				"the header.", NULL, 1, header));
+	return true;
+}
+
+/*
  * Main request handler - dispatches to method-specific handlers
  */
 static enum MHD_Result handle_request(void *cls,
@@ -2459,6 +2492,8 @@ static enum MHD_Result handle_request(void *cls,
 	 */
 	enum MHD_Result result;
 
+	if (send_unsupported_odata_version(conn, &result))
+		return result;
 	if (send_unsupported_query(conn, &result))
 		return result;
 
