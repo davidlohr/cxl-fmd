@@ -2011,6 +2011,9 @@ Changes from the fixes of the external design review (branch
 | The same when the vPPB, read then, has settled | `Exception` whatever it read | `Completed` if it reads what was asked (bound to the port and LD, or unbound), else `Exception`; the message says it was read from the vPPB |
 | `#Cxl.ForceUnbind` of a Connection whose managed unbind was lost with the vPPB at 01h | `404`: the task had ended and the vPPB at 01h gave no Connection | option 2h sent; if the switch takes it, `202` with that task, `Running` again |
 | `POST` or `DELETE` of a Connection when the task cannot be allocated | Bind vPPB or Unbind vPPB sent, then `500`, the switch carrying the operation out with no task | `500`, nothing sent |
+| `GET` of a device on hardware whose Get Multi-Headed Info (5500h) or Get LD Info (5400h) failed at discovery with a code other than Unsupported or Unsupported Mailbox or CCI (Retry Required, Busy, Internal Error, Invalid Input), or because the command did not reach the device or its response did not come back (a timeout, a route that is down) | an SLD for good (its endpoint was not asked again), of capacity 0 if Identify Memory Device was not answered either | `404` until it is discovered whole: see "Devices that are not ready" below |
+| The same for an MLD whose Get LD Allocations (5401h) failed that way or gave a reserved Memory Granularity, or whose second Get LD Info did, directly attached or on a switch port (and a switch-port MLD whose tunnelled Identify did) | an MLD for good, with LDs of 0 MiB and no `MemoryDomain` (or with no LDs) | likewise `404`, then the MLD whole |
+| The same for an SLD whose Identify Memory Device (4000h) failed that way | an SLD of capacity 0 for good | likewise |
 
 Mock topologies and discovery:
 
@@ -2019,6 +2022,31 @@ Mock topologies and discovery:
   LDs with LD-ID ..."), as they were by the validation after it. On
   hardware, a component discovered with an ID another one has is not
   added, and an error is logged.
+- Devices that are not ready. What kind of device is on an endpoint, and
+  what LDs it has of what size, is decided only on what it says: a
+  command it answers, or one it does not support (Unsupported, "The
+  command is not supported", or Unsupported Mailbox or CCI, CXL r4.0
+  Table 8-208). A device that fails one of these commands otherwise
+  (Retry Required is "a temporary error"), or that the command does not
+  reach or whose response does not come back (a timeout, a route that is
+  down), is not added, and is discovered again: on
+  the next `--rescan` (for a device on a switch port, the next read of
+  the switch's ports), then with 1, 3, 7, 15, 15, ... of them let pass
+  between tries, and after 8 failed tries not again until cxl-fmd is
+  restarted (for a switch port, until it reports another kind of device,
+  or none); each step is logged. With `--rescan 0` a directly attached
+  device that is not ready at start-up is not asked again. The
+  specification says only "An optional single retry may resolve the
+  issue": the backoff, the cap, taking every other code as one of the
+  moment, and taking as absence only a transport that will never carry
+  the command (a kernel mailbox that answers EPERM, ENOTTY, EOPNOTSUPP or
+  ENOSYS) and a response libcxlmi will not use (a list longer than was
+  asked for), which is the device's own answer, are cxl-fmd's choices. The commands that decide this are Get Multi-Headed Info
+  (5500h), Get LD Info (5400h), Get LD Allocations (5401h), Identify
+  Memory Device (4000h) of an SLD, and the tunnelled Identify of an MLD
+  on a switch port; the others (Get Head Info, QoS, Get Partition Info,
+  Get Health Info, the CEL, per-LD commands) do not keep a device from
+  being added.
 
 ---
 

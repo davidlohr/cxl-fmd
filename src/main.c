@@ -140,6 +140,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 
 	fmd_tasks_free(ctx);
 	free(ctx->known_eps);
+	free(ctx->retry_eps);
 	free(ctx->ioctl_eps);
 
 	fmd_binding_state_free(ctx);

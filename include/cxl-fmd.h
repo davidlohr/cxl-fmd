@@ -511,6 +511,58 @@ struct fmd_switch {
 };
 
 /*
+ * What the return code of a command that tells whether a device has a
+ * feature says (fmd_probe_result()). Only Unsupported, "The command is not
+ * supported", and Unsupported Mailbox or CCI, "The command is not supported
+ * on the mailbox or CCI it was issued on" (CXL r4.0 Table 8-208), say that
+ * it has not. Retry Required is "a temporary error", and Busy is a
+ * background operation that is still running: they say nothing of what the
+ * device is. That every other return code is taken as one that does not
+ * either is cxl-fmd's choice, as is how a failure to reach the device is
+ * read: as one of the moment, unless the transport will never carry the
+ * command (see fmd_probe_result()).
+ */
+enum fmd_probe {
+	FMD_PROBE_OK,		/* Success */
+	FMD_PROBE_ABSENT,	/* the device does not have it */
+	FMD_PROBE_TRANSIENT,	/* not known for now: asked again later */
+};
+
+/*
+ * @rc, the return of a libcxlmi command (0, a CCI return code, or -1 with
+ * errno set), read as fmd_probe says. Clear errno before the command, and
+ * call it before anything else can change errno.
+ */
+enum fmd_probe fmd_probe_result(int rc);
+
+/*
+ * A discovery step that failed for the moment, tried again with backoff
+ * and up to a cap. The specification says only "An optional single retry
+ * may resolve the issue" (Retry Required, Table 8-208): the cadence and
+ * the cap are cxl-fmd's. After the first failure the step is tried the
+ * next time it can be (a --rescan, or a read of a switch's ports), then
+ * with 1, 3, 7 and 15 such times let pass between tries, and after
+ * FMD_RETRY_MAX failures not again until cxl-fmd is restarted (or, for a
+ * switch port, until the port reports another kind of device, or none).
+ */
+#define FMD_RETRY_MAX	8
+
+struct fmd_retry {
+	uint8_t failures;	/* in a row */
+	uint8_t skip;		/* times left to let pass before the next try */
+};
+
+/* Whether to try now: not while backing off, and not once given up */
+bool fmd_retry_due(struct fmd_retry *r);
+/* A try failed for the moment; returns true when it was the last one */
+bool fmd_retry_failed(struct fmd_retry *r);
+static inline void fmd_retry_reset(struct fmd_retry *r)
+{
+	r->failures = 0;
+	r->skip = 0;
+}
+
+/*
  * Switch Port (DSP - Downstream Switch Port)
  *
  * Children: fmd_sld, fmd_mld
@@ -544,6 +596,12 @@ struct fmd_port {
 
 	/* The head of a Multi-Headed device on this port, if that is what is */
 	struct fmd_head *head;
+
+	/*
+	 * The device on the port could not be discovered for the moment:
+	 * when it is asked again (fmd_retry).
+	 */
+	struct fmd_retry dev_retry;
 };
 
 /*
@@ -1339,6 +1397,16 @@ struct fmd_ctx {
 	/* Endpoints that have been discovered (src/discovery.c) */
 	struct cxlmi_endpoint **known_eps;
 	int nknown_eps;
+
+	/*
+	 * Endpoints whose device answered Identify but could not be
+	 * discovered for the moment, and when each is asked again
+	 */
+	struct fmd_ep_retry {
+		struct cxlmi_endpoint *ep;
+		struct fmd_retry retry;
+	} *retry_eps;
+	int nretry_eps;
 
 	/*
 	 * Endpoints opened through the kernel's mailbox (/dev/cxl). Their

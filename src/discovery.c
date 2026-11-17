@@ -25,6 +25,60 @@
 #include "mock.h"  /* For FMD_CMD_* definitions */
 
 /*
+ * A return code of a CCI command: see enum fmd_probe. libcxlmi returns -1
+ * with errno set when the command did not reach the device or its
+ * response did not come back (a timeout, a route that is down): that says
+ * nothing of the device, and it is tried again, unless errno says the
+ * transport will never carry the command: a kernel mailbox that will not
+ * pass it (EPERM, ENOTTY, EOPNOTSUPP, ENOSYS) passes it no better later,
+ * and the device is taken not to have it. A response that came back and
+ * that libcxlmi will not use (a list longer than was asked for) is -1 with
+ * errno left as it was: the caller clears errno before the command, and
+ * -1 with errno 0 is the device's own answer, taken as absence, as an
+ * answer that cannot be read was before. These readings are cxl-fmd's.
+ */
+enum fmd_probe fmd_probe_result(int rc)
+{
+	if (rc == 0)
+		return FMD_PROBE_OK;
+	if (rc < 0) {
+		switch (errno) {
+		case 0:
+		case EPERM:
+		case ENOTTY:
+		case EOPNOTSUPP:
+		case ENOSYS:
+			return FMD_PROBE_ABSENT;
+		default:
+			return FMD_PROBE_TRANSIENT;
+		}
+	}
+	if (rc == CXLMI_RET_UNSUPPORTED || rc == CXLMI_RET_MBUNSUPPORTED)
+		return FMD_PROBE_ABSENT;
+	return FMD_PROBE_TRANSIENT;
+}
+
+bool fmd_retry_due(struct fmd_retry *r)
+{
+	if (r->failures >= FMD_RETRY_MAX)
+		return false;
+	if (r->skip) {
+		r->skip--;
+		return false;
+	}
+	return true;
+}
+
+bool fmd_retry_failed(struct fmd_retry *r)
+{
+	if (r->failures < FMD_RETRY_MAX)
+		r->failures++;
+	/* 0, 1, 3, 7, then 15 times let pass before the next try */
+	r->skip = (1u << (r->failures - 1 < 4 ? r->failures - 1 : 4)) - 1;
+	return r->failures >= FMD_RETRY_MAX;
+}
+
+/*
  * Command Effects Log (CEL) UUID
  */
 static const uint8_t cel_uuid[16] = {
@@ -192,8 +246,12 @@ out:
 }
 
 /* Forward declarations */
-static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld);
-static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld);
+static int discovered_add(struct fmd_ctx *ctx, struct fmd_component *comp,
+			  struct fmd_component *parent);
+static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld,
+			struct fmd_component *parent);
+static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld,
+			struct fmd_component *parent);
 static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 		       struct fmd_mld *mld);
 static int discover_switch(struct fmd_ctx *ctx, struct fmd_switch *sw);
@@ -229,21 +287,39 @@ static enum fmd_link_status ltssm_to_link_status(uint8_t ltssm)
  *           Get Health Info (4200h)
  *
  * SLDs never need tunneling - switch is transparent for SLD access.
+ *
+ * Its capacity is read before it is added under @parent (NULL: the root):
+ * one whose Identify Memory Device fails for the moment is not added, and
+ * is discovered again later (-EAGAIN). One that does not support it is
+ * added, of unknown capacity (1). Returns 0 once it is added and read, and
+ * a negative value when it is not added, @sld then freed.
  */
-static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld)
+static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld,
+			struct fmd_component *parent)
 {
 	struct cxlmi_endpoint *ep;
 	int rc;
 
 	ep = sld->base.ep;
-	if (!ep)
+	if (!ep) {
+		fmd_component_free(&sld->base);
 		return -1;
+	}
 
 	/* Memdev Identify (4000h) - no tunneling for SLD */
+	errno = 0;	/* see fmd_probe_result() */
 	rc = cxlmi_cmd_memdev_identify(ep, CXLMI_NO_TUNNEL, &sld->memdev);
+	if (rc && fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+		fmd_warn(ctx, "%s: memdev identify failed for now (%d): "
+			 "discovered later", sld->base.id, rc);
+		fmd_component_free(&sld->base);
+		return -EAGAIN;
+	}
+	if (discovered_add(ctx, &sld->base, parent))
+		return -1;
 	if (rc) {
 		fmd_warn(ctx, "%s: memdev identify failed: %d", sld->base.id, rc);
-		return rc;
+		return 1;
 	}
 
 	sld->memory_size = CXL_TO_BYTES(sld->memdev.total_capacity);
@@ -364,8 +440,18 @@ static int discovered_add(struct fmd_ctx *ctx, struct fmd_component *comp,
  *           Get QoS Control (5403h), Get QoS Status (5405h),
  *           Get QoS Allocated BW (5406h), Get QoS BW Limit (5408h),
  *           Per-LD: tunneled Memdev Identify, Partition Info, Health Info
+ *
+ * Get LD Info and Get LD Allocations, which say what LDs it has and of
+ * what size, are read before it is added under @parent (NULL: the root):
+ * if either fails for the moment (enum fmd_probe), or the granularity is
+ * reserved, it is not added, and -EAGAIN says to discover it again later.
+ * One that does not support them is added as far as it is known. Returns
+ * 0 once it is added and read, 1 if it is added without its LDs, and a
+ * negative value when it is not added, @mld then freed. The other
+ * commands do not keep it from being added.
  */
-static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
+static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld,
+			struct fmd_component *parent)
 {
 	struct cxlmi_cmd_fmapi_get_ld_info_rsp ld_info = {0};
 	struct cxlmi_cmd_fmapi_get_ld_allocations_req alloc_req;
@@ -382,12 +468,15 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	uint64_t granularity = CXL_CAPACITY_UNIT; /* until 5401h says otherwise */
 	uint64_t ld_bytes[FMD_MAX_LD_COUNT];	/* allocation of each LD */
 	uint8_t nld, nalloc = 0;
+	bool transient = false;
 	int rc;
 	int i;
 
 	ep = mld->base.ep;
-	if (!ep)
+	if (!ep) {
+		fmd_component_free(&mld->base);
 		return -1;
+	}
 
 	/* MLD component commands: tunnel through switch if behind one */
 	ti = (mld->switch_port < 0)
@@ -398,10 +487,18 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	//get_supported_commands(ctx, ep, ti, &mld->supported_cmds);
 
 	/* Get LD Info (5400h) */
+	errno = 0;	/* see fmd_probe_result() */
 	rc = cxlmi_cmd_fmapi_get_ld_info(ep, ti, &ld_info);
+	if (rc && fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+		fmd_warn(ctx, "%s: get ld info failed for now (%d): discovered "
+			 "later", mld->base.id, rc);
+		fmd_component_free(&mld->base);
+		return -EAGAIN;
+	}
 	if (rc) {
+		/* it will not say: an MLD whose LDs are not known */
 		fmd_warn(ctx, "%s: get ld info failed: %d", mld->base.id, rc);
-		return rc;
+		return discovered_add(ctx, &mld->base, parent) ? -1 : 1;
 	}
 
 	/*
@@ -434,6 +531,7 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 	alloc_rsp = calloc(1, rsp_size);
 	if (!alloc_rsp) {
 		fmd_warn(ctx, "%s: failed to allocate LD allocations buffer", mld->base.id);
+		fmd_component_free(&mld->base);
 		return -1;
 	}
 
@@ -452,16 +550,21 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		alloc_req.ld_allocation_list_limit = want;
 		memset(alloc_rsp, 0, rsp_size);
 
+		errno = 0;	/* see fmd_probe_result() */
 		rc = cxlmi_cmd_fmapi_get_ld_allocations(ep, ti, &alloc_req, alloc_rsp);
 		if (rc) {
-			fmd_warn(ctx, "%s: get ld allocations failed: %d", mld->base.id, rc);
+			transient = fmd_probe_result(rc) == FMD_PROBE_TRANSIENT;
+			fmd_warn(ctx, "%s: get ld allocations failed: %d%s",
+				 mld->base.id, rc, transient ?
+				 ": discovered later" : ", LD sizes unknown");
 			break;
 		}
 		if (alloc_rsp->memory_granularity > 2) {
 			/* without the unit, the multipliers mean nothing */
-			fmd_warn(ctx, "%s: reserved memory granularity %d, LD sizes unknown",
-				 mld->base.id, alloc_rsp->memory_granularity);
-			nalloc = 0;
+			fmd_warn(ctx, "%s: reserved memory granularity %d, LD sizes "
+				 "unknown: discovered later", mld->base.id,
+				 alloc_rsp->memory_granularity);
+			transient = true;
 			break;
 		}
 
@@ -500,6 +603,20 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
 		}
 	}
 	free(alloc_rsp);
+
+	/*
+	 * The LDs and their sizes are what the device is: one whose
+	 * allocations cannot be read for the moment is not added, as one
+	 * with LDs of no memory, and is discovered again later. One that
+	 * does not support Get LD Allocations is added, its LDs of unknown
+	 * size, as nothing will change that.
+	 */
+	if (transient) {
+		fmd_component_free(&mld->base);
+		return -EAGAIN;
+	}
+	if (discovered_add(ctx, &mld->base, parent))
+		return -1;
 
 	fmd_info(ctx, "%s: MLD with %d logical devices of %d supported",
 		 mld->base.id, mld->ld_count, mld->max_ld_count);
@@ -595,8 +712,16 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld)
  *
  * Commands: Get Multi-Headed Info (5500h), Get Head Info (5501h),
  *           Per-LD discovery similar to MLD
+ *
+ * Get Multi-Headed Info, which says what heads and LDs it has, is read
+ * before it is added under @parent (NULL: the root): if it fails for the
+ * moment (enum fmd_probe) the device is not added, and -EAGAIN says to
+ * discover it again later.
+ * Returns 0 once it is added and read, 1 if it is added but could not be
+ * read whole, and a negative value when it is not added, @mhd then freed.
  */
-static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
+static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
+			struct fmd_component *parent)
 {
 	struct cxlmi_cmd_fmapi_get_multiheaded_info_req mh_req = {0};
 	struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp *mh_rsp = NULL;
@@ -611,8 +736,10 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	int i;
 
 	ep = mhd->base.ep;
-	if (!ep)
+	if (!ep) {
+		fmd_component_free(&mhd->base);
 		return -1;
+	}
 
 	/* Get Multi-Headed Info (5500h) - query all LDs */
 	mh_req.start_ld_id = 0;
@@ -621,14 +748,29 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	mh_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp) +
 		      FMD_CCI_LIST_MAX;
 	mh_rsp = calloc(1, mh_rsp_size);
-	if (!mh_rsp)
+	if (!mh_rsp) {
+		fmd_component_free(&mhd->base);
 		return -1;
+	}
 
+	/* its heads and LDs: without them for the moment it is not added */
+	errno = 0;	/* see fmd_probe_result() */
 	rc = cxlmi_cmd_fmapi_get_multiheaded_info(ep, CXLMI_NO_TUNNEL, &mh_req, mh_rsp);
+	if (rc && fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+		fmd_warn(ctx, "%s: get multiheaded info failed for now (%d): "
+			 "discovered later", mhd->base.id, rc);
+		free(mh_rsp);
+		fmd_component_free(&mhd->base);
+		return -EAGAIN;
+	}
+	if (discovered_add(ctx, &mhd->base, parent)) {
+		free(mh_rsp);
+		return -1;
+	}
 	if (rc) {
 		fmd_warn(ctx, "%s: get multiheaded info failed: %d", mhd->base.id, rc);
 		free(mh_rsp);
-		return rc;
+		return 1;
 	}
 	/* answered with no tunnel: see fmd_mhd_pool_route() */
 	mhd->pool_cci = true;
@@ -686,7 +828,7 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 	head_rsp = calloc(1, head_rsp_size);
 	if (!head_rsp) {
 		free(mh_rsp);
-		return -1;
+		return 1;
 	}
 
 	rc = cxlmi_cmd_fmapi_get_head_info(ep, CXLMI_NO_TUNNEL, &head_req, head_rsp);
@@ -854,8 +996,9 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 /*
  * Discover devices attached to a switch port
  *
- * The identify response is provided by the switch discovery - this function
- * does not send Identify itself.
+ * An SLD is added as the switch reports it. An MLD is identified through
+ * the switch, and added once what it is has been read (discover_mld()):
+ * -EAGAIN says that it could not be for the moment.
  */
 static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 {
@@ -914,9 +1057,16 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 		 * gives the serial number that names the device, the same
 		 * however it is reached. Without one it is named by its port.
 		 */
+		errno = 0;	/* see fmd_probe_result() */
 		rc = cxlmi_cmd_identify(port->base.ep,
 					CXLMI_TUNNEL_SWITCH(port->port_number),
 					&identify);
+		if (rc && fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+			fmd_warn(ctx, "%s: MLD on port %d: identify failed for "
+				 "now (%d): discovered later",
+				 port->base.parent->id, port->port_number, rc);
+			return -EAGAIN;
+		}
 		if (rc == 0 && identify.serial_num) {
 			(void)snprintf(dev_id, sizeof(dev_id), "cxl_%016" PRIx64,
 				       identify.serial_num);
@@ -936,15 +1086,14 @@ static int discover_port_device(struct fmd_ctx *ctx, struct fmd_port *port)
 
 		/* MLD behind switch - store port for tunneling */
 		mld->switch_port = port->port_number;
+		mld->base.ep = port->base.ep;
 		mld->base.msg_limit = tunnelled_msg_limit(&port->base);
 
-		rc = discovered_add(ctx, &mld->base, &port->base);
+		/* added under the port once what it is has been read */
+		rc = discover_mld(ctx, mld, &port->base);
 		if (rc)
 			return rc;
-
-		rc = discover_mld(ctx, mld);
-		if (rc == 0)
-			rc = fmd_create_mld_memory_resources(ctx, mld);
+		rc = fmd_create_mld_memory_resources(ctx, mld);
 		if (rc == 0)
 			fmd_dcd_discover(ctx, &mld->base);
 
@@ -1259,6 +1408,7 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	struct fmd_component *child, *dev = NULL;
 	char port_id[128];
 	struct fmd_port *port = NULL;
+	enum fmd_conn_dev_type was = FMD_CONN_NONE;
 	bool known;
 
 	/* Fh: Invalid Port_ID. There is no such port */
@@ -1282,6 +1432,7 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		if (!port)
 			return;
 	} else {
+		was = port->conn_dev_type;
 		port->conn_dev_cxl_ver = 0;
 		port->conn_dev_type = FMD_CONN_NONE;
 	}
@@ -1374,9 +1525,24 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		dev = NULL;
 	}
 
-	/* a device on a port that has none is discovered */
-	if (!dev)
-		discover_port_device(ctx, port);
+	/* another device, or none: what was tried for the last one is past */
+	if (port->conn_dev_type != was)
+		fmd_retry_reset(&port->dev_retry);
+
+	/*
+	 * A device on a port that has none is discovered. One that could
+	 * not be for the moment is not there, and is tried again (struct
+	 * fmd_retry).
+	 */
+	if (!dev && fmd_retry_due(&port->dev_retry)) {
+		if (discover_port_device(ctx, port) != -EAGAIN)
+			fmd_retry_reset(&port->dev_retry);
+		else if (fmd_retry_failed(&port->dev_retry))
+			fmd_err(ctx, "%s: the device on port %d could not be "
+				"discovered in %d tries: not tried again until it "
+				"changes", sw->base.id, port->port_number,
+				FMD_RETRY_MAX);
+	}
 }
 
 /*
@@ -1579,8 +1745,10 @@ static uint16_t endpoint_msg_limit(struct cxlmi_endpoint *ep,
 
 /*
  * Discover the component on an endpoint that has answered Identify.
- * Returns 0 if it was added, 1 if it is one that is already known, and a
- * negative value or a CCI return code if it could not be discovered.
+ * Returns 0 if it was added, 1 if it is one that is already known, -EAGAIN
+ * if it could not be discovered for the moment (nothing is added: it is to
+ * be tried again), and another negative value or a CCI return code if it
+ * could not be discovered, or not whole.
  */
 static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			     const struct cxlmi_cmd_identify_rsp *id, int index)
@@ -1663,8 +1831,21 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		 */
 		mh_req.start_ld_id = 0;
 		mh_req.ld_map_list_limit = 1;
+		errno = 0;	/* see fmd_probe_result() */
 		rc = cxlmi_cmd_fmapi_get_multiheaded_info(ep, CXLMI_NO_TUNNEL,
 							  &mh_req, &mh.rsp);
+
+		/*
+		 * What kind of device it is is decided only on what it says:
+		 * a command it answers, or one it does not support. One that
+		 * fails otherwise says nothing of it, and the device is
+		 * discovered again later (see enum fmd_probe).
+		 */
+		if (fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+			fmd_warn(ctx, "%s: get multiheaded info failed for now "
+				 "(%d): discovered later", dev_id, rc);
+			return -EAGAIN;
+		}
 
 		if (rc == 0 && mh.rsp.num_heads > 1) {
 			/* Multi-Headed Device */
@@ -1675,11 +1856,11 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			mhd->identify = identify;
 			mhd->base.ep = ep;
 			mhd->base.msg_limit = msg_limit;
-			rc = discovered_add(ctx, &mhd->base, NULL);
-			if (rc)
-				return rc;
 
-			rc = discover_mhd(ctx, mhd);
+			/* added once what it is has been read */
+			rc = discover_mhd(ctx, mhd, NULL);
+			if (rc < 0)
+				return rc;
 			if (rc == 0)
 				rc = fmd_create_mhd_memory_resources(ctx, mhd);
 			if (rc == 0)
@@ -1696,7 +1877,13 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		 * prohibited for an SLD (Table 8-397, MM and MMS): a device
 		 * that answers it is an MLD, however many LDs it supports.
 		 */
+		errno = 0;	/* see fmd_probe_result() */
 		rc = cxlmi_cmd_fmapi_get_ld_info(ep, CXLMI_NO_TUNNEL, &ld_info);
+		if (fmd_probe_result(rc) == FMD_PROBE_TRANSIENT) {
+			fmd_warn(ctx, "%s: get ld info failed for now (%d): "
+				 "discovered later", dev_id, rc);
+			return -EAGAIN;
+		}
 		if (rc) {
 			/* SLD - direct-attached, no tunneling ever */
 			struct fmd_sld *sld = fmd_sld_create(dev_id);
@@ -1706,11 +1893,10 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			sld->identify = identify;
 			sld->base.ep = ep;
 			sld->base.msg_limit = msg_limit;
-			rc = discovered_add(ctx, &sld->base, NULL);
-			if (rc)
-				return rc;
 
-			rc = discover_sld(ctx, sld);
+			rc = discover_sld(ctx, sld, NULL);
+			if (rc < 0)
+				return rc;
 			if (rc == 0)
 				rc = fmd_create_sld_memory_resources(ctx, sld);
 			if (rc == 0)
@@ -1729,11 +1915,10 @@ static int discover_endpoint(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			mld->switch_port = -1;  /* Direct-attached */
 			mld->base.ep = ep;
 			mld->base.msg_limit = msg_limit;
-			rc = discovered_add(ctx, &mld->base, NULL);
-			if (rc)
-				return rc;
 
-			rc = discover_mld(ctx, mld);
+			rc = discover_mld(ctx, mld, NULL);
+			if (rc < 0)
+				return rc;
 			if (rc == 0)
 				rc = fmd_create_mld_memory_resources(ctx, mld);
 			if (rc == 0)
@@ -1853,10 +2038,43 @@ static void scan_endpoints(struct fmd_ctx *ctx)
 	}
 }
 
+/* The retry state of an endpoint, made if @make; NULL if it has none */
+static struct fmd_retry *endpoint_retry(struct fmd_ctx *ctx,
+					struct cxlmi_endpoint *ep, bool make)
+{
+	struct fmd_ep_retry *tmp;
+
+	for (int i = 0; i < ctx->nretry_eps; i++) {
+		if (ctx->retry_eps[i].ep == ep)
+			return &ctx->retry_eps[i].retry;
+	}
+	if (!make)
+		return NULL;
+	tmp = realloc(ctx->retry_eps, (ctx->nretry_eps + 1) * sizeof(*tmp));
+	if (!tmp)
+		return NULL;
+	ctx->retry_eps = tmp;
+	tmp[ctx->nretry_eps] = (struct fmd_ep_retry){ .ep = ep };
+	return &tmp[ctx->nretry_eps++].retry;
+}
+
+static void endpoint_retry_drop(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
+{
+	for (int i = 0; i < ctx->nretry_eps; i++) {
+		if (ctx->retry_eps[i].ep == ep) {
+			ctx->retry_eps[i] = ctx->retry_eps[--ctx->nretry_eps];
+			return;
+		}
+	}
+}
+
 /*
  * Discover the endpoints that have not been. An endpoint whose Identify
  * fails stays unknown and is asked again the next time: "Retry Required"
- * is how a component says it is not ready yet.
+ * is how a component says it is not ready yet. So does one whose device
+ * could not be discovered for the moment (discover_endpoint() -EAGAIN),
+ * with backoff and up to a cap (struct fmd_retry): nothing of it is added
+ * until it is.
  */
 static int discover_new_endpoints(struct fmd_ctx *ctx)
 {
@@ -1884,7 +2102,12 @@ static int discover_new_endpoints(struct fmd_ctx *ctx)
 
 	nfound = 0;
 	cxlmi_for_each_endpoint(ctx->cxlmi, ep) {
+		struct fmd_retry *retry;
+
 		if (endpoint_known(ctx, ep))
+			continue;
+		retry = endpoint_retry(ctx, ep, false);
+		if (retry && !fmd_retry_due(retry))
 			continue;
 		found[nfound].ep = ep;
 		found[nfound].rc = cxlmi_cmd_identify(ep, NULL, &found[nfound].identify);
@@ -1903,6 +2126,17 @@ static int discover_new_endpoints(struct fmd_ctx *ctx)
 			/* numbered in the order they are discovered */
 			rc = discover_endpoint(ctx, found[i].ep,
 					       &found[i].identify, ctx->nknown_eps);
+			if (rc == -EAGAIN) {
+				struct fmd_retry *retry =
+					endpoint_retry(ctx, found[i].ep, true);
+
+				if (retry && !fmd_retry_failed(retry))
+					continue;
+				fmd_err(ctx, "an endpoint's device could not be "
+					"discovered in %d tries: not tried again "
+					"until cxl-fmd is restarted", FMD_RETRY_MAX);
+			}
+			endpoint_retry_drop(ctx, found[i].ep);
 			endpoint_mark_known(ctx, found[i].ep);
 			if (rc == 0)
 				count++;

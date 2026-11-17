@@ -3844,6 +3844,310 @@ static void test_rescan(void)
 }
 
 /*
+ * A device that fails a command that tells what it is, other than with
+ * Unsupported, is not taken for what it is not: nothing of it is added,
+ * its endpoint stays unknown, and it is discovered whole when it answers
+ * (CXL r4.0 Table 8-208: "Retry Required: The command was not completed
+ * because of a temporary error"). The review's F09 cases A to F.
+ */
+static struct fmd_component *find_serial(struct fmd_ctx *ctx, uint64_t serial)
+{
+	char id[FMD_MAX_ID_LEN];
+
+	device_id(id, sizeof(id), serial);
+	return fmd_topology_find(&ctx->topology, id);
+}
+
+static int count_lds(struct fmd_component *c)
+{
+	struct fmd_component *child;
+	int n = 0;
+
+	if (!c)
+		return -1;
+	fmd_for_each_child_type(c, child, FMD_COMPONENT_LD)
+		n++;
+	return n;
+}
+
+/* Identify, the probe and the discovery of an MLD of two LDs of 1 GB */
+static void queue_good_mld(struct cxlmi_endpoint *ep, uint64_t serial)
+{
+	answer_identify(ep, serial, 0x03);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+}
+
+/* after a failure: none of it there, and the endpoint asked again */
+static void check_not_added(struct fmd_ctx *ctx, uint64_t serial, const char *what)
+{
+	struct fmd_fabric *root = ctx->topology.root;
+
+	CHECK(!find_serial(ctx, serial), "%s: a device was added", what);
+	CHECK(root->device_count == 0 && root->ld_count == 0 &&
+	      root->domain_count == 0, "%s: %d devices, %d LDs, %d domains",
+	      what, root->device_count, root->ld_count, root->domain_count);
+	CHECK(ctx->nknown_eps == 0, "%s: the endpoint is taken as discovered",
+	      what);
+}
+
+/* and once it answers, the MLD it is, whole */
+static void check_mld_whole(struct fmd_ctx *ctx, uint64_t serial, int rc,
+			    const char *what)
+{
+	struct fmd_component *c = find_serial(ctx, serial), *child;
+
+	CHECK(rc >= 3, "%s: %d components added by the re-scan", what, rc);
+	CHECK(c && c->type == FMD_COMPONENT_MLD, "%s: not an MLD (%d)", what,
+	      c ? (int)c->type : -1);
+	CHECK(count_lds(c) == 2, "%s: %d LDs", what, count_lds(c));
+	if (c)
+		fmd_for_each_child_type(c, child, FMD_COMPONENT_LD)
+			CHECK(fmd_to_ld(child)->memory_size == 1ULL << 30,
+			      "%s: LD of %" PRIu64 " bytes", what,
+			      (uint64_t)fmd_to_ld(child)->memory_size);
+	CHECK(ctx->topology.root->domain_count == 1, "%s: %d memory domains",
+	      what, ctx->topology.root->domain_count);
+}
+
+static void test_discovery_transient(void)
+{
+	static const struct { uint16_t rc; const char *name; } probe[] = {
+		{ CXLMI_RET_RETRY, "Retry Required" },
+		{ CXLMI_RET_BUSY, "Busy" },
+		{ CXLMI_RET_INTERNAL, "Internal Error" },
+	};
+	struct fmd_ctx *ctx;
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *c;
+	int before = failures, rc;
+
+	/* A: the probe answered, the second Get LD Info Retry Required */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xf09a, 0x03);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_rc(ep, 0x5400, CXLMI_RET_RETRY);
+	rc = fmd_discover(ctx);
+	CHECK(rc == 0, "A: fmd_discover %d", rc);
+	check_not_added(ctx, 0xf09a, "A");
+	cxlmi_mock_clear_responses(ep);
+	queue_good_mld(ep, 0xf09a);
+	check_mld_whole(ctx, 0xf09a, fmd_rescan(ctx), "A");
+	CHECK(ctx->nknown_eps == 1, "A: %d endpoints known", ctx->nknown_eps);
+	fmd_ctx_free(ctx);
+
+	/* B: the probe fails, but not with Unsupported: no SLD */
+	for (size_t i = 0; i < sizeof(probe) / sizeof(probe[0]); i++) {
+		ctx = new_ctx();
+		ep = new_device(ctx);
+		answer_identify(ep, 0xf09b, 0x03);
+		answer_rc(ep, 0x5400, probe[i].rc);
+		fmd_discover(ctx);
+		check_not_added(ctx, 0xf09b, probe[i].name);
+		cxlmi_mock_clear_responses(ep);
+		queue_good_mld(ep, 0xf09b);
+		check_mld_whole(ctx, 0xf09b, fmd_rescan(ctx), probe[i].name);
+		fmd_ctx_free(ctx);
+	}
+
+	/* C: Get Multi-Headed Info Retry Required: not an SLD either */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xf09c, 0x03);
+	answer_rc(ep, 0x5500, CXLMI_RET_RETRY);
+	fmd_discover(ctx);
+	check_not_added(ctx, 0xf09c, "C");
+	CHECK(last_opcode(ep) == 0x5500, "C: %04xh sent after 5500h failed",
+	      last_opcode(ep));
+	cxlmi_mock_clear_responses(ep);
+	queue_good_mld(ep, 0xf09c);
+	check_mld_whole(ctx, 0xf09c, fmd_rescan(ctx), "C");
+	fmd_ctx_free(ctx);
+
+	/* D: Get LD Allocations Retry Required: no LDs of no memory */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xf09d, 0x03);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_rc(ep, 0x5401, CXLMI_RET_RETRY);
+	fmd_discover(ctx);
+	check_not_added(ctx, 0xf09d, "D");
+	cxlmi_mock_clear_responses(ep);
+	queue_good_mld(ep, 0xf09d);
+	check_mld_whole(ctx, 0xf09d, fmd_rescan(ctx), "D");
+	fmd_ctx_free(ctx);
+
+	/* and a reserved Memory Granularity likewise */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xf09d, 0x03);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 3, 4);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	fmd_discover(ctx);
+	check_not_added(ctx, 0xf09d, "granularity 3");
+	cxlmi_mock_clear_responses(ep);
+	queue_good_mld(ep, 0xf09d);
+	check_mld_whole(ctx, 0xf09d, fmd_rescan(ctx), "granularity 3");
+	fmd_ctx_free(ctx);
+
+	/* an SLD whose Identify Memory Device is Busy */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xf09e, 0x03);
+	answer_rc(ep, 0x4000, CXLMI_RET_BUSY);
+	fmd_discover(ctx);
+	check_not_added(ctx, 0xf09e, "SLD 4000h");
+	answer_identify(ep, 0xf09e, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	rc = fmd_rescan(ctx);
+	c = find_serial(ctx, 0xf09e);
+	CHECK(rc == 1 && c && c->type == FMD_COMPONENT_SLD &&
+	      fmd_to_sld(c)->memory_size == 16ULL << 30,
+	      "SLD 4000h: re-scan %d, SLD of %" PRIu64 " bytes", rc,
+	      c && c->type == FMD_COMPONENT_SLD ?
+	      (uint64_t)fmd_to_sld(c)->memory_size : 0);
+	fmd_ctx_free(ctx);
+
+	/* F: an MLD on a switch port whose Get LD Info is Retry Required */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f09);
+	answer_identify(ep, 0xf09f, 0x03);	/* through the tunnel to port 5 */
+	answer_rc(ep, 0x5400, CXLMI_RET_RETRY);
+	fmd_discover(ctx);
+	{
+		char sw_id[FMD_MAX_ID_LEN];
+		struct fmd_port *port;
+
+		device_id(sw_id, sizeof(sw_id), 0x5f09);
+		port = fmd_topology_find_port(&ctx->topology, sw_id, 5);
+		CHECK(port && !port->base.first_child && !find_serial(ctx, 0xf09f),
+		      "F: a device on port 5");
+		CHECK(port && port->dev_retry.failures == 1, "F: %d failures",
+		      port ? port->dev_retry.failures : -1);
+
+		/* not ready again: the next read of the ports lets it pass */
+		answer_switch_ports(ep, 6, 0x00, 0x00);
+		answer_identify(ep, 0xf09f, 0x03);
+		answer_rc(ep, 0x5400, CXLMI_RET_RETRY);
+		fmd_rescan(ctx);
+		CHECK(port && port->dev_retry.failures == 2 && port->dev_retry.skip == 1,
+		      "F: %d failures, %d to skip", port ? port->dev_retry.failures : -1,
+		      port ? port->dev_retry.skip : -1);
+		answer_switch_ports(ep, 6, 0x00, 0x00);
+		rc = fmd_rescan(ctx);
+		CHECK(rc == 0 && port && port->dev_retry.skip == 0 &&
+		      !port->base.first_child, "F: tried while backing off");
+
+		/* and the port's state unchanged, it answers */
+		cxlmi_mock_clear_responses(ep);
+		answer_switch_ports(ep, 6, 0x00, 0x00);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+		answer_identify(ep, 0xf09f, 0x03);
+		answer_ld_info(ep, 2ULL * 4 << 28, 2);
+		answer_ld_allocations(ep, 2, 0, 4);
+		rc = fmd_rescan(ctx);
+		c = find_serial(ctx, 0xf09f);
+		CHECK(rc == 3 && c && c->type == FMD_COMPONENT_MLD &&
+		      c->parent == &port->base && count_lds(c) == 2,
+		      "F: re-scan %d, MLD %p with %d LDs", rc, (void *)c,
+		      count_lds(c));
+		CHECK(port && port->dev_retry.failures == 0, "F: %d failures kept",
+		      port ? port->dev_retry.failures : -1);
+	}
+	fmd_ctx_free(ctx);
+
+	/* Unsupported still says what it is not: an SLD, at once */
+	for (int i = 0; i < 2; i++) {
+		ctx = new_ctx();
+		ep = new_device(ctx);
+		answer_identify(ep, 0xf090, 0x03);
+		answer_rc(ep, 0x5400, i ? CXLMI_RET_MBUNSUPPORTED : CXLMI_RET_UNSUPPORTED);
+		answer_memdev_identify(ep, 64, 64, 0);
+		rc = fmd_discover(ctx);
+		c = find_serial(ctx, 0xf090);
+		CHECK(rc == 1 && c && c->type == FMD_COMPONENT_SLD &&
+		      ctx->nknown_eps == 1, "probe %s: not an SLD",
+		      i ? "Unsupported Mailbox or CCI" : "Unsupported");
+		fmd_ctx_free(ctx);
+	}
+
+	/* how a return code and a transport error are read */
+	CHECK(fmd_probe_result(0) == FMD_PROBE_OK, "Success");
+	CHECK(fmd_probe_result(CXLMI_RET_UNSUPPORTED) == FMD_PROBE_ABSENT &&
+	      fmd_probe_result(CXLMI_RET_MBUNSUPPORTED) == FMD_PROBE_ABSENT,
+	      "Unsupported is not absence");
+	CHECK(fmd_probe_result(CXLMI_RET_RETRY) == FMD_PROBE_TRANSIENT &&
+	      fmd_probe_result(CXLMI_RET_BUSY) == FMD_PROBE_TRANSIENT &&
+	      fmd_probe_result(CXLMI_RET_INTERNAL) == FMD_PROBE_TRANSIENT &&
+	      fmd_probe_result(CXLMI_RET_INPUT) == FMD_PROBE_TRANSIENT,
+	      "a failure is taken as absence");
+	errno = ETIMEDOUT;
+	CHECK(fmd_probe_result(-1) == FMD_PROBE_TRANSIENT, "a timeout is absence");
+	errno = EHOSTUNREACH;
+	CHECK(fmd_probe_result(-1) == FMD_PROBE_TRANSIENT,
+	      "a route that is down is absence");
+	errno = EPROTO;
+	CHECK(fmd_probe_result(-1) == FMD_PROBE_TRANSIENT,
+	      "a malformed response is absence");
+	errno = 0;
+	CHECK(fmd_probe_result(-1) == FMD_PROBE_ABSENT,
+	      "a response libcxlmi will not use (no errno) is tried again");
+	errno = EPERM;
+	CHECK(fmd_probe_result(-1) == FMD_PROBE_ABSENT,
+	      "a command the mailbox will not pass is tried again");
+	errno = ENOTTY;
+	CHECK(fmd_probe_result(-1) == FMD_PROBE_ABSENT,
+	      "a command the kernel does not know is tried again");
+
+	report("a temporary error does not decide a device's class", before);
+}
+
+/*
+ * A device that is never ready is asked again with backoff, and not after
+ * FMD_RETRY_MAX tries: at discovery, then at re-scans 1, 3, 7, 15, 31, 47
+ * and 63.
+ */
+static void test_discovery_retry_cap(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	int before = failures, tries = 1, next = 1, gap = 1;
+
+	answer_identify(ep, 0xf0aa, 0x03);
+	answer_rc(ep, 0x5400, CXLMI_RET_RETRY);
+	fmd_discover(ctx);
+	for (int scan = 1; scan <= 80; scan++) {
+		unsigned int sent;
+		bool due = tries < FMD_RETRY_MAX && scan == next;
+
+		cxlmi_mock_clear_responses(ep);
+		answer_identify(ep, 0xf0aa, 0x03);
+		answer_rc(ep, 0x5400, CXLMI_RET_RETRY);
+		sent = commands_sent(ep);
+		fmd_rescan(ctx);
+		CHECK((commands_sent(ep) != sent) == due,
+		      "re-scan %d: %u commands, a try %sdue", scan,
+		      commands_sent(ep) - sent, due ? "" : "not ");
+		if (due) {
+			tries++;
+			gap = gap < 16 ? gap * 2 : 16;
+			next = scan + gap;
+		}
+	}
+	CHECK(tries == FMD_RETRY_MAX, "%d tries", tries);
+	CHECK(ctx->nknown_eps == 1 && ctx->topology.root->device_count == 0,
+	      "%d endpoints known after the last try, %d devices",
+	      ctx->nknown_eps, ctx->topology.root->device_count);
+	fmd_ctx_free(ctx);
+	report("discovery is retried with backoff, up to a cap", before);
+}
+
+/*
  * The event logs of a switch (Section 7.6.8). A page of Get Event Records
  * (Table 8-232) with one record in the Common Event Record Format (Table
  * 8-221): the identifier at 00h, the handle at 14h, and from 30h on what
@@ -9153,6 +9457,8 @@ int main(void)
 	test_bind_task(false);
 	test_bind_busy();
 	test_rescan();
+	test_discovery_transient();
+	test_discovery_retry_cap();
 	test_switch_events();
 	test_mailbox_events_are_the_hosts();
 	test_device_removal();
