@@ -453,9 +453,26 @@ void fmd_device_record_keep(struct fmd_ctx *ctx, struct fmd_component *dev,
 		fmd_log_add(child, which, rec);
 }
 
+/* a record of a log kept, and counted */
+static void device_record_count(struct fmd_ctx *ctx, struct fmd_component *dev,
+				int which, const struct cxlmi_event_record *rec,
+				void *arg)
+{
+	fmd_device_record_keep(ctx, dev, which, rec, NULL);
+	(*(int *)arg)++;
+}
+
+/*
+ * The four logs of @dev. A record in the Warning, Failure or Fatal Event
+ * Log, or an overflow of one, has its health read again: a change of
+ * Health Status or Media Status adds an event to one of them (Table 8-315,
+ * see fmd_refresh_health()). Which record says so is not looked at; that
+ * any of them is enough is cxl-fmd's choice.
+ */
 static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct cxlmi_tunnel_info tbuf, *ti = CXLMI_NO_TUNNEL;
+	bool health = false;
 
 	if (dev->type == FMD_COMPONENT_MLD && fmd_to_mld(dev)->switch_port >= 0) {
 		DEFINE_CXLMI_TUNNEL_SWITCH(t, fmd_to_mld(dev)->switch_port);
@@ -467,8 +484,12 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 	for (int which = 0; which <= 3; which++) {
 		struct fmd_overflow o;
 		struct fmd_component *child;
+		int records = 0;
 
-		fmd_event_log_drain(ctx, dev, ti, which, fmd_device_record_keep, NULL, &o);
+		fmd_event_log_drain(ctx, dev, ti, which, device_record_count,
+				    &records, &o);
+		if (which >= 1 && (records || o.set))
+			health = true;
 		if (!o.set)
 			continue;
 
@@ -482,6 +503,9 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 			fmd_log_overflowed(child, which, o.count, o.first_ns, o.last_ns,
 					   o.marked ? &o.before : NULL);
 	}
+
+	if (health)
+		fmd_refresh_health(ctx, dev);
 }
 
 bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev)

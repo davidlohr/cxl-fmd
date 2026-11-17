@@ -1965,11 +1965,15 @@ static void test_staged_chunk(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	json_decref(rsp);
 	rsp = NULL;
 
-	/* a re-scan while the change is pending: it stays staged */
+	/*
+	 * a re-scan while the change is pending: it stays staged (the re-scan
+	 * reads Get Health Info and Get Partition Info)
+	 */
 	answer_partition(ep, 24, 40, 44, 20);
 	sent = commands_sent(ep);
 	fmd_rescan(ctx);
-	CHECK(commands_sent(ep) == sent + 1 && chunk->staged,
+	CHECK(commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100 &&
+	      chunk->staged,
 	      "pending: %u sent, staged %d", commands_sent(ep) - sent, chunk->staged);
 
 	/* the reset has come: Enabled, and in the Connection */
@@ -1990,11 +1994,11 @@ static void test_staged_chunk(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	json_decref(rsp);
 	rsp = NULL;
 
-	/* with nothing staged, a re-scan sends nothing to the SLD */
+	/* with nothing staged, a re-scan sends the SLD only Get Health Info */
 	sent = commands_sent(ep);
 	fmd_rescan(ctx);
-	CHECK(commands_sent(ep) == sent, "%u sent with nothing staged",
-	      commands_sent(ep) - sent);
+	CHECK(commands_sent(ep) == sent + 1 && last_opcode(ep) == 0x4200,
+	      "%u sent with nothing staged", commands_sent(ep) - sent);
 
 	/* another, and the reset leaves it out: it goes, and its room is free */
 	answer(ep, 0x4101, NULL, 0);
@@ -4238,31 +4242,35 @@ static void test_dcd_info_transient(void)
 	/* Internal Error, the next time: still not known, and then let pass */
 	answer_rc(ep, 0x5600, CXLMI_RET_INTERNAL);
 	fmd_rescan(ctx);
-	CHECK(last_opcode(ep) == 0x5600 && !sld->dcd && sld->dcd_pending &&
-	      sld->dcd_retry.skip == 1, "E: re-scan 1: last %04xh, skip %d",
-	      last_opcode(ep), sld->dcd_retry.skip);
+	CHECK(!sld->dcd && sld->dcd_pending && sld->dcd_retry.failures == 2 &&
+	      sld->dcd_retry.skip == 1, "E: re-scan 1: %d failures, skip %d",
+	      sld->dcd_retry.failures, sld->dcd_retry.skip);
+	/* the answer that would make it a DCD is not taken: not asked */
 	answer_dcd_info(ep);
-	sent = commands_sent(ep);
 	fmd_rescan(ctx);
-	CHECK(commands_sent(ep) == sent && !sld->dcd,
+	CHECK(!sld->dcd && sld->dcd_retry.failures == 2 && sld->dcd_retry.skip == 0,
 	      "E: Get DCD Info asked again while backing off");
 
-	/* then it answers: the DCD, its region and extent, its notification */
+	/*
+	 * then it answers: the DCD, its region and extent, its notification
+	 * (as the re-scan does, without the re-scan's Get Health Info after
+	 * it, so that the last command is the notification's)
+	 */
 	answer_dc_refresh(ep, 0);
 	answer(ep, 0x0104, (uint8_t[2]){ 0, 0 }, 2);
 	answer_rc(ep, 0x0105, CXLMI_RET_SUCCESS);
-	fmd_rescan(ctx);
+	fmd_dcd_retry_pending(ctx);
 	CHECK(sld->dcd && !sld->dcd_pending && sld->dcd->total_dc_capacity == 1ULL << 30 &&
 	      fmd_dc_find_region(dev, 0, 0) && fmd_dc_find_extent(dev, 0, 1ULL << 30),
 	      "E: no DCD with its region and extent after the re-scan");
 	CHECK(last_policy_set(ep) != 0xffff && (last_policy_set(ep) & 0x0010),
 	      "E: DC log notification not asked for: %04x", last_policy_set(ep));
 
-	/* and once read, not again */
+	/* and once read, not again: a re-scan sends only Get Health Info */
 	sent = commands_sent(ep);
 	fmd_rescan(ctx);
-	CHECK(commands_sent(ep) == sent, "E: %u commands by a re-scan of a DCD known",
-	      commands_sent(ep) - sent);
+	CHECK(commands_sent(ep) == sent + 1 && last_opcode(ep) == 0x4200,
+	      "E: %u commands by a re-scan of a DCD known", commands_sent(ep) - sent);
 	fmd_ctx_free(ctx);
 
 	/* Unsupported: no DCD, and not asked again */
@@ -4278,8 +4286,8 @@ static void test_dcd_info_transient(void)
 	answer_dcd_info(ep);
 	sent = commands_sent(ep);
 	fmd_rescan(ctx);
-	CHECK(commands_sent(ep) == sent && sld && !sld->dcd,
-	      "Unsupported: Get DCD Info asked again");
+	CHECK(commands_sent(ep) == sent + 1 && last_opcode(ep) == 0x4200 &&
+	      sld && !sld->dcd, "Unsupported: Get DCD Info asked again");
 out:
 	fmd_ctx_free(ctx);
 	report("Get DCD Info that cannot be read for the moment is asked again", before);
@@ -4552,7 +4560,10 @@ static void test_device_logs(void)
 		answer_no_events(mld_ep, false);
 
 	fmd_switch_events_poll(ctx);
-	CHECK(last_opcode(sld_ep) == 0x0100, "the SLD's logs were not read");
+	/* read, and with a record in the Warning log, its health after them */
+	CHECK(last_opcode(sld_ep) == 0x4200, "the SLD's logs were not read, or "
+	      "its health not after a Warning record: last %04xh",
+	      last_opcode(sld_ep));
 	CHECK(log_count(&sld->base) == 3, "%d records kept of the SLD",
 	      log_count(&sld->base));
 	e = log_newest(&sld->base);
@@ -4600,6 +4611,166 @@ static void test_device_logs(void)
 out:
 	fmd_ctx_free(ctx);
 	report("event logs of memory devices", before);
+}
+
+/*
+ * Health is read again: on the --rescan timer, and after a record in the
+ * Warning, Failure or Fatal Event Log, which a change of Health Status or
+ * Media Status adds one to (CXL r4.0 Table 8-315). It was read once, at
+ * discovery. Review F17 claim 4 (its case B).
+ */
+static void answer_health(struct cxlmi_endpoint *ep, uint8_t health, uint8_t media)
+{
+	uint8_t pl[0x12] = { 0 };
+
+	pl[0] = health;				/* Health Status */
+	pl[1] = media;				/* Media Status */
+	pl[3] = 5;				/* Life Used */
+	answer(ep, 0x4200, pl, sizeof(pl));
+}
+
+static char *chassis_status(struct fmd_ctx *ctx, const char *id)
+{
+	json_t *c = fmd_redfish_chassis(ctx, id);
+	char *text = status_text(c);
+
+	json_decref(c);
+	return text;
+}
+
+static void test_health_refresh(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx), *ep2;
+	char id[FMD_MAX_ID_LEN], *text;
+	struct fmd_component *c;
+	struct fmd_sld *sld;
+	struct fmd_mld *mld;
+	int before = failures;
+	unsigned int sent;
+
+	/* healthy at discovery */
+	answer_identify(ep, 0x1702, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	answer_health(ep, 0, 0);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x1702);
+	sld = fmd_topology_find_sld(&ctx->topology, id);
+	CHECK(sld && sld->health_valid, "no SLD with its health read");
+	if (!sld)
+		goto out;
+
+	/* B: Hardware Replacement Needed and All data lost, then a re-scan */
+	answer_health(ep, 0x04, 0x03);
+	fmd_rescan(ctx);
+	CHECK(last_opcode(ep) == 0x4200 && sld->health_valid &&
+	      sld->health.health_status == 0x04 && sld->health.media_status == 0x03,
+	      "B: last %04xh, health %02xh media %02xh", last_opcode(ep),
+	      sld->health.health_status, sld->health.media_status);
+	text = chassis_status(ctx, id);
+	CHECK(!strcmp(text, "{\"Health\":\"Critical\",\"HealthRollup\":\"Critical\","
+		      "\"State\":\"UnavailableOffline\"}"), "B: Chassis Status %s", text);
+	free(text);
+
+	/* a read that fails: no Health, not the last one read */
+	answer_rc(ep, 0x4200, CXLMI_RET_INTERNAL);
+	fmd_rescan(ctx);
+	text = chassis_status(ctx, id);
+	CHECK(!sld->health_valid && !strcmp(text, "{\"State\":\"Enabled\"}"),
+	      "a failed read: Chassis Status %s", text);
+	free(text);
+
+	/* and back to normal, which no event says */
+	answer_health(ep, 0, 0);
+	fmd_rescan(ctx);
+	text = chassis_status(ctx, id);
+	CHECK(sld->health_valid && !strcmp(text, "{\"Health\":\"OK\","
+		      "\"HealthRollup\":\"OK\",\"State\":\"Enabled\"}"),
+	      "back to normal: Chassis Status %s", text);
+	free(text);
+
+	/* a record in the Informational log only: health is not read */
+	answer_device_event(ep, general_media_event, 1, 0x00, 0, 0x00);
+	for (int log = 0; log < 4; log++)
+		answer_no_events(ep, false);
+	answer_health(ep, 0x01, 0);
+	fmd_switch_events_poll(ctx);
+	CHECK(last_opcode(ep) == 0x0100 && sld->health.health_status == 0,
+	      "an Informational record: last %04xh, health %02xh",
+	      last_opcode(ep), sld->health.health_status);
+	cxlmi_mock_clear_responses(ep);
+
+	/* one in the Failure log: it is, after the logs are read */
+	answer_no_events(ep, false);			/* Informational */
+	answer_no_events(ep, false);			/* Warning */
+	answer_device_event(ep, general_media_event, 2, 0x02, 0, 0x00);
+	answer_no_events(ep, false);			/* Failure, again */
+	answer_no_events(ep, false);			/* Fatal */
+	answer_health(ep, 0x04, 0x00);
+	fmd_switch_events_poll(ctx);
+	CHECK(last_opcode(ep) == 0x4200 && sld->health_valid &&
+	      sld->health.health_status == 0x04,
+	      "a Failure record: last %04xh, health %02xh", last_opcode(ep),
+	      sld->health.health_status);
+	text = chassis_status(ctx, id);
+	CHECK(!strcmp(text, "{\"Health\":\"Critical\",\"HealthRollup\":\"Critical\","
+		      "\"State\":\"Enabled\"}"), "after the Failure record: "
+	      "Chassis Status %s", text);
+	free(text);
+
+	/* the Warning log overflowed, with no record: read too */
+	answer_no_events(ep, false);
+	answer_no_events(ep, true);
+	answer_no_events(ep, false);
+	answer_no_events(ep, false);
+	answer_health(ep, 0, 0);
+	fmd_switch_events_poll(ctx);
+	CHECK(last_opcode(ep) == 0x4200 && sld->health.health_status == 0,
+	      "an overflow: last %04xh, health %02xh", last_opcode(ep),
+	      sld->health.health_status);
+
+	/*
+	 * An MLD: each LD's, through its tunnel. A device found by the
+	 * re-scan has its health read once, by its discovery.
+	 */
+	ep2 = new_mld(ctx, 0x1703, 2, 0, 4);
+	answer_health(ep2, 0x02, 0);
+	answer_health(ep2, 0x02, 0);
+	answer_health(ep, 0, 0);
+	fmd_rescan(ctx);
+	device_id(id, sizeof(id), 0x1703);
+	mld = fmd_topology_find_mld(&ctx->topology, id);
+	CHECK(mld, "no MLD %s", id);
+	if (!mld)
+		goto out;
+	fmd_for_each_child_type(&mld->base, c, FMD_COMPONENT_LD)
+		CHECK(fmd_to_ld(c)->health_valid && fmd_to_ld(c)->health.health_status == 2,
+		      "LD %d of the MLD found by the re-scan: valid %d, health %02xh",
+		      fmd_to_ld(c)->ld_id, fmd_to_ld(c)->health_valid,
+		      fmd_to_ld(c)->health.health_status);
+	answer_health(ep2, 0x08, 0);
+	answer_health(ep2, 0x08, 0);
+	answer_health(ep, 0, 0);
+	sent = commands_sent(ep2);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep2) - sent >= 2 && last_opcode(ep2) == 0x4200,
+	      "MLD: %u sent, last %04xh", commands_sent(ep2) - sent,
+	      last_opcode(ep2));
+	{
+		struct fmd_ld *ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+		struct fmd_ld *ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+		struct cxlmi_tunnel_info ti;
+
+		cxlmi_mock_get_last_tunnel(ep2, &ti);
+		CHECK(ld0 && ld1 && ld0->health_valid && ld0->health.health_status == 0x08 &&
+		      ld1->health_valid && ld1->health.health_status == 0x08,
+		      "the MLD's LDs after the re-scan");
+		CHECK(ti.level == 1 && (ti.ld == 0 || ti.ld == 1),
+		      "an LD's read through tunnel level %d, LD %d", ti.level, ti.ld);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("health is read again", before);
 }
 
 /* the record kept in @comp's log with @handle */
@@ -9552,6 +9723,7 @@ int main(void)
 	test_discovery_transient();
 	test_discovery_retry_cap();
 	test_dcd_info_transient();
+	test_health_refresh();
 	test_switch_events();
 	test_mailbox_events_are_the_hosts();
 	test_device_removal();

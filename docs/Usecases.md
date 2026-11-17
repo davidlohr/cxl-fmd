@@ -487,8 +487,9 @@ POST /Fabrics/CXL/Connections  # Bind LD 3 (Endpoints/mld_0_ld3) to host3
 - Serve every vPPB binding of a host's VCS as a Connection, whoever made it, and bind and unbind vPPBs as Connections are created and deleted
 - Serve the capacity of each device and domain, and its chunks
 - Support per-LD allocation for fine-grained MLD pooling
-- Serve health (Get Health Info, read when a device is discovered) and
-  switch port metrics; performance is not monitored
+- Serve health (Get Health Info, read when a device is discovered, on
+  the `--rescan` timer and after a Warning, Failure or Fatal event record)
+  and switch port metrics; performance is not monitored
 
 ### Scenario 2: Dynamic Memory Provisioning
 
@@ -602,8 +603,9 @@ PATCH /redfish/v1/Chassis/{dev}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}
 - Switch port failures
 
 **cxl-fmd Role** (what is done today):
-- Read Get Health Info (4200h) when a device is discovered, and serve it
-  as `Status` and `MemoryMetrics`; it is not polled
+- Read Get Health Info (4200h) when a device is discovered, on the
+  `--rescan` timer, and after a Warning, Failure or Fatal record in the
+  device's event logs, and serve it as `Status` and `MemoryMetrics`
 - Read and clear the event logs of switches and memory devices, and serve
   the records as `LogEntry` resources
 
@@ -2110,7 +2112,7 @@ cxl-fmd is meant to serve as the **MFM (Memory Fabric Manager)** component in th
 4. **Access Control**: MHD head-to-host validation, vPPB binding automation
 5. **Topology Information**: Zones (VCS), switches, ports, endpoints for scheduler hints
 6. **Capacity Tracking**: Per-domain MemorySizeMiB and MemoryChunks (the free capacity is not served)
-7. **Health Monitoring**: Device health status, read when a device is discovered
+7. **Health Monitoring**: Device health status, read when a device is discovered, on the `--rescan` timer and after Warning, Failure or Fatal event records
 
 ### Key API Capabilities
 

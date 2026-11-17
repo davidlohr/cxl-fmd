@@ -2174,6 +2174,127 @@ int fmd_switch_rediscover(struct fmd_ctx *ctx, struct fmd_switch *sw)
 }
 
 /*
+ * Get Health Info into @health, @valid saying whether it was read: what
+ * was read before is not kept for a read that failed.
+ */
+static int read_health(struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
+		       struct cxlmi_cmd_memdev_get_health_info_rsp *health,
+		       bool *valid)
+{
+	struct cxlmi_cmd_memdev_get_health_info_rsp rsp = { 0 };
+	int rc = cxlmi_cmd_memdev_get_health_info(ep, ti, &rsp);
+
+	*valid = !rc;
+	if (!rc)
+		*health = rsp;
+	return rc;
+}
+
+/* the LD of an MLD or Multi-Headed device, as discovery read its health */
+static int refresh_ld_health(struct fmd_ctx *ctx, struct fmd_ld *ld)
+{
+	struct fmd_component *dev = ld->base.parent;
+	struct cxlmi_tunnel_info tbuf, *ti;
+	int rc;
+
+	if (!dev || !dev->ep)
+		return 0;
+	if (dev->type == FMD_COMPONENT_MLD) {
+		struct fmd_mld *mld = fmd_to_mld(dev);
+
+		if (mld->switch_port < 0) {
+			DEFINE_CXLMI_TUNNEL_MLD(t, ld->ld_id);
+			tbuf = t;
+		} else {
+			DEFINE_CXLMI_TUNNEL_SWITCH_MLD(t, mld->switch_port, ld->ld_id);
+			tbuf = t;
+		}
+	} else if (dev->type == FMD_COMPONENT_MHD) {
+		/* the pool LD, through the LD Pool CCI, as discover_mhd() */
+		DEFINE_CXLMI_TUNNEL_MLD(t, ld->ld_id);
+		tbuf = t;
+	} else {
+		return 0;
+	}
+	ti = &tbuf;
+
+	rc = read_health(dev->ep, ti, &ld->health, &ld->health_valid);
+	if (rc)
+		fmd_warn(ctx, "%s: LD%d get health info failed: %d: no Health "
+			 "reported until it is read", dev->id, ld->ld_id, rc);
+	return rc != 0;
+}
+
+/*
+ * Health Status and Media Status change: "When transitioning from 0 to 1,
+ * the device shall add an event to the Warning or Failure Event Log" (and
+ * the like for each bit), and of Media Status "When transitioning from any
+ * state to any other state, the device shall add an event to the Failure
+ * or Fatal Event Log" (CXL r4.0 Table 8-315). A bit going back to 0 adds
+ * none. So health is read again when such a log has records
+ * (src/event_log.c), and on the --rescan timer (fmd_rescan()); when is
+ * cxl-fmd's choice.
+ */
+int fmd_refresh_health(struct fmd_ctx *ctx, struct fmd_component *dev)
+{
+	struct fmd_component *child;
+	int failed = 0;
+
+	if (!dev)
+		return 0;
+
+	switch (dev->type) {
+	case FMD_COMPONENT_SLD: {
+		struct fmd_sld *sld = fmd_to_sld(dev);
+		int rc;
+
+		/* one on a switch port has no CCI cxl-fmd reaches */
+		if (!dev->ep || (dev->parent && dev->parent->type == FMD_COMPONENT_PORT))
+			return 0;
+		rc = read_health(dev->ep, CXLMI_NO_TUNNEL, &sld->health,
+				 &sld->health_valid);
+		if (rc)
+			fmd_warn(ctx, "%s: get health info failed: %d: no Health "
+				 "reported until it is read", dev->id, rc);
+		return rc != 0;
+	}
+	case FMD_COMPONENT_MLD:
+	case FMD_COMPONENT_MHD:
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD)
+			failed += refresh_ld_health(ctx, fmd_to_ld(child));
+		return failed;
+	case FMD_COMPONENT_LD:
+		return refresh_ld_health(ctx, fmd_to_ld(dev));
+	default:
+		return 0;
+	}
+}
+
+/*
+ * The IDs of the memory devices there are, in *@ids (to be freed);
+ * returns how many, or -1 if there is no memory for them.
+ */
+static int memdevs(struct fmd_ctx *ctx, char (**ids)[FMD_MAX_ID_LEN])
+{
+	static const enum fmd_component_type types[] = {
+		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
+	};
+	struct fmd_component *comp;
+	int n = 0, max = ctx->topology.root->device_count;
+
+	*ids = calloc(max ? max : 1, sizeof(**ids));
+	if (!*ids)
+		return -1;
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, types[t]) {
+			if (n < max)
+				snprintf((*ids)[n++], FMD_MAX_ID_LEN, "%s", comp->id);
+		}
+	}
+	return n;
+}
+
+/*
  * The IDs of the MLDs and Multi-Headed devices there are, in *@ids (to be
  * freed); returns how many, or -1 if there is no memory for them.
  */
@@ -2200,10 +2321,10 @@ int fmd_rescan(struct fmd_ctx *ctx)
 {
 	struct fmd_component *comp;
 	struct fmd_switch **switches;
-	char (*lds)[FMD_MAX_ID_LEN] = NULL;
+	char (*lds)[FMD_MAX_ID_LEN] = NULL, (*devs)[FMD_MAX_ID_LEN] = NULL;
 	struct fmd_fabric *root;
 	unsigned int added, removed;
-	int n = 0, nlds;
+	int n = 0, nlds, ndevs;
 
 	if (!ctx || !ctx->cxlmi)
 		return -1;
@@ -2218,8 +2339,12 @@ int fmd_rescan(struct fmd_ctx *ctx)
 			  sizeof(*switches));
 	/* the MLDs and MHDs there are now: new ones are read whole below */
 	nlds = ld_devices(ctx, &lds);
-	if (!switches || nlds < 0) {
+	/* the memory devices there are now: new ones' health is just read */
+	ndevs = memdevs(ctx, &devs);
+	if (!switches || nlds < 0 || ndevs < 0) {
 		free(switches);
+		free(lds);
+		free(devs);
 		pthread_rwlock_unlock(&ctx->fabric_lock);
 		return -1;
 	}
@@ -2253,6 +2378,11 @@ int fmd_rescan(struct fmd_ctx *ctx)
 			fmd_ld_alloc_refresh(ctx, dev);
 	}
 	free(lds);
+
+	/* health, which no event says has gone back to normal */
+	for (int i = 0; i < ndevs; i++)
+		fmd_refresh_health(ctx, fmd_topology_find(&ctx->topology, devs[i]));
+	free(devs);
 
 	/* partitions staged for a reset: whether it has come */
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SLD)

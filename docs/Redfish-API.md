@@ -475,8 +475,24 @@ Status to `Status`, Comment 3, and Media Status to nothing):
   Performance Degraded and Memory Capacity Degraded are `Warning`), and of
   the Media Status: 03h is `Critical`; 00h and 01h (Not Ready) add
   nothing; any other is `Warning`.
+- Get Health Info is read when a device is discovered, and again
+  (cxl-fmd's choice of when): on every `--rescan`, for each device found
+  before it, and after a drain of a device's event logs that found a
+  record in its Warning, Failure or Fatal Event Log, or an overflow of
+  one. A change of Health Status or Media Status adds such a record:
+  "When transitioning from 0 to 1, the device shall add an event to the
+  Warning or Failure Event Log" (Maintenance Needed; the other bits name
+  their logs), and of Media Status "When transitioning from any state to
+  any other state, the device shall add an event to the Failure or Fatal
+  Event Log" (Table 8-315). A bit going back to 0 adds none, which the
+  `--rescan` timer covers. Which record it was is not looked at. A
+  Multi-Headed device's logs are not read, nor those of an SLD on a switch
+  port, which has no Get Health Info at all: a Multi-Headed device's pool
+  LDs are read on the `--rescan` timer only. With `--rescan 0`, only the
+  records do it.
 - When Get Health Info was not answered Success, `Health` is left out,
-  not reported `OK`: nothing is known of it. Of several LDs, one that was
+  not reported `OK`: nothing is known of it. That is so of a read after
+  discovery too: what an earlier read said is not served. Of several LDs, one that was
   not read leaves `Health` out unless another is known to be `Warning` or
   `Critical`, which it is at least. `State` is then that of the LDs that
   were read, `Enabled` if none was.
@@ -1679,9 +1695,11 @@ In summary:
 8. A bind or unbind is followed for as long as the switch takes: there is
    no time limit and no automatic abort. `#Cxl.ForceUnbind` is the
    recourse for an unbind (see "Binding").
-9. `Status/Conditions` is not served. Get Health Info is read once, when
-   a device is discovered: a `Status` does not follow the device after
-   that. When that read fails, the device's views have no `Health` (see
+9. `Status/Conditions` is not served. Get Health Info is read at
+   discovery, on the `--rescan` timer and after a record in a device's
+   Warning, Failure or Fatal Event Log, so a `Status` is as old as the
+   last of these, and a bit that goes back to 0 is seen only on the
+   timer. When a read fails, the device's views have no `Health` (see
    "Status from Get Health Info").
 10. A chunk's `AddressRangeType` is the one it was made with, the same in
     every view (`Chassis`, `Systems`, the `POST` answer). A chunk found at
@@ -1986,6 +2004,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of a device's `Chassis` whose Health Status bits OR to 3 or more, or whose Media Status is not 00h (the Chassis of an MLD or Multi-Headed device with LDs at 01h and 02h, an SLD at 08h or 04h, Media Status 04h to 09h) | `Critical` and `UnavailableOffline` (`Warning` for Media Status 01h), whatever its `PCIeDevice` and `Memory` said | as its other views: see "Status from Get Health Info". Every one of them now has `Health` `Warning` for Media Status 02h and 04h to 09h (was `OK` but on the Chassis), `Critical` for 03h, `OK` for 01h; and a `HealthRollup` on the Chassis |
 | `GET` of a switch's `Chassis` | `Status.Health` the OR of its devices' Health Status compared as a number (`mock/switch-attached.json`: `Critical`, `UnavailableOffline`, with no device worse than `Warning`) | `State` `Enabled`, no `Health`, and `HealthRollup` of its devices as each maps (`Warning` there) |
 | `GET` of any view of a device or LD whose Get Health Info failed at discovery | `Health` `OK`, `State` `Enabled`, from the zeroed response | no `Health` (or `HealthRollup`); `State` `Enabled` |
+| `GET` of any view of a device on hardware whose Health Status or Media Status changed after discovery | `Status` as discovery read it, until a restart | as Get Health Info reads after the next `--rescan`, or after a drain of the device's logs that found a Warning, Failure or Fatal record (or an overflow); a read that fails then leaves `Health` out. See "Status from Get Health Info" |
 | A request with a query parameter that starts with `$` (`GET /redfish/v1/Chassis?$filter=...`, `$top`, `$skip`, `$select`, `$expand`; a `POST` too) | `200` with the parameter ignored (the whole collection), or the request carried out | `501`, with an `@Message.ExtendedInfo` `QueryParameterUnsupported` entry for each `$` parameter; other parameters are still ignored |
 | `PUT`, or a `POST`, `PATCH` or `DELETE` a resource does not take (`PUT /redfish/v1/Chassis`, `PATCH` or `DELETE` of a Chassis, `POST /redfish/v1/Chassis`) | `501` | `405` with an `Allow` header of the methods the resource takes; `404` for a URI that is not a resource |
 | `HEAD` or `OPTIONS` (or another method cxl-fmd does not serve) | `405` with no `Allow` header | `405` with `Allow`; `404` for a URI that is not a resource |

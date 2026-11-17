@@ -1973,6 +1973,15 @@ int fmd_discover(struct fmd_ctx *ctx);
 int fmd_rescan(struct fmd_ctx *ctx);
 
 /*
+ * Get Health Info (4200h) again of a memory device whose health discovery
+ * read: an SLD on an endpoint of its own, each LD of an MLD, each pool LD
+ * of a Multi-Headed device, or one LD. A read that fails leaves its
+ * health_valid false, so that no Health is reported from what was read
+ * before. Returns how many reads failed. fabric_lock held exclusively.
+ */
+int fmd_refresh_health(struct fmd_ctx *ctx, struct fmd_component *dev);
+
+/*
  * Whether cxl-fmd may read and clear the event logs of a component reached
  * through @ep. "The Primary and Secondary Mailbox register's CCI instance
  * pairs shall share the context, but the MCTP CCI within a component shall
