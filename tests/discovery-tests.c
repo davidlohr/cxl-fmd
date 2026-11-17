@@ -20,6 +20,9 @@
  * turned into a CHECK().
  */
 #include <inttypes.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -5739,6 +5742,108 @@ out:
 	report("a DC host whose read failed after its record was cleared is retried", before);
 }
 
+struct retry_worker {
+	struct fmd_ctx *ctx;
+	int rc;
+	atomic_bool done;
+};
+
+static void *retry_worker_fn(void *arg)
+{
+	struct retry_worker *w = arg;
+
+	w->rc = fmd_dcd_retry_stale(w->ctx);
+	atomic_store(&w->done, true);
+	return NULL;
+}
+
+/* Whether @w finishes within @ms milliseconds */
+static bool retry_worker_wait(struct retry_worker *w, int ms)
+{
+	struct timespec step = { 0, 10 * 1000 * 1000 };
+
+	for (int t = 0; t < ms && !atomic_load(&w->done); t += 10)
+		nanosleep(&step, NULL);
+	return atomic_load(&w->done);
+}
+
+/*
+ * fmd_dcd_retry_stale() runs on every --event-poll tick, and most ticks
+ * have nothing to read again: it then takes fabric_lock shared, not
+ * exclusive, so a GET (which holds it shared) is not held up by it. The
+ * test holds fabric_lock shared, as a GET does: with nothing stale the
+ * retry finishes while it does; with host 1 stale it waits for the
+ * exclusive lock, and reads host 1 once the test lets go.
+ */
+static void test_dc_retry_shared_lock(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	struct dc_ext old = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct fmd_component *dev = dc_retry_dev(ctx, &ep, 0xf9, &old, 1);
+	struct retry_worker w = { .ctx = ctx };
+	uint8_t page[0x20 + 0x80] = { 0 };
+	unsigned int sent;
+	pthread_t th;
+	bool done;
+	int before = failures;
+
+	if (!dev)
+		goto out;
+
+	/* nothing stale: done under a GET's shared lock, nothing sent */
+	cxlmi_mock_clear_responses(ep);
+	sent = commands_sent(ep);
+	pthread_rwlock_rdlock(&ctx->fabric_lock);
+	atomic_init(&w.done, false);
+	if (pthread_create(&th, NULL, retry_worker_fn, &w)) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		CHECK(0, "cannot start a thread");
+		goto out;
+	}
+	done = retry_worker_wait(&w, 2000);
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+	pthread_join(th, NULL);
+	CHECK(done && w.rc == 0 && commands_sent(ep) == sent,
+	      "nothing stale: %s while fabric_lock was held shared, %d, %u commands",
+	      done ? "done" : "waited", w.rc, commands_sent(ep) - sent);
+
+	/* host 1 stale (its record read and cleared, its 5601h failed) */
+	put16(page + 0x14, 1);
+	put_dc_record(page + 0x20, 0x91, 0x04, 1, 0, 0, 0);
+	answer(ep, 0x0100, page, sizeof(page));
+	answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+	answer_no_events(ep, false);
+	answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_poll_events(ctx);
+	CHECK(fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_STALE, "host 1 is %d, not stale",
+	      fmd_dc_host_sync(dev, 1));
+
+	/* it waits for the exclusive lock, then reads host 1 */
+	cxlmi_mock_clear_responses(ep);
+	answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+	answer_dc_extents(ep, 1, 0, 1, &old, 1);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	w.rc = 0;
+	atomic_store(&w.done, false);
+	pthread_rwlock_rdlock(&ctx->fabric_lock);
+	if (pthread_create(&th, NULL, retry_worker_fn, &w)) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		CHECK(0, "cannot start a thread");
+		goto out;
+	}
+	done = retry_worker_wait(&w, 200);
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+	pthread_join(th, NULL);
+	CHECK(!done && w.rc == 1 && fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_OK,
+	      "host 1 stale: %s while fabric_lock was held shared, %d, host 1 %d",
+	      done ? "done" : "waited", w.rc, fmd_dc_host_sync(dev, 1));
+out:
+	fmd_ctx_free(ctx);
+	report("a DC retry with nothing stale takes fabric_lock shared", before);
+}
+
 /*
  * A record names a host, and the read of it fails before it starts (no
  * memory, say): the host is DIRTY, not OK, and read on the next tick. An
@@ -9753,6 +9858,7 @@ int main(void)
 	test_dc_records_ld200();
 	test_dc_records_counts();
 	test_dc_retry_cleared_event();
+	test_dc_retry_shared_lock();
 	test_dc_retry_overflow_and_tags();
 	test_dc_retry_on_tick();
 	test_dc_region_pages_staged();

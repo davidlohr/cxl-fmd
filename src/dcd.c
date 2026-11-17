@@ -2361,25 +2361,69 @@ int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
  * specification has no retry policy for an FM. A host never read (NEVER)
  * is not retried.
  */
-int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
-{
-	static const enum fmd_component_type types[] = {
-		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
-	};
-	struct fmd_component *devs[DC_EVENT_MAX_DEVS], *comp;
-	int n = 0, read = 0, rc = 0;
+static const enum fmd_component_type dc_retry_types[] = {
+	FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
+};
 
-	pthread_rwlock_wrlock(&ctx->fabric_lock);
+/* The hardware DCDs, at most @max; fabric_lock held, either way */
+static int dc_retry_devs(struct fmd_ctx *ctx, struct fmd_component **devs, int max)
+{
+	struct fmd_component *comp;
+	int n = 0;
 
 	fmd_topology_rdlock(&ctx->topology);
-	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
-		fmd_for_each_type(&ctx->topology, comp, types[t]) {
-			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) &&
-			    n < DC_EVENT_MAX_DEVS)
+	for (size_t t = 0; t < sizeof(dc_retry_types) / sizeof(dc_retry_types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, dc_retry_types[t]) {
+			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) && n < max)
 				devs[n++] = comp;
 		}
 	}
 	fmd_topology_rdunlock(&ctx->topology);
+	return n;
+}
+
+/*
+ * Whether some host of @devs is STALE or DIRTY, or some tag list could not
+ * be read: what fmd_dcd_retry_stale() reads again. fabric_lock is held,
+ * shared is enough.
+ */
+static bool dc_retry_any(struct fmd_ctx *ctx, struct fmd_component **devs, int n)
+{
+	bool any = false;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	for (int i = 0; i < n && !any; i++) {
+		int all[FMD_DC_MAX_HOST_ID + 1];
+		int nall = dc_hosts(devs[i], all, FMD_DC_MAX_HOST_ID + 1);
+
+		any = fmd_dc_tags_failed(&fmd_memdev_dcd(devs[i])->tags);
+		for (int h = 0; h < nall && !any; h++)
+			any = fmd_dc_sync_behind(fmd_dc_host_sync(devs[i], all[h]));
+	}
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return any;
+}
+
+int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
+{
+	struct fmd_component *devs[DC_EVENT_MAX_DEVS];
+	int n, read = 0, rc = 0;
+	bool any;
+
+	/*
+	 * Most ticks have nothing to read again: that is found under the
+	 * shared lock, which a GET holds too, and the exclusive one is taken
+	 * only to read. What changes between the two is looked at again below.
+	 */
+	pthread_rwlock_rdlock(&ctx->fabric_lock);
+	n = dc_retry_devs(ctx, devs, DC_EVENT_MAX_DEVS);
+	any = dc_retry_any(ctx, devs, n);
+	pthread_rwlock_unlock(&ctx->fabric_lock);
+	if (!any)
+		return 0;
+
+	pthread_rwlock_wrlock(&ctx->fabric_lock);
+	n = dc_retry_devs(ctx, devs, DC_EVENT_MAX_DEVS);
 
 	for (int i = 0; i < n; i++) {
 		struct fmd_component *dev = devs[i];
