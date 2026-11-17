@@ -113,3 +113,66 @@ uint8_t fmd_worse_media_status(uint8_t a, uint8_t b)
 		return ra > rb ? a : b;
 	return a ? a : b;
 }
+
+/*
+ * The Health a Media Status adds to that of the Health Status bits:
+ * Critical for 03h, All Data Lost; OK for 00h, Normal, and 01h, Not Ready
+ * (its State is Starting); Warning for any other, write persistency or
+ * data lost or about to be, and reserved values. cxl-fmd's mapping:
+ * DSP0288 maps Health Status to Status ("Get Health Info, Health Status,
+ * Many, Status", Comment 3), and Media Status to nothing.
+ */
+static enum rf_health media_health(uint8_t cci_media_status)
+{
+	switch (cci_media_status) {
+	case CXL_MEDIA_NORMAL:
+	case CXL_MEDIA_NOT_READY:
+		return HEALTH_OK;
+	case CXL_MEDIA_ALL_DATA_LOST:
+		return HEALTH_CRITICAL;
+	default:
+		return HEALTH_WARNING;
+	}
+}
+
+/* Add the Get Health Info of a device or LD to @r; @valid if it was read */
+void fmd_rollup_add(struct fmd_status_rollup *r,
+		    const struct cxlmi_cmd_memdev_get_health_info_rsp *h, bool valid)
+{
+	if (!valid) {
+		r->unknown++;
+		return;
+	}
+	/* Health Status is a bit field, Media Status an enumeration */
+	r->health_bits |= h->health_status;
+	r->media = r->known ? fmd_worse_media_status(r->media, h->media_status) :
+			      h->media_status;
+	r->known++;
+}
+
+/*
+ * The Status of what @r adds up. *@state is the State of the worst Media
+ * Status read (fmd_map_media_status(): only 03h is UnavailableOffline),
+ * Enabled if none was. *@health is the worse of what the Health Status
+ * bits read map to (fmd_map_health_status()) and what the Media Status
+ * adds (media_health()). Returns whether *@health holds: not if a Get
+ * Health Info was not read and the ones that were are all OK, as the one
+ * that was not may not be. A known Warning or Critical is reported though
+ * another read failed: it is no better than that. cxl-fmd's rules.
+ */
+bool fmd_rollup_status(const struct fmd_status_rollup *r,
+		       enum rf_health *health, enum rf_state *state)
+{
+	enum rf_health h = HEALTH_OK, m;
+
+	*state = STATE_ENABLED;
+	if (r->known) {
+		*state = fmd_map_media_status(r->media);
+		h = fmd_map_health_status(r->health_bits);
+		m = media_health(r->media);
+		if (m > h)
+			h = m;
+	}
+	*health = h;
+	return !r->unknown || h != HEALTH_OK;
+}

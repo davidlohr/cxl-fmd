@@ -2506,6 +2506,53 @@ json_t *fmd_redfish_chassis_collection(struct fmd_ctx *ctx)
 }
 
 /*
+ * A Status from @r (fmd_rollup_status()): State, and Health if @health
+ * and HealthRollup if @rollup, each only when it is known. Health "shall
+ * represent the health state of the resource without considering its
+ * dependent resources", HealthRollup "the resource and its dependent
+ * resources" (Resource_v1). Neither is required: one that is not known is
+ * left out, not reported OK.
+ */
+static json_t *rf_rollup_status(const struct fmd_status_rollup *r, bool health,
+				bool rollup)
+{
+	enum rf_health h;
+	enum rf_state st;
+	bool known = fmd_rollup_status(r, &h, &st);
+	json_t *status = json_pack("{s:s}", "State", rf_state_to_str(st));
+
+	if (known && health)
+		json_object_set_new(status, "Health", json_string(rf_health_to_str(h)));
+	if (known && rollup)
+		json_object_set_new(status, "HealthRollup", json_string(rf_health_to_str(h)));
+	return status;
+}
+
+/* Add the LDs of @dev, an MLD or a Multi-Headed device, to @r */
+static void rollup_lds(struct fmd_status_rollup *r, const struct fmd_component *dev)
+{
+	const struct fmd_component *child;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+		const struct fmd_ld *ld = fmd_to_ld((struct fmd_component *)child);
+
+		fmd_rollup_add(r, &ld->health, ld->health_valid);
+	}
+}
+
+/* Add a memory device, every LD of it if it has them, to @r */
+static void rollup_memdev(struct fmd_status_rollup *r, const struct fmd_component *dev)
+{
+	if (dev->type == FMD_COMPONENT_SLD) {
+		const struct fmd_sld *sld = fmd_to_sld((struct fmd_component *)dev);
+
+		fmd_rollup_add(r, &sld->health, sld->health_valid);
+	} else {
+		rollup_lds(r, dev);
+	}
+}
+
+/*
  * Chassis - /redfish/v1/Chassis/{id}
  *
  * Per OCP CMS Figure 7:
@@ -2527,8 +2574,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 	char description[256];
 	const char *name;
 	const char *chassis_type;
-	uint8_t worst_health = 0;
-	uint8_t worst_media = 0;
+	struct fmd_status_rollup r = { 0 };
 
 	snprintf(chassis_uri, sizeof(chassis_uri), "/redfish/v1/Chassis/%s", id);
 	snprintf(domains_uri, sizeof(domains_uri), "/redfish/v1/Chassis/%s/MemoryDomains", id);
@@ -2569,12 +2615,10 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 					rf_link("/redfish/v1/Chassis/%s", dev_child->id));
 
 				/* Aggregate capacity and health */
+				rollup_memdev(&r, dev_child);
 				if (dev_child->type == FMD_COMPONENT_SLD) {
 					struct fmd_sld *sld = fmd_to_sld(dev_child);
 					total_capacity_mb += sld->memory_size / (1024ULL * 1024);
-					worst_health |= sld->health.health_status;
-					worst_media = fmd_worse_media_status(worst_media,
-									     sld->health.media_status);
 				} else if (dev_child->type == FMD_COMPONENT_MLD) {
 					struct fmd_mld *mld = fmd_to_mld(dev_child);
 					/* Sum LD capacities for MLD */
@@ -2583,9 +2627,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 						if (ld_child->type == FMD_COMPONENT_LD) {
 							struct fmd_ld *ld = fmd_to_ld(ld_child);
 							total_capacity_mb += ld->memory_size / (1024ULL * 1024);
-							worst_health |= ld->health.health_status;
-							worst_media = fmd_worse_media_status(worst_media,
-											     ld->health.media_status);
 						}
 					}
 				}
@@ -2597,15 +2638,16 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 			 "CXL Switch with %d attached device(s), %llu MB aggregate capacity",
 			 device_count, (unsigned long long)total_capacity_mb);
 
-		/* Map health status to Redfish */
-		const char *health_str = "OK";
-		const char *state_str = "Enabled";
-		if (worst_health >= 3 || worst_media >= 3) {
-			health_str = "Critical";
-			state_str = "UnavailableOffline";
-		} else if (worst_health >= 1 || worst_media >= 1) {
-			health_str = "Warning";
-		}
+		/*
+		 * The switch reads no health of its own: "It is prohibited for
+		 * switches to support any commands from the Memory Device
+		 * Command Set" (CXL r4.0 Table 8-308, note 1), Get Health Info
+		 * among them. It is Enabled, with no Health; what its devices
+		 * report is its HealthRollup (cxl-fmd's choice).
+		 */
+		json_t *status = rf_rollup_status(&r, false, true);
+
+		json_object_set_new(status, "State", json_string("Enabled"));
 
 		result = json_pack(
 			"{"
@@ -2616,7 +2658,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 			"  s:s,"   /* Description */
 			"  s:s,"   /* ChassisType */
 			"  s:s,"   /* SerialNumber */
-			"  s:{s:s, s:s},"  /* Status */
+			"  s:o,"   /* Status */
 			"  s:{s:s}"   /* MemoryDomains */
 			"}",
 			"@odata.id", chassis_uri,
@@ -2626,7 +2668,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 			"Description", description,
 			"ChassisType", chassis_type,
 			"SerialNumber", serial_str,
-			"Status", "State", state_str, "Health", health_str,
+			"Status", status,
 			"MemoryDomains", "@odata.id", domains_uri
 		);
 
@@ -2660,8 +2702,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		snprintf(description, sizeof(description),
 			 "CXL Type 3 Single Logical Device (%llu MB)",
 			 (unsigned long long)(sld->memory_size / (1024ULL * 1024)));
-		worst_health = sld->health.health_status;
-		worst_media = sld->health.media_status;
 	} else if (comp->type == FMD_COMPONENT_MLD) {
 		struct fmd_mld *mld = fmd_to_mld(comp);
 		name = "CXL MLD Memory Device";
@@ -2671,20 +2711,6 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		snprintf(description, sizeof(description),
 			 "CXL Type 3 Multi-Logical Device with %d LDs",
 			 mld->ld_count);
-
-		/* Aggregate health from all LDs */
-		struct fmd_component *child;
-		fmd_topology_rdlock(&ctx->topology);
-		fmd_for_each_child(&mld->base, child) {
-			if (child->type == FMD_COMPONENT_LD) {
-				struct fmd_ld *ld = fmd_to_ld(child);
-				/* Health Status is a bitmask, Media Status is not a scale */
-				worst_health |= ld->health.health_status;
-				worst_media = fmd_worse_media_status(worst_media,
-								     ld->health.media_status);
-			}
-		}
-		fmd_topology_rdunlock(&ctx->topology);
 	} else if (comp->type == FMD_COMPONENT_MHD) {
 		struct fmd_mhd *mhd = fmd_to_mhd(comp);
 		name = "CXL MHD Memory Device";
@@ -2694,34 +2720,19 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		snprintf(description, sizeof(description),
 			 "CXL Type 3 Multi-Headed Device with %d heads, %d LDs",
 			 mhd->num_heads, mhd->total_lds);
-
-		/* Aggregate health from all LDs in pool */
-		struct fmd_component *child;
-		fmd_topology_rdlock(&ctx->topology);
-		fmd_for_each_child(&mhd->base, child) {
-			if (child->type == FMD_COMPONENT_LD) {
-				struct fmd_ld *ld = fmd_to_ld(child);
-				/* Health Status is a bitmask, Media Status is not a scale */
-				worst_health |= ld->health.health_status;
-				worst_media = fmd_worse_media_status(worst_media,
-								     ld->health.media_status);
-			}
-		}
-		fmd_topology_rdunlock(&ctx->topology);
 	} else {
 		return NULL;
 	}
 
-	/* Map health status to Redfish */
-	const char *health_str = "OK";
-	const char *state_str = "Enabled";
-
-	if (worst_health >= 3 || worst_media >= 3) {
-		health_str = "Critical";
-		state_str = "UnavailableOffline";
-	} else if (worst_health >= 1 || worst_media >= 1) {
-		health_str = "Warning";
-	}
+	/*
+	 * An SLD's Get Health Info, or that of each LD of an MLD or a
+	 * Multi-Headed device, which is all the health the device reports:
+	 * its Health, and its HealthRollup, its PCIeDevice and Memory being
+	 * views of the same (cxl-fmd's choice). The same mapping as theirs.
+	 */
+	fmd_topology_rdlock(&ctx->topology);
+	rollup_memdev(&r, comp);
+	fmd_topology_rdunlock(&ctx->topology);
 
 	/*
 	 * No Manufacturer or Model: they are names ("the name of the
@@ -2739,7 +2750,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		"  s:s,"   /* Description */
 		"  s:s,"   /* ChassisType */
 		"  s:s,"   /* SerialNumber */
-		"  s:{s:s, s:s},"  /* Status */
+		"  s:o,"   /* Status */
 		"  s:{s:s},"  /* PCIeDevices */
 		"  s:{s:s},"  /* Memory */
 		"  s:{s:s}"   /* MemoryDomains */
@@ -2751,7 +2762,7 @@ json_t *fmd_redfish_chassis(struct fmd_ctx *ctx, const char *id)
 		"Description", description,
 		"ChassisType", chassis_type,
 		"SerialNumber", serial_str,
-		"Status", "State", state_str, "Health", health_str,
+		"Status", rf_rollup_status(&r, true, true),
 		"PCIeDevices", "@odata.id", pcie_uri,
 		"Memory", "@odata.id", memory_uri,
 		"MemoryDomains", "@odata.id", domains_uri
@@ -2818,8 +2829,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 	char uri[256];
 	char ld_uri[256];
 	char fw_str[17];
-	uint8_t worst_health = 0;
-	uint8_t worst_media = 0;
+	struct fmd_status_rollup r = { 0 };
 	uint64_t serial = 0;
 
 	snprintf(uri, sizeof(uri), "/redfish/v1/Chassis/%s/PCIeDevices/%s",
@@ -2833,8 +2843,6 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 	if (comp->type == FMD_COMPONENT_SLD) {
 		struct fmd_sld *sld = fmd_to_sld(comp);
 		snprintf(fw_str, sizeof(fw_str), "%.16s", (char *)sld->memdev.fw_revision);
-		worst_health = sld->health.health_status;
-		worst_media = sld->health.media_status;
 		serial = sld->identify.serial_num;
 		dev_name = "CXL Type 3 SLD";
 	} else if (comp->type == FMD_COMPONENT_MLD) {
@@ -2842,45 +2850,19 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		fw_str[0] = '\0';	/* an LD has a firmware revision, the MLD none */
 		serial = mld->identify.serial_num;
 		dev_name = "CXL Type 3 MLD";
-
-		/* Aggregate health from all LDs */
-		struct fmd_component *child;
-		fmd_topology_rdlock(&ctx->topology);
-		fmd_for_each_child(&mld->base, child) {
-			if (child->type == FMD_COMPONENT_LD) {
-				struct fmd_ld *ld = fmd_to_ld(child);
-				/* Health Status is a bitmask, Media Status is not a scale */
-				worst_health |= ld->health.health_status;
-				worst_media = fmd_worse_media_status(worst_media,
-								     ld->health.media_status);
-			}
-		}
-		fmd_topology_rdunlock(&ctx->topology);
 	} else if (comp->type == FMD_COMPONENT_MHD) {
 		struct fmd_mhd *mhd = fmd_to_mhd(comp);
 		fw_str[0] = '\0';
 		serial = mhd->identify.serial_num;
 		dev_name = "CXL Type 3 MHD";
-
-		/* Aggregate health from all LDs in pool */
-		struct fmd_component *child;
-		fmd_topology_rdlock(&ctx->topology);
-		fmd_for_each_child(&mhd->base, child) {
-			if (child->type == FMD_COMPONENT_LD) {
-				struct fmd_ld *ld = fmd_to_ld(child);
-				/* Health Status is a bitmask, Media Status is not a scale */
-				worst_health |= ld->health.health_status;
-				worst_media = fmd_worse_media_status(worst_media,
-								     ld->health.media_status);
-			}
-		}
-		fmd_topology_rdunlock(&ctx->topology);
 	} else {
 		return NULL;
 	}
 
-	enum rf_health health = fmd_map_health_status(worst_health);
-	enum rf_state state = fmd_map_media_status(worst_media);
+	/* as its Chassis' (fmd_redfish_chassis()) */
+	fmd_topology_rdlock(&ctx->topology);
+	rollup_memdev(&r, comp);
+	fmd_topology_rdunlock(&ctx->topology);
 
 	json_t *result = json_pack(
 		"{"
@@ -2889,7 +2871,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"  s:s,"   /* Id */
 		"  s:s,"   /* Name */
 		"  s:s,"   /* DeviceType */
-		"  s:{s:s, s:s},"  /* Status */
+		"  s:o,"   /* Status */
 		"  s:{s:s}"  /* CXLLogicalDevices */
 		"}",
 		"@odata.id", uri,
@@ -2897,8 +2879,7 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		"Id", dev_id,
 		"Name", dev_name,
 		"DeviceType", "SingleFunction",
-		"Status", "State", rf_state_to_str(state),
-		         "Health", rf_health_to_str(health),
+		"Status", rf_rollup_status(&r, true, false),
 		"CXLLogicalDevices", "@odata.id", ld_uri
 	);
 
@@ -3211,8 +3192,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	char uri[512];
 	char name[64];
 	uint64_t mem_size_bytes, dc_bytes;
-	uint8_t health_status;
-	uint8_t media_status;
+	struct fmd_status_rollup r = { 0 };
 	uint8_t qos_allocated = 0;
 	uint8_t qos_limit = 0;
 	uint8_t qos_caps = 0;		/* QoS Telemetry Capabilities */
@@ -3235,8 +3215,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		if (__builtin_mul_overflow(sld->memdev.total_capacity, 256 * FMD_MIB,
 					   &mem_size_bytes))
 			mem_size_bytes = UINT64_MAX;
-		health_status = sld->health.health_status;
-		media_status = sld->health.media_status;
+		fmd_rollup_add(&r, &sld->health, sld->health_valid);
 		qos_caps = sld->memdev.qos_telemetry_caps;
 		snprintf(name, sizeof(name), "CXL Logical Device 0");
 		snprintf(ep_id, sizeof(ep_id), "%s", comp->id);
@@ -3266,8 +3245,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 			return NULL;
 
 		mem_size_bytes = ld->memory_size;
-		health_status = ld->health.health_status;
-		media_status = ld->health.media_status;
+		fmd_rollup_add(&r, &ld->health, ld->health_valid);
 		/* Convert CXL format (fraction * 256) back to percentage with rounding */
 		qos_allocated = (ld->qos_allocated_bw * 100 + 128) / 256;
 		qos_limit = (ld->qos_limit_bw * 100 + 128) / 256;
@@ -3303,8 +3281,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 			return NULL;
 
 		mem_size_bytes = ld->memory_size;
-		health_status = ld->health.health_status;
-		media_status = ld->health.media_status;
+		fmd_rollup_add(&r, &ld->health, ld->health_valid);
 		/* Convert CXL format (fraction * 256) back to percentage with rounding */
 		qos_allocated = (ld->qos_allocated_bw * 100 + 128) / 256;
 		qos_limit = (ld->qos_limit_bw * 100 + 128) / 256;
@@ -3330,8 +3307,6 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 	if (__builtin_add_overflow(mem_size_bytes, dc_bytes, &mem_size_bytes))
 		mem_size_bytes = UINT64_MAX;
 
-	enum rf_health health = fmd_map_health_status(health_status);
-	enum rf_state state = fmd_map_media_status(media_status);
 
 	json_t *result = json_pack(
 		"{"
@@ -3341,7 +3316,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"  s:s,"   /* Name */
 		"  s:I,"   /* MemorySizeMiB */
 		"  s:o,"   /* SemanticsSupported */
-		"  s:{s:s, s:s}"   /* Status */
+		"  s:o"   /* Status */
 		"}",
 		"@odata.id", uri,
 		"@odata.type", "#CXLLogicalDevice.v1_5_0.CXLLogicalDevice",
@@ -3349,8 +3324,7 @@ json_t *fmd_redfish_cxl_logical_device(struct fmd_ctx *ctx,
 		"Name", name,
 		"MemorySizeMiB", (json_int_t)(mem_size_bytes / FMD_MIB),
 		"SemanticsSupported", semantics,
-		"Status", "State", rf_state_to_str(state),
-		         "Health", rf_health_to_str(health)
+		"Status", rf_rollup_status(&r, true, false)
 	);
 
 	/*
@@ -3597,8 +3571,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 	uint64_t volatile_limit_mib = 0;
 	uint64_t staged_volatile_mib = 0;
 	uint64_t staged_persistent_mib = 0;
-	uint8_t health_status = 0;
-	uint8_t media_status = 0;
+	struct fmd_status_rollup r = { 0 };
 	const char *mem_type = "DRAM";
 	const char *mem_dev_type = "Logical";
 	int ld_id = 0;  /* For MLD tunneling in Get Security State */
@@ -3615,8 +3588,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 
 		struct fmd_sld *sld = fmd_to_sld(comp);
 		capacity_mib = sld->memory_size / (1024ULL * 1024);
-		health_status = sld->health.health_status;
-		media_status = sld->health.media_status;
+		fmd_rollup_add(&r, &sld->health, sld->health_valid);
 		snprintf(name, sizeof(name), "CXL Memory Device");
 
 		/* Get Partition Info (4100h) - values in 256MB CXL units */
@@ -3655,8 +3627,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 			return NULL;
 
 		capacity_mib = target_ld->memory_size / (1024ULL * 1024);
-		health_status = target_ld->health.health_status;
-		media_status = target_ld->health.media_status;
+		fmd_rollup_add(&r, &target_ld->health, target_ld->health_valid);
 		snprintf(name, sizeof(name), "CXL Logical Device %d", ld_id);
 
 		/* Get Partition Info (4100h) - values in 256MB CXL units */
@@ -3695,8 +3666,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 			return NULL;
 
 		capacity_mib = target_ld->memory_size / (1024ULL * 1024);
-		health_status = target_ld->health.health_status;
-		media_status = target_ld->health.media_status;
+		fmd_rollup_add(&r, &target_ld->health, target_ld->health_valid);
 		snprintf(name, sizeof(name), "CXL Logical Device %d", ld_id);
 
 		/* Get Partition Info (4100h) - values in 256MB CXL units */
@@ -3707,8 +3677,6 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 		return NULL;
 	}
 
-	enum rf_health health = fmd_map_health_status(health_status);
-	enum rf_state state = fmd_map_media_status(media_status);
 
 	json_t *result = json_pack(
 		"{"
@@ -3719,7 +3687,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 		"  s:I,"   /* CapacityMiB */
 		"  s:s,"   /* MemoryType */
 		"  s:s,"   /* MemoryDeviceType */
-		"  s:{s:s, s:s},"  /* Status */
+		"  s:o,"   /* Status */
 		"  s:{s:s}"  /* Metrics */
 		"}",
 		"@odata.id", uri,
@@ -3729,8 +3697,7 @@ json_t *fmd_redfish_memory(struct fmd_ctx *ctx,
 		"CapacityMiB", (json_int_t)capacity_mib,
 		"MemoryType", mem_type,
 		"MemoryDeviceType", mem_dev_type,
-		"Status", "State", rf_state_to_str(state),
-		         "Health", rf_health_to_str(health),
+		"Status", rf_rollup_status(&r, true, false),
 		"Metrics", "@odata.id", metrics_uri
 	);
 
@@ -3839,8 +3806,7 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 	char chunks_uri[256];
 	uint64_t capacity_mib = 0;
 	uint64_t chunk_increment_mib = 0;
-	uint8_t worst_health = 0;
-	uint8_t worst_media = 0;
+	struct fmd_status_rollup r = { 0 };
 	const char *domain_name;
 
 	snprintf(uri, sizeof(uri), "/redfish/v1/Chassis/%s/MemoryDomains/%s",
@@ -3873,12 +3839,10 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 				if (!fmd_is_memdev(dev_child))
 					continue;
 
+				rollup_memdev(&r, dev_child);
 				if (dev_child->type == FMD_COMPONENT_SLD) {
 					struct fmd_sld *sld = fmd_to_sld(dev_child);
 					capacity_mib += sld->memory_size / (1024ULL * 1024);
-					worst_health |= sld->health.health_status;
-					worst_media = fmd_worse_media_status(worst_media,
-									     sld->health.media_status);
 				} else if (dev_child->type == FMD_COMPONENT_MLD) {
 					struct fmd_mld *mld = fmd_to_mld(dev_child);
 					struct fmd_component *ld_child;
@@ -3886,9 +3850,6 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 						if (ld_child->type == FMD_COMPONENT_LD) {
 							struct fmd_ld *ld = fmd_to_ld(ld_child);
 							capacity_mib += ld->memory_size / (1024ULL * 1024);
-							worst_health |= ld->health.health_status;
-							worst_media = fmd_worse_media_status(worst_media,
-											     ld->health.media_status);
 						}
 					}
 				}
@@ -3908,48 +3869,17 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 		domain_name = "CXL Memory Domain";
 		capacity_mib = dom->capacity / (1024ULL * 1024);
 
-		/* Get health and granularity from parent device */
-		if (chassis->type == FMD_COMPONENT_SLD) {
-			struct fmd_sld *sld = fmd_to_sld(chassis);
-			worst_health = sld->health.health_status;
-			worst_media = sld->health.media_status;
-		} else if (chassis->type == FMD_COMPONENT_MLD) {
-			struct fmd_mld *mld = fmd_to_mld(chassis);
-			struct fmd_component *child;
+		/* Memory granularity from Get LD Allocations (DSP0288 Table 2) */
+		if (chassis->type == FMD_COMPONENT_MLD)
+			chunk_increment_mib = fmd_to_mld(chassis)->memory_granularity * 256;
 
-			/* Memory granularity from Get LD Allocations (DSP0288 Table 2) */
-			chunk_increment_mib = mld->memory_granularity * 256;
-
-			fmd_topology_rdlock(&ctx->topology);
-			fmd_for_each_child(&mld->base, child) {
-				if (child->type == FMD_COMPONENT_LD) {
-					struct fmd_ld *ld = fmd_to_ld(child);
-					worst_health |= ld->health.health_status;
-					worst_media = fmd_worse_media_status(worst_media,
-									     ld->health.media_status);
-				}
-			}
-			fmd_topology_rdunlock(&ctx->topology);
-		} else if (chassis->type == FMD_COMPONENT_MHD) {
-			struct fmd_component *child;
-
-			/* the LDs of the pool, as for the LDs of an MLD */
-			fmd_topology_rdlock(&ctx->topology);
-			fmd_for_each_child_type(chassis, child, FMD_COMPONENT_LD) {
-				struct fmd_ld *ld = fmd_to_ld(child);
-
-				worst_health |= ld->health.health_status;
-				worst_media = fmd_worse_media_status(worst_media,
-								     ld->health.media_status);
-			}
-			fmd_topology_rdunlock(&ctx->topology);
-		}
+		/* health from the device, as its Chassis' */
+		fmd_topology_rdlock(&ctx->topology);
+		rollup_memdev(&r, chassis);
+		fmd_topology_rdunlock(&ctx->topology);
 	} else {
 		return NULL;
 	}
-
-	enum rf_health health = fmd_map_health_status(worst_health);
-	enum rf_state state = fmd_map_media_status(worst_media);
 
 	json_t *result = json_pack(
 		"{"
@@ -3959,7 +3889,7 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 		"  s:s,"   /* Name */
 		"  s:I,"   /* MemorySizeMiB */
 		"  s:{s:s},"  /* MemoryChunks */
-		"  s:{s:s, s:s}"  /* Status */
+		"  s:o"   /* Status */
 		"}",
 		"@odata.id", uri,
 		"@odata.type", "#MemoryDomain.v1_5_1.MemoryDomain",
@@ -3967,8 +3897,7 @@ json_t *fmd_redfish_memory_domain(struct fmd_ctx *ctx,
 		"Name", domain_name,
 		"MemorySizeMiB", (json_int_t)capacity_mib,
 		"MemoryChunks", "@odata.id", chunks_uri,
-		"Status", "State", rf_state_to_str(state),
-		         "Health", rf_health_to_str(health)
+		"Status", rf_rollup_status(&r, true, false)
 	);
 
 	/* Add MemoryChunkIncrementMiB for MLDs (DSP0288 Table 2: Get LD Allocations) */
@@ -4231,8 +4160,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 	uint64_t offset_mib = 0;
 	bool offset_known = false;
 	const char *address_range_type = "PMEM";
-	uint8_t health_status = 0;
-	uint8_t media_status = 0;
+	struct fmd_status_rollup r = { 0 };
 	const char *chunk_name = "CXL Memory Chunk";
 	char ld_link_uri[512] = {0};
 
@@ -4285,8 +4213,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 			struct fmd_sld *sld = fmd_to_sld(device);
 			size_mib = sld->memory_size / (1024ULL * 1024);
 			offset_known = true;	/* the whole device, from 0 */
-			health_status = sld->health.health_status;
-			media_status = sld->health.media_status;
+			fmd_rollup_add(&r, &sld->health, sld->health_valid);
 
 			if (sld->partition.active_vmem > 0 && sld->partition.active_pmem == 0)
 				address_range_type = "Volatile";
@@ -4305,8 +4232,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 					struct fmd_ld *ld = fmd_to_ld(child);
 					if (ld->ld_id == ld_idx) {
 						size_mib = ld->memory_size / (1024ULL * 1024);
-						health_status = ld->health.health_status;
-						media_status = ld->health.media_status;
+						fmd_rollup_add(&r, &ld->health, ld->health_valid);
 
 						if (ld->memdev.volatile_capacity > 0 &&
 						    ld->memdev.persistent_capacity == 0)
@@ -4353,8 +4279,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 
 		if (chassis->type == FMD_COMPONENT_SLD) {
 			struct fmd_sld *sld = fmd_to_sld(chassis);
-			health_status = sld->health.health_status;
-			media_status = sld->health.media_status;
+			fmd_rollup_add(&r, &sld->health, sld->health_valid);
 
 			if (sld->partition.active_vmem > 0 && sld->partition.active_pmem == 0)
 				address_range_type = "Volatile";
@@ -4367,8 +4292,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 				if (child->type == FMD_COMPONENT_LD) {
 					struct fmd_ld *ld = fmd_to_ld(child);
 					if (ld->ld_id == ld_idx) {
-						health_status = ld->health.health_status;
-						media_status = ld->health.media_status;
+						fmd_rollup_add(&r, &ld->health, ld->health_valid);
 
 						if (ld->memdev.volatile_capacity > 0 &&
 						    ld->memdev.persistent_capacity == 0)
@@ -4389,8 +4313,6 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		return NULL;
 	}
 
-	enum rf_health health = fmd_map_health_status(health_status);
-	enum rf_state state = fmd_map_media_status(media_status);
 
 	json_t *result = json_pack(
 		"{"
@@ -4401,7 +4323,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"  s:I,"   /* MemoryChunkSizeMiB */
 		"  s:s,"   /* AddressRangeType */
 		"  s:b,"   /* IsMirrorEnabled */
-		"  s:{s:s, s:s}"  /* Status */
+		"  s:o"   /* Status */
 		"}",
 		"@odata.id", uri,
 		"@odata.type", "#MemoryChunks.v1_6_2.MemoryChunks",
@@ -4410,8 +4332,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"MemoryChunkSizeMiB", (json_int_t)size_mib,
 		"AddressRangeType", address_range_type,
 		"IsMirrorEnabled", false,
-		"Status", "State", rf_state_to_str(state),
-		         "Health", rf_health_to_str(health)
+		"Status", rf_rollup_status(&r, true, false)
 	);
 
 	/*

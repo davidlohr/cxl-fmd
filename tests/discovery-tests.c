@@ -1575,6 +1575,140 @@ static void test_health_mapping(void)
 	report("health and media status", before);
 }
 
+/* Status of @j as JSON text, for the checks below; the caller frees it */
+static char *status_text(json_t *j)
+{
+	json_t *st = j ? json_object_get(j, "Status") : NULL;
+
+	return st ? json_dumps(st, JSON_COMPACT | JSON_SORT_KEYS) : strdup("(none)");
+}
+
+/*
+ * The Status of what Get Health Info said, added up (fmd_rollup_status()):
+ * the Health Status bits OR-ed then mapped, never compared as a number,
+ * and a read that failed is not OK. Review F17.
+ */
+static void test_health_rollup(void)
+{
+	struct cxlmi_cmd_memdev_get_health_info_rsp h = { 0 };
+	struct fmd_status_rollup r;
+	enum rf_health health;
+	enum rf_state state;
+	int before = failures;
+	bool known;
+
+	/* Maintenance Needed and Performance Degraded: Warning, Enabled */
+	memset(&r, 0, sizeof(r));
+	h.health_status = 0x01;
+	fmd_rollup_add(&r, &h, true);
+	h.health_status = 0x02;
+	fmd_rollup_add(&r, &h, true);
+	known = fmd_rollup_status(&r, &health, &state);
+	CHECK(known && health == HEALTH_WARNING && state == STATE_ENABLED,
+	      "01h and 02h: known %d health %d state %d", known, health, state);
+
+	/* Memory Capacity Degraded alone was Critical, UnavailableOffline */
+	memset(&r, 0, sizeof(r));
+	h.health_status = 0x08;
+	fmd_rollup_add(&r, &h, true);
+	known = fmd_rollup_status(&r, &health, &state);
+	CHECK(known && health == HEALTH_WARNING && state == STATE_ENABLED,
+	      "08h: health %d state %d", health, state);
+
+	/* Media Status: only 03h is Critical and UnavailableOffline */
+	h.health_status = 0;
+	for (int media = 0; media <= 0x0a; media++) {
+		memset(&r, 0, sizeof(r));
+		h.media_status = media;
+		fmd_rollup_add(&r, &h, true);
+		known = fmd_rollup_status(&r, &health, &state);
+		CHECK(known && health == (media == 3 ? HEALTH_CRITICAL :
+					  media <= 1 ? HEALTH_OK : HEALTH_WARNING) &&
+		      state == fmd_map_media_status(media),
+		      "media %02xh: health %d state %d", media, health, state);
+	}
+
+	/* not read: no Health, unless one read is known to be worse than OK */
+	memset(&r, 0, sizeof(r));
+	fmd_rollup_add(&r, &h, false);
+	known = fmd_rollup_status(&r, &health, &state);
+	CHECK(!known && state == STATE_ENABLED, "nothing read: known %d", known);
+	h.media_status = 0;
+	fmd_rollup_add(&r, &h, true);
+	CHECK(!fmd_rollup_status(&r, &health, &state),
+	      "one OK and one not read is known");
+	h.health_status = 0x04;
+	fmd_rollup_add(&r, &h, true);
+	known = fmd_rollup_status(&r, &health, &state);
+	CHECK(known && health == HEALTH_CRITICAL,
+	      "a Critical one and one not read: known %d health %d", known, health);
+
+	report("health rollup", before);
+}
+
+/*
+ * Get Health Info answered Internal Error at discovery: the SLD's views
+ * have no Health. They reported Enabled, OK, from the zeroed response.
+ * Review F17 claim 4 (from its case A).
+ */
+static void test_health_read_failed(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	struct fmd_sld *sld;
+	char id[FMD_MAX_ID_LEN];
+	json_t *views[4];
+	int before = failures, rc;
+
+	answer_identify(ep, 0x1701, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	answer_rc(ep, 0x4200, CXLMI_RET_INTERNAL);
+	rc = fmd_discover(ctx);
+	CHECK(rc == 1, "fmd_discover: %d", rc);
+	device_id(id, sizeof(id), 0x1701);
+	sld = fmd_topology_find_sld(&ctx->topology, id);
+	CHECK(sld && !sld->health_valid, "the health read is taken to be valid");
+
+	views[0] = fmd_redfish_chassis(ctx, id);
+	views[1] = fmd_redfish_memory(ctx, id, id);
+	views[2] = fmd_redfish_pcie_device(ctx, id, id);
+	views[3] = fmd_redfish_cxl_logical_device(ctx, id, id, "0");
+	for (int i = 0; i < 4; i++) {
+		char *text = status_text(views[i]);
+
+		CHECK(!strcmp(text, "{\"State\":\"Enabled\"}"),
+		      "view %d Status %s", i, text);
+		free(text);
+		json_decref(views[i]);
+	}
+
+	/* and when it is read, Health is there */
+	fmd_ctx_free(ctx);
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0x1702, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	{
+		uint8_t pl[0x12] = { 0 };
+
+		pl[0] = 0x03;		/* Maintenance Needed, Performance Degraded */
+		answer(ep, 0x4200, pl, sizeof(pl));
+	}
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x1702);
+	views[0] = fmd_redfish_chassis(ctx, id);
+	{
+		char *text = status_text(views[0]);
+
+		CHECK(!strcmp(text, "{\"Health\":\"Warning\",\"HealthRollup\":\"Warning\","
+			      "\"State\":\"Enabled\"}"), "Chassis Status %s", text);
+		free(text);
+	}
+	json_decref(views[0]);
+	fmd_ctx_free(ctx);
+	report("a failed health read is not OK", before);
+}
+
 /*
  * A directly attached SLD of @total, Volatile Only @vol and Persistent Only
  * @pers, with Partition Alignment @align, all in units of 256 MB, and
@@ -7632,6 +7766,8 @@ int main(void)
 	test_overcount_mld();
 	test_mld_ld_counts();
 	test_health_mapping();
+	test_health_rollup();
+	test_health_read_failed();
 	test_scan_media();
 	test_life_used();
 	test_switch_sld_placeholder();

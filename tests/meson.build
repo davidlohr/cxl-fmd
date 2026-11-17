@@ -165,6 +165,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Status from Get Health Info, alike in every view
+    test(
+        'health',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_health.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Query parameters, and methods a resource does not take
     test(
         'protocol',

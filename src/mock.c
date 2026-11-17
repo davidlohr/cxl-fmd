@@ -620,6 +620,7 @@ static struct fmd_sld *parse_sld(struct fmd_ctx *ctx, json_t *jdev,
 	sld = fmd_sld_create(dev_id);
 	if (!sld)
 		return NULL;
+	sld->health_valid = true;	/* a mock answers Get Health Info */
 
 	/* Identify info */
 	sld->identify.vendor_id = parse_hex16(json_object_get(jdev, "vendor_id"));
@@ -807,6 +808,7 @@ static struct fmd_ld *parse_ld(struct fmd_ctx *ctx, json_t *jld,
 	ld = fmd_ld_create(ld_id_str, ld_num);
 	if (!ld)
 		return NULL;
+	ld->health_valid = true;	/* a mock answers Get Health Info */
 
 	/* Memory size (total, volatile, persistent) */
 	ld->memory_size = json_uint_or(jld, "memory_size_mb", 0) * 1024ULL * 1024;
@@ -1006,6 +1008,7 @@ static struct fmd_ld *parse_ld_pool_entry(struct fmd_ctx *ctx, json_t *jld,
 	ld = fmd_ld_create(ld_id_str, ld_num);
 	if (!ld)
 		return NULL;
+	ld->health_valid = true;	/* a mock answers Get Health Info */
 
 	/* Memory size */
 	ld->memory_size = json_uint_or(jld, "memory_size_mb", 0) * 1024ULL * 1024;
@@ -1885,6 +1888,7 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 
 				struct fmd_ld *ld = fmd_ld_create(ld_id_str, i);
 				if (ld) {
+					ld->health_valid = true;
 					ld->memory_size = per_ld_mb * 1024ULL * 1024;
 					/* 100% ≈ 255 in CXL format (8-bit fraction) */
 					ld->qos_allocated_bw = 255;

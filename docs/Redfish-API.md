@@ -87,7 +87,7 @@ whether it serves the mapping, and where it serves it under another name.
 | Get Partition Info | Next Persistent Capacity | `Memory` | `StagedPersistentSizeMiB` | | Yes, as `CXL/StagedNonVolatileSizeMiB`: DSP8010 has no `StagedPersistentSizeMiB` (see "Set Partition Info" below) |
 | Set Partition Info | Next Volatile Capacity | `Memory` | `StagedVolatileSizeMiB` | | Yes, as `CXL/StagedVolatileSizeMiB` (see "Set Partition Info" below) |
 | Set Partition Info | Next Persistent Capacity | `Memory` | `StagedPersistentSizeMiB` | | Yes, as `CXL/StagedNonVolatileSizeMiB` (see "Set Partition Info" below) |
-| Get Health Info | Health Status | Many | `Status` | See Comment 3. | Partial: `Status/Health` and `Status/State` are served; `Status/Conditions`, which Comment 3 describes, is not |
+| Get Health Info | Health Status | Many | `Status` | See Comment 3. | Partial: `Status/Health` and `Status/State` are served (see "Status from Get Health Info"); `Status/Conditions`, which Comment 3 describes, is not |
 | Get Health Info | Life Used | `MemoryMetrics` | `CapacityUtilizationPercent` | | No (deviation, see "Life Used" below) |
 | Get Health Info | Corrected Volatile Error Count | `MemoryMetrics` | `CorrectedVolatileErrorCount` | | Yes |
 | Get Health Info | Corrected Persistent Error Count | `MemoryMetrics` | `CorrectedPersistentErrorCount` | | Yes |
@@ -427,6 +427,39 @@ The write operations on a `Connection`, which no DSP0288 rule maps (see
 - `POST /redfish/v1/Fabrics/CXL/Connections/{conn}/Actions/Oem/Cxl.ForceUnbind` - Unbind vPPB, Simulate Surprise Hot-Remove (cxl-fmd's Oem action)
 
 ---
+
+## Status from Get Health Info
+
+The `Status` of a memory device's `Chassis`, `PCIeDevice`,
+`CXLLogicalDevice`, `Memory`, `MemoryDomain` and `MemoryChunk` comes from
+Get Health Info (4200h, CXL r4.0 Table 8-315): an SLD's, or that of each
+LD of an MLD or a Multi-Headed device added up. Health Status is a bit
+field and Media Status an enumeration; every view maps them the same way
+(`fmd_rollup_status()`), and the mapping is cxl-fmd's (DSP0288 maps Health
+Status to `Status`, Comment 3, and Media Status to nothing):
+
+- `State` is that of the worst Media Status (see "Media Status" in the
+  README): only 03h, All Data Lost, is `UnavailableOffline`. The Health
+  Status bits do not change it.
+- `Health` is the worse of the Health Status bits, OR-ed then mapped
+  (Hardware Replacement Needed is `Critical`; Maintenance Needed,
+  Performance Degraded and Memory Capacity Degraded are `Warning`), and of
+  the Media Status: 03h is `Critical`; 00h and 01h (Not Ready) add
+  nothing; any other is `Warning`.
+- When Get Health Info was not answered Success, `Health` is left out,
+  not reported `OK`: nothing is known of it. Of several LDs, one that was
+  not read leaves `Health` out unless another is known to be `Warning` or
+  `Critical`, which it is at least. `State` is then that of the LDs that
+  were read, `Enabled` if none was.
+- A device's `Chassis` has `HealthRollup` too, the same as its `Health`:
+  its `PCIeDevice` and `Memory` are views of the same health.
+- A switch's `Chassis` is `Enabled` with no `Health`: a switch reads none
+  ("It is prohibited for switches to support any commands from the Memory
+  Device Command Set", Table 8-308, note 1). Its `HealthRollup` is that of
+  every device on its ports, added up as above (Resource_v1: Health "shall
+  represent the health state of the resource without considering its
+  dependent resources", HealthRollup "the resource and its dependent
+  resources").
 
 ## Error Responses
 
@@ -1515,14 +1548,10 @@ In summary:
 8. A bind or unbind is followed for as long as the switch takes: there is
    no time limit and no automatic abort. `#Cxl.ForceUnbind` is the
    recourse for an unbind (see "Binding").
-9. `Status/Conditions` is not served. The `Status` of the Chassis of an MLD,
-   a Multi-Headed device or a switch is worked out from the Health Status
-   and Media Status of all its LDs or devices together. The Health Status
-   bits are OR'd and then compared as a number: 3 or more is `Critical`
-   with `State` `UnavailableOffline`. So Maintenance Needed with
-   Performance Degraded, or one LD's Media Status, makes the whole Chassis
-   `Critical` and `UnavailableOffline`, and the Chassis can disagree with
-   the device's `PCIeDevice`.
+9. `Status/Conditions` is not served. Get Health Info is read once, when
+   a device is discovered: a `Status` does not follow the device after
+   that. When that read fails, the device's views have no `Health` (see
+   "Status from Get Health Info").
 10. `AddressRangeType` is `Volatile` only for a device or LD with volatile
     and no persistent capacity. Every other one is `PMEM`, a device with
     both kinds of capacity or with unknown capacities included. A `POST` of
@@ -1807,6 +1836,9 @@ Changes from the fixes of the external design review (branch
 | `DynamicCapacityAdd` or `DynamicCapacityRelease` with a `Length` past 2^44 - 1 MiB, or `PATCH` of a `MemoryRegion`'s `BlockSizeMiB` past it | `200` with the value wrapped (an add of 2^44 + 256 MiB added 256 MiB), or `400` with another message when it wrapped to 0 | `400`, nothing sent |
 | `GET` of a DCD's `MemoryRegion` or `MemoryExtent` when the host's LD is in the Pending Reference Bitmap of a tag (5608h), and of an extent a mock topology file declares `pending` | `Pending` `true` in the region's `MemoryExtents[]` and `Status.State` `Starting` for every extent of that host and tag, accepted ones too | `Pending` `false` and `Enabled` for every extent 5603h lists; the add is in the tag's `PendingLDs` of `Oem/Cxl/DynamicCapacityTags` only |
 | `GET` of a `CXLLogicalDevice` of a DCD | `MemorySizeMiB` the static capacity only (Total Capacity, or the LD allocation) | the static capacity plus every extent the LD's host holds, so it changes with an add or a release; a non-DCD device is unchanged |
+| `GET` of a device's `Chassis` whose Health Status bits OR to 3 or more, or whose Media Status is not 00h (the Chassis of an MLD or Multi-Headed device with LDs at 01h and 02h, an SLD at 08h or 04h, Media Status 04h to 09h) | `Critical` and `UnavailableOffline` (`Warning` for Media Status 01h), whatever its `PCIeDevice` and `Memory` said | as its other views: see "Status from Get Health Info". Every one of them now has `Health` `Warning` for Media Status 02h and 04h to 09h (was `OK` but on the Chassis), `Critical` for 03h, `OK` for 01h; and a `HealthRollup` on the Chassis |
+| `GET` of a switch's `Chassis` | `Status.Health` the OR of its devices' Health Status compared as a number (`mock/switch-attached.json`: `Critical`, `UnavailableOffline`, with no device worse than `Warning`) | `State` `Enabled`, no `Health`, and `HealthRollup` of its devices as each maps (`Warning` there) |
+| `GET` of any view of a device or LD whose Get Health Info failed at discovery | `Health` `OK`, `State` `Enabled`, from the zeroed response | no `Health` (or `HealthRollup`); `State` `Enabled` |
 | A request with a query parameter that starts with `$` (`GET /redfish/v1/Chassis?$filter=...`, `$top`, `$skip`, `$select`, `$expand`; a `POST` too) | `200` with the parameter ignored (the whole collection), or the request carried out | `501`, with an `@Message.ExtendedInfo` `QueryParameterUnsupported` entry for each `$` parameter; other parameters are still ignored |
 | `PUT`, or a `POST`, `PATCH` or `DELETE` a resource does not take (`PUT /redfish/v1/Chassis`, `PATCH` or `DELETE` of a Chassis, `POST /redfish/v1/Chassis`) | `501` | `405` with an `Allow` header of the methods the resource takes; `404` for a URI that is not a resource |
 | `HEAD` or `OPTIONS` (or another method cxl-fmd does not serve) | `405` with no `Allow` header | `405` with `Allow`; `404` for a URI that is not a resource |

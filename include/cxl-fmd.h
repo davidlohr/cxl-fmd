@@ -562,8 +562,9 @@ struct fmd_sld {
 	/* Get Partition Info (4100h) response */
 	struct cxlmi_cmd_memdev_get_partition_info_rsp partition;
 
-	/* Get Health Info (4200h) response */
+	/* Get Health Info (4200h) response, if health_valid */
 	struct cxlmi_cmd_memdev_get_health_info_rsp health;
+	bool health_valid;		/* 4200h was answered Success */
 
 	/* Supported CCI commands bitmask */
 	uint64_t supported_cmds;
@@ -695,8 +696,9 @@ struct fmd_ld {
 	/* From tunneled Get Partition Info (4100h) */
 	struct cxlmi_cmd_memdev_get_partition_info_rsp partition;
 
-	/* From tunneled Get Health Info (4200h) */
+	/* From tunneled Get Health Info (4200h), if health_valid */
 	struct cxlmi_cmd_memdev_get_health_info_rsp health;
+	bool health_valid;		/* 4200h was answered Success */
 
 	/* From Get Host DC Region Configuration (5601h) trailer, DCD only */
 	uint32_t dc_extents_supported;
@@ -2484,5 +2486,21 @@ int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
 enum rf_health fmd_map_health_status(uint8_t cci_health_status);
 enum rf_state fmd_map_media_status(uint8_t cci_media_status);
 uint8_t fmd_worse_media_status(uint8_t a, uint8_t b);
+
+/*
+ * The Get Health Info (4200h) of one or more devices or LDs, added up for
+ * one Status: see fmd_rollup_status(). Zero it before the first add.
+ */
+struct fmd_status_rollup {
+	uint8_t health_bits;		/* Health Status of each, OR-ed */
+	uint8_t media;			/* the worst Media Status */
+	unsigned int known;		/* how many were read */
+	unsigned int unknown;		/* how many were not */
+};
+
+void fmd_rollup_add(struct fmd_status_rollup *r,
+		    const struct cxlmi_cmd_memdev_get_health_info_rsp *h, bool valid);
+bool fmd_rollup_status(const struct fmd_status_rollup *r,
+		       enum rf_health *health, enum rf_state *state);
 
 #endif /* CXL_FMD_H */

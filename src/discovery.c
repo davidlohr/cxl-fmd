@@ -266,8 +266,9 @@ static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld)
 
 	/* Get Health Info (4200h) - no tunneling for SLD */
 	rc = cxlmi_cmd_memdev_get_health_info(ep, CXLMI_NO_TUNNEL, &sld->health);
+	sld->health_valid = !rc;	/* not read: no Health is reported */
 	if (rc)
-		fmd_dbg(ctx, "%s: get health info failed: %d", sld->base.id, rc);
+		fmd_warn(ctx, "%s: get health info failed: %d", sld->base.id, rc);
 
 	return 0;
 }
@@ -323,8 +324,9 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 
 	/* Get Health Info (4200h) */
 	rc = cxlmi_cmd_memdev_get_health_info(ep, ti, &ld->health);
+	ld->health_valid = !rc;
 	if (rc)
-		fmd_dbg(ctx, "%s: LD%d get health info failed: %d",
+		fmd_warn(ctx, "%s: LD%d get health info failed: %d",
 			mld->base.id, ld->ld_id, rc);
 
 	fmd_dbg(ctx, "%s: LD%d memory=%" PRIu64 "MB health=%d media=%d",
@@ -796,8 +798,9 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd)
 				mhd->base.id, i, rc);
 		rc = cxlmi_cmd_memdev_get_health_info(ep, CXLMI_TUNNEL_MLD(i),
 						      &ld->health);
+		ld->health_valid = !rc;
 		if (rc)
-			fmd_dbg(ctx, "%s: pool LD %d get health info failed: %d",
+			fmd_warn(ctx, "%s: pool LD %d get health info failed: %d",
 				mhd->base.id, i, rc);
 
 		fmd_dbg(ctx, "%s: pool LD %d bound to head %d",

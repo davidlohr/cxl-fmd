@@ -195,7 +195,11 @@ XML metadata responses include:
 ### CXL to Redfish Mapping
 
 The Health Status and Media Status fields are those of Get Health Info (CXL
-r4.0 Table 8-315). Which Redfish value each is given is cxl-fmd's mapping.
+r4.0 Table 8-315). Which Redfish value each is given is cxl-fmd's mapping,
+the same in every view of a device; a Media Status other than 00h and 01h
+raises Health too (03h `Critical`, any other `Warning`), and a device whose
+Get Health Info failed has no Health. See "Status from Get Health Info" in
+docs/Redfish-API.md.
 
 #### Health Status
 
