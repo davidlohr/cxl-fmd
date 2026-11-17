@@ -316,6 +316,15 @@ json_t *fmd_redfish_system_memory_domain(struct fmd_ctx *ctx,
 		"MemoryChunks", "@odata.id", chunks_id,
 		"Links", "CXLLogicalDevices", lds
 	);
+	/*
+	 * What the host does with it the FM does not see (cxl-fmd's Oem):
+	 * "The switch prohibits any CXL.io access from the FM to a bound SLD
+	 * port and any CXL.io access from the FM to a bound LD within an MLD
+	 * component" (CXL r4.0 Section 7.2.3.1).
+	 */
+	if (result)
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s}}", "Cxl",
+			"HostState", "NotObserved"));
 out:
 	fmd_topology_rdunlock(&ctx->topology);
 	return result;
@@ -1015,9 +1024,25 @@ static const char *conn_access_state(enum fmd_conn_state state)
  *  - Absent: bound, and no device is on the port. "This function or device
  *    is not currently present or detected" (Resource_v1); it has no target
  *    nor memory to link to;
- *  - Enabled, Warning: bound, and what it reaches is not known.
+ *  - Enabled, Warning: bound, and what it reaches is not known; or a
+ *    direct-attached Connection that is inferred (direct_origin()).
  * Topology read lock held.
  */
+/*
+ * Where a direct-attached Connection comes from (cxl-fmd's Oem.Cxl.Origin):
+ * "Configured" for a head of a Multi-Headed device whose host the topology
+ * names (attached_host_id, which only a mock topology sets), "Inferred"
+ * for an SLD or MLD given to the only direct-attached host. An inferred
+ * one rests on no evidence of a CXL.mem link: that a device answers on a
+ * management interface (MCTP) does not say which root port, if any, it
+ * is linked to, and no CXL command reports that. It is Enabled, so that
+ * the host has its MemoryDomain, with Health Warning.
+ */
+static const char *direct_origin(const struct fmd_conn_view *v)
+{
+	return v->head ? "Configured" : "Inferred";
+}
+
 static json_t *conn_json(const struct fmd_conn_view *v)
 {
 	json_t *targets = json_array(), *chunks = json_array(), *links, *result;
@@ -1037,6 +1062,8 @@ static json_t *conn_json(const struct fmd_conn_view *v)
 		health = "Warning";
 		break;
 	case FMD_CONN_ENABLED:
+		if (v->kind == FMD_CONN_DIRECT && !strcmp(direct_origin(v), "Inferred"))
+			health = "Warning";
 		break;
 	}
 
@@ -1085,6 +1112,9 @@ static json_t *conn_json(const struct fmd_conn_view *v)
 			"Oem", "#Cxl.ForceUnbind", "target",
 			rf_uri(0, "/redfish/v1/Fabrics/CXL/Connections/%s/Actions/Oem/Cxl.ForceUnbind",
 			       v->id)));
+	} else {
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s}}", "Cxl",
+			"Origin", direct_origin(v)));
 	}
 	return result;
 }

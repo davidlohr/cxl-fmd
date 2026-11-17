@@ -1403,13 +1403,17 @@ func (e *CXLExporter) Collect(ch chan<- prometheus.Metric) {
 }
 ```
 
-**Deployment with Exporter Sidecar**:
+**Deployment with Exporter Sidecar** (one cxl-fmd per fabric: see
+"Kubernetes MFM Deployment"):
 ```yaml
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: cxl-fmd
 spec:
+  replicas: 1
+  strategy:
+    type: Recreate
   template:
     spec:
       containers:
@@ -1949,15 +1953,31 @@ Dedicated management appliance for large CXL fabrics.
 - Large-scale disaggregated memory deployments
 - Multi-rack CXL fabrics
 - Centralized policy enforcement
-- High-availability fabric management
+
+High availability is not implemented: cxl-fmd has no fail-over, leader
+election, lease or fencing, and two instances driving one switch would
+each act on bindings the other made (a `DELETE` unbinds whoever made the
+binding). Run one cxl-fmd per fabric.
 
 ### Kubernetes MFM Deployment (OCP Architecture)
 
-In the OCP MFM architecture, cxl-fmd runs as a DaemonSet on each CXL-capable node, serving as the MFM component that the MFM Node Agent communicates with.
+The OCP CMS white paper describes two Kubernetes components: an "MFM
+Controller – A cluster-level service that allocates memory slices from the
+CXL pool and exposes eligible nodes through topology hints", and an "MFM
+Node Agent – A daemonset running on each node that maps the allocated CXL
+memory slice into the pod’s namespace using standard mechanisms (dax
+devices, mem slabs, etc.)"; and "MFM serves as the central control point
+for fabric daemons deployed on any server within the Kubernetes cluster
+that contains CXL attachment points" (Section 7). In this sketch cxl-fmd is
+that central point: one instance for the fabric, as a Deployment with one
+replica on the node that has the fabric's management interface, behind a
+Service. The Node Agent is the DaemonSet, and calls cxl-fmd through the
+Service. cxl-fmd does not stop a second instance; keeping it to one is the
+deployment's job.
 
 ```yaml
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: cxl-fmd
   namespace: kube-system
@@ -1965,6 +1985,9 @@ metadata:
     app.kubernetes.io/name: cxl-fmd
     app.kubernetes.io/component: mfm
 spec:
+  replicas: 1                    # one Fabric Manager per fabric; no HA
+  strategy:
+    type: Recreate               # never two at once, not even during a rollout
   selector:
     matchLabels:
       app: cxl-fmd
@@ -1973,12 +1996,10 @@ spec:
       labels:
         app: cxl-fmd
     spec:
-      hostNetwork: true
-      hostPID: true
+      hostNetwork: true                 # MCTP endpoints are in the node's network namespace
       nodeSelector:
-        cxl.io/capable: "true"
+        cxl.io/fabric-manager: "true"   # the node with the fabric's MCTP link
       containers:
-      # cxl-fmd: The MFM component providing Redfish API
       - name: cxl-fmd
         image: ghcr.io/cxl-fmd/cxl-fmd:latest
         securityContext:
@@ -1990,15 +2011,50 @@ spec:
           mountPath: /sys
         ports:
         - containerPort: 8080
-          hostPort: 8080
           name: redfish
-
-      # MFM Node Agent: Handles NodePrepareResources/NodeUnprepareResources
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: sys
+        hostPath:
+          path: /sys
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cxl-fmd
+  namespace: kube-system
+spec:
+  selector:
+    app: cxl-fmd
+  ports:
+  - port: 8080
+    name: redfish
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mfm-node-agent
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: mfm-node-agent
+  template:
+    metadata:
+      labels:
+        app: mfm-node-agent
+    spec:
+      nodeSelector:
+        cxl.io/capable: "true"
+      containers:
+      # MFM Node Agent: NodePrepareResources/NodeUnprepareResources
       - name: mfm-node-agent
         image: ghcr.io/cxl-fmd/mfm-node-agent:latest
         env:
         - name: MFM_ENDPOINT
-          value: "http://localhost:8080"
+          value: "http://cxl-fmd.kube-system.svc:8080"
         - name: NODE_NAME
           valueFrom:
             fieldRef:
@@ -2008,14 +2064,7 @@ spec:
           mountPath: /var/run/cdi
         - name: kubelet-plugins
           mountPath: /var/lib/kubelet/plugins
-
       volumes:
-      - name: dev
-        hostPath:
-          path: /dev
-      - name: sys
-        hostPath:
-          path: /sys
       - name: cdi
         hostPath:
           path: /var/run/cdi
@@ -2024,10 +2073,14 @@ spec:
           path: /var/lib/kubelet/plugins
 ```
 
+cxl-fmd serves its Redfish API with no authentication: the Service has to
+be reachable only by the Controller and the Node Agents.
+
 **Use Cases**:
 - OCP MFM Kubernetes integration
 - DRA-based CXL memory allocation
-- Per-node CXL resource management
+- One Fabric Manager for the cluster's fabric, with a Node Agent on each
+  node that maps what it was given
 
 ---
 
@@ -2041,9 +2094,9 @@ cxl-fmd is meant to serve as the **MFM (Memory Fabric Manager)** component in th
 ┌─────────────────────────────────────┐
 │  MFM Controller (K8s DRA)           │  ← Cluster-level, calls cxl-fmd
 ├─────────────────────────────────────┤
-│  cxl-fmd (MFM)                      │  ← THIS PROJECT
+│  cxl-fmd (MFM), one per fabric      │  ← THIS PROJECT
 ├─────────────────────────────────────┤
-│  MFM Node Agent (K8s DaemonSet)     │  ← Per-node, calls cxl-fmd
+│  MFM Node Agent (K8s DaemonSet)     │  ← Per-node, reads cxl-fmd
 ├─────────────────────────────────────┤
 │  CXL Hardware (SLD/MLD/MHD/Switch)  │
 └─────────────────────────────────────┘
@@ -2066,8 +2119,9 @@ cxl-fmd is meant to serve as the **MFM (Memory Fabric Manager)** component in th
 | `GET /Chassis/{id}/MemoryDomains/{dom}` | Query capacity | MFM Controller, Node Agent |
 | `POST /MemoryDomains/{dom}/MemoryChunks` | Allocate memory slice | MFM Controller |
 | `DELETE /MemoryDomains/{dom}/MemoryChunks/{chunk}` | Deallocate memory | MFM Controller |
-| `POST /Fabrics/CXL/Connections` | Bind memory to node | MFM Node Agent |
-| `DELETE /Fabrics/CXL/Connections/{conn}` | Unbind memory | MFM Node Agent |
+| `POST /Fabrics/CXL/Connections` | Bind memory to node | MFM Controller |
+| `DELETE /Fabrics/CXL/Connections/{conn}` | Unbind memory, once the Node Agent says the node has let it go | MFM Controller |
+| `GET /Systems/{node}/MemoryDomains` | What the fabric makes reachable for the node (`HostState` `NotObserved`: not what it has mapped) | MFM Node Agent |
 | `GET /Fabrics/CXL/Zones` | Topology for AvailableOnNodes hints | MFM Controller |
 | `GET /Memory/{ld}` | Health status for eviction decisions | MFM Node Agent |
 
@@ -2077,8 +2131,8 @@ cxl-fmd enables the OCP DRA-based Kubernetes integration:
 
 1. **MFM Controller** queries cxl-fmd for capacity, creates MemoryChunks, returns topology hints
 2. **Kubernetes Scheduler** uses `AvailableOnNodes` to place pods on CXL-capable nodes
-3. **MFM Node Agent** creates Connections via cxl-fmd, maps memory into pod namespace
-4. **Pod termination** triggers NodeUnprepareResources, deleting Connections and releasing capacity
+3. **MFM Controller** creates the Connection to the chosen node via cxl-fmd; the **MFM Node Agent** on that node maps the memory into the pod's namespace
+4. **Pod termination** triggers NodeUnprepareResources: the Node Agent unmaps the memory and tells the Controller, which deletes the Connection and releases the capacity. cxl-fmd cannot see whether the node still uses the memory (see "What cxl-fmd can see of memory a host is given" in [Redfish-API.md](Redfish-API.md))
 
 ### Future OCP Enhancements Supported
 

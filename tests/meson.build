@@ -88,6 +88,22 @@ if pytest_available
     )
 endif
 
+# The docs' deployment sketches run one cxl-fmd per fabric
+if pytest_available
+    test(
+        'docs',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            meson.current_source_dir() / 'test_docs.py',
+        ],
+        timeout: 60,
+        suite: 'unit',
+    )
+endif
+
 # Quick endpoint tests (always run if pytest available)
 if pytest_available
     test(

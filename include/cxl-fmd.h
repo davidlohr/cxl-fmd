@@ -1190,11 +1190,12 @@ struct fmd_binding_op {
 
 /*
  * A binding this run of cxl-fmd made. Advisory only: it feeds the
- * Oem.Cxl.Origin of a Connection, and never decides whether a Connection
- * exists. Dropped when the vPPB no longer holds the key, and lost on a
- * restart: nothing the switch reports says who made a binding (Table
- * 7-34, Table 7-80). Kept on ctx->binding_marks, under fabric_lock as the
- * operations are.
+ * Oem.Cxl.Origin of a switch-attached Connection ("Service" or
+ * "Discovered"; a direct-attached one's is "Inferred" or "Configured"),
+ * and never decides whether a Connection exists. Dropped when the vPPB
+ * no longer holds the key, and lost on a restart: nothing the switch
+ * reports says who made a binding (Table 7-34, Table 7-80). Kept on
+ * ctx->binding_marks, under fabric_lock as the operations are.
  */
 struct fmd_binding_mark {
 	struct fmd_bind_key key;

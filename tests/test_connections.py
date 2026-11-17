@@ -11,8 +11,12 @@ Memory Model:
 - DELETE chunk frees capacity, POST allocates from remaining
 """
 
+import json
+
 import pytest
 import requests
+
+from test_health import daemon  # noqa: F401  (the fixture)
 
 
 # =============================================================================
@@ -477,11 +481,12 @@ class TestForceUnbindDirect:
 
     def test_not_offered_on_a_direct_attached_connection(self, api_client):
         """A direct-attached Connection has no vPPB to unbind: no action,
-        no Origin, and the action URI is 400."""
+        an Origin that is not a binding's, and the action URI is 400."""
         cid = "local_direct_sld_0"
         status, conn = api_client.get(f"{CONNECTIONS}/{cid}")
         assert status == 200
-        assert "Actions" not in conn and "Oem" not in conn
+        assert "Actions" not in conn
+        assert conn["Oem"] == {"Cxl": {"Origin": "Inferred"}}
         status, data, _ = api_client.post(
             f"{CONNECTIONS}/{cid}/Actions/Oem/Cxl.ForceUnbind", {})
         assert status == 400
@@ -507,3 +512,101 @@ class TestDirectAttachedConnections:
         chunk_path = "/redfish/v1/Chassis/cxl_mld_0/MemoryDomains/cxl_mld_0_domain0/MemoryChunks/cxl_mld_0_ld0_chunk"
         status, data, _ = post(api_client, "host0", "cxl_mld_0", [chunk_path])
         assert status == 400
+
+
+# =============================================================================
+# What a host's MemoryDomain and a direct-attached Connection prove
+# =============================================================================
+
+HOST_STATE = {"Cxl": {"HostState": "NotObserved"}}
+
+
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestInferredDirect:
+    """Review F04 claim 4 and F13: a device on no switch port is given to
+    the only direct-attached host, 'local' on hardware, with no evidence of
+    a CXL.mem link: it answered on a management interface, which says
+    nothing of the root port it is linked to. Its Connection is Origin
+    Inferred, with Health Warning, and still Enabled, so that the host has
+    its MemoryDomain. A host's MemoryDomain is what the fabric makes
+    reachable, not what the host has mapped, which the FM does not see:
+    Oem.Cxl.HostState NotObserved. These are cxl-fmd's Oem."""
+
+    CID = "local_direct_cxl_mem0"
+
+    def test_direct_connection_is_inferred(self, api_client):
+        status, data = api_client.get(CONNECTIONS)
+        assert data["Members"] == [{"@odata.id": f"{CONNECTIONS}/{self.CID}"}]
+        status, conn = api_client.get(f"{CONNECTIONS}/{self.CID}")
+        assert status == 200
+        assert conn["Status"] == {"State": "Enabled", "Health": "Warning"}
+        assert conn["Oem"] == {"Cxl": {"Origin": "Inferred"}}
+        # the POST of the pair answers the same
+        status, again, _ = post(api_client, "local", "cxl_mem0")
+        assert status == 200 and again["Oem"] == conn["Oem"]
+        assert again["Status"] == conn["Status"]
+
+    def test_host_domain_is_not_observed(self, api_client):
+        status, data = api_client.get("/redfish/v1/Systems/local/MemoryDomains")
+        assert data["Members"] == [
+            {"@odata.id": f"/redfish/v1/Systems/local/MemoryDomains/{self.CID}"}]
+        status, domain = api_client.get(
+            f"/redfish/v1/Systems/local/MemoryDomains/{self.CID}")
+        assert status == 200
+        assert domain["Oem"] == HOST_STATE
+
+
+def mixed_direct_topology(project_root):
+    """fm-boots-first.json, with a direct-attached host 'dhost' and an SLD
+    on no switch port, 'sld_direct' (review F04, mixed-dhost.json)."""
+    with open(project_root / "mock" / "fm-boots-first.json") as f:
+        topology = json.load(f)
+    topology["id"] = "mixed_dhost"
+    topology["hosts"] = [{"id": "dhost", "direct_attached": True}]
+    topology["devices"].append({
+        "id": "sld_direct", "vendor_id": "0x8086", "device_id": "0x0d93",
+        "serial_number": "0x534c443030309999", "component_type": 3, "ld_count": 1,
+        "identify_memory_device": {"fw_revision": "1.0.0", "total_capacity_mb": 16384,
+                                   "volatile_capacity_mb": 16384,
+                                   "persistent_capacity_mb": 0},
+        "health_info": {"health_status": 0, "media_status": 0}})
+    return topology
+
+
+def test_mixed_direct_and_switch(daemon, project_root):
+    """On a fabric with a switch and a direct-attached host: the direct
+    Connection is Inferred, with a Warning; a binding cxl-fmd makes is
+    Origin Service, OK; and both hosts' MemoryDomains are NotObserved."""
+    base = daemon(mixed_direct_topology(project_root))
+
+    def get(uri):
+        response = requests.get(base + uri, timeout=30)
+        assert response.status_code == 200, uri
+        return response.json()
+
+    cid = "dhost_direct_sld_direct"
+    conn = get(f"{CONNECTIONS}/{cid}")
+    assert conn["Status"] == {"State": "Enabled", "Health": "Warning"}
+    assert conn["Oem"] == {"Cxl": {"Origin": "Inferred"}}
+    assert get(f"/redfish/v1/Systems/dhost/MemoryDomains/{cid}")["Oem"] == HOST_STATE
+
+    ep = "/redfish/v1/Fabrics/CXL/Endpoints/"
+    response = requests.post(base + CONNECTIONS, json={"Links": {
+        "InitiatorEndpoints": [{"@odata.id": ep + "switch_0_host0"}],
+        "TargetEndpoints": [{"@odata.id": ep + "sld_0"}]}}, timeout=30)
+    assert response.status_code == 201, response.text
+    bound = response.json()
+    assert bound["Status"] == {"State": "Enabled", "Health": "OK"}
+    assert bound["Oem"] == {"Cxl": {"Origin": "Service"}}
+    domain = get(f"/redfish/v1/Systems/switch_0_host0/MemoryDomains/{bound['Id']}")
+    assert domain["Oem"] == HOST_STATE
+
+
+@pytest.mark.mock_topology("mock/unit/unit-direct-mhsld.json")
+def test_head_connection_is_configured(api_client):
+    """The host of a head of a Multi-Headed device is the one the topology
+    names (attached_host, a mock topology's only): Origin Configured, OK."""
+    status, conn = api_client.get(f"{CONNECTIONS}/host0_direct_mhsld_0_h0")
+    assert status == 200
+    assert conn["Status"] == {"State": "Enabled", "Health": "OK"}
+    assert conn["Oem"] == {"Cxl": {"Origin": "Configured"}}

@@ -647,7 +647,12 @@ named. Which Connections give one is cxl-fmd's choice.
 This is what a binding makes reachable, not what the host has mapped: the
 FM does not see that. "The switch prohibits any CXL.io access from the FM
 to a bound SLD port and any CXL.io access from the FM to a bound LD within
-an MLD component" (CXL r4.0 Section 7.2.3.1).
+an MLD component" (CXL r4.0 Section 7.2.3.1). Each host `MemoryDomain`
+says so with `"Oem": {"Cxl": {"HostState": "NotObserved"}}` (cxl-fmd's
+Oem): what the host has accepted, mapped or put to use is not known to
+cxl-fmd (see "What cxl-fmd can see of memory a host is given"). A domain
+from a direct-attached Connection that is `Inferred` rests on no evidence
+of a link either (see "What a Connection is").
 
 ### Chassis Model
 
@@ -1139,18 +1144,26 @@ are seen only on the vPPB, in `BindingStatus`.
 
 A direct-attached Connection has no vPPB: there is no VCS, and no bind,
 on a link from a host's root port to a device. That the link is the
-Connection is cxl-fmd's choice. It derives one, always `Enabled`, for:
+Connection is cxl-fmd's choice. It derives one, always `Enabled`, with
+`Oem.Cxl.Origin` saying where it comes from, for:
 
 - the only direct-attached host (the `local` host of a topology with no
   switch) with each SLD and MLD that is on no switch port; for an MLD, its
   `TargetEndpoints` are all of its LDs. What an MLD on a root port gives
   its host, the specification does not say. With more than one
   direct-attached host, nothing says whose link a device is on, and there
-  is none;
+  is none. Such a Connection is `Inferred`, with `Health` `Warning`: that
+  a device answers on a management interface such as MCTP says nothing of
+  which root port, if any, its CXL.mem link is on, and no CXL command
+  reports that. It is still `Enabled`, so that the host has its
+  `MemoryDomain`. A device reached through the mailbox of the kernel
+  cxl-fmd runs on (`-i`) is on that host's hierarchy, but cxl-fmd does
+  not tell it apart, and marks it `Inferred` too (cxl-fmd's choice);
 - each head of a Multi-Headed device that is on no switch port and whose
   host is known, with the pool LDs that the LD Map (Table 7-61) maps to
   that head. Only a mock topology says which host a head is attached to
-  (`attached_host`): no command maps a head to a host.
+  (`attached_host`): no command maps a head to a host. Such a Connection
+  is `Configured`, `OK`: the topology names the host.
 
 #### Connection IDs
 
@@ -1215,7 +1228,9 @@ another vPPB is another ID; a `POST` of that target finds it.
   bind or unbind of it is under way (`Starting`, `Updating`): cxl-fmd's
   choice of Connection_v1's values. Left out while `Absent`, and when the
   target is not known
-- `Oem.Cxl.Origin` (switch-attached only): see "Forcing an Unbind"
+- `Oem.Cxl.Origin`: of a switch-attached one, `Service` or `Discovered`
+  (see "Forcing an Unbind"); of a direct-attached one, `Inferred` or
+  `Configured` (see above). cxl-fmd's Oem
 - `Actions.Oem["#Cxl.ForceUnbind"]` (switch-attached only): see "Forcing
   an Unbind"
 
@@ -1226,8 +1241,8 @@ cxl-fmd's choice:
 |---------|----------|------|
 | `Starting` | `OK` | cxl-fmd's bind of it is under way |
 | `Updating` | `OK` | cxl-fmd's unbind of it is under way |
-| `Enabled` | `OK` | bound, and what it reaches is known; every direct-attached Connection |
-| `Enabled` | `Warning` | bound, and what it reaches is not known: an LD of a head that presents an MLD (see "Endpoints"), or an LD-ID the MLD does not have |
+| `Enabled` | `OK` | bound, and what it reaches is known; a direct-attached Connection that is `Configured` |
+| `Enabled` | `Warning` | bound, and what it reaches is not known: an LD of a head that presents an MLD (see "Endpoints"), or an LD-ID the MLD does not have; a direct-attached Connection that is `Inferred` |
 | `Absent` | `OK` | bound, and no device is on the port (see "When a Device Is Removed") |
 
 A `PATCH` of a Connection is answered `405 Method Not Allowed`, `Allow:
@@ -1472,11 +1487,40 @@ The complete memory lifecycle is:
 4. **Unbinding** - `DELETE /redfish/v1/Fabrics/CXL/Connections/{id}` releases the binding (vPPB unbind), or `#Cxl.ForceUnbind` forces it.
 5. **Deprovisioning** - `DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}` returns capacity to the available pool, once no switch-attached Connection exposes the chunk (409 until then).
 
+### What cxl-fmd can see of memory a host is given
+
+Memory reaches a workload in five steps. The split is the design review's
+(F13); the names, and which of them cxl-fmd serves, are cxl-fmd's. The FM
+serves the first two, and the third only for Dynamic Capacity. The rest
+belong to the host and whatever coordinates it: cxl-fmd takes no input
+from a host, and nothing it serves says that a host has mapped or is
+using memory.
+
+| Step | What it means | What cxl-fmd serves |
+|------|---------------|---------------------|
+| Fabric-associated | the switch has bound the port or LD to the host's VCS, or the device is on the host's link | a Connection: from Get Virtual CXL Switch Info (5200h), or derived for a direct-attached device (`Oem.Cxl.Origin` `Inferred` or `Configured`) |
+| Device-allocated | the device has given the LD or host the capacity | chunks: LD allocations (Get LD Allocations, 5401h), an SLD's partition (Get Partition Info, 4100h; a chunk staged for a reset is `StandbyOffline`), Dynamic Capacity extents (Get Host DC Region Configuration and Get DC Region Extent Lists, 5601h and 5603h) |
+| Host-accepted | the host has taken the capacity | for Dynamic Capacity only, per tag: an LD in `PendingLDs` "for which the tagged capacity has been added with no host response yet" (Pending Reference Bitmap, CXL r4.0 Table 7-78), in `Oem/Cxl/DynamicCapacityTags` (see [DCD-FM-API.md](DCD-FM-API.md)); "The Extent List does not contain extents that are still pending acceptance from the host via the Add Dynamic Capacity Response command" (Section 9.13.3). Not for a binding or an allocation: the FM has no CXL.io access to a bound port or LD (Section 7.2.3.1) |
+| Host-mapped | the host has decoded the capacity into its address space and onlined it | nothing: host `MemoryDomains` are `HostState` `NotObserved` |
+| Workload-ready | applications use it, and can let it go | nothing |
+
+The host decides how much of an add it takes: it "responds back to the
+device with the updated extent for the exact capacity it added ... This
+allows the host to control exactly how much of the added capacity it
+wishes to utilize, which may be less than the amount of capacity sent in
+the add capacity event, or even 0" (Section 9.13.3). The OCP Composable
+Memory Systems white paper (informative) keeps "the separation between
+fabric-level coordination and host-level memory management" (Section
+5.5). So a `MemoryDomain` under `/redfish/v1/Systems/{id}` is what the
+fabric makes reachable for that host. A `DELETE` of a Connection, or of a
+chunk, is not a sign that the host stopped using the memory: a host-side
+coordinator has to say that before a client asks.
+
 ### Direct-Attached vs Switch-Attached
 
 | Topology | vPPB Binding | Connections |
 |----------|--------------|-------------|
-| Direct-attached | None: there is no switch | Derived from the link, always `Enabled`; `POST` of the pair is `200`, `DELETE` is `405` |
+| Direct-attached | None: there is no switch | Derived from the link, always `Enabled` (`Inferred` with `Warning`, or `Configured`); `POST` of the pair is `200`, `DELETE` is `405` |
 | Switch-attached | Bind vPPB and Unbind vPPB | One per vPPB binding of a host's VCS to a memory device's port, whoever made it; `POST` binds, `DELETE` unbinds |
 
 ### Open questions, and the choice made for each
@@ -1661,7 +1705,12 @@ These are known gaps in what cxl-fmd does:
   `"Discovered"`.
 - What a host has mapped of what is bound is not known: the FM has no
   CXL.io access to a bound port or LD (Section 7.2.3.1). A `MemoryDomain`
-  of a host is what a binding makes reachable.
+  of a host is what a binding makes reachable (`HostState`
+  `NotObserved`).
+- A direct-attached SLD or MLD is given to the only direct-attached host
+  with no evidence of the link (`Inferred`, `Warning`). Proving it would
+  take a host-side source, such as a host agent matching the device's
+  serial number, or the operator's configuration; cxl-fmd has neither.
 
 ### DSP0288 mappings
 
@@ -1896,6 +1945,9 @@ Changes from the fixes of the external design review (branch
 | Chunk `DELETE` and `POST` on hardware of a `"Volatile"` chunk of an SLD with no partitionable capacity (Partition Alignment 0, such as one that is all Volatile Only) | `400`: Set Partition Info was taken to be needed, and is not sent to such a device (nor to any SLD behind a switch), so the chunk found at discovery could not be deleted and no `"Volatile"` chunk made | `204` / `201`, nothing sent: the chunk divides the Volatile Only capacity, as in a mock |
 | `"Volatile"` chunk `POST` on a bound SLD with no partitionable capacity (`sld_0` of `mock/fm-boots-first.json` once bound) | `409` "A Connection binds the logical device" | `201`, nothing sent, as for a `"PMEM"` chunk; one of an SLD with partitionable capacity is still `409` |
 | `"Volatile"` chunk `POST` on hardware on a directly attached SLD with partitionable capacity (Set Partition Info sent, not Immediate) | `201` and an `Enabled` chunk, in the direct-attached Connection's `MemoryChunkInfo` and the host's `MemoryDomains`, though its partition is active only from the device's next reset | `201` with `Status.State` `StandbyOffline`; in no Connection or host view, and a Connection `POST` naming it `409`, until a `--rescan` reads Get Partition Info with the change active (then `Enabled`) or gone (then the chunk is removed). See "Staged chunks" |
+| `GET` of a direct-attached Connection of an SLD or MLD (given to the only direct-attached host, `local` on hardware) | `Status` `Enabled`, `OK`, no `Oem` | `Enabled`, `Warning`, with `Oem.Cxl.Origin` `Inferred`; still the host's `MemoryDomain` |
+| `GET` of a direct-attached Connection of a head of a Multi-Headed device (mock topologies only) | no `Oem` | `Oem.Cxl.Origin` `Configured`; `Status` unchanged |
+| `GET` of a host's `MemoryDomain` (`/redfish/v1/Systems/{id}/MemoryDomains/{dom}`) | no `Oem` | `Oem.Cxl.HostState` `NotObserved`: what the host has mapped is not known |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
 
 Mock topologies and discovery:

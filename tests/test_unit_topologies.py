@@ -204,7 +204,9 @@ class TestDirectSLDConnections:
         assert connection_ids(api_client) == [self.CID]
         status, data = api_client.get(f"{CONNECTIONS}/{self.CID}")
         assert status == 200
-        assert data["Status"] == {"State": "Enabled", "Health": "OK"}
+        # inferred, not observed (review F04): see TestInferredDirect
+        assert data["Status"] == {"State": "Enabled", "Health": "Warning"}
+        assert data["Oem"] == {"Cxl": {"Origin": "Inferred"}}
         assert data["Links"]["InitiatorEndpoints"] == [{"@odata.id": EP + "local"}]
         assert data["Links"]["TargetEndpoints"] == [{"@odata.id": EP + "sld_0"}]
         assert [i["MemoryChunk"]["@odata.id"] for i in data["MemoryChunkInfo"]] == [
