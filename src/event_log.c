@@ -468,11 +468,18 @@ static void device_record_count(struct fmd_ctx *ctx, struct fmd_component *dev,
  * Health Status or Media Status adds an event to one of them (Table 8-315,
  * see fmd_refresh_health()). Which record says so is not looked at; that
  * any of them is enough is cxl-fmd's choice.
+ *
+ * A record in any of the logs of an SLD, or an overflow, also has its
+ * staged chunks looked at again (fmd_sld_staged_refresh(), one Get
+ * Partition Info, only for an SLD that has one): the reset a staged
+ * partition waits for may have come. No event record is defined to say
+ * that a memory device was reset; that any record may mean so is
+ * cxl-fmd's choice.
  */
 static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct cxlmi_tunnel_info tbuf, *ti = CXLMI_NO_TUNNEL;
-	bool health = false;
+	bool health = false, any = false;
 
 	if (dev->type == FMD_COMPONENT_MLD && fmd_to_mld(dev)->switch_port >= 0) {
 		DEFINE_CXLMI_TUNNEL_SWITCH(t, fmd_to_mld(dev)->switch_port);
@@ -490,6 +497,8 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 				    &records, &o);
 		if (which >= 1 && (records || o.set))
 			health = true;
+		if (records || o.set)
+			any = true;
 		if (!o.set)
 			continue;
 
@@ -506,6 +515,8 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 
 	if (health)
 		fmd_refresh_health(ctx, dev);
+	if (any && dev->type == FMD_COMPONENT_SLD)
+		fmd_sld_staged_refresh(ctx, fmd_to_sld(dev));
 }
 
 bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev)

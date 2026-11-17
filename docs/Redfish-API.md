@@ -243,10 +243,30 @@ Partition Info shows it active (cxl-fmd's choices):
   it is `409`;
 - its range of the domain stays its own: no other chunk is given it;
 - a `DELETE` of it sends Set Partition Info for the volatile capacity
-  staged less the chunk, as for any `"Volatile"` chunk.
+  staged less the chunk, as for any `"Volatile"` chunk;
+- it has `Oem.Cxl.PendingPartition` (`#Cxl.v1_0_0.MemoryChunk`, in the
+  `201` and on a `GET`): `NextVolatileCapacityBytes`, the volatile
+  capacity in all it was staged with, and `ActivationResets`, the resets
+  the device names for Set Partition Info. The change is "to become active
+  on the next reset (as specified in the command effects)" (CXL r4.0 Table
+  8-311), and the Command Effect of 4101h in the device's Command Effects
+  Log, read at discovery, has "Configuration Change after Cold Reset"
+  (Bit[0], `ColdReset`), "Configuration Change after Conventional Reset"
+  (Bit[10], `ConventionalReset`) and "Configuration Change after CXL
+  Reset" (Bit[11], `CXLReset`), these two valid only when Bit[9],
+  "CEL[11:10] Valid", is set (Table 8-254). Each is "The change takes
+  effect after a ..." reset: whether one of those listed is enough or all
+  are needed, the table does not say, and cxl-fmd does not either.
+  `ActivationResets` is empty when the CEL lists 4101h with none of them,
+  and absent when the CEL could not be read or does not list 4101h. The
+  names are cxl-fmd's (see "Oem schema").
 
-Each `--rescan` reads Get Partition Info of an SLD that has a staged
-chunk, and of no other. While Next Volatile or Next Persistent Capacity
+Get Partition Info of an SLD that has a staged chunk, and of no other, is
+read on each `--rescan`, and when a read of the SLD's event logs finds a
+record in any of them, or an overflow: no event record is defined to say
+that a memory device was reset, and taking any record as one that may is
+cxl-fmd's choice. An SLD whose logs are the host's (one on the kernel's
+mailbox) is read only on a `--rescan`. While Next Volatile or Next Persistent Capacity
 is not 0 ("If both this field and the Next Persistent Capacity field are
 0, there is no pending change to the partitioning", Table 8-310), it
 stays staged. With no change pending, a chunk whose Next Volatile
@@ -699,6 +719,7 @@ derived from `Resource.OemObject`:
 | `Connection` | `#Cxl.v1_0_0.Connection` | `Origin` |
 | `PCIeDevice` of a DCD | `#Cxl.v1_0_0.PCIeDevice` | `DynamicCapacity` (sizes in bytes) and `DynamicCapacityTags` (with `LastRefreshed`; see [DCD-FM-API.md](DCD-FM-API.md)) |
 | `CXLLogicalDevice` of a DCD, once its host's regions or extents have been read | `#Cxl.v1_0_0.CXLLogicalDevice` | `DynamicCapacityRegionsLastRefreshed`, `DynamicCapacityExtentsLastRefreshed` |
+| `MemoryChunk` of an SLD staged for a reset (see "Staged chunks") | `#Cxl.v1_0_0.MemoryChunk` | `PendingPartition` (`NextVolatileCapacityBytes`, `ActivationResets`) |
 | `MemoryRegion` of a DCD | `#Cxl.v1_0_0.MemoryRegion` | `RegionBaseOffsetBytes`, `RegionSizeBytes`, `BlockSizeBytes`, `LastRefreshed` |
 | `MemoryExtent` | `#Cxl.v1_0_0.MemoryExtent` | `ExtentOffsetBytes`, `ExtentSizeBytes`, `LastRefreshed` |
 
@@ -2246,10 +2267,11 @@ These are known gaps in what cxl-fmd does:
   unless started with `--allow-mctp-restricted`. With that option it sends
   them whenever a client asks; use it only when no host drives the devices
   (see "Commands restricted on MCTP").
-- Which reset makes a staged partition active (the command effects of Set
-  Partition Info, in the CEL) is not read, and nothing tells cxl-fmd that
-  the device was reset: a staged chunk (see "Staged chunks") is looked at
-  again only on a `--rescan`, so with none it stays `StandbyOffline`.
+- Nothing tells cxl-fmd that a device was reset. Which resets make a
+  staged partition active is served (`ActivationResets`, from the CEL),
+  but a staged chunk (see "Staged chunks") is looked at again only on a
+  `--rescan` and when the SLD's event logs have a record, so with neither
+  it stays `StandbyOffline` after the reset.
 
 ### Conditions
 
@@ -2482,7 +2504,8 @@ Changes from the fixes of the external design review (branch
 | `GET` of a Connection while the switch binds or unbinds it (`Status.State` `Starting` or `Updating`) | `MemoryChunkInfo[].AccessState` `Optimized` | `Transitioning`; `Optimized` once it is `Enabled` |
 | Chunk `DELETE` and `POST` on hardware of a `"Volatile"` chunk of an SLD with no partitionable capacity (Partition Alignment 0, such as one that is all Volatile Only) | `400`: Set Partition Info was taken to be needed, and is not sent to such a device (nor to any SLD behind a switch), so the chunk found at discovery could not be deleted and no `"Volatile"` chunk made | `204` / `201`, nothing sent: the chunk divides the Volatile Only capacity, as in a mock |
 | `"Volatile"` chunk `POST` on a bound SLD with no partitionable capacity (`sld_0` of `mock/fm-boots-first.json` once bound) | `409` "A Connection binds the logical device" | `201`, nothing sent, as for a `"PMEM"` chunk; one of an SLD with partitionable capacity is still `409` |
-| `"Volatile"` chunk `POST` on hardware on a directly attached SLD with partitionable capacity (Set Partition Info sent, not Immediate) | `201` and an `Enabled` chunk, in the direct-attached Connection's `MemoryChunkInfo` and the host's `MemoryDomains`, though its partition is active only from the device's next reset | `201` with `Status.State` `StandbyOffline`; in no Connection or host view, and a Connection `POST` naming it `409`, until a `--rescan` reads Get Partition Info with the change active (then `Enabled`) or gone (then the chunk is removed). See "Staged chunks" |
+| `"Volatile"` chunk `POST` on hardware on a directly attached SLD with partitionable capacity (Set Partition Info sent, not Immediate) | `201` and an `Enabled` chunk, in the direct-attached Connection's `MemoryChunkInfo` and the host's `MemoryDomains`, though its partition is active only from the device's next reset | `201` with `Status.State` `StandbyOffline`; in no Connection or host view, and a Connection `POST` naming it `409`, until Get Partition Info, read on a `--rescan` (or after a record in the SLD's event logs, see the next row), shows the change active (then `Enabled`) or gone (then the chunk is removed). See "Staged chunks" |
+| The `201` and `GET` of such a staged chunk; what has it looked at again | no `Oem`; nothing said of the reset it waits for; looked at only on a `--rescan` | `Oem.Cxl.PendingPartition` (`#Cxl.v1_0_0.MemoryChunk`): `NextVolatileCapacityBytes`, and `ActivationResets` (`ColdReset`, `ConventionalReset`, `CXLReset`), the resets the Command Effect of Set Partition Info in the device's CEL names, absent when it is not known; Get Partition Info is read again also when the SLD's event logs have a record or overflowed, not only on a `--rescan` (review F15 claim 4) |
 | `GET` of a direct-attached Connection of an SLD or MLD (given to the only direct-attached host, `local` on hardware) | `Status` `Enabled`, `OK`, no `Oem` | `Enabled`, `Warning`, with `Oem.Cxl.Origin` `Inferred`; still the host's `MemoryDomain` |
 | `GET` of a direct-attached Connection of a head of a Multi-Headed device (mock topologies only) | no `Oem` | `Oem.Cxl.Origin` `Configured`; `Status` unchanged |
 | `GET` of a host's `MemoryDomain` (`/redfish/v1/Systems/{id}/MemoryDomains/{dom}`) | no `Oem` | `Oem.Cxl.HostState` `NotObserved`: what the host has mapped is not known |

@@ -154,6 +154,48 @@
         </Property>
       </ComplexType>
 
+      <ComplexType Name="MemoryChunk" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a memory chunk."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a memory chunk of a single logical device whose Set Partition Info (4101h) was sent without Immediate, and which is staged until the device is reset."/>
+        <Property Name="PendingPartition" Type="Cxl.v1_0_0.PendingPartition" Nullable="false">
+          <Annotation Term="OData.Description" String="The partition the chunk waits for."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the partition of the device the chunk is staged for, which CXL r4.0 Table 8-311 says shall 'become active on the next reset (as specified in the command effects)'.  It shall be present only while the chunk's Status.State is StandbyOffline for that reason."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="PendingPartition">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="A partition of a memory device that is to become active on a reset."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain a partition of a memory device that Set Partition Info (4101h) staged, and the resets after which the device says it takes effect."/>
+        <Property Name="NextVolatileCapacityBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The volatile capacity of the device in all once the partition is active, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain, in bytes, the Volatile Capacity in all that the chunk was staged with, which Get Partition Info (4100h) reports as Next Volatile Capacity (CXL r4.0 Table 8-310) while the change is pending.  The chunk shall become enabled once Active Volatile Capacity reaches it with no change pending."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="ActivationResets" Type="Collection(Cxl.v1_0_0.ResetType)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The resets after which the device says a change of Set Partition Info takes effect."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the resets the Command Effect of Set Partition Info (4101h) in the device's Command Effects Log names (CXL r4.0 Table 8-254): ColdReset for Bit[0], and, when Bit[9] (CEL[11:10] Valid) is set, ConventionalReset for Bit[10] and CXLReset for Bit[11].  Whether one of them is enough, or all are needed, the table does not say.  It shall be empty when the log lists 4101h with none of them, and absent when the log was not read, or does not list 4101h."/>
+        </Property>
+      </ComplexType>
+
+      <EnumType Name="ResetType">
+        <Member Name="ColdReset">
+          <Annotation Term="OData.Description" String="Configuration Change after Cold Reset."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate Command Effect Bit[0]: 'The change takes effect after a device cold reset' (CXL r4.0 Table 8-254)."/>
+        </Member>
+        <Member Name="ConventionalReset">
+          <Annotation Term="OData.Description" String="Configuration Change after Conventional Reset."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate Command Effect Bit[10]: 'The change takes effect after a Conventional Reset' (CXL r4.0 Table 8-254)."/>
+        </Member>
+        <Member Name="CXLReset">
+          <Annotation Term="OData.Description" String="Configuration Change after CXL Reset."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate Command Effect Bit[11]: 'The change takes effect after a CXL Reset' (CXL r4.0 Table 8-254)."/>
+        </Member>
+      </EnumType>
+
       <ComplexType Name="MemoryRegion" BaseType="Resource.OemObject">
         <Annotation Term="OData.AdditionalProperties" Bool="false"/>
         <Annotation Term="OData.Description" String="cxl-fmd's properties of a dynamic capacity region."/>

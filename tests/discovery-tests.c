@@ -1917,12 +1917,11 @@ static void test_conditions(void)
  * @pers, with Partition Alignment @align, all in units of 256 MB, and
  * @active_vol of it volatile now (Get Partition Info, Table 8-310).
  */
-static struct fmd_sld *direct_sld(struct fmd_ctx *ctx,
-				  struct cxlmi_endpoint **epp, uint64_t serial,
-				  uint64_t total, uint64_t vol, uint64_t pers,
-				  uint64_t align, uint64_t active_vol)
+/* direct_sld() on @ep, a device made by new_device() */
+static struct fmd_sld *direct_sld_on(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+				     uint64_t serial, uint64_t total, uint64_t vol,
+				     uint64_t pers, uint64_t align, uint64_t active_vol)
 {
-	struct cxlmi_endpoint *ep = new_device(ctx);
 	char id[FMD_MAX_ID_LEN];
 	uint8_t pl[0x45] = { 0 }, part[0x20] = { 0 };
 
@@ -1940,9 +1939,17 @@ static struct fmd_sld *direct_sld(struct fmd_ctx *ctx,
 	answer(ep, 0x4000, pl, sizeof(pl));
 	fmd_discover(ctx);
 
-	*epp = ep;
 	device_id(id, sizeof(id), serial);
 	return fmd_topology_find_sld(&ctx->topology, id);
+}
+
+static struct fmd_sld *direct_sld(struct fmd_ctx *ctx,
+				  struct cxlmi_endpoint **epp, uint64_t serial,
+				  uint64_t total, uint64_t vol, uint64_t pers,
+				  uint64_t align, uint64_t active_vol)
+{
+	*epp = new_device(ctx);
+	return direct_sld_on(ctx, *epp, serial, total, vol, pers, align, active_vol);
 }
 
 /*
@@ -7979,6 +7986,204 @@ static void test_rescan_reads_new_logs(void)
 }
 
 /*
+ * The Command Effects Log of an SLD (Get Supported Logs, then Get Log of
+ * the CEL, Table 8-253) with Identify Memory Device, Get Partition Info and
+ * Set Partition Info, this one with Command Effect @effect, or without Set
+ * Partition Info for @effect -1.
+ */
+static void answer_cel_set_partition(struct cxlmi_endpoint *ep, int effect)
+{
+	static const uint8_t cel_uuid[16] = {
+		0x0d, 0xa9, 0xc0, 0xb5, 0xbf, 0x41, 0x4b, 0x78,
+		0x8f, 0x79, 0x96, 0xb1, 0x62, 0x3b, 0x3f, 0x17
+	};
+	static const uint16_t ops[] = { 0x4000, 0x4100, 0x4200, 0x4101 };
+	uint8_t logs[8 + 20] = { 0 }, cel[4 * 4] = { 0 };
+	size_t n = effect < 0 ? 3 : 4;
+
+	logs[0] = 1;					/* one log */
+	memcpy(logs + 8, cel_uuid, 16);
+	logs[8 + 16] = 4 * n;				/* its Log Size */
+	for (size_t i = 0; i < n; i++) {
+		cel[4 * i] = ops[i] & 0xff;
+		cel[4 * i + 1] = ops[i] >> 8;
+	}
+	if (effect >= 0)
+		put16(cel + 4 * 3 + 2, (uint16_t)effect);	/* Command Effect */
+	answer(ep, 0x0400, logs, sizeof(logs));
+	answer(ep, 0x0401, cel, 4 * n);
+}
+
+/* The Oem/Cxl/PendingPartition of @j, a MemoryChunk */
+static json_t *pending_partition(json_t *j)
+{
+	return json_object_get(json_object_get(json_object_get(j, "Oem"), "Cxl"),
+			       "PendingPartition");
+}
+
+/* Whether @pending has the ActivationResets @want, NULL for none */
+static bool activation_resets_are(json_t *pending, const char *const *want)
+{
+	json_t *v = json_object_get(pending, "ActivationResets");
+	size_t n = 0;
+
+	if (!want)
+		return pending && !v;
+	while (want[n])
+		n++;
+	if (!json_is_array(v) || json_array_size(v) != n)
+		return false;
+	for (size_t i = 0; i < n; i++) {
+		const char *s = json_string_value(json_array_get(v, i));
+
+		if (!s || strcmp(s, want[i]))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Review F15 claim 4: a staged chunk said nothing of the reset it waits
+ * for. Set Partition Info's change is "to become active on the next reset
+ * (as specified in the command effects)" (Table 8-311): its Command Effect
+ * in the CEL (Table 8-254) is read at discovery, and a staged chunk has
+ * Oem/Cxl/PendingPartition, its Next Volatile Capacity in bytes and the
+ * resets the effect names: Bit[0] Cold Reset, and Bits[10] Conventional
+ * and [11] CXL Reset only when Bit[9], CEL[11:10] Valid, is set. A CEL
+ * not read, or not listing 4101h, gives none. Then a record in the SLD's
+ * event logs has its staged chunk looked at again, with no re-scan.
+ */
+static void test_staged_chunk_resets(void)
+{
+	static const char *const all[] = { "ColdReset", "ConventionalReset", "CXLReset", NULL };
+	static const char *const cold[] = { "ColdReset", NULL };
+	static const char *const cxl[] = { "CXLReset", NULL };
+	static const char *const none[] = { NULL };
+	static const struct {
+		int effect;			/* -1: no 4101h; -2: no CEL */
+		const char *const *want;
+	} cases[] = {
+		{ 0x0e07, all },	/* Section 8.2.10.9.2.2's: Bits[0] to [2], [9] to [11] */
+		{ 0x0c01, cold },	/* Bits[10] and [11] with Bit[9] clear */
+		{ 0x0a00, cxl },	/* Bit[11] with Bit[9] */
+		{ 0x0c00, none },	/* none of them valid: an empty list */
+		{ -1, NULL },
+		{ -2, NULL },
+	};
+	static const char body[] =
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}";
+	int before = failures;
+
+	for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dom, *chunk;
+		char id[FMD_MAX_ID_LEN], dom_id[FMD_MAX_ID_LEN + 16];
+		char chunk_id[FMD_MAX_ID_LEN];
+		struct fmd_sld *sld;
+		json_t *rsp = NULL, *j;
+		int rc;
+
+		if (cases[c].effect != -2)
+			answer_cel_set_partition(ep, cases[c].effect);
+		sld = direct_sld_on(ctx, ep, 0x1120 + c, 64, 8, 16, 4, 24);
+		CHECK(sld && sld->set_partition_effect.known ==
+		      (cases[c].effect >= 0) &&
+		      (cases[c].effect < 0 ||
+		       sld->set_partition_effect.effect == cases[c].effect),
+		      "effect %#x: known %d, %#x", cases[c].effect,
+		      sld ? sld->set_partition_effect.known : -1,
+		      sld ? sld->set_partition_effect.effect : 0);
+		if (!sld)
+			goto next;
+		ctx->config.allow_mctp_restricted = true;
+		snprintf(id, sizeof(id), "%s", sld->base.id);
+		dom = fmd_first_child_type(&sld->base, FMD_COMPONENT_DOMAIN);
+		chunk = dom ? fmd_first_child_type(dom, FMD_COMPONENT_CHUNK) : NULL;
+		if (!dom || !chunk)
+			goto next;
+		snprintf(dom_id, sizeof(dom_id), "%s", dom->id);
+
+		/* an active chunk has no Oem */
+		j = fmd_redfish_memory_chunk(ctx, id, dom_id, chunk->id);
+		CHECK(j && !json_object_get(j, "Oem"), "an active chunk has an Oem");
+		json_decref(j);
+
+		rc = fmd_redfish_delete_memory_chunk(ctx, id, dom_id, chunk->id);
+		answer(ep, 0x4101, NULL, 0);
+		rc = rc ? rc : fmd_redfish_post_memory_chunk(ctx, id, dom_id, body,
+							     strlen(body), &rsp);
+		/* 6 GiB active, and 1 GiB more: 7 GiB, Next Volatile 28 */
+		CHECK(rc == 0 && json_integer_value(json_object_get(
+				pending_partition(rsp), "NextVolatileCapacityBytes")) ==
+		      (json_int_t)(28 * CXL_CAPACITY_UNIT) &&
+		      activation_resets_are(pending_partition(rsp), cases[c].want),
+		      "effect %#x: the POST: %d", cases[c].effect, rc);
+		snprintf(chunk_id, sizeof(chunk_id), "%s",
+			 rsp ? json_string_value(json_object_get(rsp, "Id")) : "");
+		json_decref(rsp);
+		j = fmd_redfish_memory_chunk(ctx, id, dom_id, chunk_id);
+		CHECK(activation_resets_are(pending_partition(j), cases[c].want),
+		      "effect %#x: the GET", cases[c].effect);
+		json_decref(j);
+		if (c)
+			goto next;
+
+		/*
+		 * A record in a log of the SLD: the reset may have come, and
+		 * its staged chunk is looked at again with no re-scan. With
+		 * the change still pending it stays staged.
+		 */
+		cxlmi_mock_clear_responses(ep);
+		answer_device_event(ep, general_media_event, 1, 0x00, 0, 0x00);
+		for (int log = 0; log < 4; log++)
+			answer_no_events(ep, false);
+		answer_partition(ep, 24, 40, 28, 36);
+		fmd_switch_events_poll(ctx);
+		CHECK(last_opcode(ep) == 0x4100 &&
+		      fmd_topology_find_chunk(&ctx->topology, chunk_id) &&
+		      fmd_topology_find_chunk(&ctx->topology, chunk_id)->staged,
+		      "a record with the change pending: last %04xh",
+		      last_opcode(ep));
+
+		/* empty logs: nothing more */
+		cxlmi_mock_clear_responses(ep);
+		for (int log = 0; log < 4; log++)
+			answer_no_events(ep, false);
+		answer_partition(ep, 28, 36, 0, 0);
+		{
+			unsigned int sent = commands_sent(ep);
+
+			fmd_switch_events_poll(ctx);
+			CHECK(commands_sent(ep) == sent + 4 && last_opcode(ep) == 0x0100 &&
+			      fmd_topology_find_chunk(&ctx->topology, chunk_id)->staged,
+			      "empty logs: %u sent, last %04xh",
+			      commands_sent(ep) - sent, last_opcode(ep));
+		}
+
+		/* an overflow, and the reset has come: Enabled, no Oem */
+		cxlmi_mock_clear_responses(ep);
+		answer_no_events(ep, true);
+		for (int log = 1; log < 4; log++)
+			answer_no_events(ep, false);
+		answer_partition(ep, 28, 36, 0, 0);
+		fmd_switch_events_poll(ctx);
+		j = fmd_redfish_memory_chunk(ctx, id, dom_id, chunk_id);
+		CHECK(last_opcode(ep) == 0x4100 &&
+		      !fmd_topology_find_chunk(&ctx->topology, chunk_id)->staged &&
+		      j && !json_object_get(j, "Oem"),
+		      "an overflow, the reset come: last %04xh, staged %d",
+		      last_opcode(ep),
+		      fmd_topology_find_chunk(&ctx->topology, chunk_id)->staged);
+		json_decref(j);
+next:
+		fmd_ctx_free(ctx);
+	}
+	report("a staged chunk says which reset it waits for, and is looked at "
+	       "on an event", before);
+}
+
+/*
  * An Event Notification says only which logs have records; who sent it is
  * the MCTP address it came from. The logs read are those of the component
  * on that endpoint, and every component's for an address that is none of
@@ -12134,6 +12339,7 @@ int main(void)
 	test_life_used();
 	test_switch_sld_placeholder();
 	test_set_partition();
+	test_staged_chunk_resets();
 	test_o4_gate();
 	test_ld_security();
 	test_security_cel();

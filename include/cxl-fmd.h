@@ -606,6 +606,21 @@ struct fmd_port {
 };
 
 /*
+ * The Command Effect of one opcode in a component's CEL (CXL r4.0 Table
+ * 8-254), if the CEL was read and lists it (@known)
+ */
+struct fmd_cel_effect {
+	bool known;
+	uint16_t effect;
+};
+
+/* Command Effect bits (Table 8-254) of a change that waits for a reset */
+#define FMD_CEL_CONFIG_AFTER_COLD_RESET		(1u << 0)
+#define FMD_CEL_RESETS_VALID			(1u << 9)	/* CEL[11:10] Valid */
+#define FMD_CEL_CONFIG_AFTER_CONV_RESET		(1u << 10)
+#define FMD_CEL_CONFIG_AFTER_CXL_RESET		(1u << 11)
+
+/*
  * Type 3 Single Logical Device
  *
  * Simple memory device with a single logical device.
@@ -629,6 +644,8 @@ struct fmd_sld {
 
 	/* Supported CCI commands bitmask */
 	uint64_t supported_cmds;
+	/* Set Partition Info (4101h) in the CEL: which reset a staged chunk waits for */
+	struct fmd_cel_effect set_partition_effect;
 
 	/* Memory sizes (derived from memdev response) */
 	uint64_t memory_size;
@@ -1025,7 +1042,9 @@ struct fmd_mem_chunk {
 	 * is served StandbyOffline and is in no Connection, and it keeps its
 	 * range of the domain, so that no other chunk takes it (cxl-fmd's
 	 * choices): see fmd_sld_staged_refresh(). @staged_vmem is the Next
-	 * Volatile Capacity it was staged with, in units of 256 MB.
+	 * Volatile Capacity it was staged with, in units of 256 MB. Which
+	 * resets the device says it waits for is its SLD's
+	 * set_partition_effect.
 	 */
 	bool staged;
 	uint64_t staged_vmem;
@@ -2611,7 +2630,8 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
  * change pending, a staged chunk the Active Volatile Capacity has reached
  * becomes an ordinary one, and one it has not is removed. A change still
  * pending, or a read that fails, leaves them as they are. Called by
- * fmd_rescan(). Returns 0, or -EIO if 4100h was not answered.
+ * fmd_rescan(), and when the SLD's event logs have a record or overflowed
+ * (a reset may have come). Returns 0, or -EIO if 4100h was not answered.
  */
 int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld);
 

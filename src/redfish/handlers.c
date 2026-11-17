@@ -2851,6 +2851,44 @@ static json_t *chunk_status(const struct fmd_status_rollup *r,
 	return status;
 }
 
+/*
+ * Oem/Cxl of a staged chunk of @sld: the partition it waits for, and the
+ * resets the device's CEL gives for Set Partition Info (4101h). "If
+ * cleared, the change in partitioning shall become the "next"
+ * configuration, to become active on the next reset (as specified in the
+ * command effects)" (CXL r4.0 Table 8-311), and the Command Effect
+ * (Table 8-254) has "Configuration Change after Cold Reset" (Bit[0]),
+ * "after Conventional Reset" (Bit[10]) and "after CXL Reset" (Bit[11]),
+ * the last two valid only with "CEL[11:10] Valid" (Bit[9]). Each listed
+ * is a reset the device says the change takes effect after; whether one
+ * of them is enough or all are needed, Table 8-254 does not say.
+ * ActivationResets is empty when the CEL lists 4101h with none of them,
+ * and absent when the CEL was not read or does not list 4101h. The
+ * names are cxl-fmd's (Cxl_v1.xml). Review F15 claim 4.
+ */
+static json_t *staged_chunk_oem(const struct fmd_sld *sld,
+				const struct fmd_mem_chunk *chunk)
+{
+	json_t *pending = json_pack("{s:I}", "NextVolatileCapacityBytes",
+				    (json_int_t)(chunk->staged_vmem * CXL_CAPACITY_UNIT));
+
+	if (sld->set_partition_effect.known) {
+		uint16_t e = sld->set_partition_effect.effect;
+		json_t *resets = json_array();
+
+		if (e & FMD_CEL_CONFIG_AFTER_COLD_RESET)
+			json_array_append_new(resets, json_string("ColdReset"));
+		if ((e & FMD_CEL_RESETS_VALID) && (e & FMD_CEL_CONFIG_AFTER_CONV_RESET))
+			json_array_append_new(resets, json_string("ConventionalReset"));
+		if ((e & FMD_CEL_RESETS_VALID) && (e & FMD_CEL_CONFIG_AFTER_CXL_RESET))
+			json_array_append_new(resets, json_string("CXLReset"));
+		json_object_set_new(pending, "ActivationResets", resets);
+	}
+	return json_pack("{s:{s:s, s:o}}", "Cxl",
+			 "@odata.type", "#Cxl.v1_0_0.MemoryChunk",
+			 "PendingPartition", pending);
+}
+
 /* @str as a JSON string, or null if it is NULL */
 static json_t *json_string_or_null(const char *str)
 {
@@ -4657,6 +4695,11 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		json_object_set_new(result, "AddressRangeOffsetMiB",
 				    json_integer((json_int_t)offset_mib));
 
+	/* what a staged chunk waits for */
+	if (chassis->type == FMD_COMPONENT_SLD && found && found->staged)
+		json_object_set_new(result, "Oem",
+				    staged_chunk_oem(fmd_to_sld(chassis), found));
+
 	/* Add Links.CXLLogicalDevices back-reference */
 	if (ld_link_uri[0] != '\0') {
 		json_object_set_new(result, "Links",
@@ -5335,6 +5378,8 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		fmd_rollup_add(&r, &fmd_to_sld(chassis)->health,
 			       fmd_to_sld(chassis)->health_valid);
 		json_object_set_new(*response, "Status", chunk_status(&r, chunk));
+		json_object_set_new(*response, "Oem",
+				    staged_chunk_oem(fmd_to_sld(chassis), chunk));
 	}
 
 	/*

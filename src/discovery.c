@@ -159,11 +159,18 @@ static uint16_t tunnelled_msg_limit(const struct fmd_component *parent)
  * Fetches the CEL from the device and converts the opcodes to a bitmask.
  * Returns 0 on success, -1 on error. On error, supported_cmds is set to
  * a reasonable default.
+ *
+ * @part, if not NULL, is given the Command Effect of Set Partition Info
+ * (4101h) when the CEL was read whole and lists it, and is marked not
+ * known otherwise: "all possible command effects for a given command
+ * shall be reported by the device in the CEL" (CXL r4.0 Section
+ * 8.2.10.5.2.1).
  */
 static int get_supported_commands(struct fmd_ctx *ctx,
 				  const struct fmd_component *comp,
 				  struct cxlmi_tunnel_info *ti,
-				  uint64_t *supported_cmds)
+				  uint64_t *supported_cmds,
+				  struct fmd_cel_effect *part)
 {
 	struct cxlmi_endpoint *ep = comp->ep;
 	struct cxlmi_cmd_get_supported_logs_rsp *logs_rsp = NULL;
@@ -175,6 +182,8 @@ static int get_supported_commands(struct fmd_ctx *ctx,
 	int rc;
 
 	*supported_cmds = FMD_CMD_DEFAULT_MEMDEV;
+	if (part)
+		part->known = false;
 
 	/* Allocate buffer for supported logs response */
 	/* the entry count is 16 bits and the device's to choose */
@@ -243,6 +252,10 @@ static int get_supported_commands(struct fmd_ctx *ctx,
 	for (int i = 0; i < num_entries; i++) {
 		uint64_t bit = opcode_to_cmd_bit(cel_rsp[i].opcode);
 		*supported_cmds |= bit;
+		if (part && cel_rsp[i].opcode == 0x4101) {
+			part->known = true;
+			part->effect = cel_rsp[i].command_effect;
+		}
 
 		fmd_dbg(ctx, "CEL[%d]: opcode=0x%04x effect=0x%04x%s",
 			i, cel_rsp[i].opcode, cel_rsp[i].command_effect,
@@ -340,7 +353,8 @@ static int discover_sld(struct fmd_ctx *ctx, struct fmd_sld *sld,
 	sld->persistent_size = CXL_TO_BYTES(sld->memdev.persistent_capacity);
 
 	/* Get supported commands from CEL */
-	get_supported_commands(ctx, &sld->base, CXLMI_NO_TUNNEL, &sld->supported_cmds);
+	get_supported_commands(ctx, &sld->base, CXLMI_NO_TUNNEL, &sld->supported_cmds,
+			       &sld->set_partition_effect);
 
 	fmd_dbg(ctx, "%s: FW=%.16s total=%" PRIu64 "MB volatile=%" PRIu64 "MB persistent=%" PRIu64 "MB",
 		sld->base.id, sld->memdev.fw_revision,
@@ -397,7 +411,7 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 			mld->base.id, ld->ld_id, rc);
 
 	/* Get supported commands from CEL */
-	get_supported_commands(ctx, &ld->base, ti, &ld->supported_cmds);
+	get_supported_commands(ctx, &ld->base, ti, &ld->supported_cmds, NULL);
 
 	/* Memdev Identify (4000h) */
 	rc = cxlmi_cmd_memdev_identify(ep, ti, &ld->memdev);
@@ -4134,13 +4148,15 @@ static struct fmd_mem_chunk *sld_staged_chunk(struct fmd_sld *sld)
 
 /*
  * See include/cxl-fmd.h. A staged chunk is "the "next" configuration, to
- * become active on the next reset" (CXL r4.0 Table 8-311), and "If both
- * this field and the Next Persistent Capacity field are 0, there is no
- * pending change to the partitioning" (Table 8-310): with none pending,
- * the reset has come, or the change was undone, and Active Volatile
- * Capacity says which. Which reset the device needs (the command effects
- * of Set Partition Info) is not read: cxl-fmd looks again on each
- * re-scan. Caller holds fabric_lock.
+ * become active on the next reset (as specified in the command effects)"
+ * (CXL r4.0 Table 8-311), and "If both this field and the Next Persistent
+ * Capacity field are 0, there is no pending change to the partitioning"
+ * (Table 8-310): with none pending, the reset has come, or the change was
+ * undone, and Active Volatile Capacity says which. Which resets those are
+ * is read from the CEL at discovery (set_partition_effect) and served on
+ * the chunk; nothing tells the FM that one has happened, so cxl-fmd looks
+ * again on each re-scan, and when the SLD's event logs have a record
+ * (device_logs() in src/event_log.c). Caller holds fabric_lock.
  */
 int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 {
