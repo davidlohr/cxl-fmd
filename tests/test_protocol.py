@@ -164,3 +164,98 @@ class TestDirectConnection:
         status, chunks = api_client.get(domain + "/MemoryChunks")
         chunk = chunks["Members"][0]["@odata.id"]
         assert allowed(requests.delete(api_client.base_url + chunk, timeout=30)) == {"GET"}
+
+
+# Conditional requests (review F18 claim 4)
+DCD = "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0"
+REGION = DCD + "/CXLLogicalDevices/0/MemoryRegions/0"
+EXTENT = DCD + "/MemoryExtents/ext_0_400000000"
+SLD_CHUNKS = "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks"
+PRECONDITIONS = [{"If-Match": '"stale-etag-from-earlier-read"'},
+                 {"If-Match": "*"},
+                 {"If-None-Match": "*"},
+                 {"If-None-Match": '"x"'}]
+
+
+def precondition_failed(response):
+    """
+    412: "Precondition check, such as check of the OData-Version, If-Match,
+    or If-None-Match header, failed." (DSP0266 1.25.0 Table 14). cxl-fmd
+    returns no ETags, and cannot compare one.
+    """
+    assert response.status_code == 412, response.text
+    info = response.json()["error"]["@Message.ExtendedInfo"]
+    assert [m["MessageId"] for m in info] == ["Base.1.24.GeneralError"]
+    assert "If-Match" in info[0]["Resolution"]
+
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+class TestPreconditionsDCD:
+
+    @pytest.mark.parametrize("headers", PRECONDITIONS)
+    def test_patch_with_precondition_changes_nothing(self, api_client, headers):
+        """It was 200, and Set DC Region Configuration sent, whatever the
+        ETag asked for (there are none)."""
+        assert api_client.delete(EXTENT) == 204
+        response = requests.patch(api_client.base_url + REGION,
+                                  json={"BlockSizeMiB": 512},
+                                  headers=headers, timeout=30)
+        precondition_failed(response)
+        status, data = api_client.get(REGION)
+        assert status == 200 and data["BlockSizeMiB"] == 256
+        # without one, it is carried out
+        response = requests.patch(api_client.base_url + REGION,
+                                  json={"BlockSizeMiB": 512}, timeout=30)
+        assert response.status_code == 200
+        assert api_client.get(REGION)[1]["BlockSizeMiB"] == 512
+
+    def test_delete_with_precondition_changes_nothing(self, api_client):
+        response = requests.delete(api_client.base_url + EXTENT,
+                                   headers={"If-Match": "*"}, timeout=30)
+        precondition_failed(response)
+        assert api_client.get(EXTENT)[0] == 200
+
+    def test_action_with_precondition(self, api_client):
+        response = requests.post(
+            api_client.base_url + DCD + "/CXLLogicalDevices/0/Actions/"
+            "CXLLogicalDevice.DynamicCapacityRelease",
+            json={"Policy": "Free", "ForcedRemoval": False,
+                  "SanitizeOnRelease": False},
+            headers={"If-Match": '"x"'}, timeout=30)
+        precondition_failed(response)
+        assert api_client.get(EXTENT)[0] == 200
+
+    def test_get_with_precondition_is_a_get(self, api_client):
+        """A conditional GET is "If supported by the service" (Section
+        7.2.1): cxl-fmd answers it as one without."""
+        response = requests.get(api_client.base_url + REGION,
+                                headers={"If-None-Match": '"x"'}, timeout=30)
+        assert response.status_code == 200
+
+
+@pytest.mark.mock_topology("mock/single-sld.json")
+class TestPreconditionsSLD:
+
+    def test_post_with_precondition_makes_nothing(self, api_client):
+        status, before = api_client.get(SLD_CHUNKS)
+        response = requests.post(api_client.base_url + SLD_CHUNKS,
+                                 json={"MemoryChunkSizeMiB": 256},
+                                 headers={"If-None-Match": "*"}, timeout=30)
+        precondition_failed(response)
+        assert api_client.get(SLD_CHUNKS)[1]["Members"] == before["Members"]
+
+    def test_not_found_and_not_allowed_win(self, api_client):
+        """'A server MUST ignore all received preconditions if its response
+        to the same request without those conditions ... would have been a
+        status code other than a 2xx (Successful) or 412' (RFC 9110 Section
+        13.2.1)"""
+        h = {"If-Match": "*"}
+        base = api_client.base_url
+        assert requests.patch(base + "/redfish/v1/Chassis/nonexistent", json={},
+                              headers=h, timeout=30).status_code == 404
+        assert requests.delete(base + SLD_CHUNKS + "/nonexistent",
+                               headers=h, timeout=30).status_code == 404
+        assert requests.put(base + CHASSIS, json={}, headers=h,
+                            timeout=30).status_code == 405
+        assert requests.post(base + CHASSIS, json={}, headers=h,
+                             timeout=30).status_code == 405

@@ -1244,6 +1244,82 @@ static enum MHD_Result send_method_not_allowed(struct fmd_ctx *ctx,
 }
 
 /*
+ * Whether @method on @url is one a handler takes, of a resource that is
+ * there: what would be answered 2xx were it not for a precondition, and
+ * not 404 or 405. An action is taken to be there when its resource is.
+ */
+static bool takes_method(struct fmd_ctx *ctx, const char *method,
+			 const char *url)
+{
+	char *norm_url = normalize_url(url);
+	char *actions;
+	bool takes = false;
+
+	if (!norm_url)
+		return false;
+	if (!strcmp(method, "POST")) {
+		actions = strstr(norm_url, "/Actions/");
+		if (actions) {
+			*actions = '\0';
+			takes = route_exists(ctx, norm_url);
+		} else {
+			takes = matches_any(post_routes, ROUTES(post_routes), norm_url) &&
+				route_exists(ctx, norm_url);
+		}
+	} else if (!strcmp(method, "PATCH")) {
+		takes = matches_any(patch_routes, ROUTES(patch_routes), norm_url) &&
+			route_exists(ctx, norm_url);
+	} else if (!strcmp(method, "DELETE")) {
+		takes = matches_any(delete_routes, ROUTES(delete_routes), norm_url) &&
+			route_exists(ctx, norm_url) && deletable(ctx, norm_url);
+	}
+	free(norm_url);
+	return takes;
+}
+
+/*
+ * A request that changes something, with If-Match or If-None-Match:
+ * cxl-fmd returns no ETag, so it cannot compare the one asked for with
+ * the resource's, and would otherwise carry the request out as if it had
+ * none. It is answered 412, nothing done: "412 Precondition Failed:
+ * Precondition check, such as check of the OData-Version, If-Match, or
+ * If-None-Match header, failed." (DSP0266 1.25.0 Table 14). DSP0266 asks
+ * If-Match only of services that return ETags ("PUT and PATCH requests for
+ * resources for which a service returns ETags shall support If-Match",
+ * Table 6), so a 412 for any precondition, whatever its value, is
+ * cxl-fmd's choice: a client that asks for one never gets a write it did
+ * not condition. A request answered 404 or 405 without the header is
+ * answered so with it ("A server MUST ignore all received preconditions if
+ * its response to the same request without those conditions, prior to
+ * processing the request content, would have been a status code other
+ * than a 2xx (Successful) or 412 (Precondition Failed)", RFC 9110 Section
+ * 13.2.1). A GET is not checked: a conditional GET is "If supported by the
+ * service" (DSP0266 Section 7.2.1), and cxl-fmd answers it as one without.
+ * Base PreconditionFailed is not used: "The use of this message shall
+ * only be used in responses for deep operations, since HTTP status code
+ * 412 is typically used for this" (Base.1.24.0.json). Returns true, the
+ * answer sent and *@result what sending it gave, if the request is
+ * answered so.
+ */
+static bool send_precondition_failed(struct fmd_ctx *ctx,
+				     struct MHD_Connection *conn,
+				     const char *method, const char *url,
+				     enum MHD_Result *result)
+{
+	if (!MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "If-Match") &&
+	    !MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "If-None-Match"))
+		return false;
+	if (!takes_method(ctx, method, url))
+		return false;
+	*result = send_error(conn, MHD_HTTP_PRECONDITION_FAILED,
+			     "If-Match and If-None-Match are not supported: cxl-fmd "
+			     "returns no ETags, and cannot compare one. Nothing was done",
+			     RF_GENERAL("Resubmit the request without If-Match or "
+					"If-None-Match: cxl-fmd returns no ETags."));
+	return true;
+}
+
+/*
  * Handle POST request
  */
 static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
@@ -2183,7 +2259,9 @@ static enum MHD_Result handle_request(void *cls,
 	}
 
 	pthread_rwlock_wrlock(&ctx->fabric_lock);
-	if (strcmp(method, "POST") == 0)
+	if (send_precondition_failed(ctx, conn, method, url, &result))
+		;
+	else if (strcmp(method, "POST") == 0)
 		result = handle_request_post(ctx, conn, url,
 					     rctx->body, rctx->body_size);
 	else if (strcmp(method, "PUT") == 0)
