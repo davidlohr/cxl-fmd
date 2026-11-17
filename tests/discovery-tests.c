@@ -3687,6 +3687,7 @@ static void test_dc_exact_bytes(void)
 	struct fmd_component *dev;
 	int before = failures;
 	json_t *j, *oem, *want;
+	json_int_t ld_mib;
 
 	info[0x00] = 1;					/* Number of Hosts */
 	info[0x01] = 2;					/* Number of Regions */
@@ -3719,13 +3720,21 @@ static void test_dc_exact_bytes(void)
 	json_decref(want);
 	json_decref(j);
 
-	/* d: a region of 64 KiB blocks, two 64 KiB extents in it */
+	/*
+	 * d: a region of 64 KiB blocks, two 64 KiB extents in it, and one of
+	 * 896 KiB: 1 MiB in all, which the LD's MemorySizeMiB gains only if
+	 * the extents are added up in bytes (each alone is 0 MiB)
+	 */
+	j = fmd_redfish_cxl_logical_device(ctx, id, id, "0");
+	ld_mib = json_integer_value(json_object_get(j, "MemorySizeMiB"));
+	json_decref(j);
 	{
 		uint8_t pl[0x04 + 2 * 0x28 + 0x10] = { 0 };
 		uint8_t *r1 = pl + 0x04 + 0x28, *tail = pl + 0x04 + 2 * 0x28;
-		struct dc_ext e[2] = {
+		struct dc_ext e[3] = {
 			{ 1ULL << 30, 1ULL << 16, dc_tag, 0 },
 			{ (1ULL << 30) + (1ULL << 16), 1ULL << 16, dc_tag_b, 0 },
+			{ (1ULL << 30) + (2ULL << 16), 14ULL << 16, dc_tag_c, 0 },
 		};
 
 		pl[0x02] = 2;
@@ -3739,10 +3748,16 @@ static void test_dc_exact_bytes(void)
 		put16(tail + 0x08, 16);
 		put16(tail + 0x0c, 15);
 		answer(ep, 0x5601, pl, sizeof(pl));
-		answer_dc_extents(ep, 1, 0, 2, e, 2);
+		answer_dc_extents(ep, 1, 0, 3, e, 3);
 		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
 		CHECK(fmd_dcd_refresh(ctx, dev, 0) == 0, "the refresh");
 	}
+	j = fmd_redfish_cxl_logical_device(ctx, id, id, "0");
+	CHECK(json_integer_value(json_object_get(j, "MemorySizeMiB")) == ld_mib + 1,
+	      "MemorySizeMiB %lld, was %lld: the extents not added up in bytes",
+	      (long long)json_integer_value(json_object_get(j, "MemorySizeMiB")),
+	      (long long)ld_mib);
+	json_decref(j);
 	j = fmd_redfish_dc_memory_region(ctx, id, id, "0", "1");
 	oem = json_object_get(json_object_get(j, "Oem"), "Cxl");
 	want = json_pack("{s:s, s:I, s:I, s:I}", "@odata.type", "#Cxl.v1_0_0.MemoryRegion",
