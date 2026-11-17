@@ -332,6 +332,12 @@ fabric, discovery failed, or the HTTP port could not be opened.
 .B cxl-fmd
 serves plain HTTP on every interface and does not authenticate clients.
 Anything that can reach the port can reconfigure the fabric.
+No option chooses the address to listen on, and there is no TLS or
+authentication; adding them has been deferred (see Known Gaps in
+docs/Redfish-API.md).
+Nor does anything keep a second
+.B cxl-fmd
+on another port from driving the same devices.
 Run it on a management network, or behind a reverse proxy that provides TLS
 and authentication.
 .SH EXAMPLES

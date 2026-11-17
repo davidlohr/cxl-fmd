@@ -51,9 +51,9 @@ curl -s http://localhost:8080/redfish/v1/Fabrics/CXL/Connections | jq
 
 ## Authentication
 
-cxl-fmd does not currently implement authentication. All endpoints are accessible without credentials. Only the `Sessions` collection, `/redfish/v1/SessionService/Sessions`, is served, linked from the service root's `Links/Sessions`; there is no `/redfish/v1/SessionService` resource, and no session is created or required.
+cxl-fmd does not currently implement authentication, nor TLS, and it listens on every interface: the maintainer has deferred all three (Known Gaps, item 13). All endpoints are accessible without credentials, and credentials that are sent are not checked. Only the `Sessions` collection, `/redfish/v1/SessionService/Sessions`, is served, linked from the service root's `Links/Sessions`; there is no `/redfish/v1/SessionService` resource, and no session is created or required.
 
-For production deployments, place cxl-fmd behind a reverse proxy (e.g., nginx) that handles authentication.
+For production deployments, place cxl-fmd behind a reverse proxy (e.g., nginx) that handles TLS and authentication, and keep its own port out of reach of anything else.
 
 ---
 
@@ -2010,7 +2010,16 @@ In summary:
    Prescriptive add cannot be named through Redfish, as `POST` on
    `MemoryExtents` is not served. A host past LD 255 gets nothing from the
    tag list. The Host ID of a Multi-Headed DCD is taken to be the pool
-   LD-ID, unverified. See Comments 4 and 5 and the Open Questions of
+   LD-ID, unverified, and Dynamic Capacity adds and releases are sent to
+   such a device with it all the same (the maintainer's decision; see
+   "Writes on a Multi-Headed DCD" in DCD-FM-API.md). The
+   `DynamicCapacityAdd` action has no `Policy@Redfish.AllowableValues`, so
+   nothing tells a client that a `Prescriptive` add, which a device may
+   list in `AddCapacityPoliciesSupported`, is always `400` (review DCD-Q
+   A5, not done). A `DELETE` of an extent with a tag in a Sharable region
+   releases every extent of that host with the tag, and an all-zero Tag
+   is taken for no tag (cxl-fmd's convention). See Comments 4 and 5, "DELETE
+   of a MemoryExtent" and the Open Questions of
    [DCD-FM-API.md](DCD-FM-API.md#comments-for-table-3).
 2. The managed hot-removal of an MLD (CXL r4.0 Section 7.6.6.7) is not
    carried out (see "Event logs and switch events" below).
@@ -2068,6 +2077,38 @@ In summary:
     component that keeps to it holds at most 7 records; cxl-fmd does not
     check that one does. A page read through the kernel's mailbox (ioctl)
     could hold more, but cxl-fmd reads no event log that way.
+13. No TLS, no authentication, and no choice of listen address: deferred
+    by the maintainer (2026-11-16, review F16), not overlooked. cxl-fmd
+    serves plain HTTP on every interface (`0.0.0.0`, the `--port` only),
+    reads no `Authorization` header (wrong Basic credentials are ignored,
+    not refused), and identifies and authorizes no one: whatever it does
+    for one client it does for anyone who can reach the port, every
+    `POST`, `PATCH` and `DELETE` included (binds and unbinds,
+    `#Cxl.ForceUnbind`, chunk changes, Dynamic Capacity, `ResetPPB`, and
+    with `--allow-mctp-restricted` the security actions and Set Partition
+    Info, which without it are `409` for every client but on an SLD on
+    the kernel's mailbox, item 11). Its service root links an empty
+    `Sessions` collection, and there is no `SessionService` or
+    `AccountService` (see "Authentication"). Nothing keeps a second
+    cxl-fmd, on another port, from driving the same devices. DSP0266
+    1.25.0 requires what is missing: "Implementations shall support the
+    Transport Layer Security (TLS) protocol v1.2 with RFC7525 recommendations or later" (Section
+    13.1.1); services "Shall support both HTTP Basic authentication and
+    Redfish session login authentication" (Section 13.3.1); "Services
+    shall authenticate all write requests to Redfish resources", and
+    "Redfish resources shall not be available as unauthenticated", but for
+    the service root, the metadata and OData service documents, the
+    OpenAPI document and `/redfish` (Section 13.3.2.1). Until then, run
+    cxl-fmd only where nothing untrusted can reach its port, or behind a
+    proxy that provides TLS and authentication (see `man cxl-fmd`,
+    SECURITY).
+14. A device that is not ready at discovery (see "Devices that are not
+    ready" under "Changes for Clients") is not served at all, `404`,
+    until it is discovered whole: there is no resource for it in a
+    `Status.State` such as `Starting`. A device whose Get DCD Info is
+    read late, on a `--rescan`, has its Dynamic Capacity event log read not
+    when it is found but on the next `--event-poll` tick, or on an Event
+    Notification from it (with `--event-poll 0`, only then).
 
 ### Event logs and switch events
 

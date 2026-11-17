@@ -96,3 +96,21 @@ def test_zero_tag_is_cxl_fmds_convention():
         assert table in q5, table
     assert not re.search(r"as the specification calls the Tag\s+\"Optional\"",
                          text), "the zero tag is not the specification's"
+
+
+def test_trust_boundary_gaps_are_listed():
+    """TLS, authentication and the listen address were deferred by the
+    maintainer (review F16): the Known Gaps list them as such, with the
+    DSP0266 requirements they leave unmet, and the man page says so."""
+    text = (DOCS / "Redfish-API.md").read_text()
+    gaps = flat(section(text, "## Known Gaps"))
+    item = re.search(r" 13\. (.*?) 14\. ", gaps)
+    assert item, "no item 13 in the Known Gaps"
+    item = item.group(1)
+    for words in ("No TLS", "no authentication", "no choice of listen address",
+                  "deferred by the maintainer", "Section 13.1.1",
+                  "Section 13.3.1", "Section 13.3.2.1"):
+        assert words in item, words
+    assert "deferred" in flat(section(text, "## Authentication"))
+    man = flat((DOCS.parent / "man" / "cxl-fmd.8").read_text())
+    assert "there is no TLS or authentication; adding them has been deferred" in man
