@@ -193,6 +193,32 @@ class TestPostIdempotent:
         status, data = api_client.get(CONNECTIONS)
         assert data["Members"] == [{"@odata.id": location}]
 
+    def test_duplicate_post_then_delete_leaves_nothing(self, api_client):
+        """Review F05: two POSTs of sld_0 with its chunk for host0 made two
+        Connections, and a DELETE of the first unbound the vPPB while the
+        second stayed Enabled, and in host0's MemoryDomains. A Connection
+        is the switch's binding: the second POST is the same Connection,
+        and after a DELETE nothing of it is left."""
+        chunks = chunks_of(api_client, "sld_0")
+        status, first, location = post(api_client, "switch_0_host0", "sld_0", chunks)
+        assert status == 201, first
+        status, again, where = post(api_client, "switch_0_host0", "sld_0", chunks)
+        assert status == 200, again
+        assert where == location and again["Id"] == first["Id"]
+        path = location[location.index("/redfish/v1"):]
+        assert api_client.delete(path) == 204
+        assert api_client.get(path)[0] == 404
+        status, data = api_client.get(CONNECTIONS)
+        assert (data["Members@odata.count"], data["Members"]) == (0, [])
+        status, data = api_client.get("/redfish/v1/Systems/switch_0_host0/MemoryDomains")
+        assert status == 200
+        assert (data["Members@odata.count"], data["Members"]) == (0, [])
+        for p in (1, 2, 3):
+            status, vppb = api_client.get(
+                f"/redfish/v1/Fabrics/CXL/Switches/switch_0/VCSs/0/VPPBs/{p}")
+            assert status == 200
+            assert vppb["BindingStatus"] == "Unbound", p
+
     def test_post_validation_400(self, api_client):
         """A chunk of another device, an MLD's chunks on two LDs, and
         AccessCapabilities other than Read and Write are bad requests, and
