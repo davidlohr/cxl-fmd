@@ -674,6 +674,32 @@ Status to `Status`, Comment 3, and Media Status to nothing):
 | Additional Status Bit[4] | `CorrectedVolatileErrorCount` | Warning | `Memory` |
 | Additional Status Bit[5] | `CorrectedPersistentErrorCount` | Warning | `Memory` |
 
+## Oem schema
+
+cxl-fmd's Oem properties and its one Oem action are described by its own
+CSDL schema, `Cxl_v1.xml` (namespaces `Cxl` and `Cxl.v1_0_0`, in
+`schema/oem/csdl`). It is served at `/redfish/v1/Schemas/Cxl_v1.xml`
+("Local copy of a Redfish schema file", DSP0266 1.25.0 Table 4) and
+`$metadata` references it there ("The OData metadata document may
+reference additional schema documents that describe OEM-specific
+extensions that the service uses", Section 8.4.2.2; a reference may be
+"A relative URI to a local copy of the Redfish schema", Section
+8.4.2.1). Every `Oem.Cxl` object has `@odata.type` naming its type, each
+derived from `Resource.OemObject`:
+
+| Resource | `Oem.Cxl` `@odata.type` | Properties |
+|----------|-------------------------|------------|
+| `MemoryDomain` of a host (`/redfish/v1/Systems/{id}/MemoryDomains/{dom}`) | `#Cxl.v1_0_0.MemoryDomain` | `HostState` |
+| `Connection` | `#Cxl.v1_0_0.Connection` | `Origin` |
+| `PCIeDevice` of a DCD | `#Cxl.v1_0_0.PCIeDevice` | `DynamicCapacityTags` (see [DCD-FM-API.md](DCD-FM-API.md)) |
+
+The action `#Cxl.ForceUnbind` of a switch-attached `Connection` is the
+`ForceUnbind` action of the `Cxl` namespace, bound to
+`Connection.v1_0_0.OemActions`: "#<OEMSchemaName>.<Action>" (Section
+9.8.8). The schema, its names and every definition in it are cxl-fmd's;
+see "Oem identifier" under Known Gaps for `Cxl`. There is no JSON Schema
+of it, and no `/redfish/v1/JsonSchemas`.
+
 ## Error Responses
 
 All error responses follow the Redfish error format: an `error` object with a `code`, a `message` and `@Message.ExtendedInfo` (see "Error Response Format").
@@ -868,6 +894,7 @@ curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_mem0/MemoryDomains/
 | `GET /redfish/v1/Registries` | cxl-fmd's registries (`MessageRegistryFileCollection`) |
 | `GET /redfish/v1/Registries/CxlHealth` | The `MessageRegistryFile` of `CxlHealth.1.0` |
 | `GET /redfish/v1/Registries/CxlHealth.1.0.0.json` | The registry of the `Status/Conditions` messages (see "Status from Get Health Info") |
+| `GET /redfish/v1/Schemas/Cxl_v1.xml` | The CSDL of cxl-fmd's Oem properties and Oem action (see "Oem schema") |
 
 ### Systems Model
 
@@ -919,8 +946,8 @@ This is what a binding makes reachable, not what the host has mapped: the
 FM does not see that. "The switch prohibits any CXL.io access from the FM
 to a bound SLD port and any CXL.io access from the FM to a bound LD within
 an MLD component" (CXL r4.0 Section 7.2.3.1). Each host `MemoryDomain`
-says so with `"Oem": {"Cxl": {"HostState": "NotObserved"}}` (cxl-fmd's
-Oem): what the host has accepted, mapped or put to use is not known to
+says so with `"Oem": {"Cxl": {"@odata.type": "#Cxl.v1_0_0.MemoryDomain",
+"HostState": "NotObserved"}}` (cxl-fmd's Oem): what the host has accepted, mapped or put to use is not known to
 cxl-fmd (see "What cxl-fmd can see of memory a host is given"). A domain
 from a direct-attached Connection that is `Inferred` rests on no evidence
 of a link either (see "What a Connection is").
@@ -1510,7 +1537,7 @@ another vPPB is another ID; a `POST` of that target finds it.
         "AccessCapabilities": ["Read", "Write"],
         "AccessState": "Optimized"
     }],
-    "Oem": {"Cxl": {"Origin": "Discovered"}},
+    "Oem": {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Discovered"}},
     "Actions": {
         "Oem": {
             "#Cxl.ForceUnbind": {
@@ -1847,7 +1874,7 @@ run of cxl-fmd made the binding and `"Discovered"` otherwise. It is
 advisory, never decides what a `DELETE` does, and is lost on restart:
 nothing the switch reports says who made a binding (Tables 7-34 and 7-80),
 so after a restart every binding is `"Discovered"`. Both `Oem` properties
-are cxl-fmd's and have no schema.
+are cxl-fmd's, described by its Oem schema (see "Oem schema").
 
 ### Connection Lifecycle
 
@@ -1971,8 +1998,7 @@ In summary:
 1. Dynamic capacity: no extent is shown pending. The Pending Reference
    Bitmap of 5608h is per tag, so an add a host has not answered shows
    only in `Oem/Cxl/DynamicCapacityTags` (`PendingLDs`) of the
-   `PCIeDevice`, which has no schema (the Redfish Service Validator is run
-   with `--nooemcheck`). Add and release answer `200 OK` with no `Task`. A
+   `PCIeDevice`, a property of cxl-fmd's Oem schema, not DMTF's. Add and release answer `200 OK` with no `Task`. A
    Prescriptive add cannot be named through Redfish, as `POST` on
    `MemoryExtents` is not served. A host past LD 255 gets nothing from the
    tag list. The Host ID of a Multi-Headed DCD is taken to be the pool
@@ -2392,6 +2418,8 @@ Changes from the fixes of the external design review (branch
 | `GET` of the `Memory` of a device or LD whose Additional Status has Bit[4] or Bit[5] set | no `Status.Conditions`; the value was read and not used | `CorrectedVolatileErrorCount`, `CorrectedPersistentErrorCount` Conditions; `Health` unchanged |
 | `GET /redfish/v1`, `/redfish/v1/odata`, `/redfish/v1/$metadata` | no `Registries` | `Registries`, `/redfish/v1/Registries`, with cxl-fmd's `CxlHealth` registry at `/redfish/v1/Registries/CxlHealth.1.0.0.json` |
 | A mock topology's `health_info.additional_status` | ignored, though mock-topology.md listed it | read, for an SLD and for an LD in its own `health_info` |
+| `GET` of any resource with `Oem.Cxl` (a host's `MemoryDomain`, a `Connection`, a DCD's `PCIeDevice`) | `Oem.Cxl` with no `@odata.type`, and no schema for it | `@odata.type` `#Cxl.v1_0_0.MemoryDomain`, `#Cxl.v1_0_0.Connection` or `#Cxl.v1_0_0.PCIeDevice`, the types of cxl-fmd's Oem schema (see "Oem schema") |
+| `GET /redfish/v1/$metadata`; `GET /redfish/v1/Schemas/Cxl_v1.xml` | no reference to an Oem schema; `404` | a reference to `/redfish/v1/Schemas/Cxl_v1.xml`, which is served |
 
 Mock topologies and discovery:
 

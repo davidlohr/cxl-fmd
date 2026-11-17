@@ -2776,6 +2776,8 @@ json_t *fmd_redfish_registries(struct fmd_ctx *ctx);
 json_t *fmd_redfish_registry(struct fmd_ctx *ctx, const char *id);
 /* the bytes of registry file @file, *@len of them; NULL if there is none */
 const char *fmd_redfish_registry_file(const char *file, size_t *len);
+/* the bytes of cxl-fmd's schema file @file (Cxl_v1.xml); NULL if none */
+const char *fmd_redfish_schema_file(const char *file, size_t *len);
 json_t *fmd_redfish_service_root(struct fmd_ctx *ctx);
 
 /* Collections */

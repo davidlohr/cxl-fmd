@@ -693,6 +693,22 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 		return ret;
 	}
 
+	if (match_route("/redfish/v1/Schemas/{file}", norm_url, params, 8)) {
+		size_t len;
+		const char *data = fmd_redfish_schema_file(params[0], &len);
+
+		free_params(params, 8);
+		if (!data)
+			goto not_found;
+		free(norm_url);
+		if (exists) {
+			*exists = true;
+			return MHD_YES;
+		}
+		return send_static_response(conn, MHD_HTTP_OK, data, len,
+					    "application/xml; charset=utf-8");
+	}
+
 	if (strcmp(norm_url, "/redfish/v1/Registries") == 0) {
 		response = fmd_redfish_registries(ctx);
 		goto ok;

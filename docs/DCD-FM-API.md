@@ -192,13 +192,14 @@ choice.
 **Comment 4:** DMTF has no resource for a tag, and no property for the LDs
 that have accepted a tag or been offered it. cxl-fmd shows the device's
 5608h list on the `PCIeDevice` of a DCD, as
-`Oem/Cxl/DynamicCapacityTags`. The view, its names and its having no
-schema are cxl-fmd's choice; the Redfish Service Validator is run with
-`--nooemcheck` over it.
+`Oem/Cxl/DynamicCapacityTags`. The view and its names are cxl-fmd's
+choice. Its type, `#Cxl.v1_0_0.PCIeDevice`, is in cxl-fmd's Oem schema,
+`Cxl_v1.xml` (see "Oem schema" in [Redfish-API.md](Redfish-API.md)).
 
 ```json
 "Oem": {
   "Cxl": {
+    "@odata.type": "#Cxl.v1_0_0.PCIeDevice",
     "DynamicCapacityTags": {
       "TagsKnown": true,
       "Generation": 7,
@@ -1267,8 +1268,9 @@ where it says so), not the specification's.
     The schema does not say. Choice: POST is not served; DELETE releases
     from the extent's host only; the Tag is a UUID string.
 20. **No DMTF resource for a tag.** Choice: `Oem/Cxl/DynamicCapacityTags`
-    on `PCIeDevice`, with no CSDL. Whether to publish a CSDL, or propose
-    the properties to DMTF, is open.
+    on `PCIeDevice`, described by cxl-fmd's Oem schema `Cxl_v1.xml`
+    (served at `/redfish/v1/Schemas/Cxl_v1.xml`). Whether to propose the
+    properties to DMTF is open.
 21. **The earlier extent Ids `ext_<hex DPA>`.** Choice: `404`, no alias:
     they are ambiguous across hosts, and Ids are the service's to assign.
     cxl-fmd keeps no release notes; this document is where it is said.

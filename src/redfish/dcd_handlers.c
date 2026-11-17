@@ -395,7 +395,9 @@ static json_t *dc_tags_oem_locked(struct fmd_ctx *ctx, struct fmd_component *dev
 		json_object_set_new(view, "Tags", tags);
 	else
 		json_decref(tags);
-	return json_pack("{s:{s:o}}", "Cxl", "DynamicCapacityTags", view);
+	return json_pack("{s:{s:s, s:o}}", "Cxl",
+			 "@odata.type", "#Cxl.v1_0_0.PCIeDevice",
+			 "DynamicCapacityTags", view);
 }
 
 /*

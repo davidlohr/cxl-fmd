@@ -165,10 +165,17 @@ def run_validator(venv_mgr, port, schema_dir=None, output_dir=None,
     if output_dir:
         cmd.extend(["--logdir", str(output_dir)])
 
-    result = subprocess.run(
-        cmd,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            timeout=timeout,
+        )
+    finally:
+        # The validator saves each schema $metadata references by a
+        # relative URI in the schema directory, DMTF's: cxl-fmd's Oem
+        # schema (/redfish/v1/Schemas/Cxl_v1.xml) is not left there
+        if schema_dir:
+            (Path(schema_dir) / "Cxl_v1.xml").unlink(missing_ok=True)
 
     return result
 

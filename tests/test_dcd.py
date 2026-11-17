@@ -1045,7 +1045,9 @@ class TestPerHostDPA:
         whether the FM holds it, and every host's extents with it."""
         status, data = api_client.get(PH)
         view = data["Oem"]["Cxl"]["DynamicCapacityTags"]
-        assert "@odata.type" not in view and "@odata.type" not in data["Oem"]
+        # its type is in cxl-fmd's Oem schema (test_oem_schema.py)
+        assert "@odata.type" not in view
+        assert data["Oem"]["Cxl"]["@odata.type"] == "#Cxl.v1_0_0.PCIeDevice"
         assert isinstance(view["Generation"], int)
         tags = tag_view(api_client)
         assert sorted(tags) == [TAG_C1, TAG_C2, TAG_C3, TAG_C4]

@@ -468,11 +468,11 @@ class TestForceUnbind:
         again by a POST: Service."""
         cid = "cxl_switch_0_vcs0_vppb3_p3"
         status, conn = api_client.get(f"{CONNECTIONS}/{cid}")
-        assert conn["Oem"] == {"Cxl": {"Origin": "Discovered"}}
+        assert conn["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Discovered"}}
         assert api_client.delete(f"{CONNECTIONS}/{cid}") == 204
         status, data, location = post(api_client, HOST0, "cxl_switch0_dev2")
         assert status == 201 and data["Id"] == cid
-        assert data["Oem"] == {"Cxl": {"Origin": "Service"}}
+        assert data["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Service"}}
         assert api_client.get(f"{CONNECTIONS}/{cid}")[1]["Oem"]["Cxl"]["Origin"] == "Service"
 
 
@@ -486,7 +486,7 @@ class TestForceUnbindDirect:
         status, conn = api_client.get(f"{CONNECTIONS}/{cid}")
         assert status == 200
         assert "Actions" not in conn
-        assert conn["Oem"] == {"Cxl": {"Origin": "Inferred"}}
+        assert conn["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Inferred"}}
         status, data, _ = api_client.post(
             f"{CONNECTIONS}/{cid}/Actions/Oem/Cxl.ForceUnbind", {})
         assert status == 400
@@ -518,7 +518,8 @@ class TestDirectAttachedConnections:
 # What a host's MemoryDomain and a direct-attached Connection prove
 # =============================================================================
 
-HOST_STATE = {"Cxl": {"HostState": "NotObserved"}}
+HOST_STATE = {"Cxl": {"@odata.type": "#Cxl.v1_0_0.MemoryDomain",
+                      "HostState": "NotObserved"}}
 
 
 @pytest.mark.mock_topology("mock/single-sld.json")
@@ -540,7 +541,7 @@ class TestInferredDirect:
         status, conn = api_client.get(f"{CONNECTIONS}/{self.CID}")
         assert status == 200
         assert conn["Status"] == {"State": "Enabled", "Health": "Warning"}
-        assert conn["Oem"] == {"Cxl": {"Origin": "Inferred"}}
+        assert conn["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Inferred"}}
         # the POST of the pair answers the same
         status, again, _ = post(api_client, "local", "cxl_mem0")
         assert status == 200 and again["Oem"] == conn["Oem"]
@@ -587,7 +588,7 @@ def test_mixed_direct_and_switch(daemon, project_root):
     cid = "dhost_direct_sld_direct"
     conn = get(f"{CONNECTIONS}/{cid}")
     assert conn["Status"] == {"State": "Enabled", "Health": "Warning"}
-    assert conn["Oem"] == {"Cxl": {"Origin": "Inferred"}}
+    assert conn["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Inferred"}}
     assert get(f"/redfish/v1/Systems/dhost/MemoryDomains/{cid}")["Oem"] == HOST_STATE
 
     ep = "/redfish/v1/Fabrics/CXL/Endpoints/"
@@ -597,7 +598,7 @@ def test_mixed_direct_and_switch(daemon, project_root):
     assert response.status_code == 201, response.text
     bound = response.json()
     assert bound["Status"] == {"State": "Enabled", "Health": "OK"}
-    assert bound["Oem"] == {"Cxl": {"Origin": "Service"}}
+    assert bound["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Service"}}
     domain = get(f"/redfish/v1/Systems/switch_0_host0/MemoryDomains/{bound['Id']}")
     assert domain["Oem"] == HOST_STATE
 
@@ -609,4 +610,4 @@ def test_head_connection_is_configured(api_client):
     status, conn = api_client.get(f"{CONNECTIONS}/host0_direct_mhsld_0_h0")
     assert status == 200
     assert conn["Status"] == {"State": "Enabled", "Health": "OK"}
-    assert conn["Oem"] == {"Cxl": {"Origin": "Configured"}}
+    assert conn["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Configured"}}

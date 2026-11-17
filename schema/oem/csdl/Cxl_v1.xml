@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!---->
+<!--################################################################################       -->
+<!--# cxl-fmd Oem Schema:  Cxl v1.0.0                                                       -->
+<!--#                                                                                      -->
+<!--# The Oem properties and the Oem action cxl-fmd serves, under "Oem": {"Cxl": ...} and  -->
+<!--# "Actions": {"Oem": {"#Cxl.<Action>": ...}}.  Not a DMTF schema: every definition is  -->
+<!--# cxl-fmd's.  Served at /redfish/v1/Schemas/Cxl_v1.xml and named in $metadata.        -->
+<!--# SPDX-License-Identifier: LGPL-2.1                                                    -->
+<!--################################################################################       -->
+<!---->
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0">
+
+  <edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/csd01/complete/vocabularies/Org.OData.Core.V1.xml">
+    <edmx:Include Namespace="Org.OData.Core.V1" Alias="OData"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/RedfishExtensions_v1.xml">
+    <edmx:Include Namespace="RedfishExtensions.v1_0_0" Alias="Redfish"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Resource_v1.xml">
+    <edmx:Include Namespace="Resource"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Connection_v1.xml">
+    <edmx:Include Namespace="Connection.v1_0_0"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/MemoryExtent_v1.xml">
+    <edmx:Include Namespace="MemoryExtent"/>
+  </edmx:Reference>
+
+  <edmx:DataServices>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Cxl">
+      <Annotation Term="Redfish.OwningEntity" String="cxl-fmd"/>
+
+      <Action Name="ForceUnbind" IsBound="true">
+        <Annotation Term="OData.Description" String="This action unbinds the vPPB of a switch-attached connection with Unbind Option 2h, Simulate Surprise Hot-Remove."/>
+        <Annotation Term="OData.LongDescription" String="This action shall send Unbind vPPB (5202h) for the vPPB of this connection with Unbind Option 2h, Simulate Surprise Hot-Remove (CXL r4.0 Table 7-36).  It shall be offered only on a connection that is a vPPB binding of a switch.  It takes no parameters."/>
+        <Parameter Name="Connection" Type="Connection.v1_0_0.OemActions"/>
+      </Action>
+    </Schema>
+
+    <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="Cxl.v1_0_0">
+      <Annotation Term="Redfish.OwningEntity" String="cxl-fmd"/>
+      <Annotation Term="Redfish.Release" String="1.0"/>
+
+      <ComplexType Name="MemoryDomain" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a memory domain of a host."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a memory domain under /redfish/v1/Systems."/>
+        <Property Name="HostState" Type="Cxl.v1_0_0.HostState" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="What the fabric manager knows of the host's use of this memory."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain what the fabric manager has observed of what the host has accepted, mapped or put to use of this memory."/>
+        </Property>
+      </ComplexType>
+
+      <EnumType Name="HostState">
+        <Member Name="NotObserved">
+          <Annotation Term="OData.Description" String="The fabric manager cannot observe it."/>
+          <Annotation Term="OData.LongDescription" String="This value shall indicate that the fabric manager has no access through which to observe the host's use of the memory: the switch prohibits CXL.io access from the FM to a bound port or LD (CXL r4.0 Section 7.2.3.1)."/>
+        </Member>
+      </EnumType>
+
+      <ComplexType Name="Connection" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a connection."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a connection."/>
+        <Property Name="Origin" Type="Cxl.v1_0_0.Origin" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Where the connection comes from."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain where the connection comes from.  It is advisory: nothing a switch reports says who made a binding."/>
+        </Property>
+      </ComplexType>
+
+      <EnumType Name="Origin">
+        <Member Name="Service">
+          <Annotation Term="OData.Description" String="A vPPB binding this run of the service made."/>
+        </Member>
+        <Member Name="Discovered">
+          <Annotation Term="OData.Description" String="A vPPB binding the service found and did not make, or made before it was restarted."/>
+        </Member>
+        <Member Name="Configured">
+          <Annotation Term="OData.Description" String="A direct-attached connection of a head of a multi-headed device to the host its configuration names."/>
+        </Member>
+        <Member Name="Inferred">
+          <Annotation Term="OData.Description" String="A direct-attached connection the service infers, with no evidence of a CXL.mem link."/>
+        </Member>
+      </EnumType>
+
+      <ComplexType Name="PCIeDevice" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a CXL device."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a PCIe device that is a CXL dynamic capacity device."/>
+        <Property Name="DynamicCapacityTags" Type="Cxl.v1_0_0.DynamicCapacityTags" Nullable="false">
+          <Annotation Term="OData.Description" String="The tags of the dynamic capacity of the device, from Dynamic Capacity List Tags (5608h)."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the tag list the device reported in Dynamic Capacity List Tags (5608h, CXL r4.0 Table 7-78)."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="DynamicCapacityTags">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="The tag list of a dynamic capacity device."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the tag list of a dynamic capacity device, as Dynamic Capacity List Tags (5608h) reports it."/>
+        <Property Name="TagsKnown" Type="Edm.Boolean" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Whether the tag list was read."/>
+          <Annotation Term="OData.LongDescription" String="This property shall indicate whether the last read of the tag list completed.  When it is false, the Tags property shall be absent."/>
+        </Property>
+        <Property Name="Generation" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Generation Number of the tag list."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Generation Number the device reported with the tag list."/>
+        </Property>
+        <Property Name="Tags" Type="Collection(Cxl.v1_0_0.DynamicCapacityTag)">
+          <Annotation Term="OData.Description" String="The tags."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain one entry for each tag of the tag list."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="DynamicCapacityTag">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="One tag of a dynamic capacity device."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain one entry of the tag list."/>
+        <Property Name="Tag" Type="Edm.String" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The tag, as a UUID."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the 16 bytes of the tag, in order, in the form of a UUID.  An all-zero tag is the empty string."/>
+        </Property>
+        <Property Name="FMHoldsReference" Type="Edm.Boolean" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Whether the fabric manager holds a reference on the tagged capacity."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain Flags Bit[0], FM Holds Reference, of the tag's entry."/>
+        </Property>
+        <Property Name="AcceptedLDs" Type="Collection(Edm.Int64)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The LD-IDs whose host has accepted the tagged capacity."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the LD-ID of each bit set in the Reference Bitmap of the tag's entry.  It shall be absent when the Validity Bitmap says the Reference Bitmap is not valid."/>
+        </Property>
+        <Property Name="PendingLDs" Type="Collection(Edm.Int64)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The LD-IDs to which the tagged capacity has been added with no host response yet."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the LD-ID of each bit set in the Pending Reference Bitmap of the tag's entry.  It shall be absent when the Validity Bitmap says the Pending Reference Bitmap is not valid."/>
+        </Property>
+        <NavigationProperty Name="Extents" Type="Collection(MemoryExtent.MemoryExtent)">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The extents with this tag."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain an array of links to resources of type `MemoryExtent` that have this tag."/>
+          <Annotation Term="OData.AutoExpandReferences"/>
+        </NavigationProperty>
+      </ComplexType>
+    </Schema>
+
+  </edmx:DataServices>
+</edmx:Edmx>

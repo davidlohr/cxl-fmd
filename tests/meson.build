@@ -181,6 +181,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # cxl-fmd's Oem properties against its Oem schema
+    test(
+        'oem-schema',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_oem_schema.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 300,
+        suite: 'api',
+    )
+
     # Status.Conditions from Get Health Info, and cxl-fmd's registry
     test(
         'conditions',

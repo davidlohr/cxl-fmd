@@ -206,7 +206,7 @@ class TestDirectSLDConnections:
         assert status == 200
         # inferred, not observed (review F04): see TestInferredDirect
         assert data["Status"] == {"State": "Enabled", "Health": "Warning"}
-        assert data["Oem"] == {"Cxl": {"Origin": "Inferred"}}
+        assert data["Oem"] == {"Cxl": {"@odata.type": "#Cxl.v1_0_0.Connection", "Origin": "Inferred"}}
         assert data["Links"]["InitiatorEndpoints"] == [{"@odata.id": EP + "local"}]
         assert data["Links"]["TargetEndpoints"] == [{"@odata.id": EP + "sld_0"}]
         assert [i["MemoryChunk"]["@odata.id"] for i in data["MemoryChunkInfo"]] == [

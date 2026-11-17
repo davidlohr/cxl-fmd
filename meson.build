@@ -70,6 +70,7 @@ src = files(
 embed_file = find_program('scripts/embed_file.py')
 foreach f : [
     ['CxlHealth.1.0.0.json', 'schema/oem/registries/CxlHealth.1.0.0.json', 'fmd_file_cxl_health_registry'],
+    ['Cxl_v1.xml', 'schema/oem/csdl/Cxl_v1.xml', 'fmd_file_cxl_schema'],
 ]
     src += custom_target(
         'embed-' + f[0],

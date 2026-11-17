@@ -1,20 +1,36 @@
 /* SPDX-License-Identifier: LGPL-2.1 */
 /*
- * CXL Fabric Manager Daemon - cxl-fmd's own registry files
+ * CXL Fabric Manager Daemon - cxl-fmd's own registry and schema files
  *
  * "/redfish/v1/Registries/<RegistryFile>: Local copy of a Redfish registry
  * file, where <RegistryFile> is the file name of the local registry file"
  * (DSP0266 1.25.0 Table 4, Redfish-defined URIs; not required). Each is
  * found from /redfish/v1/Registries, a MessageRegistryFileCollection, and
- * its MessageRegistryFile, whose Location[].Uri is that URI. The files are
- * compiled in from schema/oem (scripts/embed_file.py): nothing is read
- * from disk.
+ * its MessageRegistryFile, whose Location[].Uri is that URI. And
+ * "/redfish/v1/Schemas/<SchemaFile>: Local copy of a Redfish schema file"
+ * (the same table): the CSDL of cxl-fmd's Oem properties, which $metadata
+ * references there ("A relative URI to a local copy of the Redfish
+ * schema", Section 8.4.2.1; "The OData metadata document may reference
+ * additional schema documents that describe OEM-specific extensions",
+ * Section 8.4.2.2). The files are compiled in from schema/oem
+ * (scripts/embed_file.py): nothing is read from disk.
  */
 
 #include "handlers_internal.h"
 
 extern const char fmd_file_cxl_health_registry[];
 extern const size_t fmd_file_cxl_health_registry_len;
+extern const char fmd_file_cxl_schema[];
+extern const size_t fmd_file_cxl_schema_len;
+
+const char *fmd_redfish_schema_file(const char *file, size_t *len)
+{
+	if (!strcmp(file, "Cxl_v1.xml")) {
+		*len = fmd_file_cxl_schema_len;
+		return fmd_file_cxl_schema;
+	}
+	return NULL;
+}
 
 struct served_registry {
 	const char *id;			/* the MessageRegistryFile's Id */

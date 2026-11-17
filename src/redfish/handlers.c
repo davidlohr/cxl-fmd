@@ -335,7 +335,8 @@ json_t *fmd_redfish_system_memory_domain(struct fmd_ctx *ctx,
 	 * component" (CXL r4.0 Section 7.2.3.1).
 	 */
 	if (result)
-		json_object_set_new(result, "Oem", json_pack("{s:{s:s}}", "Cxl",
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:s}}", "Cxl",
+			"@odata.type", "#Cxl.v1_0_0.MemoryDomain",
 			"HostState", "NotObserved"));
 out:
 	fmd_topology_rdunlock(&ctx->topology);
@@ -1207,14 +1208,16 @@ static json_t *conn_json(const struct fmd_conn_view *v)
 	 * Surprise Hot-Remove.
 	 */
 	if (v->kind == FMD_CONN_SWITCH) {
-		json_object_set_new(result, "Oem", json_pack("{s:{s:s}}", "Cxl",
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:s}}", "Cxl",
+			"@odata.type", "#Cxl.v1_0_0.Connection",
 			"Origin", v->made_here ? "Service" : "Discovered"));
 		json_object_set_new(result, "Actions", json_pack("{s:{s:{s:s}}}",
 			"Oem", "#Cxl.ForceUnbind", "target",
 			rf_uri(0, "/redfish/v1/Fabrics/CXL/Connections/%s/Actions/Oem/Cxl.ForceUnbind",
 			       v->id)));
 	} else {
-		json_object_set_new(result, "Oem", json_pack("{s:{s:s}}", "Cxl",
+		json_object_set_new(result, "Oem", json_pack("{s:{s:s, s:s}}", "Cxl",
+			"@odata.type", "#Cxl.v1_0_0.Connection",
 			"Origin", direct_origin(v)));
 	}
 	return result;
@@ -5518,6 +5521,10 @@ char *fmd_redfish_metadata(struct fmd_ctx *ctx)
 		"  <edmx:Reference Uri=\"http://redfish.dmtf.org/schemas/v1/MessageRegistryFile_v1.xml\">\n"
 		"    <edmx:Include Namespace=\"MessageRegistryFile\"/>\n"
 		"    <edmx:Include Namespace=\"MessageRegistryFile.v1_1_5\"/>\n"
+		"  </edmx:Reference>\n"
+		"  <edmx:Reference Uri=\"/redfish/v1/Schemas/Cxl_v1.xml\">\n"
+		"    <edmx:Include Namespace=\"Cxl\"/>\n"
+		"    <edmx:Include Namespace=\"Cxl.v1_0_0\"/>\n"
 		"  </edmx:Reference>\n"
 		"  <edmx:DataServices>\n"
 		"    <Schema xmlns=\"http://docs.oasis-open.org/odata/ns/edm\" Namespace=\"Service\">\n"

@@ -273,7 +273,8 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_unit_topologies.py` | 7 combinations of attachment and device type | 83 |
 | `test_mock_bindings.py` | The mock switch's bind and unbind outcomes, and binds made outside cxl-fmd | 16 |
 | `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
-| **Total** | | **670** |
+| `test_oem_schema.py` | Every `Oem.Cxl` object and Oem action against cxl-fmd's Oem schema `Cxl_v1.xml` | 7 |
+| **Total** | | **677** |
 
 ### Running Tests
 

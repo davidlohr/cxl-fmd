@@ -113,12 +113,19 @@ class TestRedfishValidator:
         if schema_dir and schema_dir.exists():
             cmd.extend(["--schema_directory", str(schema_dir)])
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        finally:
+            # The validator saves each schema $metadata references by a
+            # relative URI in the schema directory, DMTF's: cxl-fmd's Oem
+            # schema (/redfish/v1/Schemas/Cxl_v1.xml) is not left there
+            if schema_dir:
+                (schema_dir / "Cxl_v1.xml").unlink(missing_ok=True)
 
         return result
 
@@ -126,6 +133,8 @@ class TestRedfishValidator:
         """Validate single SLD topology against Redfish schemas."""
         result = self._run_validator(
             validator_venv.validator, cxl_fmd_daemon["url"], schema_dir)
+        # the Oem schema it fetched from cxl-fmd is not left in the tree
+        assert not (schema_dir / "Cxl_v1.xml").exists()
 
         print("=== Validator stdout ===")
         print(result.stdout)
