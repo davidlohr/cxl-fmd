@@ -7374,6 +7374,56 @@ static void test_dc_tasks_hw(void)
 		fmd_ctx_free(ctx);
 	}
 
+	/*
+	 * The read for the baseline frees the extents the device no longer
+	 * lists: a Prescriptive release, or a DELETE, of an extent of a stale
+	 * host that is gone once it is read is 404 with nothing sent, not a
+	 * 5605h built from the freed extent
+	 */
+	for (int c = 0; c < 2; c++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1ac + c, 0x00);
+		char id[FMD_MAX_ID_LEN], rel[512];
+		const char *msg = NULL;
+		json_t *task = NULL;
+		unsigned int sent;
+		int rc;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		device_id(id, sizeof(id), 0x1ac + c);
+		answer_dcd_host(ep, 0, NULL, 0, NULL, -1);
+		fmd_dcd_refresh(ctx, dev, 0);
+		CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_STALE &&
+		      fmd_dc_find_extent(dev, 0, 1ULL << 30),
+		      "host 0 not stale with its extent");
+		answer_dcd_host(ep, 3, NULL, 0, NULL, -1);
+		answer_rc(ep, 0x5605, CXLMI_RET_SUCCESS);
+		sent = commands_sent(ep);
+		if (c == 0) {
+			snprintf(rel, sizeof(rel), "{\"Policy\": \"Prescriptive\", "
+				 "\"ForcedRemoval\": false, \"SanitizeOnRelease\": false, "
+				 "\"ExtentList\": [{\"@odata.id\": \"/redfish/v1/Chassis/%s/"
+				 "PCIeDevices/%s/MemoryExtents/ext_0_40000000\"}]}", id, id);
+			rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel),
+							   &msg, &task);
+		} else {
+			rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000",
+								 &msg, &task);
+		}
+		CHECK(rc == -ENOENT && !task && !ctx->tasks &&
+		      last_opcode(ep) != 0x5605 && commands_sent(ep) - sent == 3 &&
+		      msg && strstr(msg, "no longer the host's"),
+		      "%s of an extent gone when read for the baseline: %d, last %04xh, "
+		      "%u sent, %s", c ? "a DELETE" : "a Prescriptive release", rc,
+		      last_opcode(ep), commands_sent(ep) - sent, msg ? msg : "");
+		json_decref(task);
+		fmd_ctx_free(ctx);
+	}
+
 	report("Dynamic Capacity tasks follow the host", before);
 }
 

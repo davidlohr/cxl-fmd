@@ -316,6 +316,35 @@ static int dc_task_release_fill(struct fmd_task *task, uint8_t policy, bool forc
 	return 0;
 }
 
+/*
+ * fmd_dc_task_prepare() reads a stale host again for the baseline, and
+ * that frees the extents the device no longer lists: the @n extents of a
+ * Prescriptive release, found before it, are found again from the copies
+ * in @task. False if one is gone, or is not the extent it was; then
+ * nothing is to be sent.
+ */
+static bool dc_task_extents_again(struct fmd_component *dev,
+				  const struct fmd_task *task,
+				  struct fmd_dc_extent **extents, int n)
+{
+	const struct fmd_dc_task *dc = task->dc;
+
+	for (int i = 0; i < n && i < dc->n_req; i++) {
+		struct fmd_dc_extent *ext = fmd_dc_find_extent(dev, dc->host_id,
+							       dc->req[i].dpa);
+
+		if (!ext || ext->len != dc->req[i].len ||
+		    memcmp(ext->tag, dc->req[i].tag, FMD_DC_TAG_LEN))
+			return false;
+		extents[i] = ext;
+	}
+	return true;
+}
+
+#define EXTENT_GONE_MSG \
+	"An extent the request names is no longer the host's, as read before it: " \
+	"nothing was sent"
+
 #define EXTENT_LIST_MSG \
 	"ExtentList must be a non-empty array of distinct MemoryExtent links on this device"
 #define EXTENT_FOREIGN_MSG \
@@ -881,6 +910,12 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 	rc = fmd_dc_task_prepare(ctx, dev, task, msg);
 	if (rc)
 		goto out;
+	if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE &&
+	    !dc_task_extents_again(dev, task, extents, n)) {
+		*msg = EXTENT_GONE_MSG;
+		rc = -ENOENT;
+		goto out;
+	}
 
 	rc = fmd_dc_release(ctx, dev, host_id, policy, false, sanitize,
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? length : 0, tag,
@@ -1454,6 +1489,13 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		fmd_task_discard(task);
 		free(extents);
 		return rc;
+	}
+	if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE &&
+	    !dc_task_extents_again(dev, task, extents, ext_count)) {
+		fmd_task_discard(task);
+		free(extents);
+		*msg = EXTENT_GONE_MSG;
+		return -ENOENT;
 	}
 
 	rc = fmd_dc_release(ctx, dev, host_id, (uint8_t)policy, forced, sanitize,

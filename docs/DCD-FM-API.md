@@ -886,7 +886,9 @@ extents of a Prescriptive release (`RequestedExtents`), with the host's
 extents before it (`BaselineExtents`) and their Extent List Generation
 Number (`BaselineGeneration`). On hardware a host whose last read failed,
 or is owed, or a tag list that could not be read, is read first; if the
-host still cannot be read, nothing is sent and the answer is `503`.
+host still cannot be read, nothing is sent and the answer is `503`. An
+extent a Prescriptive release or a `DELETE` names that the read no
+longer lists for the host is not sent either: `404`.
 
 **One task at a time for a host and a tag.** What 5603h and the bitmaps
 show of a host cannot be told apart between two requests of one tag, so
