@@ -5389,12 +5389,22 @@ static void test_switch_events(void)
 	 * VCS 2, in the Informational log, which is where a successful one
 	 * goes.
 	 */
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, cid, sizeof(cid));
+	/* the VCSs are read first, as a POST does */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_vcs_refresh(ctx, sw);
+	task = fmd_task_alloc(ctx, FMD_TASK_BIND, sw, &key);
+	CHECK(task && task->before.read &&
+	      task->before.status == FMD_VPPB_UNBOUND, "no task, or the vPPB "
+	      "not read unbound before the bind");
+	if (!task)
+		goto out;
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
-	key = bind_key(sw_id, 2, 1, 5, 1);
-	fmd_conn_id_format(&key, cid, sizeof(cid));
-	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+	task = fmd_task_activate(ctx, task, 0);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
@@ -8505,12 +8515,18 @@ static void test_lost_task_frees_op(void)
 	 * then does not answer 0002h. On the fifth failed poll the VCSs are
 	 * read: the vPPB is bound.
 	 */
+	key = bind_key(id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, conn_id, sizeof(conn_id));
+	task = fmd_task_alloc(ctx, FMD_TASK_BIND, sw, &key);
+	CHECK(task && task->before.read &&
+	      task->before.status == FMD_VPPB_UNBOUND, "no task, or the vPPB "
+	      "not read unbound before the bind");
+	if (!task)
+		goto out;
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
-	key = bind_key(id, 2, 1, 5, 1);
-	fmd_conn_id_format(&key, conn_id, sizeof(conn_id));
-	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+	task = fmd_task_activate(ctx, task, 0);
 	CHECK(task, "no task");
 	if (!task)
 		goto out;
@@ -8577,6 +8593,10 @@ static void test_lost_task_frees_op(void)
 	for (int unbinds = 0; unbinds < 2; unbinds++) {
 		bool done = unbinds == 0;
 
+		/* the vPPB is read bound first, as a DELETE does */
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, ld1, unbound);
+		fmd_vcs_refresh(ctx, sw);
 		task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
 		CHECK(task, "no task");
 		if (!task)
@@ -8624,6 +8644,7 @@ static struct fmd_task *task_on(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 				struct fmd_switch **swp)
 {
 	char id[FMD_MAX_ID_LEN];
+	struct fmd_vppb_seen seen;
 	struct fmd_bind_key key;
 	struct fmd_switch *sw;
 
@@ -8641,7 +8662,8 @@ static struct fmd_task *task_on(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		fmd_vcs_refresh(ctx, sw);
 		return fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
 	}
-	fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL);
+	fmd_vppb_seen(sw, 2, 1, &seen);
+	fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL, &seen);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	if (fmd_vppb_bind(ctx, sw, 2, 1, 5, 1) != FMD_OP_STARTED)
 		return NULL;
@@ -9151,6 +9173,234 @@ out:
 	       before);
 }
 
+/*
+ * A bind or an unbind records its vPPB as read before the command is sent
+ * (Review F08.7b): the op has it, and the task carries it. A vPPB that
+ * already read what was asked then, or that was not read, reads the same
+ * whether or not the switch carried the command out: without the switch's
+ * word, the task's outcome is not known, and a Binding Change record that
+ * shows it is not taken for the end of the task.
+ */
+static bool seen_is(const struct fmd_vppb_seen *seen, bool read,
+		    enum fmd_vppb_binding_status status, uint8_t port_id,
+		    uint16_t ld_id)
+{
+	if (!read)
+		return !seen->read;
+	return seen->read && seen->status == status &&
+	       seen->port_id == port_id && seen->ld_id == ld_id;
+}
+
+/* @sw's VCS 2 read with vPPB 1 as @vppb1 */
+static void read_vppb1(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+		       struct fmd_switch *sw, const uint8_t *vppb1)
+{
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb1, unbound);
+	fmd_vcs_refresh(ctx, sw);
+}
+
+/* four polls that 0002h does not answer, and a fifth: the task is lost */
+static void lose_task(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+		      const uint8_t *vppb1)
+{
+	for (int i = 0; i < 4; i++)
+		fmd_tasks_poll(ctx);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb1, unbound);
+	fmd_tasks_poll(ctx);
+}
+
+static void test_task_before_state(void)
+{
+	char sw_id[FMD_MAX_ID_LEN], body[512], cid[FMD_CONN_ID_LEN];
+	struct cxlmi_endpoint *ep;
+	struct fmd_bind_key key;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	struct fmd_ctx *ctx;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	/* POST: the vPPB, read unbound, is recorded before 5201h is sent */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f30);
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5f30);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	host = sw ? vcs_host(ctx, sw_id, 2) : NULL;
+	CHECK(sw && host, "no switch or host of VCS 2");
+	if (!sw || !host)
+		goto out;
+	snprintf(body, sizeof(body),
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld1\"}]}}",
+		 host->base.id, sw_id);
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && task && ops_count(ctx) == 1 &&
+	      seen_is(&ctx->binding_ops->before, true, FMD_VPPB_UNBOUND, 0,
+		      FMD_LD_NONE) &&
+	      seen_is(&task->before, true, FMD_VPPB_UNBOUND, 0, FMD_LD_NONE),
+	      "POST: %d, the vPPB before the bind not recorded unbound", rc);
+	json_decref(resp);
+	resp = NULL;
+	cxlmi_mock_clear_responses(ep);
+	if (!task)
+		goto out;
+	task_done(ctx, ep, false);
+	CHECK(task->state == FMD_TASK_COMPLETED, "the bind: task %d (%s)",
+	      task->state, task->message);
+
+	/* DELETE: the vPPB, read bound to LD 1 of port 5, before 5202h */
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	}
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && task && task->kind == FMD_TASK_UNBIND &&
+	      ops_count(ctx) == 1 &&
+	      seen_is(&ctx->binding_ops->before, true, FMD_VPPB_BOUND_LD, 5, 1) &&
+	      seen_is(&task->before, true, FMD_VPPB_BOUND_LD, 5, 1),
+	      "DELETE: %d, the vPPB before the unbind not recorded bound", rc);
+	json_decref(resp);
+	resp = NULL;
+	fmd_ctx_free(ctx);
+
+	/*
+	 * A bind of a vPPB that read bound to what was asked before it, lost:
+	 * the vPPB, read bound to it, says nothing of the bind. Exception,
+	 * the outcome not known, and the binding not cxl-fmd's.
+	 */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f31);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5f31);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw, "no switch %s", sw_id);
+	if (!sw)
+		goto out;
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+	CHECK(task && seen_is(&task->before, true, FMD_VPPB_BOUND_LD, 5, 1),
+	      "no task, or the vPPB before it not recorded");
+	if (!task)
+		goto out;
+	lose_task(ctx, ep, vppb_ld1);
+	CHECK(task->state == FMD_TASK_EXCEPTION &&
+	      task->outcome == FMD_TASK_UNPROVEN && !ops_count(ctx) &&
+	      strstr(task->message, "not known") &&
+	      !fmd_binding_mark_find(ctx, &key),
+	      "a lost bind of a vPPB bound before: task %d (%s)", task->state,
+	      task->message);
+	/* its monitor: 500, "Outcome unknown" */
+	{
+		char loc[128];
+		const char *msg;
+
+		rc = fmd_redfish_task_monitor(ctx, task->id, &resp, loc, sizeof(loc));
+		msg = json_string_value(json_object_get(json_object_get(resp, "error"),
+							"message"));
+		CHECK(rc == 500 && msg &&
+		      !strncmp(msg, "Outcome unknown: The vPPB is bound", 34) &&
+		      !strstr(msg, "before it went"),
+		      "the monitor of a bind not shown done: %d, %s", rc,
+		      msg ? msg : "(no message)");
+		json_decref(resp);
+		resp = NULL;
+	}
+
+	/* an unbind of a vPPB that read unbound before it, likewise */
+	read_vppb1(ctx, ep, sw, unbound);
+	task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
+	CHECK(task && seen_is(&task->before, true, FMD_VPPB_UNBOUND, 0,
+			      FMD_LD_NONE), "no task, or no before");
+	if (!task)
+		goto out;
+	lose_task(ctx, ep, unbound);
+	CHECK(task->state == FMD_TASK_EXCEPTION &&
+	      task->outcome == FMD_TASK_UNPROVEN && !ops_count(ctx),
+	      "a lost unbind of a vPPB unbound before: task %d (%s)",
+	      task->state, task->message);
+
+	/*
+	 * A bind whose VCS could not be read before it, Interrupted with the
+	 * vPPB at 01h, then read bound to what was asked (the reconcile of
+	 * fmd_vcs_refresh()): not known either.
+	 */
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	fmd_vcs_refresh(ctx, sw);
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+	CHECK(task && seen_is(&task->before, false, 0, 0, 0),
+	      "no task, or a vPPB not read recorded as read");
+	if (!task)
+		goto out;
+	lose_task(ctx, ep, vppb_busy);
+	CHECK(task->state == FMD_TASK_INTERRUPTED, "not Interrupted: %d (%s)",
+	      task->state, task->message);
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	CHECK(task->state == FMD_TASK_EXCEPTION &&
+	      task->outcome == FMD_TASK_UNPROVEN && !ops_count(ctx),
+	      "an Interrupted bind of a vPPB not read before: task %d (%s)",
+	      task->state, task->message);
+	fmd_ctx_free(ctx);
+
+	/*
+	 * A successful Binding Change record that shows what the vPPB held
+	 * before the bind: turned away, the VCSs read again, and the task
+	 * goes on. The switch's 0002h, Success, then ends it.
+	 */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f32);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5f32);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw, "no switch %s", sw_id);
+	if (!sw)
+		goto out;
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	answer_event(ep, virtual_switch_event, 0x51,
+		     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	fmd_switch_events_poll(ctx);
+	CHECK(task->state == FMD_TASK_RUNNING && ops_count(ctx) == 1 &&
+	      last_opcode(ep) == 0x5200,
+	      "a record of what the vPPB held before was taken: task %d (%s), "
+	      "last %04xh", task->state, task->message, last_opcode(ep));
+	cxlmi_mock_clear_responses(ep);
+	task_done(ctx, ep, false);
+	CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx),
+	      "0002h Success after the record: task %d (%s)", task->state,
+	      task->message);
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	report("a bind or unbind is judged against the vPPB before it", before);
+}
+
 /* a task allocation that fails */
 static void *no_task_calloc(size_t nmemb, size_t size)
 {
@@ -9466,7 +9716,7 @@ static void test_conn_view_prebound_sld_ld(void)
 
 	/* a bind under way on unbound vPPB 2 of VCS 2: Starting, found */
 	key = bind_key(sw_id, 2, 2, 5, 0);
-	bind_op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, "1");
+	bind_op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, "1", NULL);
 	l = list_conns(ctx);
 	snprintf(want, sizeof(want), "%s_vcs2_vppb2_p5_ld0", sw_id);
 	i = conn_index(&l, want);
@@ -9491,7 +9741,7 @@ static void test_conn_view_prebound_sld_ld(void)
 
 	/* an unbind under way of the SLD: Updating, and gone at 00h */
 	key = bind_key(sw_id, 0, 2, 4, FMD_LD_NONE);
-	unbind_op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, 1, "2");
+	unbind_op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, 1, "2", NULL);
 	snprintf(want, sizeof(want), "%s_vcs0_vppb2_p4", sw_id);
 	rc = fmd_conn_lookup(ctx, want, &v);
 	CHECK(rc == 0 && v.state == FMD_CONN_UPDATING && v.op == unbind_op,
@@ -11760,6 +12010,7 @@ int main(void)
 	test_lost_task_interrupted();
 	test_task_monitor_as_sync();
 	test_task_before_command();
+	test_task_before_state();
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
 	test_chunk_plan();

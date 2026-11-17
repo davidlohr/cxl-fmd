@@ -16,7 +16,10 @@
  * frees it when the operation is over, however that is learnt, and the
  * Connection is then what the vPPB is. That the operation is over is
  * judged on the vPPB read again after the switch says it is, and only then
- * (task_complete()).
+ * (task_complete()). What the vPPB read before the command is kept with
+ * the op and the task: where the switch's word is not had, a vPPB that
+ * reads what was asked shows the command done only if it did not read
+ * that before it (task_judge()).
  *
  * The task is made before the command is sent (fmd_task_alloc()), so that
  * nothing the switch has started is left without one. A task whose switch
@@ -71,6 +74,7 @@ struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 	task->ld_id = key->ld_id;
 	snprintf(task->switch_id, sizeof(task->switch_id), "%s", sw->base.id);
 	fmd_conn_id_format(key, task->connection_id, sizeof(task->connection_id));
+	fmd_vppb_seen(sw, key->vcs_id, key->vppb_id, &task->before);
 	return task;
 }
 
@@ -147,8 +151,11 @@ struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
 		fmd_binding_op_remove(ctx, op);
 		op = NULL;
 	}
-	if (!op)
-		op = fmd_binding_op_add(ctx, &key, op_kind, unbind_option, NULL);
+	if (op)
+		task->before = op->before;
+	else
+		op = fmd_binding_op_add(ctx, &key, op_kind, unbind_option, NULL,
+					&task->before);
 	if (!op) {
 		/* nothing would say what the vPPB is becoming: the vPPB says */
 		fmd_err(ctx, "%s: no task for the %s of vPPB %d in VCS %d",
@@ -166,9 +173,20 @@ struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
 	task->next = ctx->tasks;
 	ctx->tasks = task;
 
-	fmd_info(ctx, "Task %d: %s of vPPB %d in VCS %d of %s started (connection %s)",
-		 task->id, task->kind == FMD_TASK_BIND ? "bind" : "unbind",
-		 task->vppb_id, task->vcs_id, task->switch_id, task->connection_id);
+	if (task->before.read)
+		fmd_info(ctx, "Task %d: %s of vPPB %d in VCS %d of %s started "
+			 "(connection %s); the vPPB read %02xh, port %d, LD %d "
+			 "before", task->id,
+			 task->kind == FMD_TASK_BIND ? "bind" : "unbind",
+			 task->vppb_id, task->vcs_id, task->switch_id,
+			 task->connection_id, task->before.status,
+			 task->before.port_id, task->before.ld_id);
+	else
+		fmd_info(ctx, "Task %d: %s of vPPB %d in VCS %d of %s started "
+			 "(connection %s); the vPPB was not read before",
+			 task->id, task->kind == FMD_TASK_BIND ? "bind" : "unbind",
+			 task->vppb_id, task->vcs_id, task->switch_id,
+			 task->connection_id);
 	return task;
 }
 
@@ -292,10 +310,70 @@ static void task_unseen(struct fmd_ctx *ctx, struct fmd_task *task,
 }
 
 /*
+ * @task was followed without the switch's word on it, and its vPPB reads
+ * what was asked (@what), as it did before the command, or nothing was
+ * known of it then: whether the switch carried the command out is not
+ * known. The Connection is what the vPPB is.
+ */
+static void task_unproven(struct fmd_ctx *ctx, struct fmd_task *task,
+			  const char *what)
+{
+	char msg[sizeof(task->message)];
+
+	task->percent = 100;
+	task->rc = CXLMI_RET_SUCCESS;
+	task->outcome = FMD_TASK_UNPROVEN;
+	snprintf(msg, sizeof(msg), "The vPPB is %s, as it %s before %s was "
+		 "sent, and the switch was not asked how it went: whether it "
+		 "carried out the %s is not known", what,
+		 task->before.read ? "was" : "may have been (it was not read)",
+		 task->kind == FMD_TASK_BIND ? "Bind vPPB" : "Unbind vPPB",
+		 task->kind == FMD_TASK_BIND ? "bind" : "unbind");
+	task_finish(ctx, task, false, msg);
+}
+
+/*
+ * Whether a vPPB whose Binding Status, port and LD are @status, @port_id
+ * and @ld_id holds what @task asks for: for a bind the port, and the LD for
+ * 03h (Bound Port ID is "Valid only when Binding Status is 02h or 03h", and
+ * Bound LD ID "Valid only when vPPB[Start vPPB] Binding Status is 03h",
+ * Table 7-34); for an unbind, 00h.
+ */
+static bool task_asked(const struct fmd_task *task, uint8_t status,
+		       uint8_t port_id, uint16_t ld_id)
+{
+	if (task->kind != FMD_TASK_BIND)
+		return status == FMD_VPPB_UNBOUND;
+	return port_id == task->port_id &&
+		((task->ld_id == FMD_LD_NONE &&
+		  status == FMD_VPPB_BOUND_PHYSICAL_PORT) ||
+		 (task->ld_id != FMD_LD_NONE && status == FMD_VPPB_BOUND_LD &&
+		  ld_id == task->ld_id));
+}
+
+/*
+ * Whether the vPPB reading what @task asks for shows that the command did
+ * it: only if it was read before the command and did not read that then.
+ * A vPPB that held it already, or of which nothing was known, would read
+ * the same had the switch never carried the command out (cxl-fmd's
+ * reading).
+ */
+static bool task_changed_it(const struct fmd_task *task)
+{
+	return task->before.read &&
+	       !task_asked(task, task->before.status, task->before.port_id,
+			   task->before.ld_id);
+}
+
+/*
  * The outcome of @task, its vPPB read and not at 01h: @vppb, NULL if the
  * switch has no such vPPB. @rc and @logged_failed as task_complete().
  * @read_only: the switch could not be asked how it went, and the vPPB is
- * all there is to go by.
+ * all there is to go by. Then a vPPB that reads what was asked shows it
+ * done only if it did not before the command (task_changed_it()); if it
+ * did, or was not read then, the task is an Exception whose outcome is not
+ * known (cxl-fmd's choice). With the switch's return code, Success is the
+ * switch's word, and the vPPB has to agree with it.
  */
 static void task_judge(struct fmd_ctx *ctx, struct fmd_task *task,
 		       const struct fmd_vppb *vppb, uint16_t rc,
@@ -318,13 +396,14 @@ static void task_judge(struct fmd_ctx *ctx, struct fmd_task *task,
 		 * and Bound LD ID "Valid only when vPPB[Start vPPB] Binding
 		 * Status is 03h" (Table 7-34).
 		 */
-		bool bound = vppb && vppb->bound_port_id == task->port_id &&
-			((task->ld_id == FMD_LD_NONE &&
-			  vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT) ||
-			 (task->ld_id != FMD_LD_NONE &&
-			  vppb->binding_status == FMD_VPPB_BOUND_LD &&
-			  vppb->bound_ld_id == task->ld_id));
+		bool bound = vppb && task_asked(task, vppb->binding_status,
+						vppb->bound_port_id,
+						vppb->bound_ld_id);
 
+		if (!failed && bound && read_only && !task_changed_it(task)) {
+			task_unproven(ctx, task, "bound to what was asked");
+			return;
+		}
 		if (!failed && bound) {
 			struct fmd_bind_key key;
 
@@ -353,6 +432,11 @@ static void task_judge(struct fmd_ctx *ctx, struct fmd_task *task,
 	}
 
 	/* unbind */
+	if (!failed && (!vppb || vppb->binding_status == FMD_VPPB_UNBOUND) &&
+	    read_only && !task_changed_it(task)) {
+		task_unproven(ctx, task, "unbound");
+		return;
+	}
 	if (!failed && (!vppb || vppb->binding_status == FMD_VPPB_UNBOUND)) {
 		snprintf(msg, sizeof(msg), "The vPPB is unbound%s", how);
 		task_finish(ctx, task, true, msg);
@@ -422,14 +506,7 @@ static bool record_fits(const struct fmd_task *task, bool failed,
 
 	if (status == FMD_VPPB_BUSY)
 		return false;
-	if (task->kind == FMD_TASK_BIND)
-		asked = port_id == task->port_id &&
-			((task->ld_id == FMD_LD_NONE &&
-			  status == FMD_VPPB_BOUND_PHYSICAL_PORT) ||
-			 (task->ld_id != FMD_LD_NONE &&
-			  status == FMD_VPPB_BOUND_LD && ld_id == task->ld_id));
-	else
-		asked = status == FMD_VPPB_UNBOUND;
+	asked = task_asked(task, status, port_id, ld_id);
 	return failed ? !asked : asked;
 }
 
@@ -460,6 +537,21 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 				 "VCS %d (%02xh, port %d, LD %d) that is not "
 				 "the end of its %s", task->id, vppb_id, vcs_id,
 				 status, port_id, ld_id,
+				 task->kind == FMD_TASK_BIND ? "bind" : "unbind");
+			return false;
+		}
+		/*
+		 * A successful one that shows what the vPPB held before the
+		 * command, or when nothing was known of it then, can be of
+		 * an earlier bind or unbind: the switch is asked instead.
+		 */
+		if (!failed && !task_changed_it(task)) {
+			fmd_info(ctx, "Task %d: a Binding Change of vPPB %d of "
+				 "VCS %d (%02xh, port %d, LD %d) that the vPPB "
+				 "%s before the %s: not taken as its end",
+				 task->id, vppb_id, vcs_id, status, port_id,
+				 ld_id, task->before.read ? "showed" :
+				 "may have shown (it was not read)",
 				 task->kind == FMD_TASK_BIND ? "bind" : "unbind");
 			return false;
 		}

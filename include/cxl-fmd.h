@@ -1354,6 +1354,25 @@ enum fmd_bind_op_kind {
 };
 
 /*
+ * A vPPB's binding as last read with Get Virtual CXL Switch Info (Table
+ * 7-34): its Binding Status, its Bound Port ID ("Valid only when Binding
+ * Status is 02h or 03h"; 0 otherwise) and its Bound LD ID ("Valid only when
+ * vPPB[Start vPPB] Binding Status is 03h"; FMD_LD_NONE otherwise). @read is
+ * false when its VCS could not be read the last time it was asked for, or
+ * has no such vPPB: then nothing is known of it.
+ */
+struct fmd_vppb_seen {
+	bool read;
+	enum fmd_vppb_binding_status status;
+	uint8_t port_id;
+	uint16_t ld_id;
+};
+
+/* vPPB @vppb_id of VCS @vcs_id of @sw, as its table has it now */
+void fmd_vppb_seen(struct fmd_switch *sw, uint8_t vcs_id, uint8_t vppb_id,
+		   struct fmd_vppb_seen *seen);
+
+/*
  * A bind or an unbind the switch is carrying out in the background for
  * cxl-fmd. It lives only while that runs: a vPPB being bound or unbound
  * reads 01h, and its Bound Port ID is "Valid only when Binding Status is
@@ -1366,6 +1385,14 @@ struct fmd_binding_op {
 	struct fmd_bind_key key;
 	enum fmd_bind_op_kind kind;
 	uint8_t unbind_option;		/* Unbind Option (Table 7-36), for an unbind */
+	/*
+	 * The vPPB as read before the command was sent, after the VCSs
+	 * were read for it: a vPPB that already read what the command asks
+	 * for shows nothing of the command when it reads that afterwards
+	 * (task_judge()). Of a forced unbind sent while an unbind runs, the
+	 * vPPB before the first: it is the same unbind.
+	 */
+	struct fmd_vppb_seen before;
 	char task_id[FMD_MAX_ID_LEN];
 	/*
 	 * Its task is Interrupted: the switch could not be asked how it went.
@@ -1814,7 +1841,8 @@ struct fmd_binding_op *fmd_binding_op_add(struct fmd_ctx *ctx,
 					  const struct fmd_bind_key *key,
 					  enum fmd_bind_op_kind kind,
 					  uint8_t unbind_option,
-					  const char *task_id);
+					  const char *task_id,
+					  const struct fmd_vppb_seen *before);
 /* The op on vPPB @vppb_id of VCS @vcs_id of switch @switch_id */
 struct fmd_binding_op *fmd_binding_op_find(const struct fmd_ctx *ctx,
 					   const char *switch_id,
@@ -1889,6 +1917,9 @@ enum fmd_task_outcome {
 	FMD_TASK_RC,		/* the switch's return code, rc */
 	FMD_TASK_UNKNOWN,	/* the switch, or the DCD, is gone: what it did
 				   is not known */
+	FMD_TASK_UNPROVEN,	/* the switch was not asked, and the vPPB reads
+				   what was asked as it did, or may have, before
+				   the command: what it did is not known */
 	FMD_TASK_DC_REFUSED,	/* the host was seen to accept none of an add */
 };
 
@@ -1948,6 +1979,8 @@ struct fmd_task {
 	uint8_t vppb_id;
 	uint8_t port_id;                     /* what is bound, or unbound */
 	uint16_t ld_id;                      /* FMD_LD_NONE for a whole port */
+	struct fmd_vppb_seen before;         /* the vPPB before the command:
+						its op's (struct fmd_binding_op) */
 	char connection_id[FMD_CONN_ID_LEN];
 	time_t start;
 	time_t end;                          /* 0 while running */
@@ -1966,7 +1999,9 @@ static inline bool fmd_task_is_dc(const struct fmd_task *task)
 /*
  * A task for the bind or unbind of @key on @sw, made before the command is
  * sent, so that nothing has to be allocated once the switch has started it:
- * NULL if it cannot be made, and then nothing is to be sent. It is nobody's
+ * NULL if it cannot be made, and then nothing is to be sent. Its before is
+ * the vPPB as @sw's table has it now, which the caller has just read, and
+ * gives its op (fmd_binding_op_add()). It is nobody's
  * until fmd_task_activate(); fmd_task_discard() frees it if the command
  * was not started in the background.
  */
@@ -1976,9 +2011,10 @@ struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 /*
  * @sw has started the operation of @task in the background: the task is
  * listed, and takes over the struct fmd_binding_op of its vPPB, which the
- * caller added before it sent the command, and frees it when the task ends.
- * If there is no op one is added with @unbind_option; if that cannot be,
- * the task is freed and NULL returned.
+ * caller added before it sent the command, and frees it when the task ends;
+ * the task's before is then the op's. If there is no op one is added with
+ * @unbind_option and the task's before; if that cannot be, the task is
+ * freed and NULL returned.
  */
 struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
 				   uint8_t unbind_option);
@@ -2347,8 +2383,10 @@ void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw);
  * A Binding Change of a vPPB, from a Virtual CXL Switch Event Record, with
  * its vPPB Binding Status, Port ID and LD ID (33h-35h, Table 7-80): the
  * end of the bind or unbind a task is following, if those fit it. Returns
- * false if no task is following that vPPB, or the record does not fit the
- * one that is. fabric_lock held.
+ * false if no task is following that vPPB, the record does not fit the one
+ * that is, or it is a successful one that shows what the vPPB read before
+ * the command (or was not read then): it can be of an earlier one.
+ * fabric_lock held.
  */
 bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			      uint8_t vcs_id, uint8_t vppb_id, bool failed,

@@ -771,9 +771,10 @@ unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
  * as the request would have been had the switch answered with it at once
  * (fmd_redfish_vppb_failure()); one with none (the switch logged the
  * operation failed, or the vPPB is not what was asked) is 500 with what
- * the vPPB showed; and one whose switch is gone is 500 "Outcome unknown",
- * as whether the switch did it before it went is not known (cxl-fmd's
- * choices).
+ * the vPPB showed; and one whose switch is gone, or whose vPPB, the switch
+ * not asked, reads what was asked as it did before the command
+ * (FMD_TASK_UNPROVEN), is 500 "Outcome unknown", as whether the switch did
+ * it is not known (cxl-fmd's choices).
  */
 /*
  * The monitor of a DC task that is over answers as the request would have,
@@ -841,6 +842,13 @@ int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 				 "it %s the vPPB before it went is not known",
 				 task->message,
 				 task->kind == FMD_TASK_BIND ? "bound" : "unbound");
+			*response = fmd_redfish_error_body(msg,
+				fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+						    FMD_RES_OUTCOME_UNKNOWN, NULL, 0));
+			return 500;
+		case FMD_TASK_UNPROVEN:
+			snprintf(msg, sizeof(msg), "Outcome unknown: %s",
+				 task->message);
 			*response = fmd_redfish_error_body(msg,
 				fmd_redfish_message(FMD_RF_GENERAL_ERROR,
 						    FMD_RES_OUTCOME_UNKNOWN, NULL, 0));
@@ -7038,12 +7046,13 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 
 	/*
 	 * Recorded, and its task made, before the switch is asked: nothing
-	 * is allocated once it may have started.
+	 * is allocated once it may have started. Both keep the vPPB as just
+	 * read, unbound, against which the outcome is judged.
 	 */
 	task = fmd_task_alloc(ctx, FMD_TASK_BIND, sw, &key);
 	if (!task)
 		return -6;
-	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL);
+	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL, &task->before);
 	if (!op) {
 		fmd_task_discard(task);
 		return -6;
@@ -7394,11 +7403,15 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 	} else {
 		fmd_info(ctx, "Connection %s: unbinding vPPB %d of VCS %d (option %d)",
 			 connection_id, key.vppb_id, key.vcs_id, option);
-		/* its task is made before the switch is asked, as for a bind */
+		/*
+		 * its task is made before the switch is asked, as for a bind,
+		 * with the vPPB as just read
+		 */
 		task = fmd_task_alloc(ctx, FMD_TASK_UNBIND, sw, &key);
 		if (!task)
 			return -2;
-		op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, option, NULL);
+		op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, option,
+					NULL, &task->before);
 		if (!op) {
 			fmd_task_discard(task);
 			return -2;

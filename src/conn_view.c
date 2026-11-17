@@ -235,11 +235,31 @@ struct fmd_binding_op *fmd_binding_op_find_target(const struct fmd_ctx *ctx,
 	return NULL;
 }
 
+void fmd_vppb_seen(struct fmd_switch *sw, uint8_t vcs_id, uint8_t vppb_id,
+		   struct fmd_vppb_seen *seen)
+{
+	struct fmd_vcs *vcs = fmd_switch_find_vcs(sw, vcs_id);
+	const struct fmd_vppb *vppb = vcs ? fmd_vcs_find_vppb(vcs, vppb_id) : NULL;
+
+	memset(seen, 0, sizeof(*seen));
+	seen->ld_id = FMD_LD_NONE;
+	if (!vppb || vcs->stale)
+		return;
+	seen->read = true;
+	seen->status = vppb->binding_status;
+	if (vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT ||
+	    vppb->binding_status == FMD_VPPB_BOUND_LD)
+		seen->port_id = vppb->bound_port_id;
+	if (vppb->binding_status == FMD_VPPB_BOUND_LD)
+		seen->ld_id = vppb->bound_ld_id;
+}
+
 struct fmd_binding_op *fmd_binding_op_add(struct fmd_ctx *ctx,
 					  const struct fmd_bind_key *key,
 					  enum fmd_bind_op_kind kind,
 					  uint8_t unbind_option,
-					  const char *task_id)
+					  const char *task_id,
+					  const struct fmd_vppb_seen *before)
 {
 	struct fmd_binding_op *op = calloc(1, sizeof(*op));
 
@@ -248,6 +268,10 @@ struct fmd_binding_op *fmd_binding_op_add(struct fmd_ctx *ctx,
 	op->key = *key;
 	op->kind = kind;
 	op->unbind_option = unbind_option;
+	if (before)
+		op->before = *before;
+	else
+		op->before.ld_id = FMD_LD_NONE;
 	if (task_id)
 		snprintf(op->task_id, sizeof(op->task_id), "%s", task_id);
 	op->next = ctx->binding_ops;

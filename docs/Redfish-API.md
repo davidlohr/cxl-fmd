@@ -1782,7 +1782,9 @@ failed with no return code (the switch logged the operation failed, or
 the vPPB is not what was asked) is `500` with what was found. A task whose
 switch is gone is `500` with a message that starts "Outcome unknown":
 whether the switch bound or unbound the vPPB before it went is not known.
-Which status each of these gets is cxl-fmd's choice.
+So is one whose vPPB, read with no word from the switch, shows what was
+asked as it did before the command (see below). Which status each of these
+gets is cxl-fmd's choice.
 
 The outcome is judged only on a read of the vPPB made after the switch
 said the operation was over (cxl-fmd's choice). A vPPB that still reads
@@ -1801,8 +1803,28 @@ command it is of: one read while a bind is under way can be that of an
 earlier unbind of the same vPPB. So the fields only turn a record away
 (cxl-fmd's choice): an Informational one fits only if it shows what the
 task asked for (unbound, for an unbind), a Warning one only if it does not,
-and neither if it shows 01h. One turned away has the VCSs read again, as a
-record no task follows does.
+and neither if it shows 01h. An Informational one that fits is turned
+away too when the vPPB read the same before the command, or was not read
+then (see below): it can be of an earlier bind or unbind. One turned away
+has the VCSs read again, as a record no task follows does, and the task
+goes on until Background Operation Status says it is over.
+
+What the vPPB read before the command is recorded with the bind or unbind
+when it is recorded as under way, before Bind vPPB or Unbind vPPB is sent:
+its Binding Status, and its Bound Port ID and Bound LD ID when they are
+valid (Table 7-34), from the read of the VCSs the request starts with
+(step 1 of "What a POST of a switch-attached target does"; a `DELETE`
+reads them too), or "not read" if that VCS could
+not be read. The task carries it. A vPPB that already read what the command
+asks for (bound to that port and LD, or unbound) reads the same afterwards
+whether or not the switch carried the command out. So where the outcome
+rests on the vPPB alone (a Binding Change record, or a lost task, below),
+a vPPB that reads what was asked shows it done only if it read otherwise
+before (cxl-fmd's reading). Background Operation Status that says the
+operation is over with Success is the switch's word, and is taken with a
+vPPB that agrees, whatever it read before. A forced unbind sent while an
+unbind runs keeps the vPPB as read before the first: it is the same
+unbind.
 
 The task of a bind or unbind is made before Bind vPPB or Unbind vPPB is
 sent. If it cannot be (no memory), nothing is sent, and the request is
@@ -1818,7 +1840,10 @@ are then read:
   forgotten, and the Connection is what the vPPB is (none).
 - The vPPB reads anything but 01h: the task ends on what it reads, as
   above, but with no return code; its message says it was read from the
-  vPPB.
+  vPPB. If it reads what was asked, and read that before the command too,
+  or was not read before it, the task ends in `Exception` instead: whether
+  the switch carried the command out is not known, its monitor is `500`
+  "Outcome unknown", and the Connection is what the vPPB is.
 - The vPPB still reads 01h, or cannot be read: the task is `Interrupted`
   (Task_v1: "the task has been interrupted but is expected to restart and
   is therefore not complete"), with no `EndTime` or `TaskStatus` and a
@@ -2470,6 +2495,8 @@ Changes from the fixes of the external design review (branch
 | A bind or unbind task whose Background Operation Status (0002h) says Success while the switch's VCSs cannot be read (5200h fails) | `Exception`, "... the vPPB is not bound to what was asked" (or "is still bound"), and the Connection of a bind gone, though the switch bound it | `Running`; it ends when the vPPB is read, or is lost after five such answers |
 | A bind or unbind task whose 0002h says it is over while the vPPB still reads 01h | `Exception`, its Connection gone (the vPPB at 01h gave none) and the switch not asked again | `Running`, the Connection `Starting` or `Updating`, and the switch asked again (after five such answers, see the next rows) |
 | A Binding Change record (Table 7-80) of a vPPB a task follows whose 33h-35h are not what the task asked for (an earlier unbind's record read during a bind), or that shows 01h | taken for the end of the task: `Exception` while the vPPB read 01h, and the real end never read | turned away: the VCSs are read again, and the task goes on |
+| A lost or `Interrupted` bind or unbind task whose vPPB, read at last, shows what was asked, when it showed that before the command too, or its VCS could not be read before it | `Completed`, "The vPPB is bound" (or "unbound"), "read from the vPPB" | `Exception`, "... whether it carried out the bind is not known"; its monitor `500` "Outcome unknown"; the Connection is what the vPPB is |
+| An Informational Binding Change record that shows what the task asked for, when its vPPB showed that before the command too, or was not read before it | taken for the end of the task: `Completed` | turned away: the VCSs are read again, and the task goes on until Background Operation Status says it is over |
 | A bind or unbind task whose switch does not answer Background Operation Status five times, or answers five times that it is over with the vPPB at 01h or not read, while the vPPB reads 01h or cannot be read | `Exception`, "The switch does not answer Background Operation Status"; its Connection gone (none for a vPPB at 01h) and a `DELETE` of it no longer `503`; the task never corrected | `TaskState` `Interrupted`, no `EndTime` or `TaskStatus`, its monitor `202`; the Connection `Starting` or `Updating`, a `DELETE` `503`; the next read of the switch's VCSs (a Binding Change record, `--rescan`, a request) that sees the vPPB settled ends the task `Completed` or `Exception` on what it reads |
 | The same when the vPPB, read then, has settled | `Exception` whatever it read | `Completed` if it reads what was asked (bound to the port and LD, or unbound), else `Exception`; the message says it was read from the vPPB |
 | `#Cxl.ForceUnbind` of a Connection whose managed unbind was lost with the vPPB at 01h | `404`: the task had ended and the vPPB at 01h gave no Connection | option 2h sent; if the switch takes it, `202` with that task, `Running` again |
