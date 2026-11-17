@@ -33,6 +33,9 @@
 #include <unistd.h>
 
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <microhttpd.h>
 #include <linux/mctp.h>
 
 #include <libcxlmi.h>
@@ -2364,6 +2367,142 @@ static struct fmd_component *hw_dcd(struct fmd_ctx *ctx, struct cxlmi_endpoint *
 	if (!dev || !fmd_dc_find_region(dev, 0, 0) || !fmd_dc_find_extent(dev, 0, 1ULL << 30))
 		return NULL;
 	return dev;
+}
+
+/*
+ * A jansson allocator that fails its oom_at-th call (counted from 0), on
+ * whichever thread makes it
+ */
+static atomic_int oom_calls, oom_at = -1;
+static json_malloc_t oom_saved_malloc;
+static json_free_t oom_saved_free;
+
+static void *oom_malloc(size_t size)
+{
+	if (atomic_fetch_add(&oom_calls, 1) == atomic_load(&oom_at))
+		return NULL;
+	return oom_saved_malloc(size);
+}
+
+static void oom_arm(int at)
+{
+	json_get_alloc_funcs(&oom_saved_malloc, &oom_saved_free);
+	atomic_store(&oom_calls, 0);
+	atomic_store(&oom_at, at);
+	json_set_alloc_funcs(oom_malloc, oom_saved_free);
+}
+
+static void oom_disarm(void)
+{
+	json_set_alloc_funcs(oom_saved_malloc, oom_saved_free);
+	atomic_store(&oom_at, -1);
+}
+
+/*
+ * The 501 for $-parameters (review F18) when memory runs out: the body is
+ * all of it or none, never one with a message missing or with no
+ * @Message.ExtendedInfo, and a list of parameters that could not be
+ * collected in full is no body. Each allocation of jansson is made to
+ * fail in turn, until the body is made.
+ */
+static void test_unsupported_query_oom(void)
+{
+	json_t *found = json_pack("[s, s]", "$top", "$skip");
+	json_t *ref = fmd_redfish_unsupported_query_body(found, 2), *got, *bad;
+	int before = failures, nulls = 0, k;
+
+	CHECK(ref && json_array_size(json_object_get(json_object_get(ref, "error"),
+						     "@Message.ExtendedInfo")) == 2,
+	      "no body for $top and $skip");
+	CHECK(!fmd_redfish_unsupported_query_body(NULL, 1) &&
+	      !fmd_redfish_unsupported_query_body(found, 3) &&
+	      !fmd_redfish_unsupported_query_body(found, 0),
+	      "a body for parameters not all collected");
+	bad = json_pack("[s, i]", "$top", 1);
+	CHECK(!fmd_redfish_unsupported_query_body(bad, 2), "a body for a parameter not a string");
+	json_decref(bad);
+
+	for (k = 0; k < 200; k++) {
+		oom_arm(k);
+		got = fmd_redfish_unsupported_query_body(found, 2);
+		oom_disarm();
+		if (!got) {
+			nulls++;
+			continue;
+		}
+		CHECK(json_equal(got, ref), "allocation %d failed: a body not whole", k);
+		json_decref(got);
+		if (atomic_load(&oom_calls) <= k)	/* nothing failed: done */
+			break;
+	}
+	CHECK(nulls > 0 && k < 200, "%d allocations failed to no body, stopped at %d", nulls, k);
+	json_decref(ref);
+	json_decref(found);
+	report("a 501 for $-parameters is whole or not made", before);
+}
+
+/* The status of @request sent to 127.0.0.1:@port, or -1 */
+static int http_status(uint16_t port, const char *request)
+{
+	struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(port) };
+	char buf[64] = { 0 };
+	int fd, status = -1;
+	size_t len = strlen(request);
+	ssize_t got;
+
+	sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		return -1;
+	if (!connect(fd, (struct sockaddr *)&sa, sizeof(sa)) &&
+	    write(fd, request, len) == (ssize_t)len) {
+		got = read(fd, buf, sizeof(buf) - 1);
+		if (got > 0 && sscanf(buf, "HTTP/1.%*d %d", &status) != 1)
+			status = -1;
+	}
+	close(fd);
+	return status;
+}
+
+/*
+ * A request with a $-parameter is answered 501 though memory runs out
+ * (review F18): the first allocation the request makes fails. It was the
+ * list of $-parameters, and the request was then carried out as if it had
+ * none: GET /redfish/v1/Chassis?$top=1 answered 200.
+ */
+static void test_unsupported_query_oom_server(void)
+{
+	static const char req[] = "GET /redfish/v1/Chassis?$top=1 HTTP/1.1\r\n"
+				  "Host: localhost\r\nConnection: close\r\n\r\n";
+	struct fmd_ctx *ctx = new_ctx();
+	const union MHD_DaemonInfo *info;
+	int before = failures, status;
+	uint16_t port;
+
+	ctx->config.port = 0;		/* any free port */
+	ctx->config.http_threads = 1;
+	if (fmd_redfish_start(ctx)) {
+		CHECK(0, "the HTTP server did not start");
+		goto out;
+	}
+	info = MHD_get_daemon_info(ctx->redfish.daemon, MHD_DAEMON_INFO_BIND_PORT);
+	port = info ? info->port : 0;
+	CHECK(port, "no port");
+	if (!port)
+		goto stop;
+
+	status = http_status(port, req);
+	CHECK(status == 501, "with memory: %d", status);
+
+	oom_arm(0);
+	status = http_status(port, req);
+	oom_disarm();
+	CHECK(status == 501, "its first allocation failed: %d", status);
+stop:
+	fmd_redfish_stop(ctx);
+out:
+	fmd_ctx_free(ctx);
+	report("a request with a $-parameter is 501 when memory runs out", before);
 }
 
 /*
@@ -9882,6 +10021,8 @@ int main(void)
 	test_dc_return_codes();
 	test_mib_out_of_range_sends_nothing();
 	test_duplicate_id_refused();
+	test_unsupported_query_oom();
+	test_unsupported_query_oom_server();
 	test_dc_reserved_fields();
 	test_dc_same_dpa_two_hosts();
 	test_dc_region_per_host();

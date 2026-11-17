@@ -2543,6 +2543,13 @@ int fmd_dc_tag_from_str(const char *str, uint8_t tag[FMD_DC_TAG_LEN]);
 int fmd_redfish_start(struct fmd_ctx *ctx);
 void fmd_redfish_stop(struct fmd_ctx *ctx);
 
+/*
+ * The 501 body for the @n query parameters that start with $, @found
+ * (src/redfish/server.c): NULL unless @found holds all @n and all of the
+ * body could be made. @found is not consumed.
+ */
+json_t *fmd_redfish_unsupported_query_body(json_t *found, size_t n);
+
 
 /* Service root and metadata */
 json_t *fmd_redfish_odata(struct fmd_ctx *ctx);

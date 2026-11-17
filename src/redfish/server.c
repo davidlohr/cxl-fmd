@@ -1710,6 +1710,19 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 	return send_method_not_allowed(ctx, conn, "DELETE", url);
 }
 
+/* How many query parameters of a request start with $; nothing allocated */
+static enum MHD_Result count_dollar_param(void *cls, enum MHD_ValueKind kind,
+					  const char *key, const char *value)
+{
+	size_t *n = cls;
+
+	(void)kind;
+	(void)value;
+	if (key && key[0] == '$')
+		(*n)++;
+	return MHD_YES;
+}
+
 /* The query parameters of a request that start with $ */
 static enum MHD_Result collect_dollar_param(void *cls, enum MHD_ValueKind kind,
 					    const char *key, const char *value)
@@ -1721,6 +1734,51 @@ static enum MHD_Result collect_dollar_param(void *cls, enum MHD_ValueKind kind,
 	if (key && key[0] == '$')
 		json_array_append_new(found, json_string(key));
 	return MHD_YES;
+}
+
+/*
+ * The body of the 501 for the $-parameters @found, which must hold all @n
+ * of them (a string each): NULL if it does not (one could not be
+ * collected), or if any of the body could not be made. Never a body with
+ * a message missing.
+ */
+json_t *fmd_redfish_unsupported_query_body(json_t *found, size_t n)
+{
+	json_t *info, *body, *v;
+	size_t i;
+
+	if (!found || !n || json_array_size(found) != n)
+		return NULL;
+	info = json_array();
+	if (!info)
+		return NULL;
+	json_array_foreach(found, i, v) {
+		json_t *m;
+		char msg[160];
+
+		if (!json_is_string(v))
+			goto fail;
+		snprintf(msg, sizeof(msg), "Query parameter '%.100s' is not supported.",
+			 json_string_value(v));
+		m = json_pack("{s:s, s:s, s:[O], s:s, s:s}",
+			"MessageId", "Base.1.15.0.QueryParameterUnsupported",
+			"Message", msg,
+			"MessageArgs", v,
+			"Severity", "Warning",
+			"Resolution", "Correct or remove the query parameter and resubmit the request.");
+		/* json_array_append_new() releases @m when it fails */
+		if (!m || json_array_append_new(info, m))
+			goto fail;
+	}
+	body = json_pack("{s:{s:s, s:s, s:O}}", "error",
+			 "code", "Base.1.15.0.QueryParameterUnsupported",
+			 "message", "Query parameters that start with $ are not supported",
+			 "@Message.ExtendedInfo", info);
+	json_decref(info);
+	return body;
+fail:
+	json_decref(info);
+	return NULL;
 }
 
 /*
@@ -1741,40 +1799,33 @@ static enum MHD_Result collect_dollar_param(void *cls, enum MHD_ValueKind kind,
  * answered so: cxl-fmd's choice, as the clause has query parameters only
  * on GET. Returns false if there is none, and the request is handled as
  * usual; else true, the answer sent, and *@result what sending it gave.
+ * Whether there is one is found with nothing allocated, so that running
+ * out of memory never lets such a request through; a body that cannot be
+ * made in full is replaced by the GeneralError one send_error() makes,
+ * still with 501 (cxl-fmd's choice).
  */
 static bool send_unsupported_query(struct MHD_Connection *conn,
 				   enum MHD_Result *result)
 {
-	json_t *found = json_array(), *info, *v;
-	size_t i;
+	json_t *found, *body = NULL;
+	size_t n = 0;
 
-	if (!found)
-		return false;
 	MHD_get_connection_values(conn, MHD_GET_ARGUMENT_KIND,
-				  collect_dollar_param, found);
-	if (!json_array_size(found)) {
-		json_decref(found);
+				  count_dollar_param, &n);
+	if (!n)
 		return false;
+	found = json_array();
+	if (found) {
+		MHD_get_connection_values(conn, MHD_GET_ARGUMENT_KIND,
+					  collect_dollar_param, found);
+		body = fmd_redfish_unsupported_query_body(found, n);
+		json_decref(found);
 	}
-	info = json_array();
-	json_array_foreach(found, i, v) {
-		char msg[160];
-
-		snprintf(msg, sizeof(msg), "Query parameter '%.100s' is not supported.",
-			 json_string_value(v));
-		json_array_append_new(info, json_pack("{s:s, s:s, s:[O], s:s, s:s}",
-			"MessageId", "Base.1.15.0.QueryParameterUnsupported",
-			"Message", msg,
-			"MessageArgs", v,
-			"Severity", "Warning",
-			"Resolution", "Correct or remove the query parameter and resubmit the request."));
-	}
-	json_decref(found);
-	*result = send_json_response(conn, MHD_HTTP_NOT_IMPLEMENTED,
-		json_pack("{s:{s:s, s:s, s:o}}", "error",
-			  "code", "Base.1.15.0.QueryParameterUnsupported",
-			  "message", "Query parameters that start with $ are not supported",
-			  "@Message.ExtendedInfo", info));
+	if (body)
+		*result = send_json_response(conn, MHD_HTTP_NOT_IMPLEMENTED, body);
+	else
+		*result = send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
+				     "Query parameters that start with $ are not supported");
 	return true;
 }
 
