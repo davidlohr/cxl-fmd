@@ -2004,6 +2004,10 @@ int fmd_rescan(struct fmd_ctx *ctx)
 	}
 	free(lds);
 
+	/* partitions staged for a reset: whether it has come */
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SLD)
+		fmd_sld_staged_refresh(ctx, fmd_to_sld(comp));
+
 	added = ctx->topology.added - added;
 	removed = ctx->topology.removed - removed;
 	if (added || removed)
@@ -3339,4 +3343,72 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 					&sld->partition,
 					volatile_bytes / CXL_CAPACITY_UNIT,
 					immediate);
+}
+
+/* The first staged chunk of @sld, NULL if it has none */
+static struct fmd_mem_chunk *sld_staged_chunk(struct fmd_sld *sld)
+{
+	struct fmd_component *dom, *child;
+
+	fmd_for_each_child_type(&sld->base, dom, FMD_COMPONENT_DOMAIN)
+		fmd_for_each_child_type(dom, child, FMD_COMPONENT_CHUNK)
+			if (fmd_to_chunk(child)->staged)
+				return fmd_to_chunk(child);
+	return NULL;
+}
+
+/*
+ * See include/cxl-fmd.h. A staged chunk is "the "next" configuration, to
+ * become active on the next reset" (CXL r4.0 Table 8-311), and "If both
+ * this field and the Next Persistent Capacity field are 0, there is no
+ * pending change to the partitioning" (Table 8-310): with none pending,
+ * the reset has come, or the change was undone, and Active Volatile
+ * Capacity says which. Which reset the device needs (the command effects
+ * of Set Partition Info) is not read: cxl-fmd looks again on each
+ * re-scan. Caller holds fabric_lock.
+ */
+int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
+{
+	struct cxlmi_cmd_memdev_get_partition_info_rsp part = { 0 };
+	struct fmd_component *dom, *child;
+	struct fmd_mem_chunk *chunk;
+	int rc;
+
+	if (!sld_staged_chunk(sld) || !sld->base.ep)
+		return 0;
+
+	rc = cxlmi_cmd_memdev_get_partition_info(sld->base.ep, CXLMI_NO_TUNNEL, &part);
+	if (rc) {
+		fmd_warn(ctx, "%s: get partition info failed: %d: its staged "
+			 "chunks are kept", sld->base.id, rc);
+		return -EIO;
+	}
+
+	fmd_topology_wrlock(&ctx->topology);
+	sld->partition = part;
+	if (!part.next_vmem && !part.next_pmem) {
+		fmd_for_each_child_type(&sld->base, dom, FMD_COMPONENT_DOMAIN) {
+			fmd_for_each_child_type(dom, child, FMD_COMPONENT_CHUNK) {
+				chunk = fmd_to_chunk(child);
+				if (!chunk->staged || part.active_vmem < chunk->staged_vmem)
+					continue;
+				fmd_info(ctx, "%s: chunk %s is active", sld->base.id,
+					 child->id);
+				chunk->staged = false;
+			}
+		}
+	}
+	fmd_topology_wrunlock(&ctx->topology);
+	if (part.next_vmem || part.next_pmem)
+		return 0;
+
+	/* what is left was not made active: it goes */
+	while ((chunk = sld_staged_chunk(sld))) {
+		fmd_warn(ctx, "%s: chunk %s was staged for %" PRIu64 " MB volatile, "
+			 "and %" PRIu64 " MB is active: removed", sld->base.id,
+			 chunk->base.id, (uint64_t)chunk->staged_vmem * 256,
+			 (uint64_t)part.active_vmem * 256);
+		fmd_chunk_remove(&ctx->topology, chunk);
+	}
+	return 0;
 }

@@ -1427,6 +1427,9 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -22)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "InitiatorEndpointGroups and TargetEndpointGroups are not supported: name InitiatorEndpoints and TargetEndpoints");
+		if (rc == -23)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "The memory chunk is staged: its partition is active from the device's next reset");
 		if (rc == -13)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The memory chunk names no logical device that the device's port can bind");

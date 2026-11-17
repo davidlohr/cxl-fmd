@@ -890,6 +890,18 @@ struct fmd_mem_chunk {
 	 * chunk). Its URIs are built from it when served.
 	 */
 	int backing_ld;
+	/*
+	 * A Volatile chunk of an SLD whose Set Partition Info (4101h) was not
+	 * Immediate: "the change in partitioning shall become the "next"
+	 * configuration, to become active on the next reset" (CXL r4.0
+	 * Table 8-311). Until Get Partition Info (4100h) shows it active it
+	 * is served StandbyOffline and is in no Connection, and it keeps its
+	 * range of the domain, so that no other chunk takes it (cxl-fmd's
+	 * choices): see fmd_sld_staged_refresh(). @staged_vmem is the Next
+	 * Volatile Capacity it was staged with, in units of 256 MB.
+	 */
+	bool staged;
+	uint64_t staged_vmem;
 };
 
 
@@ -1581,6 +1593,7 @@ int fmd_conn_find_target(const struct fmd_ctx *ctx, const struct fmd_switch *sw,
  * the chunks on an LD, none when the target is the head of a switch-attached
  * device or is unknown. A direct-attached MLD's are all of its chunks, and
  * those of a direct-attached head the chunks of the pool LDs mapped to it.
+ * A staged chunk (struct fmd_mem_chunk) is none: it is not active yet.
  * @cb's non-zero return stops the walk and is returned.
  */
 int fmd_conn_for_each_chunk(const struct fmd_conn_view *v,
@@ -2174,6 +2187,16 @@ uint64_t fmd_partition_next_volatile(const struct cxlmi_cmd_memdev_get_partition
  */
 int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 			  uint64_t volatile_bytes, bool immediate);
+
+/*
+ * Read Get Partition Info (4100h) of @sld again if it has a staged chunk
+ * (struct fmd_mem_chunk), and nothing is sent if it has none. With no
+ * change pending, a staged chunk the Active Volatile Capacity has reached
+ * becomes an ordinary one, and one it has not is removed. A change still
+ * pending, or a read that fails, leaves them as they are. Called by
+ * fmd_rescan(). Returns 0, or -EIO if 4100h was not answered.
+ */
+int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld);
 
 
 

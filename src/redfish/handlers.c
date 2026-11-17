@@ -2528,6 +2528,23 @@ static json_t *rf_rollup_status(const struct fmd_status_rollup *r, bool health,
 	return status;
 }
 
+/*
+ * The Status of a chunk, @chunk (NULL for a switch's pool chunk), from
+ * @r. A staged chunk (struct fmd_mem_chunk) is StandbyOffline, "a
+ * resource is temporarily unavailable but may become available through
+ * an external action" (Resource_v1): the device's next reset (cxl-fmd's
+ * choice of state).
+ */
+static json_t *chunk_status(const struct fmd_status_rollup *r,
+			    const struct fmd_mem_chunk *chunk)
+{
+	json_t *status = rf_rollup_status(r, true, false);
+
+	if (chunk && chunk->staged)
+		json_object_set_new(status, "State", json_string("StandbyOffline"));
+	return status;
+}
+
 /* @str as a JSON string, or null if it is NULL */
 static json_t *json_string_or_null(const char *str)
 {
@@ -4169,6 +4186,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 	struct fmd_status_rollup r = { 0 };
 	const char *chunk_name = "CXL Memory Chunk";
 	char ld_link_uri[512] = {0};
+	const struct fmd_mem_chunk *found = NULL;	/* a device's chunk */
 
 	if (chassis->type == FMD_COMPONENT_SWITCH) {
 		/*
@@ -4276,6 +4294,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		if (!dom->base.parent || strcmp(dom->base.parent->id, chassis_id) != 0)
 			return NULL;
 
+		found = chunk;
 		size_mib = chunk->size / (1024ULL * 1024);
 		offset_mib = chunk->base_address / (1024ULL * 1024);
 		offset_known = chassis->type == FMD_COMPONENT_SLD;
@@ -4325,7 +4344,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"MemoryChunkSizeMiB", (json_int_t)size_mib,
 		"AddressRangeType", range_type ? range_type : json_null(),
 		"IsMirrorEnabled", false,
-		"Status", rf_rollup_status(&r, true, false)
+		"Status", chunk_status(&r, found)
 	);
 
 	/*
@@ -4944,6 +4963,15 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 					rc = -EINVAL;
 				else
 					rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
+				/*
+				 * The chunk is of the next configuration, not of
+				 * the active one, until a read-back shows it
+				 * active (fmd_sld_staged_refresh()).
+				 */
+				if (!rc) {
+					chunk->staged = true;
+					chunk->staged_vmem = new_volatile / CXL_CAPACITY_UNIT;
+				}
 			}
 		}
 
@@ -4982,6 +5010,13 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		"AddressRangeOffsetMiB", (json_int_t)(chunk->base_address / (1024ULL * 1024)),
 		"AddressRangeType", fmd_chunk_range_type(chunk)
 	);
+	if (chunk->staged) {
+		struct fmd_status_rollup r = { 0 };
+
+		fmd_rollup_add(&r, &fmd_to_sld(chassis)->health,
+			       fmd_to_sld(chassis)->health_valid);
+		json_object_set_new(*response, "Status", chunk_status(&r, chunk));
+	}
 
 	/*
 	 * The LD the chunk grows, for an MLD or MHD (a pool index for an
@@ -6587,7 +6622,9 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * -20 AccessCapabilities other than Read and Write
  * -21 a link that is not the URI the service serves its resource at
  * -22 InitiatorEndpointGroups or TargetEndpointGroups
- * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -22.
+ * -23 a chunk is staged: its partition is active from the device's next
+ *     reset (struct fmd_mem_chunk)
+ * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -23.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -6643,6 +6680,12 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 			fmd_warn(ctx, "Connection rejected: chunk %s is not %s's",
 				 chunk->base.id, dev->id);
 			return -15;
+		}
+		/* not active until the device's next reset */
+		if (chunk->staged) {
+			fmd_warn(ctx, "Connection rejected: chunk %s is staged",
+				 chunk->base.id);
+			return -23;
 		}
 		if (dev->type == FMD_COMPONENT_SLD)
 			continue;

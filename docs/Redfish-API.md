@@ -179,6 +179,35 @@ and it can destroy data: "Using this command to change the size of the
 persistent capacity shall result in the loss of data stored" (Section
 8.2.10.9.2.2).
 
+#### Staged chunks
+
+A `"Volatile"` chunk `POST` on a directly attached SLD with partitionable
+capacity sends Set Partition Info for the volatile capacity staged, or
+else active, plus the chunk, with Immediate cleared as above. The chunk
+is then of the next configuration, not of the active one, and until Get
+Partition Info shows it active (cxl-fmd's choices):
+
+- its `Status.State` is `StandbyOffline`, "a resource is temporarily
+  unavailable but may become available through an external action"
+  (`Resource_v1`), in the `201` and on a `GET`; its `AddressRangeType` is
+  `Volatile`;
+- it is in no Connection's `MemoryChunkInfo`, nor in a host's
+  `MemoryDomains` and their `MemoryChunks`, and a Connection `POST` naming
+  it is `409`;
+- its range of the domain stays its own: no other chunk is given it;
+- a `DELETE` of it sends Set Partition Info for the volatile capacity
+  staged less the chunk, as for any `"Volatile"` chunk.
+
+Each `--rescan` reads Get Partition Info of an SLD that has a staged
+chunk, and of no other. While Next Volatile or Next Persistent Capacity
+is not 0 ("If both this field and the Next Persistent Capacity field are
+0, there is no pending change to the partitioning", Table 8-310), it
+stays staged. With no change pending, a chunk whose Next Volatile
+Capacity the Active Volatile Capacity has reached is `Enabled`, and in
+the Connection; one it has not reached is removed, and its range is free.
+A read that fails changes nothing. In a mock no Set Partition Info is
+sent, nor is anything staged: a `"Volatile"` chunk is `Enabled` at once.
+
 ### Where cxl-fmd puts CXL event records
 
 Comment 2 puts the records of a memory device in the `LogService` of its
@@ -476,7 +505,7 @@ All error responses follow the Redfish error format with an `error` object conta
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` |
 | 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.15.0.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31) |
@@ -902,8 +931,8 @@ the chunk's `SizeMiB`; `GET` of the chunk has the same link, and the LD's
   issues `Set Partition Info (0x4101h)` for the volatile capacity staged
   (or else active) plus the chunk, worked out and checked as in "Set
   Partition Info" above. Immediate is cleared: the device takes the new
-  partitioning at its next reset, yet the chunk is in the collection at
-  once (see Known Gaps). Persistent data is lost if the persistent
+  partitioning at its next reset, and the chunk is `StandbyOffline` until
+  it does (see "Staged chunks"). Persistent data is lost if the persistent
   capacity changes. A `"PMEM"` chunk sends no command: it only divides
   cxl-fmd's own record of the domain. Nor does a `"Volatile"` chunk of an
   SLD with no partitionable capacity (Partition Alignment 0, or no
@@ -1656,10 +1685,10 @@ These are known gaps in what cxl-fmd does:
   operational." cxl-fmd sends them over MCTP whenever a client asks, and
   does not know whether a host is using the device's mailboxes. Use these
   operations only on a device no host is driving.
-- A `"Volatile"` chunk of an SLD is in the collection as soon as it is
-  created, though the partition change it asked for is staged and takes
-  effect only at the device's next reset; the chunk has no state that says
-  so.
+- Which reset makes a staged partition active (the command effects of Set
+  Partition Info, in the CEL) is not read, and nothing tells cxl-fmd that
+  the device was reset: a staged chunk (see "Staged chunks") is looked at
+  again only on a `--rescan`, so with none it stays `StandbyOffline`.
 
 ### Properties not served
 
@@ -1866,6 +1895,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of a Connection while the switch binds or unbinds it (`Status.State` `Starting` or `Updating`) | `MemoryChunkInfo[].AccessState` `Optimized` | `Transitioning`; `Optimized` once it is `Enabled` |
 | Chunk `DELETE` and `POST` on hardware of a `"Volatile"` chunk of an SLD with no partitionable capacity (Partition Alignment 0, such as one that is all Volatile Only) | `400`: Set Partition Info was taken to be needed, and is not sent to such a device (nor to any SLD behind a switch), so the chunk found at discovery could not be deleted and no `"Volatile"` chunk made | `204` / `201`, nothing sent: the chunk divides the Volatile Only capacity, as in a mock |
 | `"Volatile"` chunk `POST` on a bound SLD with no partitionable capacity (`sld_0` of `mock/fm-boots-first.json` once bound) | `409` "A Connection binds the logical device" | `201`, nothing sent, as for a `"PMEM"` chunk; one of an SLD with partitionable capacity is still `409` |
+| `"Volatile"` chunk `POST` on hardware on a directly attached SLD with partitionable capacity (Set Partition Info sent, not Immediate) | `201` and an `Enabled` chunk, in the direct-attached Connection's `MemoryChunkInfo` and the host's `MemoryDomains`, though its partition is active only from the device's next reset | `201` with `Status.State` `StandbyOffline`; in no Connection or host view, and a Connection `POST` naming it `409`, until a `--rescan` reads Get Partition Info with the change active (then `Enabled`) or gone (then the chunk is removed). See "Staged chunks" |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion`s and `MemoryExtent`s after a Dynamic Capacity List Tags (5608h) read failed | `TagsKnown` `false` with `"Tags": []`, and every extent `Pending` `false`, `OK` | `TagsKnown` `false` and no `Tags`; the device's `MemoryRegion`s and its `MemoryExtent`s with a tag `Status.Health` `Warning`. A device that answers Unsupported has no `Tags` and no `Warning` |
 
 Mock topologies and discovery:

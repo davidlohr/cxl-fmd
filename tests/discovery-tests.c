@@ -1854,6 +1854,188 @@ static int64_t patch_partition(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	return (int64_t)get64(pl);
 }
 
+/* The chunks the direct-attached Connection of @dev has: how many */
+struct direct_chunks {
+	const struct fmd_component *dev;
+	int conns, chunks;
+};
+
+static int count_one_chunk(const struct fmd_mem_chunk *chunk, void *arg)
+{
+	(void)chunk;
+	(*(int *)arg)++;
+	return 0;
+}
+
+static int direct_conn_chunks(const struct fmd_conn_view *v, void *arg)
+{
+	struct direct_chunks *d = arg;
+
+	if (v->kind != FMD_CONN_DIRECT || v->device != d->dev)
+		return 0;
+	d->conns++;
+	fmd_conn_for_each_chunk(v, count_one_chunk, &d->chunks);
+	return 0;
+}
+
+/* Get Partition Info (4100h), Table 8-310, in units of 256 MB */
+static void answer_partition(struct cxlmi_endpoint *ep, uint64_t active_vol,
+			     uint64_t active_pers, uint64_t next_vol,
+			     uint64_t next_pers)
+{
+	uint8_t part[0x20] = { 0 };
+
+	put64(part + 0x00, active_vol);
+	put64(part + 0x08, active_pers);
+	put64(part + 0x10, next_vol);
+	put64(part + 0x18, next_pers);
+	answer(ep, 0x4100, part, sizeof(part));
+}
+
+/* The State of the Status of chunk @chunk_id, as served; "" if none */
+static void chunk_state(struct fmd_ctx *ctx, const char *id, const char *dom,
+			const char *chunk_id, char *state, size_t size,
+			char *type, size_t tsize)
+{
+	json_t *j = fmd_redfish_memory_chunk(ctx, id, dom, chunk_id);
+	const char *s = json_string_value(json_object_get(
+				json_object_get(j, "Status"), "State"));
+	const char *t = json_string_value(json_object_get(j, "AddressRangeType"));
+
+	snprintf(state, size, "%s", s ? s : "");
+	snprintf(type, tsize, "%s", t ? t : "");
+	json_decref(j);
+}
+
+/*
+ * Review F15: a Volatile chunk whose Set Partition Info is not Immediate
+ * is "the "next" configuration, to become active on the next reset"
+ * (Table 8-311), and was published Enabled, in the direct-attached
+ * Connection, at once. It is StandbyOffline and in no Connection until
+ * Get Partition Info, read again on a re-scan, shows it active; with no
+ * change pending and less volatile capacity active, it goes. @dom has
+ * the chunk test_set_partition() staged, of 1 GiB, with Next Volatile
+ * Capacity 11 GiB (44).
+ */
+static void test_staged_chunk(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+			      struct fmd_sld *sld, const char *id,
+			      struct fmd_component *dom, const char *dom_id)
+{
+	struct fmd_mem_domain *domain = fmd_to_domain(dom);
+	struct fmd_component *c = fmd_first_child_type(dom, FMD_COMPONENT_CHUNK);
+	struct fmd_mem_chunk *chunk = c ? fmd_to_chunk(c) : NULL;
+	struct direct_chunks d = { .dev = &sld->base };
+	char chunk_id[FMD_MAX_ID_LEN], second[FMD_MAX_ID_LEN];
+	char state[32], type[16], body[512];
+	json_t *rsp = NULL;
+	unsigned int sent;
+	int rc;
+
+	CHECK(chunk && !c->next_sibling && chunk->staged &&
+	      chunk->staged_vmem == 44, "not one chunk staged for 44");
+	if (!chunk)
+		return;
+	snprintf(chunk_id, sizeof(chunk_id), "%s", c->id);
+
+	/* its range is the chunk's: no other chunk is given it */
+	CHECK(domain->remaining == domain->capacity - (1024ULL << 20),
+	      "%" PRIu64 " MiB remaining of %" PRIu64, domain->remaining >> 20,
+	      domain->capacity >> 20);
+	chunk_state(ctx, id, dom_id, chunk_id, state, sizeof(state), type, sizeof(type));
+	CHECK(!strcmp(state, "StandbyOffline") && !strcmp(type, "Volatile"),
+	      "staged chunk: %s, %s", state, type);
+	fmd_conn_for_each(ctx, direct_conn_chunks, &d);
+	CHECK(d.conns == 1 && d.chunks == 0,
+	      "%d direct Connections of the SLD, with %d chunks", d.conns, d.chunks);
+
+	/* a Connection naming it is refused, and nothing is sent */
+	snprintf(body, sizeof(body),
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
+		 "\"/redfish/v1/Fabrics/CXL/Endpoints/local\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": "
+		 "\"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}]}, "
+		 "\"MemoryChunkInfo\": [{\"MemoryChunk\": {\"@odata.id\": "
+		 "\"/redfish/v1/Chassis/%s/MemoryDomains/%s/MemoryChunks/%s\"}}]}",
+		 id, id, dom_id, chunk_id);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &rsp);
+	CHECK(rc == -23 && !rsp && commands_sent(ep) == sent,
+	      "Connection to a staged chunk: %d, %u sent", rc,
+	      commands_sent(ep) - sent);
+	json_decref(rsp);
+	rsp = NULL;
+
+	/* a re-scan while the change is pending: it stays staged */
+	answer_partition(ep, 24, 40, 44, 20);
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent + 1 && chunk->staged,
+	      "pending: %u sent, staged %d", commands_sent(ep) - sent, chunk->staged);
+
+	/* the reset has come: Enabled, and in the Connection */
+	answer_partition(ep, 44, 20, 0, 0);
+	fmd_rescan(ctx);
+	CHECK(!chunk->staged && sld->partition.active_vmem == 44,
+	      "active: staged %d, active %" PRIu64, chunk->staged,
+	      (uint64_t)sld->partition.active_vmem);
+	chunk_state(ctx, id, dom_id, chunk_id, state, sizeof(state), type, sizeof(type));
+	CHECK(strcmp(state, "StandbyOffline") && !strcmp(type, "Volatile"),
+	      "active chunk: %s, %s", state, type);
+	d.conns = d.chunks = 0;
+	fmd_conn_for_each(ctx, direct_conn_chunks, &d);
+	CHECK(d.conns == 1 && d.chunks == 1, "%d direct Connections, %d chunks",
+	      d.conns, d.chunks);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &rsp);
+	CHECK(rc == FMD_CONN_EXISTS, "Connection to the active chunk: %d", rc);
+	json_decref(rsp);
+	rsp = NULL;
+
+	/* with nothing staged, a re-scan sends nothing to the SLD */
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent, "%u sent with nothing staged",
+	      commands_sent(ep) - sent);
+
+	/* another, and the reset leaves it out: it goes, and its room is free */
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom_id,
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}",
+		strlen("{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}"),
+		&rsp);
+	snprintf(second, sizeof(second), "%s",
+		 rsp ? json_string_value(json_object_get(rsp, "Id")) : "");
+	json_decref(rsp);
+	rsp = NULL;
+	CHECK(rc == 0 && fmd_topology_find_chunk(&ctx->topology, second) &&
+	      fmd_topology_find_chunk(&ctx->topology, second)->staged_vmem == 48,
+	      "second Volatile chunk: %d", rc);
+	CHECK(domain->remaining == domain->capacity - (2048ULL << 20),
+	      "%" PRIu64 " MiB remaining", domain->remaining >> 20);
+	answer_partition(ep, 44, 20, 0, 0);
+	fmd_rescan(ctx);
+	CHECK(!fmd_topology_find_chunk(&ctx->topology, second) &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk_id) &&
+	      domain->remaining == domain->capacity - (1024ULL << 20),
+	      "not made active: %s is there %d, %" PRIu64 " MiB remaining", second,
+	      fmd_topology_find_chunk(&ctx->topology, second) != NULL,
+	      domain->remaining >> 20);
+
+	/* a read that fails keeps what is staged */
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom_id,
+		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}",
+		strlen("{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}"),
+		&rsp);
+	snprintf(second, sizeof(second), "%s",
+		 rsp ? json_string_value(json_object_get(rsp, "Id")) : "");
+	json_decref(rsp);
+	answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+	fmd_rescan(ctx);
+	CHECK(rc == 0 && fmd_topology_find_chunk(&ctx->topology, second) &&
+	      fmd_topology_find_chunk(&ctx->topology, second)->staged,
+	      "after a failed read: %d", rc);
+}
+
 /*
  * Set Partition Info (4101h). Its Volatile Capacity is "The amount of
  * partitionable capacity that shall be allocated to volatile capacity, in
@@ -1929,6 +2111,13 @@ static void test_set_partition(void)
 		"{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}",
 		strlen("{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}"),
 		&rsp);
+	{
+		const char *st = json_string_value(json_object_get(
+				json_object_get(rsp, "Status"), "State"));
+
+		CHECK(st && !strcmp(st, "StandbyOffline"),
+		      "the POST answers a staged chunk as %s", st ? st : "(none)");
+	}
 	json_decref(rsp);
 	{
 		uint8_t pl[16] = { 0 };
@@ -1939,6 +2128,7 @@ static void test_set_partition(void)
 		      "Volatile chunk: %d, %04xh, Volatile Capacity %" PRIu64,
 		      rc, opcode, get64(pl));
 	}
+	test_staged_chunk(ctx, ep, sld, id, dom, dom_id);
 out:
 	fmd_ctx_free(ctx);
 

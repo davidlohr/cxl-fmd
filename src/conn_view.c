@@ -702,6 +702,8 @@ int fmd_conn_for_each_chunk(const struct fmd_conn_view *v,
 		fmd_for_each_child_type(dom, child, FMD_COMPONENT_CHUNK) {
 			const struct fmd_mem_chunk *chunk = fmd_to_chunk(child);
 
+			if (chunk->staged)
+				continue;
 			if (v->ld && fmd_chunk_ld(dev, chunk) != v->ld)
 				continue;
 			if (v->target->type == FMD_COMPONENT_HEAD) {
