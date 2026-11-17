@@ -1824,7 +1824,12 @@ int fmd_topology_validate(struct fmd_ctx *ctx);
  * (src/tasks.c). All of these are called with fabric_lock held exclusively,
  * except fmd_tasks_running() and fmd_tasks_poll(), which take it.
  */
-enum fmd_task_kind { FMD_TASK_BIND, FMD_TASK_UNBIND };
+enum fmd_task_kind {
+	FMD_TASK_BIND,
+	FMD_TASK_UNBIND,
+	FMD_TASK_DC_ADD,	/* Initiate Dynamic Capacity Add (5604h) */
+	FMD_TASK_DC_RELEASE,	/* Initiate Dynamic Capacity Release (5605h) */
+};
 enum fmd_task_state {
 	FMD_TASK_RUNNING,
 	FMD_TASK_COMPLETED,
@@ -1837,7 +1842,52 @@ enum fmd_task_outcome {
 	FMD_TASK_OBSERVED,	/* the switch logged it failed, or the vPPB is
 				   not what was asked: no return code */
 	FMD_TASK_RC,		/* the switch's return code, rc */
-	FMD_TASK_UNKNOWN,	/* the switch is gone: what it did is not known */
+	FMD_TASK_UNKNOWN,	/* the switch, or the DCD, is gone: what it did
+				   is not known */
+	FMD_TASK_DC_REFUSED,	/* the host was seen to accept none of an add */
+};
+
+/* One extent of a DC task: the host's DPA range, its Tag and region */
+struct fmd_dc_range {
+	uint64_t dpa;
+	uint64_t len;
+	uint8_t  tag[FMD_DC_TAG_LEN];
+	uint8_t  region_id;
+};
+
+/*
+ * What a Dynamic Capacity add or release task follows (src/dcd.c): the
+ * request as it was sent, recorded before the command, and the host's
+ * extents before it (the baseline). Extents are copies: the host's own are
+ * freed when it is read again.
+ */
+struct fmd_dc_task {
+	char dev_id[FMD_MAX_ID_LEN];		/* the DCD */
+	char chassis_id[FMD_MAX_ID_LEN];	/* of the request's URI */
+	char ld_id[16];				/* {ld} of the action; "" for DELETE */
+	char ext_id[48];			/* the MemoryExtent a DELETE named */
+	int host_id;
+	uint8_t policy;				/* FMD_DC_POLICY_* or FMD_DC_REL_POLICY_* */
+	uint8_t region_id;			/* an add's RegionNumber */
+	uint8_t tag[FMD_DC_TAG_LEN];
+	uint64_t length;			/* bytes: Free/Contiguous add, Tag-based release */
+	bool forced;
+	bool sanitize;
+	char *body;				/* the request body, NULL for a DELETE */
+	struct fmd_dc_range *req;		/* a Prescriptive release's extents */
+	int n_req;
+	struct fmd_dc_range *base;		/* the host's extents before the command */
+	int n_base;
+	uint32_t base_gen;			/* their Extent List Generation Number */
+	bool stale_after;			/* the read after the command failed */
+	bool pend_seen;				/* the host seen pending for the tag since */
+	bool none_record;			/* an Add Capacity Response record with
+						   no capacity was taken to be this
+						   add's (or the mock host refused it) */
+	bool partial;				/* Completed with less than asked */
+	struct fmd_dc_range *done;		/* added, or released, as last observed */
+	int n_done;
+	uint64_t done_bytes;
 };
 
 struct fmd_task {
@@ -1856,11 +1906,17 @@ struct fmd_task {
 	char connection_id[FMD_CONN_ID_LEN];
 	time_t start;
 	time_t end;                          /* 0 while running */
-	char message[128];                   /* how it ended */
+	char message[256];                   /* how it ended, or how it goes */
 	enum fmd_task_outcome outcome;       /* of an Exception */
 	uint16_t rc;                         /* FMD_TASK_RC: Table 8-208 code */
+	struct fmd_dc_task *dc;              /* FMD_TASK_DC_*: what it follows */
 	struct fmd_task *next;
 };
+
+static inline bool fmd_task_is_dc(const struct fmd_task *task)
+{
+	return task->kind == FMD_TASK_DC_ADD || task->kind == FMD_TASK_DC_RELEASE;
+}
 
 /*
  * A task for the bind or unbind of @key on @sw, made before the command is
@@ -1889,6 +1945,18 @@ struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 				uint8_t unbind_option);
 /* what fmd_task_alloc() allocates with; tests replace it */
 extern void *(*fmd_task_calloc)(size_t nmemb, size_t size);
+/*
+ * A task for a Dynamic Capacity add or release (@kind FMD_TASK_DC_*), made
+ * before the command is sent: NULL if it cannot be made, and then nothing
+ * is to be sent. It is nobody's until fmd_dc_task_list(); free it with
+ * fmd_task_discard() if the command is not carried out.
+ */
+struct fmd_task *fmd_dc_task_new(struct fmd_ctx *ctx, enum fmd_task_kind kind);
+/* the device accepted the command of @task: it is listed, Running */
+void fmd_dc_task_list(struct fmd_ctx *ctx, struct fmd_task *task);
+/* @task is over: Completed if @ok, else Exception with @outcome */
+void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
+		     enum fmd_task_outcome outcome, const char *message);
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
@@ -2571,14 +2639,36 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev);
 void fmd_dcd_retry_pending(struct fmd_ctx *ctx);
 
 /*
+ * Dynamic Capacity tasks (src/dcd.c). A DynamicCapacityAdd,
+ * DynamicCapacityRelease or MemoryExtent DELETE the device accepted is
+ * followed by a task until what the host does is seen in its 5603h and
+ * the tag list (5608h). Called with fabric_lock held exclusively and
+ * ctx->dcd_lock, but fmd_dc_tasks_poll(), which takes dcd_lock.
+ *
+ * fmd_dc_task_prepare(): before the command of @task (its request filled
+ * in), which is to @dev: 0, or -EALREADY when another task is following
+ * that host and tag (or the host has an add of the tag it has not answered),
+ * or -EAGAIN when the host could not be read for the baseline; then
+ * nothing is to be sent. @msg says why.
+ */
+int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
+			struct fmd_task *task, const char **msg);
+/* the device accepted the command of @task; @stale: the read after it failed */
+void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
+		       struct fmd_task *task, bool stale);
+/* from fmd_tasks_poll(): DC tasks whose device is gone, and the mock's hosts */
+void fmd_dc_tasks_poll(struct fmd_ctx *ctx);
+
+/*
  * Drain the Dynamic Capacity Event Log of every DCD and refresh the hosts
  * named in Add Capacity Response / Capacity Released records.
  */
 int fmd_dcd_poll_events(struct fmd_ctx *ctx);
 
 /*
- * Read again every host of every DCD whose state is STALE or DIRTY, and a
- * tag list that could not be read, whoever owns the device's event log.
+ * Read again every host of every DCD whose state is STALE or DIRTY, or that
+ * a Dynamic Capacity task follows, and a tag list that could not be read,
+ * whoever owns the device's event log.
  * Return how many devices were read, or -1 if a read failed.
  */
 int fmd_dcd_retry_stale(struct fmd_ctx *ctx);
@@ -2705,6 +2795,13 @@ json_t *fmd_redfish_message(enum fmd_rf_msg id, const char *resolution,
  * NULL or out of memory.
  */
 json_t *fmd_redfish_error_body(const char *message, json_t *info);
+/*
+ * The body of a 200 for an action whose answer is a message: "An error
+ * response, with a message that indicates success or any additional
+ * relevant messages" (DSP0266 Table 11): the Success code, @message, and
+ * Base Success in its ExtendedInfo. NULL if out of memory.
+ */
+json_t *fmd_redfish_success_body(const char *message);
 /* the error body sent when one cannot be made */
 extern const char fmd_redfish_error_fallback[];
 
@@ -2933,15 +3030,26 @@ int fmd_redfish_patch_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_
 				       const char *dev_id, const char *ld_id,
 				       const char *region_id, const char *body,
 				       size_t body_size, const char **msg);
+/*
+ * An add, a release, or a DELETE of an extent the device accepted returns
+ * FMD_OP_STARTED with its Task in @task (NULL if out of memory): 202, and
+ * the task follows the host. -EALREADY is 409: another task follows the
+ * host and Tag.
+ */
 int fmd_redfish_delete_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
 					const char *dev_id, const char *ext_id,
-					const char **msg);
+					const char **msg, json_t **task);
 int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
 			      const char *dev_id, const char *ld_id,
-			      const char *body, size_t body_size, const char **msg);
+			      const char *body, size_t body_size, const char **msg,
+			      json_t **task);
 int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
 				  const char *dev_id, const char *ld_id,
-				  const char *body, size_t body_size, const char **msg);
+				  const char *body, size_t body_size, const char **msg,
+				  json_t **task);
+/* The Oem/Cxl of a Dynamic Capacity Task, and the extents it added that remain */
+json_t *fmd_redfish_dc_task_oem(struct fmd_ctx *ctx, const struct fmd_task *task);
+json_t *fmd_redfish_dc_task_created(struct fmd_ctx *ctx, const struct fmd_task *task);
 int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
 				    const char *dev_id, const char *body,
 				    size_t body_size, const char **msg);

@@ -557,6 +557,80 @@ static void task_connection_uri(struct fmd_task *task, char *buf, size_t len)
 		 task->connection_id);
 }
 
+/*
+ * Where the request of a DC task went: the action, or the MemoryExtent of
+ * a DELETE
+ */
+static void dc_task_target(const struct fmd_task *task, char *buf, size_t len)
+{
+	const struct fmd_dc_task *dc = task->dc;
+
+	if (dc->ext_id[0])
+		snprintf(buf, len, "/redfish/v1/Chassis/%s/PCIeDevices/%s/MemoryExtents/%s",
+			 dc->chassis_id, dc->dev_id, dc->ext_id);
+	else
+		snprintf(buf, len, "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s"
+			 "/Actions/CXLLogicalDevice.%s", dc->chassis_id, dc->dev_id,
+			 dc->ld_id, task->kind == FMD_TASK_DC_ADD ?
+			 "DynamicCapacityAdd" : "DynamicCapacityRelease");
+}
+
+/*
+ * A Dynamic Capacity task: Payload is the request as it came (TargetUri,
+ * HttpOperation, and JsonBody, "the JSON payload to use in the execution
+ * of this task", Task_v1). There is no PercentComplete: what share of the
+ * work a host has done is not known (cxl-fmd's choice). Messages says how
+ * it goes while it runs, and how it ended. A partial add is Completed with
+ * TaskStatus Warning.
+ */
+static json_t *dc_task(struct fmd_ctx *ctx, const struct fmd_task *task,
+		       const char *uri, const char *monitor, const char *start)
+{
+	const struct fmd_dc_task *dc = task->dc;
+	char target[512], msgid[64];
+	json_t *result, *payload;
+	const char *status;
+
+	dc_task_target(task, target, sizeof(target));
+	payload = json_pack("{s:s, s:s}", "TargetUri", target,
+			    "HttpOperation", dc->ext_id[0] ? "DELETE" : "POST");
+	if (dc->body)
+		json_object_set_new(payload, "JsonBody", json_string(dc->body));
+
+	result = json_pack("{s:s, s:s, s:s, s:s, s:s, s:s, s:s, s:o, s:o}",
+		"@odata.id", uri,
+		"@odata.type", "#Task.v1_7_4.Task",
+		"Id", uri + strlen("/redfish/v1/TaskService/Tasks/"),
+		"Name", task->kind == FMD_TASK_DC_ADD ? "Dynamic Capacity Add" :
+			"Dynamic Capacity Release",
+		"TaskState", task->state == FMD_TASK_RUNNING ? "Running" :
+			     task->state == FMD_TASK_COMPLETED ? "Completed" : "Exception",
+		"StartTime", start,
+		"TaskMonitor", monitor,
+		"Payload", payload,
+		"Oem", fmd_redfish_dc_task_oem(ctx, task));
+
+	status = task->state == FMD_TASK_EXCEPTION ? "Critical" :
+		 dc->partial ? "Warning" : "OK";
+	fmd_redfish_message_id(task->state == FMD_TASK_EXCEPTION ? FMD_RF_GENERAL_ERROR :
+			       FMD_RF_SUCCESS, msgid, sizeof(msgid));
+	if (task->message[0])
+		json_object_set_new(result, "Messages",
+			json_pack("[{s:s, s:s}]", "MessageId", msgid,
+				  "Message", task->message));
+	if (task->state != FMD_TASK_RUNNING) {
+		char end[32];
+
+		task_time(task->end, end, sizeof(end));
+		json_object_set_new(result, "EndTime", json_string(end));
+		json_object_set_new(result, "TaskStatus", json_string(status));
+	}
+	if (task->kind == FMD_TASK_DC_ADD && task->state != FMD_TASK_EXCEPTION)
+		json_object_set_new(result, "Links", json_pack("{s:o}",
+			"CreatedResources", fmd_redfish_dc_task_created(ctx, task)));
+	return result;
+}
+
 /* Task - /redfish/v1/TaskService/Tasks/{id} */
 json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 {
@@ -566,6 +640,12 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 
 	if (!task)
 		return NULL;
+	if (fmd_task_is_dc(task)) {
+		snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
+		snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
+		task_time(task->start, start, sizeof(start));
+		return dc_task(ctx, task, uri, monitor, start);
+	}
 
 	snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
 	snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
@@ -695,6 +775,39 @@ unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
  * as whether the switch did it before it went is not known (cxl-fmd's
  * choices).
  */
+/*
+ * The monitor of a DC task that is over answers as the request would have,
+ * had what the host did been known at once (DSP0266 1.25.0 Section 12.2,
+ * quoted above): a DELETE 204, an action 200 with a Success message that
+ * says what the host accepted or released. A host seen to accept none of
+ * an add is 409 (the host's state does not allow it; cxl-fmd's choice); a
+ * device that is gone is 500 "Outcome unknown".
+ */
+static int dc_task_monitor(const struct fmd_task *task, json_t **response)
+{
+	char msg[sizeof(task->message) + 128];
+
+	if (task->state == FMD_TASK_COMPLETED) {
+		if (task->dc->ext_id[0])
+			return 204;
+		*response = fmd_redfish_success_body(task->message);
+		return 200;
+	}
+	if (task->outcome == FMD_TASK_DC_REFUSED) {
+		*response = fmd_redfish_error_body(task->message,
+			fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+				"Read the host's MemoryExtents and the tag's PendingLDs: "
+				"the host did not accept the capacity. Resubmit the request "
+				"if it still applies.", NULL, 0));
+		return 409;
+	}
+	snprintf(msg, sizeof(msg), "Outcome unknown: %s", task->message);
+	*response = fmd_redfish_error_body(msg,
+		fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_OUTCOME_UNKNOWN,
+				    NULL, 0));
+	return 500;
+}
+
 int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 			     char *location, size_t len)
 {
@@ -712,6 +825,9 @@ int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 		*response = fmd_redfish_task(ctx, id);
 		return 202;
 	}
+
+	if (fmd_task_is_dc(task))
+		return dc_task_monitor(task, response);
 
 	if (task->state == FMD_TASK_EXCEPTION) {
 		char msg[sizeof(task->message) + 128];

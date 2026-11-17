@@ -188,17 +188,21 @@ client is to check before sending it again.
 A command the device answered Success for is not a failure, even when the
 read after it fails: 5604h "shall complete when the device initiates the
 Add Capacity procedure" (Section 7.6.7.6.5), 5605h "when the device
-initiates the Remove Capacity procedure" (Section 7.6.7.6.6). The answer
-is then `200 OK` (a DELETE too), with an error object whose `code` is
-`Base.1.24.Success`, with `Base.1.24.Success` in its
-`@Message.ExtendedInfo`, and whose `message` says the device accepted the
-request, that what is shown is stale until it is read again, and not to
-send the request again: a Free, Contiguous or Tag-based request sent again
-is another add or release. A 5603h list that keeps changing as it is read
-is such a read, not `503`. The host is shown `Warning` and read again on
-the next `--event-poll` tick. That the answer is `200` with this message,
-rather than a `Task`, and that a DELETE and a PATCH answer it too, where
-DSP0266 says they "should" return the resource or `204`, is cxl-fmd's
+initiates the Remove Capacity procedure" (Section 7.6.7.6.6). An add, a
+release or a `DELETE` of an extent is then `202 Accepted` with its `Task`,
+as when the read succeeds, and the task's message says the host could not
+be read back after it (see [Tasks of an add or a
+release](#tasks-of-an-add-or-a-release)): a Free, Contiguous or Tag-based
+request sent again is another add or release. A `PATCH` of a region
+(5602h) and `CXLReferenceDCMemory` (5606h, 5607h) are then `200 OK`, with
+an error object whose `code` is `Base.1.24.Success`, with
+`Base.1.24.Success` in its `@Message.ExtendedInfo`, and whose `message`
+says the device accepted the request, that what is shown is stale until it
+is read again, and not to send the request again. A 5603h list that keeps
+changing as it is read is such a read, not `503`. The host is shown
+`Warning` and read again on the next `--event-poll` tick. That the answer
+is `200` with this message, and that a PATCH answers it too, where
+DSP0266 says it "should" return the resource or `204`, is cxl-fmd's
 choice.
 
 **Comment 4:** DMTF has no resource for a tag, and no property for the LDs
@@ -286,16 +290,19 @@ shown only in the tag view, as `PendingLDs` (Comment 4). Why:
   "DCO", "Optional for DCDs", in Table 8-397) has no tag list to fail:
   `TagsKnown` `false`, no `Tags`, and no `Warning`; on it an add a host
   has not answered cannot be seen at all.
-- 5604h and 5605h complete at the device when the host answers, which the
-  FM learns from a DC event record, an Add Capacity Response (04h) or a
-  Capacity Released (05h). The specification does not say whether the
-  device sends 04h for a host that accepts no capacity, nor 05h after a
-  Forced Removal, so the records give no dependable completion signal. The
-  actions answer `200 OK` once the FM-API command succeeds, with no
-  `Task` (with the message of Comment 3 when the read after it failed),
-  and a record only makes cxl-fmd read the host again (cxl-fmd's
-  choice). The mock host accepts added capacity at once, so in the mock
-  only a topology file has an add the host has not answered.
+- 5604h and 5605h complete when the device initiates the procedure; the
+  host answers after, which the FM may learn from a DC event record, an
+  Add Capacity Response (04h) or a Capacity Released (05h). The
+  specification does not say whether the device sends 04h for a host that
+  accepts no capacity, nor 05h after a Forced Removal, so the records give
+  no dependable completion signal. An add or a release is therefore
+  answered `202 Accepted` with a `Task`, which follows the host's 5603h
+  and the tag's bitmaps until they show what the host did (see [Tasks of
+  an add or a release](#tasks-of-an-add-or-a-release)); a record makes
+  cxl-fmd read the host again, and one of no capacity is taken as a host
+  that accepted none (cxl-fmd's choices). The mock host accepts added
+  capacity at once, so in the mock only a topology file has an add the
+  host has not answered.
 
 **Comment 6:** A host's Extent List is read a page at a time, and its
 Extent List Generation Number is "A device-generated value that is used to
@@ -691,8 +698,10 @@ exceed the region's decode length (Section 7.6.7.6.5), which is `409`
 `400` for more than the region's length). On success cxl-fmd reads 5601h
 and 5603h for that host again, then 5608h; whether the new extent is then
 listed, or only shown in `PendingLDs` of its tag until the host answers,
-depends on the device (Comment 5). The
-answer is `200 OK`, with the message of Comment 3 when that read failed.
+depends on the device (Comment 5). The answer is `202 Accepted` with a
+`Task` that follows the host until it is seen to have accepted the
+capacity, some of it, or none (see [Tasks of an add or a
+release](#tasks-of-an-add-or-a-release)).
 
 ### Initiate Dynamic Capacity Release (5605h)
 
@@ -727,9 +736,10 @@ The release takes capacity from the host the request names, and from no
 other: "To remove a host's access to the shared extent, the FM issues
 Initiate Dynamic Capacity Release Request with Selection Policy=Tag-based
 with the Host ID associated with that host" (Section 7.6.7.6.6). The
-answer is `200 OK`; on hardware 5601h and 5603h of that host are then
-read again, and 5608h (when that read fails, `200` with the message of
-Comment 3).
+answer is `202 Accepted` with a `Task`, which is `Completed` once what the
+release named is gone from the host's 5603h (see [Tasks of an add or a
+release](#tasks-of-an-add-or-a-release)); on hardware 5601h and 5603h of
+that host are read again after the command, and 5608h.
 
 What the mock refuses, as the specification says a device does:
 
@@ -810,13 +820,108 @@ decides; a release of only part of what a host has of a sharable tag is
 expected to fail with Invalid Input as quoted above (the mock refuses it,
 Open Questions 11 and 12).
 
-The answer is `204 No Content`, or `200` when the device accepted the
-release and the read after it failed (Comment 3). A device that refuses
-is answered as in Comment 3; a policy the device does not support is
+The answer is `202 Accepted` with a `Task`, whose `Payload` is the
+`DELETE`; its monitor answers `204 No Content` once what was released is
+gone from the host's 5603h (see [Tasks of an add or a
+release](#tasks-of-an-add-or-a-release)). A device that refuses is
+answered at once as in Comment 3; a policy the device does not support is
 `400`. This mirrors how
 `DELETE` on a `MemoryChunk` maps to Set LD Allocations. Capacity an FM
 reference keeps that no host holds is no `MemoryExtent`, so it cannot be
 deleted; only `CXLReferenceDCMemory` with `FMReference` `false` frees it.
+
+### Tasks of an add or a release
+
+Initiate Dynamic Capacity Add "shall complete when the device initiates
+the Add Capacity procedure" (CXL r4.0 Section 7.6.7.6.5), and Initiate
+Dynamic Capacity Release "when the device initiates the Remove Capacity
+procedure" (Section 7.6.7.6.6). The host answers after: an add "allows
+the host to control exactly how much of the added capacity it wishes to
+utilize, which may be less than the amount of capacity sent in the add
+capacity event, or even 0", and of a release "The host may call Release
+Dynamic Capacity multiple times, returning different portions of the
+total capacity over time" (Section 9.13.3). A device that accepted the
+command has started a change the host may make in part, late, or not at
+all.
+
+So `DynamicCapacityAdd`, `DynamicCapacityRelease` and a `DELETE` of a
+`MemoryExtent` the device accepts are answered as DSP0266 1.25.0 Section
+12.2 has an asynchronous operation answered: "When a client issues a
+request that results in a long-running operation, the service returns the
+HTTP 202 Accepted status code and a Location header that contains a task
+monitor URI", and "If a response body is provided, it shall contain a
+representation of the Task resource that represents the state of the
+operation". The `Task` is at `/redfish/v1/TaskService/Tasks/{id}`, its
+monitor at `/redfish/v1/TaskService/TaskMonitors/{id}`. A request
+cxl-fmd or the device refuses is answered at once, with no task, as
+before; so is a command whose outcome is not known ("Outcome unknown",
+Comment 3).
+
+**Recorded before the command is sent.** The task is made, and the
+request recorded in it, before 5604h or 5605h is sent; if it cannot be
+made (no memory), nothing is sent (`500`). `Payload` has the request as
+it came: `TargetUri`, `HttpOperation` and, for an action, `JsonBody`, the
+body. `Oem/Cxl/DynamicCapacity` (type `#Cxl.v1_0_0.Task` of cxl-fmd's Oem
+schema) has what was sent: `HostId`, `Policy`, `RegionNumber` and `Tag`
+of an add, `LengthBytes` of a Free or Contiguous add or of a Tag-based
+release, `ForcedRemoval` and `SanitizeOnRelease` of a release, and the
+extents of a Prescriptive release (`RequestedExtents`), with the host's
+extents before it (`BaselineExtents`) and their Extent List Generation
+Number (`BaselineGeneration`). On hardware a host whose last read failed,
+or is owed, or a tag list that could not be read, is read first; if the
+host still cannot be read, nothing is sent and the answer is `503`.
+
+**One task at a time for a host and a tag.** What 5603h and the bitmaps
+show of a host cannot be told apart between two requests of one tag, so
+a request is refused with `409` and nothing is sent while a task follows
+the same host with the same Tag (all zeros is a tag here; a Prescriptive
+release has the tags of its extents), and an add of a tag whose
+Pending Reference Bitmap already has the host's LD is refused likewise
+(`ResourceInUse`, "Wait for the Dynamic Capacity task that follows this
+host and Tag to end"). Both are cxl-fmd's choices.
+
+**How a task ends** (cxl-fmd's rules; the specification gives none). A
+task is judged on a read of its host that completed, 5603h and then
+5608h; a read that fails changes nothing.
+
+| Task | `Running` while | `Completed` when | `Exception` when |
+|------|-----------------|------------------|------------------|
+| Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host) |
+| Release | any of what it named is still in the host's 5603h; the message says how much has gone | all of it is gone: the extents of a Prescriptive list, or `Length` bytes of the Tag for a Tag-based one (a `DELETE` is one of these) | never on what the host does: nothing says a host refuses a release |
+| Either | | | the device is gone: what its host did is not known (`500` "Outcome unknown") |
+
+The capacity seen is in the task as `AcceptedExtents` or
+`ReleasedExtents` (DPA, length and Tag of each part), and an add's
+`Links/CreatedResources` links the `MemoryExtent`s it is in that are
+still there. There is no `PercentComplete`: what share a host has done is
+not known. No time limit ends a task, and nothing in a task sends a
+command or frees capacity: a host that never answers leaves its task
+`Running`, the capacity where it is, and its tag refused for that host
+(by the rule above) until the host answers or the device goes. That a
+5603h lists only what the host accepted is cxl-fmd's reading (Comment 5);
+on a device whose 5603h also lists capacity the host has not accepted, an
+untagged add, or one on a device with no tag list, is `Completed` as soon
+as it is listed.
+
+**When it is judged.** On hardware, on every read of the host: after a
+command, after a DC event record names it, and on every `--event-poll`
+tick while a task follows it (the host is read on the tick for that
+reason alone). With `--event-poll 0`, only a record or a request that
+reads that host moves its tasks. In the mock, on every turn of the event
+loop (100 ms while one runs); the mock's host has answered by then.
+
+**The monitor.** While the task runs, `202` and the `Task`. Once it is
+over, "The headers and response body of the initial operation, as if it
+had completed synchronously. If the initial operation fails, the response
+body shall contain an error response" (DSP0266 1.25.0 Section 12.2): an
+action `200 OK` with an error object whose `code` is `Base.1.24.Success`
+and whose `message` says what the host accepted or released, a `DELETE`
+`204`; a host that accepted none `409` (`GeneralError`); a device that is
+gone `500` "Outcome unknown". The statuses are cxl-fmd's choices. Nothing
+cancels a task (DSP0266: "If a service supports cancellation of a task,
+the Allow header shall contain DELETE for the task monitor"; cxl-fmd does
+not), tasks are not kept across a restart, and of the tasks that are over
+the newest 64 are kept.
 
 ### Dynamic Capacity Add Reference (5606h) / Remove Reference (5607h)
 
@@ -1309,10 +1414,11 @@ where it says so), not the specification's.
    host accepts none of, or 05h after a Forced Removal or a device's own
    reclaim, is not said; nor whether the FM's 04h records follow the order
    the host answered in. Choice: a record only makes cxl-fmd read the host
-   again and take its counts (78h, 7Ch). The actions answer `200 OK` when
-   the FM-API command succeeds, DELETE `204` (both `200` with a message
-   when the read after it failed: Comment 3); there is no `Task`, and no
-   record is matched to a request.
+   again and take its counts (78h, 7Ch); one with no capacity is taken to
+   be a host that accepted none of the add of its Tag, or of the one add
+   followed on that host when its Tag is all zeros. Completion is judged
+   on 5603h and the Pending Reference Bitmap, by a `Task` (see [Tasks of
+   an add or a release](#tasks-of-an-add-or-a-release)).
 8. **Which log carries 04h and 05h on an MLD or a Multi-Headed device.**
    Choice: the device's FM-side Dynamic Capacity Event Log, read through
    its FM CCI; a Multi-Headed device's records are not kept per LD.
@@ -1381,7 +1487,8 @@ where it says so), not the specification's.
     cxl-fmd keeps no release notes; this document is where it is said.
 22. **When the mock host accepts.** Choice: at once; pending state comes
     only from the topology file (`per_host` `pending`, `tags`
-    `pending_hosts`). There are no timers, Tasks or knobs.
+    `pending_hosts`). Its tasks are `Completed` on the next turn of the
+    event loop. There are no timers or knobs.
 23. **An extent being released.** Section 9.13.3 says of the Extent
     List a host sees: "The Extent List does not contain extents that are
     still pending acceptance from the host via the Add Dynamic Capacity
@@ -1393,7 +1500,9 @@ where it says so), not the specification's.
     Release Dynamic Capacity. 5605h says only that it "shall complete
     when the device initiates the Remove Capacity procedure" (Section
     7.6.7.6.6). Choice: there is no "pending release" state; an extent
-    stays, and is served, until its host's 5603h no longer lists it. That
+    stays, and is served, until its host's 5603h no longer lists it, and
+    the release's `Task` runs until then (see [Tasks of an add or a
+    release](#tasks-of-an-add-or-a-release)). That
     5603h, the "Extent list for the specified host as defined in Table
     8-230" (Table 7-71), lists what Section 9.13.3 says of the host's list
     is cxl-fmd's reading: the specification does not say they are one

@@ -253,6 +253,69 @@ static int parse_extent_list(struct fmd_component *dev, int host_id, json_t *roo
 	return (int)n;
 }
 
+/*
+ * A task for an add or release of @host_id of @dev, which {ld} @ld_id
+ * names (NULL for a DELETE), recording the request: its body as it came,
+ * which the Task shows as its Payload. NULL, with @msg, if out of memory.
+ */
+static struct fmd_task *dc_task_new(struct fmd_ctx *ctx, enum fmd_task_kind kind,
+				    struct fmd_component *dev, int host_id,
+				    const char *chassis_id, const char *ld_id,
+				    const char *body, size_t body_size,
+				    const char **msg)
+{
+	struct fmd_task *task = fmd_dc_task_new(ctx, kind);
+
+	if (task && body) {
+		task->dc->body = strndup(body, body_size);
+		if (!task->dc->body) {
+			fmd_task_discard(task);
+			task = NULL;
+		}
+	}
+	if (!task) {
+		*msg = "No memory for the task: nothing was sent";
+		return NULL;
+	}
+	task->dc->host_id = host_id;
+	snprintf(task->dc->dev_id, sizeof(task->dc->dev_id), "%s", dev->id);
+	snprintf(task->dc->chassis_id, sizeof(task->dc->chassis_id), "%s", chassis_id);
+	snprintf(task->dc->ld_id, sizeof(task->dc->ld_id), "%s", ld_id ? ld_id : "");
+	return task;
+}
+
+/*
+ * The release @task records: its terms, and the extents of a Prescriptive
+ * one copied, as releasing them can free them. -ENOMEM, or 0.
+ */
+static int dc_task_release_fill(struct fmd_task *task, uint8_t policy, bool forced,
+				bool sanitize, uint64_t length, const uint8_t *tag,
+				struct fmd_dc_extent **extents, int n)
+{
+	struct fmd_dc_task *dc = task->dc;
+
+	dc->policy = policy;
+	dc->forced = forced;
+	dc->sanitize = sanitize;
+	dc->region_id = FMD_DC_REGION_NONE;
+	if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE) {
+		dc->req = calloc(n ? n : 1, sizeof(*dc->req));
+		if (!dc->req)
+			return -ENOMEM;
+		for (int i = 0; i < n; i++) {
+			dc->req[i].dpa = extents[i]->start_dpa;
+			dc->req[i].len = extents[i]->len;
+			memcpy(dc->req[i].tag, extents[i]->tag, FMD_DC_TAG_LEN);
+			dc->req[i].region_id = extents[i]->region_id;
+		}
+		dc->n_req = n;
+		return 0;
+	}
+	dc->length = length;
+	memcpy(dc->tag, tag, FMD_DC_TAG_LEN);
+	return 0;
+}
+
 #define EXTENT_LIST_MSG \
 	"ExtentList must be a non-empty array of distinct MemoryExtent links on this device"
 #define EXTENT_FOREIGN_MSG \
@@ -708,8 +771,10 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
  */
 static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_id,
 					  const char *dev_id, const char *ext_id,
-					  const char **msg)
+					  const char **msg, int *task_id)
 {
+	struct fmd_task *task = NULL;
+	uint8_t policy;
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dcd_info *dcd;
 	struct fmd_dc_region *region;
@@ -741,48 +806,74 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		   !tag_is_zero(tag);
 
 	if (!sharable) {
-		rc = fmd_dc_release(ctx, dev, host_id, FMD_DC_REL_POLICY_PRESCRIPTIVE,
-				    false, sanitize, 0, tag, &ext, 1);
-		goto out;
-	}
+		extents = calloc(1, sizeof(*extents));
+		if (!extents)
+			goto nomem;
+		extents[n++] = ext;
+		policy = FMD_DC_REL_POLICY_PRESCRIPTIVE;
+	} else {
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
 
-	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-		struct fmd_dc_extent *e = fmd_to_dc_extent(child);
-
-		if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN)) {
-			length += e->len;
-			n++;
+			if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
+				length += e->len;
 		}
+		policy = FMD_DC_REL_POLICY_TAG_BASED;
 	}
 
-	if (dcd->release_policies & fmd_dc_policy_cap_bit(true, FMD_DC_REL_POLICY_TAG_BASED)) {
-		rc = fmd_dc_release(ctx, dev, host_id, FMD_DC_REL_POLICY_TAG_BASED,
-				    false, sanitize, length, tag, NULL, 0);
+	if (sharable && !(dcd->release_policies &
+			  fmd_dc_policy_cap_bit(true, FMD_DC_REL_POLICY_TAG_BASED))) {
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+			n += e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN);
+		}
+		extents = calloc(n, sizeof(*extents));
+		if (!extents)
+			goto nomem;
+		n = 0;
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+			if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
+				extents[n++] = e;
+		}
+		policy = FMD_DC_REL_POLICY_PRESCRIPTIVE;
+		length = 0;
+	}
+
+	task = dc_task_new(ctx, FMD_TASK_DC_RELEASE, dev, host_id, chassis_id, NULL,
+			   NULL, 0, msg);
+	if (!task || dc_task_release_fill(task, policy, false, sanitize, length, tag,
+					  extents, n))
+		goto nomem;
+	snprintf(task->dc->ext_id, sizeof(task->dc->ext_id), "%s", ext_id);
+	rc = fmd_dc_task_prepare(ctx, dev, task, msg);
+	if (rc)
 		goto out;
-	}
 
-	extents = calloc(n, sizeof(*extents));
-	if (!extents) {
+	rc = fmd_dc_release(ctx, dev, host_id, policy, false, sanitize,
+			    policy == FMD_DC_REL_POLICY_TAG_BASED ? length : 0, tag,
+			    policy == FMD_DC_REL_POLICY_TAG_BASED ? NULL : extents,
+			    policy == FMD_DC_REL_POLICY_TAG_BASED ? 0 : n);
+	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
+		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
+		*task_id = task->id;
+		free(extents);
+		return FMD_OP_STARTED;
+	}
+	*msg = dc_common_msg(rc);
+	if (!*msg)
 		*msg = "Dynamic capacity release failed";
-		return -ENOMEM;
-	}
-	n = 0;
-	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-		struct fmd_dc_extent *e = fmd_to_dc_extent(child);
-
-		if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
-			extents[n++] = e;
-	}
-	rc = fmd_dc_release(ctx, dev, host_id, FMD_DC_REL_POLICY_PRESCRIPTIVE,
-			    false, sanitize, 0, tag, extents, n);
-	free(extents);
 out:
-	if (rc) {
-		*msg = dc_common_msg(rc);
-		if (!*msg)
-			*msg = "Dynamic capacity release failed";
-	}
+	fmd_task_discard(task);
+	free(extents);
 	return rc;
+nomem:
+	fmd_task_discard(task);
+	free(extents);
+	*msg = "No memory for the task: nothing was sent";
+	return -ENOMEM;
 }
 
 /*
@@ -1039,8 +1130,10 @@ static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassi
  */
 static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 				const char *dev_id, const char *ld_id,
-				const char *body, size_t body_size, const char **msg)
+				const char *body, size_t body_size, const char **msg,
+				int *task_id)
 {
+	struct fmd_task *task;
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dc_extent **extents = NULL;
 	json_t *root, *val;
@@ -1152,17 +1245,39 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		break;
 	}
 
+	/* the task, with the request and the baseline, before anything is sent */
+	task = dc_task_new(ctx, FMD_TASK_DC_ADD, dev, host_id, chassis_id, ld_id,
+			   body, body_size, msg);
+	if (!task) {
+		free(extents);
+		return -ENOMEM;
+	}
+	task->dc->policy = (uint8_t)policy;
+	task->dc->region_id = (uint8_t)(region < 0 ? 0 : region);
+	memcpy(task->dc->tag, tag, FMD_DC_TAG_LEN);
+	task->dc->length = length;
+	rc = fmd_dc_task_prepare(ctx, dev, task, msg);
+	if (rc) {
+		fmd_task_discard(task);
+		free(extents);
+		return rc;
+	}
+
 	rc = fmd_dc_add(ctx, dev, host_id, (uint8_t)policy, (uint8_t)(region < 0 ? 0 : region),
 			length, tag, extents, ext_count);
 	free(extents);
+	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
+		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
+		*task_id = task->id;
+		return FMD_OP_STARTED;
+	}
+	fmd_task_discard(task);
 
 	if (dc_common_msg(rc)) {
 		*msg = dc_common_msg(rc);
 		return rc;
 	}
 	switch (rc) {
-	case 0:
-		return 0;
 	case -EINVAL:
 		*msg = "Invalid request: a Policy the device does not support, a Length that is not "
 		       "a block-size multiple, or a request the device refused as invalid";
@@ -1190,8 +1305,10 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
  */
 static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 				    const char *dev_id, const char *ld_id,
-				    const char *body, size_t body_size, const char **msg)
+				    const char *body, size_t body_size, const char **msg,
+				    int *task_id)
 {
+	struct fmd_task *task;
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
 	struct fmd_dc_extent **extents = NULL;
 	json_t *root, *val;
@@ -1286,17 +1403,37 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		return -EINVAL;
 	}
 
+	task = dc_task_new(ctx, FMD_TASK_DC_RELEASE, dev, host_id, chassis_id, ld_id,
+			   body, body_size, msg);
+	if (!task || dc_task_release_fill(task, (uint8_t)policy, forced, sanitize,
+					  length, tag, extents, ext_count)) {
+		fmd_task_discard(task);
+		free(extents);
+		*msg = "No memory for the task: nothing was sent";
+		return -ENOMEM;
+	}
+	rc = fmd_dc_task_prepare(ctx, dev, task, msg);
+	if (rc) {
+		fmd_task_discard(task);
+		free(extents);
+		return rc;
+	}
+
 	rc = fmd_dc_release(ctx, dev, host_id, (uint8_t)policy, forced, sanitize,
 			    length, tag, extents, ext_count);
 	free(extents);
+	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
+		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
+		*task_id = task->id;
+		return FMD_OP_STARTED;
+	}
+	fmd_task_discard(task);
 
 	if (dc_common_msg(rc)) {
 		*msg = dc_common_msg(rc);
 		return rc;
 	}
 	switch (rc) {
-	case 0:
-		return 0;
 	case -EINVAL:
 		*msg = "Invalid request: a Policy the device does not support, or a request the "
 		       "device refused as invalid";
@@ -1401,16 +1538,26 @@ json_t *fmd_redfish_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id
 	return res;
 }
 
+/* The Task of a request that started one, made once dcd_lock is let go */
+static int dc_started(struct fmd_ctx *ctx, int rc, int task_id, json_t **task)
+{
+	*task = NULL;
+	if (rc != FMD_OP_STARTED)
+		return rc;
+	*task = fmd_redfish_task(ctx, task_id);
+	return rc;
+}
+
 int fmd_redfish_delete_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id,
 					const char *dev_id, const char *ext_id,
-					const char **msg)
+					const char **msg, json_t **task)
 {
-	int rc;
+	int rc, id = 0;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
-	rc = delete_dc_memory_extent_locked(ctx, chassis_id, dev_id, ext_id, msg);
+	rc = delete_dc_memory_extent_locked(ctx, chassis_id, dev_id, ext_id, msg, &id);
 	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
+	return dc_started(ctx, rc, id, task);
 }
 
 json_t *fmd_redfish_dc_memory_regions(struct fmd_ctx *ctx, const char *chassis_id,
@@ -1452,28 +1599,30 @@ int fmd_redfish_patch_dc_memory_region(struct fmd_ctx *ctx, const char *chassis_
 
 int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
 			      const char *dev_id, const char *ld_id,
-			      const char *body, size_t body_size, const char **msg)
+			      const char *body, size_t body_size, const char **msg,
+			      json_t **task)
 {
-	int rc;
+	int rc, id = 0;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
 	rc = action_dc_add_locked(ctx, chassis_id, dev_id,
-			ld_id, body, body_size, msg);
+			ld_id, body, body_size, msg, &id);
 	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
+	return dc_started(ctx, rc, id, task);
 }
 
 int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
 				  const char *dev_id, const char *ld_id,
-				  const char *body, size_t body_size, const char **msg)
+				  const char *body, size_t body_size, const char **msg,
+				  json_t **task)
 {
-	int rc;
+	int rc, id = 0;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
 	rc = action_dc_release_locked(ctx, chassis_id, dev_id,
-			ld_id, body, body_size, msg);
+			ld_id, body, body_size, msg, &id);
 	pthread_mutex_unlock(&ctx->dcd_lock);
-	return rc;
+	return dc_started(ctx, rc, id, task);
 }
 
 int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
@@ -1487,4 +1636,107 @@ int fmd_redfish_action_dc_reference(struct fmd_ctx *ctx, const char *chassis_id,
 			body, body_size, msg);
 	pthread_mutex_unlock(&ctx->dcd_lock);
 	return rc;
+}
+
+/*
+ * ============================================================================
+ * Tasks
+ * ============================================================================
+ */
+
+static json_t *dc_ranges_json(const struct fmd_dc_range *v, int n)
+{
+	json_t *arr = json_array();
+
+	for (int i = 0; i < n; i++) {
+		char tag[40];
+
+		fmd_dc_tag_to_str(v[i].tag, tag, sizeof(tag));
+		json_array_append_new(arr, json_pack("{s:I, s:I, s:s}",
+			"ExtentOffsetBytes", (json_int_t)v[i].dpa,
+			"ExtentSizeBytes", (json_int_t)v[i].len,
+			"Tag", tag));
+	}
+	return arr;
+}
+
+/*
+ * Oem/Cxl of a DC Task: the request as it was recorded before it was sent,
+ * the host's extents before it, and what has been seen added or released.
+ */
+json_t *fmd_redfish_dc_task_oem(struct fmd_ctx *ctx, const struct fmd_task *task)
+{
+	const struct fmd_dc_task *dc = task->dc;
+	bool add = task->kind == FMD_TASK_DC_ADD;
+	bool prescriptive = !add && dc->policy == FMD_DC_REL_POLICY_PRESCRIPTIVE;
+	json_t *o;
+	char tag[40];
+
+	(void)ctx;
+	fmd_dc_tag_to_str(dc->tag, tag, sizeof(tag));
+	o = json_pack("{s:i, s:s, s:I, s:o}",
+		"HostId", dc->host_id,
+		"Policy", fmd_dc_policy_name(!add, dc->policy),
+		"BaselineGeneration", (json_int_t)dc->base_gen,
+		"BaselineExtents", dc_ranges_json(dc->base, dc->n_base));
+	if (add) {
+		json_object_set_new(o, "RegionNumber", json_integer(dc->region_id));
+		json_object_set_new(o, "Tag", json_string(tag));
+		if (dc->policy == FMD_DC_POLICY_FREE || dc->policy == FMD_DC_POLICY_CONTIGUOUS)
+			json_object_set_new(o, "LengthBytes", json_integer((json_int_t)dc->length));
+		json_object_set_new(o, "AcceptedExtents", dc_ranges_json(dc->done, dc->n_done));
+	} else {
+		json_object_set_new(o, "ForcedRemoval", json_boolean(dc->forced));
+		json_object_set_new(o, "SanitizeOnRelease", json_boolean(dc->sanitize));
+		if (prescriptive) {
+			json_object_set_new(o, "RequestedExtents",
+					    dc_ranges_json(dc->req, dc->n_req));
+		} else {
+			json_object_set_new(o, "Tag", json_string(tag));
+			json_object_set_new(o, "LengthBytes",
+					    json_integer((json_int_t)dc->length));
+		}
+		json_object_set_new(o, "ReleasedExtents", dc_ranges_json(dc->done, dc->n_done));
+	}
+	return json_pack("{s:{s:s, s:o}}", "Cxl",
+			 "@odata.type", "#Cxl.v1_0_0.Task",
+			 "DynamicCapacity", o);
+}
+
+/*
+ * Links/CreatedResources of an add: the MemoryExtents the capacity seen
+ * added is in, those that are still there ("Services shall set this
+ * property prior to the task entering its final state", Task_v1).
+ */
+json_t *fmd_redfish_dc_task_created(struct fmd_ctx *ctx, const struct fmd_task *task)
+{
+	const struct fmd_dc_task *dc = task->dc;
+	struct fmd_component *dev, *child;
+	json_t *arr = json_array();
+
+	if (task->kind != FMD_TASK_DC_ADD)
+		return arr;
+	pthread_mutex_lock(&ctx->dcd_lock);
+	dev = find_dcd_device(ctx, dc->dev_id, dc->dev_id);
+	if (dev) {
+		fmd_topology_rdlock(&ctx->topology);
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+			struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+			bool in = false;
+			char uri[512];
+
+			if (ext->host_id != dc->host_id)
+				continue;
+			for (int i = 0; i < dc->n_done && !in; i++)
+				in = dc->done[i].dpa >= ext->start_dpa &&
+				     dc->done[i].dpa - ext->start_dpa < ext->len;
+			if (!in)
+				continue;
+			extent_uri(dc->chassis_id, dc->dev_id, dev, ext, uri, sizeof(uri));
+			json_array_append_new(arr, json_pack("{s:s}", "@odata.id", uri));
+		}
+		fmd_topology_rdunlock(&ctx->topology);
+	}
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return arr;
 }

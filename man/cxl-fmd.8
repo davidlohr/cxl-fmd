@@ -272,6 +272,17 @@ The logs of a Multi-Headed device are not read.
 A component reached through the kernel's mailbox
 .RB ( \-i )
 shares its event logs with the kernel's driver, and they are left to it.
+.SH DYNAMIC CAPACITY TASKS
+A Dynamic Capacity add or release, or a DELETE of a memory extent, that
+the device accepts is answered with
+.B 202 Accepted
+and a Redfish task: the device has only started it, and the host takes
+the capacity, or gives it back, later, in part, or not at all.
+The task ends once a read of the host's extents and of the tag list
+shows what the host did; while it runs, the host is read on every
+.B \-\-event\-poll
+tick, and nothing else is accepted for the same host and tag.
+No time limit ends a task.
 .SH BINDING IN THE BACKGROUND
 A switch carries out a bind or an unbind as a background command.
 When it has started one and not finished it,

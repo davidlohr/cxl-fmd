@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
- * Tasks: operations a switch carries out in the background
+ * Tasks: operations a switch carries out in the background, and the
+ * Dynamic Capacity adds and releases a host answers (src/dcd.c)
  *
  * "All binding operations are executed as background commands" (CXL r4.0
  * Section 7.6.7.2.2), and unbinding likewise. A switch answers Bind vPPB or
@@ -73,9 +74,63 @@ struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 	return task;
 }
 
+static void task_free(struct fmd_task *task)
+{
+	if (task && task->dc) {
+		free(task->dc->body);
+		free(task->dc->req);
+		free(task->dc->base);
+		free(task->dc->done);
+		free(task->dc);
+	}
+	free(task);
+}
+
 void fmd_task_discard(struct fmd_task *task)
 {
-	free(task);
+	task_free(task);
+}
+
+struct fmd_task *fmd_dc_task_new(struct fmd_ctx *ctx, enum fmd_task_kind kind)
+{
+	struct fmd_task *task = fmd_task_calloc(1, sizeof(*task));
+
+	if (task)
+		task->dc = fmd_task_calloc(1, sizeof(*task->dc));
+	if (!task || !task->dc) {
+		fmd_err(ctx, "no task for a Dynamic Capacity %s: nothing is sent",
+			kind == FMD_TASK_DC_ADD ? "add" : "release");
+		free(task);
+		return NULL;
+	}
+	task->kind = kind;
+	task->state = FMD_TASK_RUNNING;
+	task->dc->host_id = -1;
+	return task;
+}
+
+void fmd_dc_task_list(struct fmd_ctx *ctx, struct fmd_task *task)
+{
+	task->id = ++ctx->task_next_id;
+	task->start = time(NULL);
+	task->next = ctx->tasks;
+	ctx->tasks = task;
+	fmd_info(ctx, "Task %d: Dynamic Capacity %s for host %d of %s started",
+		 task->id, task->kind == FMD_TASK_DC_ADD ? "add" : "release",
+		 task->dc->host_id, task->dc->dev_id);
+}
+
+void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
+		     enum fmd_task_outcome outcome, const char *message)
+{
+	task->state = ok ? FMD_TASK_COMPLETED : FMD_TASK_EXCEPTION;
+	task->outcome = outcome;
+	task->end = time(NULL);
+	snprintf(task->message, sizeof(task->message), "%s", message);
+	if (ok)
+		fmd_info(ctx, "Task %d: %s", task->id, message);
+	else
+		fmd_err(ctx, "Task %d: %s", task->id, message);
 }
 
 struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
@@ -165,9 +220,15 @@ bool fmd_tasks_running(struct fmd_ctx *ctx)
 	struct fmd_task *task;
 	bool running = false;
 
+	/*
+	 * A DC task on hardware is followed on the --event-poll timer, as
+	 * its host is read then (fmd_dcd_retry_stale()); one of a mock, whose
+	 * host answers on a turn of the loop, as a bind is.
+	 */
 	pthread_rwlock_rdlock(&ctx->fabric_lock);
 	for (task = ctx->tasks; task && !running; task = task->next)
-		running = task->state == FMD_TASK_RUNNING;
+		running = task->state == FMD_TASK_RUNNING &&
+			  (!fmd_task_is_dc(task) || fmd_is_mock(ctx));
 	pthread_rwlock_unlock(&ctx->fabric_lock);
 
 	return running;
@@ -389,7 +450,7 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	uint16_t rc = CXLMI_RET_SUCCESS;
 
 	for (task = ctx->tasks; task; task = task->next) {
-		if (task->state != FMD_TASK_RUNNING ||
+		if (task->state != FMD_TASK_RUNNING || fmd_task_is_dc(task) ||
 		    task->vcs_id != vcs_id || task->vppb_id != vppb_id ||
 		    strcmp(task->switch_id, sw->base.id) != 0)
 			continue;
@@ -470,7 +531,7 @@ void fmd_tasks_reconcile(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		struct fmd_vcs *vcs;
 		struct fmd_vppb *vppb;
 
-		if (task->state != FMD_TASK_INTERRUPTED ||
+		if (task->state != FMD_TASK_INTERRUPTED || fmd_task_is_dc(task) ||
 		    strcmp(task->switch_id, sw->base.id) != 0)
 			continue;
 		vcs = fmd_switch_find_vcs(sw, task->vcs_id);
@@ -497,7 +558,7 @@ static void tasks_prune(struct fmd_ctx *ctx)
 		     task->state == FMD_TASK_EXCEPTION) &&
 		    ++finished > FMD_TASKS_KEPT) {
 			*pp = task->next;
-			free(task);
+			task_free(task);
 			continue;
 		}
 		pp = &task->next;
@@ -524,13 +585,15 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 		return;
 
 	pthread_rwlock_wrlock(&ctx->fabric_lock);
+	/* the Dynamic Capacity tasks: what their hosts have done */
+	fmd_dc_tasks_poll(ctx);
 	for (task = ctx->tasks; task; task = task->next) {
 		struct fmd_switch *sw;
 		uint16_t rc = 0;
 		int percent = 0, status;
 
-		if (task->state != FMD_TASK_RUNNING &&
-		    task->state != FMD_TASK_INTERRUPTED)
+		if ((task->state != FMD_TASK_RUNNING &&
+		     task->state != FMD_TASK_INTERRUPTED) || fmd_task_is_dc(task))
 			continue;
 
 		sw = fmd_topology_find_switch(&ctx->topology, task->switch_id);
@@ -571,6 +634,6 @@ void fmd_tasks_free(struct fmd_ctx *ctx)
 		struct fmd_task *task = ctx->tasks;
 
 		ctx->tasks = task->next;
-		free(task);
+		task_free(task);
 	}
 }

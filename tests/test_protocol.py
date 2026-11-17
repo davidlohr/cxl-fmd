@@ -17,6 +17,8 @@ code", and a 405 has an Allow header (Table 13).
 import pytest
 import requests
 
+from test_dcd import dc_delete
+
 CHASSIS = "/redfish/v1/Chassis"
 CONNECTIONS = "/redfish/v1/Fabrics/CXL/Connections"
 
@@ -196,7 +198,7 @@ class TestPreconditionsDCD:
     def test_patch_with_precondition_changes_nothing(self, api_client, headers):
         """It was 200, and Set DC Region Configuration sent, whatever the
         ETag asked for (there are none)."""
-        assert api_client.delete(EXTENT) == 204
+        assert dc_delete(api_client, EXTENT) == 204
         response = requests.patch(api_client.base_url + REGION,
                                   json={"BlockSizeMiB": 512},
                                   headers=headers, timeout=30)

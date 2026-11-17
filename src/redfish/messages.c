@@ -211,6 +211,20 @@ json_t *fmd_redfish_error_body(const char *message, json_t *info)
 	return body;
 }
 
+json_t *fmd_redfish_success_body(const char *message)
+{
+	json_t *body = fmd_redfish_error_body(message ? message : "Accepted",
+					      fmd_redfish_message(FMD_RF_SUCCESS,
+								  NULL, NULL, 0));
+	char code[96];
+
+	fmd_redfish_message_id(FMD_RF_SUCCESS, code, sizeof(code));
+	if (body)
+		json_object_set_new(json_object_get(body, "error"), "code",
+				    json_string(code));
+	return body;
+}
+
 /*
  * What is sent when an error body cannot be made (out of memory): a
  * complete one, with the error's status all the same (cxl-fmd's choice).

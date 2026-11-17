@@ -214,6 +214,24 @@ class TestRedfishValidator:
         Capacity records in their logical devices' logs."""
         self._validate(cxl_fmd_daemon["url"], schema_dir, validator_venv)
 
+    @pytest.mark.mock_topology("mock/dcd-device.json")
+    def test_dcd_tasks_validation(self, cxl_fmd_daemon, api_client, schema_dir,
+                                  validator_venv):
+        """Validate with Dynamic Capacity tasks: an add, a release and a
+        DELETE, each Completed, with their Payload, Oem and links."""
+        from test_dcd import (SLD, SLD_ADD, SLD_RELEASE, TAG_NEW, dc_delete,
+                              dc_post, release_body)
+
+        assert dc_post(api_client, SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 1024,
+            "Tag": TAG_NEW})[0] == 200
+        assert dc_post(api_client, SLD_RELEASE, release_body(
+            "TagBased", Tag=TAG_NEW, Length=512))[0] == 200
+        assert dc_delete(api_client, SLD + "/MemoryExtents/ext_0_400000000") == 204
+        status, tasks = api_client.get("/redfish/v1/TaskService/Tasks")
+        assert tasks["Members@odata.count"] == 3
+        self._validate(cxl_fmd_daemon["url"], schema_dir, validator_venv)
+
     @pytest.mark.mock_topology("mock/dcd-shared-perhost.json")
     def test_dcd_perhost_validation(self, cxl_fmd_daemon, schema_dir, validator_venv):
         """Validate a DCD whose hosts see its regions at different DPAs: an

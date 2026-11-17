@@ -234,15 +234,33 @@ static enum MHD_Result send_bad_body(struct MHD_Connection *conn,
 static enum MHD_Result send_dc_accepted_stale(struct MHD_Connection *conn,
 					      const char *message)
 {
-	json_t *body = fmd_redfish_error_body(message ? message : "Accepted",
-					      RF_MSG(FMD_RF_SUCCESS));
-	char code[64];
+	return send_json_response(conn, MHD_HTTP_OK, fmd_redfish_success_body(message));
+}
 
-	fmd_redfish_message_id(FMD_RF_SUCCESS, code, sizeof(code));
-	if (body)
-		json_object_set_new(json_object_get(body, "error"), "code",
-				    json_string(code));
-	return send_json_response(conn, MHD_HTTP_OK, body);
+/*
+ * A Dynamic Capacity add or release the device accepted (FMD_OP_STARTED):
+ * 202 Accepted, the Task, and its monitor in Location. "The response to an
+ * asynchronous operation shall return the HTTP 202 Accepted status code
+ * and set the Location response header to the URI of a task monitor
+ * associated with the task ... If a response body is provided, it shall
+ * contain a representation of the Task resource" (DSP0266 1.25.0 Section
+ * 12.2). A task that could not be shown (out of memory) is 202 with no
+ * body and no Location; it is in the Tasks collection all the same.
+ */
+static enum MHD_Result send_json_response_with_location(struct MHD_Connection *conn,
+							unsigned int status, json_t *json,
+							const char *location);
+
+static enum MHD_Result send_dc_started(struct MHD_Connection *conn, json_t *task)
+{
+	char location[256];
+
+	if (!task)
+		return send_json_response(conn, MHD_HTTP_ACCEPTED, NULL);
+	snprintf(location, sizeof(location), "%s",
+		 json_string_value(json_object_get(task, "TaskMonitor")));
+	return send_json_response_with_location(conn, MHD_HTTP_ACCEPTED, task,
+						location);
 }
 
 /*
@@ -402,6 +420,12 @@ static enum MHD_Result send_errno(struct fmd_ctx *ctx,
 	case EEXIST:
 		return send_error(conn, MHD_HTTP_CONFLICT, msg,
 				  RF_MSG(FMD_RF_RESOURCE_IN_USE));
+	case EALREADY:	/* a DC task follows the host and Tag: nothing was sent */
+		return send_error(conn, MHD_HTTP_CONFLICT, msg,
+				  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
+					"Wait for the Dynamic Capacity task that follows "
+					"this host and Tag to end, then resubmit the "
+					"request if it still applies.", NULL, 0));
 	case ENOSPC:
 		snprintf(target, sizeof(target), "%s", url);
 		actions = strstr(target, "/Actions/");
@@ -1514,16 +1538,15 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd",
 			norm_url, params, 8)) {
 		const char *msg = NULL;
+		json_t *task = NULL;
 
 		rc = fmd_redfish_action_dc_add(ctx, params[0], params[1], params[2],
-					       body, body_size, &msg);
+					       body, body_size, &msg, &task);
 		free_params(params, 8);
 		free(norm_url);
 
-		if (rc == FMD_DC_ACCEPTED_STALE)
-			return send_dc_accepted_stale(conn, msg);
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_OP_STARTED)
+			return send_dc_started(conn, task);
 		return send_errno(ctx, conn, rc, msg, url, action_of(url),
 				  body, body_size);
 	}
@@ -1532,16 +1555,15 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease",
 			norm_url, params, 8)) {
 		const char *msg = NULL;
+		json_t *task = NULL;
 
 		rc = fmd_redfish_action_dc_release(ctx, params[0], params[1], params[2],
-						   body, body_size, &msg);
+						   body, body_size, &msg, &task);
 		free_params(params, 8);
 		free(norm_url);
 
-		if (rc == FMD_DC_ACCEPTED_STALE)
-			return send_dc_accepted_stale(conn, msg);
-		if (rc == 0)
-			return send_json_response(conn, MHD_HTTP_OK, NULL);
+		if (rc == FMD_OP_STARTED)
+			return send_dc_started(conn, task);
 		return send_errno(ctx, conn, rc, msg, url, action_of(url),
 				  body, body_size);
 	}
@@ -2109,16 +2131,15 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 	if (match_route("/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}",
 			norm_url, params, 8)) {
 		const char *msg = NULL;
+		json_t *task = NULL;
 
 		rc = fmd_redfish_delete_dc_memory_extent(ctx, params[0], params[1],
-							 params[2], &msg);
+							 params[2], &msg, &task);
 		free_params(params, 8);
 		free(norm_url);
 
-		if (rc == FMD_DC_ACCEPTED_STALE)
-			return send_dc_accepted_stale(conn, msg);
-		if (rc == 0)
-			return send_no_content(conn);
+		if (rc == FMD_OP_STARTED)
+			return send_dc_started(conn, task);
 		return send_errno(ctx, conn, rc, msg, url, NULL, NULL, 0);
 	}
 

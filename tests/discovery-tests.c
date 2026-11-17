@@ -3318,7 +3318,7 @@ static void test_mib_out_of_range_sends_nothing(void)
 	const char *msg = NULL;
 	int before = failures, rc, chunks;
 	unsigned int sent;
-	json_t *resp = NULL;
+	json_t *resp = NULL, *task = NULL;
 
 	fmd_discover(ctx);
 	device_id(id, sizeof(id), 0x1170);
@@ -3375,7 +3375,8 @@ dcd:
 			 "{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": %s, "
 			 "\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}", sizes[i]);
 		sent = commands_sent(ep);
-		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg,
+					       &task);
 		CHECK(rc == -EINVAL && commands_sent(ep) == sent,
 		      "DC add Length %s: %d, %u commands sent", sizes[i], rc,
 		      commands_sent(ep) - sent);
@@ -3385,7 +3386,8 @@ dcd:
 		 "{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": 256, "
 		 "\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}");
 	sent = commands_sent(ep);
-	fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg);
+	fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg, &task);
+	json_decref(task);
 	CHECK(commands_sent(ep) > sent, "DC add Length 256: nothing sent");
 out:
 	fmd_ctx_free(ctx);
@@ -6992,6 +6994,367 @@ out:
 }
 
 /*
+ * Dynamic Capacity tasks on hardware (review F06.6c, F13.C4, DCD-A1a,
+ * DCD-A1c). 5604h "shall complete when the device initiates the Add
+ * Capacity procedure" (CXL r4.0 Section 7.6.7.6.5): the add is a task, and
+ * it ends only on what a read of the host shows. hw_dcd()'s host 0 has one
+ * 256 MB extent tagged dc_tag at 1 GiB, in a 1 GiB region.
+ */
+
+/* A read of hw_dcd()'s host: 5601h, 5603h (@n extents, generation @gen),
+ * and 5608h with @nr rows, or Unsupported for @nr < 0, or failing 5603h
+ * for @gen 0 */
+static void answer_dcd_host(struct cxlmi_endpoint *ep, uint32_t gen,
+			    const struct dc_ext *e, int n,
+			    const struct dc_tag_row *r, int nr)
+{
+	uint8_t regions[0x04 + 0x28 + 0x10] = { 0 };
+
+	regions[0x02] = 1;
+	regions[0x03] = 1;
+	put64(regions + 0x04, 1ULL << 30);	/* Region Base */
+	put64(regions + 0x0c, 4);		/* Region Decode Length */
+	put64(regions + 0x14, 1ULL << 30);	/* Region Length */
+	put64(regions + 0x1c, 1ULL << 28);	/* Region Block Size */
+	put16(regions + 0x2c, 64);
+	put16(regions + 0x30, 63);
+	put16(regions + 0x34, 16);
+	put16(regions + 0x38, 15);
+	answer(ep, 0x5601, regions, sizeof(regions));
+	if (!gen)
+		answer_rc(ep, 0x5603, CXLMI_RET_INTERNAL);
+	else
+		answer_dc_extents(ep, gen, 0, n, e, n);
+	if (nr < 0)
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	else
+		answer_dc_tags(ep, gen + 100, nr, 0x03, r, nr);
+}
+
+static const char *dc_task_state(json_t *task)
+{
+	const char *s = json_string_value(json_object_get(task, "TaskState"));
+
+	return s ? s : "";
+}
+
+/* the task @id as it is served, and its monitor's status */
+static json_t *dc_task_now(struct fmd_ctx *ctx, int id, int *monitor)
+{
+	char location[256];
+	json_t *resp = NULL;
+
+	*monitor = fmd_redfish_task_monitor(ctx, id, &resp, location, sizeof(location));
+	json_decref(resp);
+	return fmd_redfish_task(ctx, id);
+}
+
+static int dc_task_id(json_t *task)
+{
+	const char *id = json_string_value(json_object_get(task, "Id"));
+
+	return id ? atoi(id) : -1;
+}
+
+static json_t *dc_task_oem(json_t *task, const char *key)
+{
+	return json_object_get(json_object_get(json_object_get(json_object_get(task, "Oem"),
+					"Cxl"), "DynamicCapacity"), key);
+}
+
+/* a Free add of 256 MB, or @mib, with @tag, to hw_dcd()'s host */
+static int dc_task_add(struct fmd_ctx *ctx, const char *id, const char *tag, int mib,
+		       json_t **task)
+{
+	char body[256];
+	const char *msg = NULL;
+
+	snprintf(body, sizeof(body), "{\"Policy\": \"Free\", \"RegionNumber\": 0, "
+		 "\"Length\": %d, \"Tag\": \"%s\"}", mib, tag);
+	return fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg, task);
+}
+
+#define TAG_B "6f1a2c3e-0000-4000-8000-00000000000b"
+#define TAG_C "6f1a2c3e-0000-4000-8000-00000000000c"
+
+static void test_dc_tasks_hw(void)
+{
+	struct dc_ext seed = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct dc_ext with_b[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag_b, 0 },
+	};
+	struct dc_tag_row pend_b[2] = {
+		{ dc_tag, false, { 0 }, 1, { 0 }, 0 },
+		{ dc_tag_b, false, { 0 }, 0, { 0 }, 1 },
+	};
+	struct dc_tag_row took_b[2] = {
+		{ dc_tag, false, { 0 }, 1, { 0 }, 0 },
+		{ dc_tag_b, false, { 0 }, 1, { 0 }, 0 },
+	};
+	int before = failures;
+
+	/* accepted: Running while the host is pending, Completed once it is listed */
+	for (int c = 0; c < 4; c++) {
+		static const char *const what[] = {
+			"accepted", "accepted in part", "refused", "a read that fails",
+		};
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1a0 + c, 0x00);
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL, *t, *acc;
+		int rc, tid, monitor;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		device_id(id, sizeof(id), 0x1a0 + c);
+		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+		answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
+		rc = dc_task_add(ctx, id, TAG_B, c == 1 ? 512 : 256, &task);
+		tid = dc_task_id(task);
+		CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(task), "Running") &&
+		      json_array_size(dc_task_oem(task, "BaselineExtents")) == 1 &&
+		      json_integer_value(dc_task_oem(task, "BaselineGeneration")) == 0,
+		      "%s: %d, %s", what[c], rc, dc_task_state(task));
+		json_decref(task);
+
+		/* the next tick: the host is read though it is current */
+		switch (c) {
+		case 0:
+		case 1:
+			answer_dcd_host(ep, 3, with_b, 2, took_b, 2);
+			break;
+		case 2:	/* pending no more, and nothing listed: refused */
+			answer_dcd_host(ep, 3, &seed, 1, took_b, 1);
+			break;
+		default:
+			answer_dcd_host(ep, 0, NULL, 0, took_b, 2);
+			break;
+		}
+		rc = fmd_dcd_retry_stale(ctx);
+		CHECK(rc == (c == 3 ? -1 : 1), "%s: the host is not read on the tick: %d",
+		      what[c], rc);
+		t = dc_task_now(ctx, tid, &monitor);
+		acc = dc_task_oem(t, "AcceptedExtents");
+		switch (c) {
+		case 0:
+			CHECK(!strcmp(dc_task_state(t), "Completed") && monitor == 200 &&
+			      !strcmp(json_string_value(json_object_get(t, "TaskStatus")), "OK") &&
+			      json_array_size(acc) == 1 &&
+			      json_integer_value(json_object_get(json_array_get(acc, 0),
+						 "ExtentOffsetBytes")) == (1LL << 30) + (1LL << 28) &&
+			      json_array_size(json_object_get(json_object_get(t, "Links"),
+							      "CreatedResources")) == 1,
+			      "accepted: %s, monitor %d, %zu accepted", dc_task_state(t),
+			      monitor, json_array_size(acc));
+			break;
+		case 1:
+			CHECK(!strcmp(dc_task_state(t), "Completed") && monitor == 200 &&
+			      !strcmp(json_string_value(json_object_get(t, "TaskStatus")),
+				      "Warning") && json_array_size(acc) == 1,
+			      "accepted in part: %s, monitor %d", dc_task_state(t), monitor);
+			break;
+		case 2:
+			CHECK(!strcmp(dc_task_state(t), "Exception") && monitor == 409 &&
+			      json_array_size(acc) == 0,
+			      "refused: %s, monitor %d", dc_task_state(t), monitor);
+			break;
+		default:
+			/* a read that fails says nothing: still Running, read again */
+			CHECK(!strcmp(dc_task_state(t), "Running") && monitor == 202 &&
+			      fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_STALE,
+			      "a read that fails: %s, monitor %d", dc_task_state(t), monitor);
+			json_decref(t);
+			/* and the device goes: what the host did is not known */
+			fmd_topology_remove(&ctx->topology, dev);
+			fmd_tasks_poll(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(!strcmp(dc_task_state(t), "Exception") && monitor == 500,
+			      "the device is gone: %s, monitor %d", dc_task_state(t), monitor);
+			break;
+		}
+		json_decref(t);
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * No tag list, and the host's list does not change: Running, however
+	 * many ticks (never a refusal made up). An Add Capacity Response
+	 * record with no capacity, "the capacity accepted by the host" (Table
+	 * 8-229), is the host refusing it.
+	 */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1a8, 0x00);
+		uint8_t page[0x20 + 0x80] = { 0 };
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL, *t;
+		int tid, monitor;
+
+		if (dev) {
+			device_id(id, sizeof(id), 0x1a8);
+			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
+			dc_task_add(ctx, id, TAG_B, 256, &task);
+			tid = dc_task_id(task);
+			json_decref(task);
+			for (int k = 0; k < 3; k++) {
+				answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
+				fmd_dcd_retry_stale(ctx);
+			}
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(!strcmp(dc_task_state(t), "Running") && monitor == 202,
+			      "no tag list, nothing listed: %s", dc_task_state(t));
+			json_decref(t);
+
+			put16(page + 0x14, 1);
+			put_dc_record(page + 0x20, 0x91, 0x04, 0, 0, 0, 0);
+			answer(ep, 0x0100, page, sizeof(page));
+			answer_rc(ep, 0x0101, CXLMI_RET_SUCCESS);
+			answer_no_events(ep, false);
+			answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
+			fmd_dcd_poll_events(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(!strcmp(dc_task_state(t), "Exception") && monitor == 409,
+			      "a record of no capacity: %s, monitor %d", dc_task_state(t),
+			      monitor);
+			json_decref(t);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * One task at a time follows a host and a tag: a second add of it is
+	 * refused with nothing sent, one of another tag is sent
+	 */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1a9, 0x00);
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL;
+		unsigned int sent;
+		int rc;
+
+		if (dev) {
+			/* no tag list: only the task says an add of the tag is open */
+			device_id(id, sizeof(id), 0x1a9);
+			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
+			dc_task_add(ctx, id, TAG_B, 256, &task);
+			json_decref(task);
+			sent = commands_sent(ep);
+			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+			CHECK(rc == -EALREADY && !task && commands_sent(ep) == sent,
+			      "a second add of the tag: %d, %u sent", rc,
+			      commands_sent(ep) - sent);
+			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 3, &seed, 1, NULL, -1);
+			rc = dc_task_add(ctx, id, TAG_C, 256, &task);
+			CHECK(rc == FMD_OP_STARTED, "an add of another tag: %d", rc);
+			json_decref(task);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * The baseline is the host as the device has it: a host whose last
+	 * read failed is read before the command, and if that fails, nothing
+	 * is sent
+	 */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1aa, 0x00);
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL;
+		unsigned int sent;
+		int rc;
+
+		if (dev) {
+			device_id(id, sizeof(id), 0x1aa);
+			answer_dcd_host(ep, 0, NULL, 0, NULL, -1);
+			fmd_dcd_refresh(ctx, dev, 0);
+			CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_STALE, "host 0 not stale");
+			answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+			sent = commands_sent(ep);
+			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+			CHECK(rc == -EAGAIN && !task && last_opcode(ep) == 0x5608 &&
+			      commands_sent(ep) - sent == 2,
+			      "a baseline that cannot be read: %d, last %04xh", rc,
+			      last_opcode(ep));
+			answer_dcd_host(ep, 5, with_b, 2, NULL, -1);
+			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 5, with_b, 2, NULL, -1);
+			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+			CHECK(rc == FMD_OP_STARTED &&
+			      json_array_size(dc_task_oem(task, "BaselineExtents")) == 2 &&
+			      json_integer_value(dc_task_oem(task, "BaselineGeneration")) == 5,
+			      "the baseline read first: %d, %zu extents", rc,
+			      json_array_size(dc_task_oem(task, "BaselineExtents")));
+			json_decref(task);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/* a Tag-based release the host carries out in two parts */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1ab, 0x00);
+		struct dc_ext two[2] = {
+			{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+			{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag, 0 },
+		};
+		static const char *rel =
+			"{\"Policy\": \"TagBased\", \"ForcedRemoval\": false, "
+			"\"SanitizeOnRelease\": false, \"Length\": 512, "
+			"\"Tag\": \"6f1a2c3e-0000-4000-8000-000000000001\"}";
+		char id[FMD_MAX_ID_LEN];
+		const char *msg = NULL;
+		json_t *task = NULL, *t;
+		int rc, tid, monitor;
+
+		if (dev) {
+			device_id(id, sizeof(id), 0x1ab);
+			answer_dcd_host(ep, 2, two, 2, NULL, -1);
+			fmd_dcd_refresh(ctx, dev, 0);
+			answer_rc(ep, 0x5605, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 2, two, 2, NULL, -1);
+			rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel),
+							   &msg, &task);
+			tid = dc_task_id(task);
+			json_decref(task);
+			answer_dcd_host(ep, 3, &two[1], 1, NULL, -1);
+			fmd_dcd_retry_stale(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(t), "Running") &&
+			      json_array_size(dc_task_oem(t, "ReleasedExtents")) == 1 &&
+			      strstr(json_string_value(json_object_get(json_array_get(
+					json_object_get(t, "Messages"), 0), "Message")),
+				     "256 MiB of the 512 MiB"),
+			      "half released: %d, %s", rc, dc_task_state(t));
+			json_decref(t);
+			answer_dcd_host(ep, 4, NULL, 0, NULL, -1);
+			fmd_dcd_retry_stale(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(!strcmp(dc_task_state(t), "Completed") && monitor == 200 &&
+			      json_array_size(dc_task_oem(t, "ReleasedExtents")) == 2,
+			      "all released: %s, monitor %d", dc_task_state(t), monitor);
+			json_decref(t);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	report("Dynamic Capacity tasks follow the host", before);
+}
+
+/*
  * The review's reproduction (F06): Initiate Dynamic Capacity Add (5604h)
  * "shall complete when the device initiates the Add Capacity procedure"
  * (CXL r4.0 Section 7.6.7.6.5), and Release (5605h) "when the device
@@ -7009,7 +7372,7 @@ out:
  */
 static int dc_accepted_case(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 			    const char *id, int kind,
-			    unsigned int *cmds, const char **msg)
+			    unsigned int *cmds, const char **msg, json_t **task)
 {
 	static const char *add =
 		"{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": 256, "
@@ -7025,15 +7388,19 @@ static int dc_accepted_case(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	int rc;
 
 	*msg = NULL;
+	*task = NULL;
 	switch (kind) {
 	case 0:
-		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", add, strlen(add), msg);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", add, strlen(add), msg,
+					       task);
 		break;
 	case 1:
-		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel), msg);
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel), msg,
+						   task);
 		break;
 	case 2:
-		rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000", msg);
+		rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000", msg,
+							 task);
 		break;
 	case 3:
 		rc = fmd_redfish_patch_dc_memory_region(ctx, id, id, "0", "0", patch,
@@ -7080,7 +7447,7 @@ static void test_dc_accepted_stale(void)
 		char id[FMD_MAX_ID_LEN];
 		const char *msg;
 		unsigned int cmds;
-		json_t *j;
+		json_t *j, *task;
 		int rc;
 
 		if (!dev) {
@@ -7125,11 +7492,26 @@ static void test_dc_accepted_stale(void)
 		answer_rc(ep, 0x5608, cases[i].read == 4 ? CXLMI_RET_INTERNAL :
 			  CXLMI_RET_UNSUPPORTED);
 
-		rc = dc_accepted_case(ctx, ep, id, cases[i].kind, &cmds, &msg);
-		CHECK(rc == FMD_DC_ACCEPTED_STALE && msg && strstr(msg, "accepted") &&
-		      strstr(msg, "Do not send") && cmds == cases[i].cmds,
-		      "%s: %d \"%s\", %u commands", cases[i].what, rc, msg ? msg : "",
-		      cmds);
+		rc = dc_accepted_case(ctx, ep, id, cases[i].kind, &cmds, &msg, &task);
+		if (cases[i].kind <= 2) {
+			/* a Task, Running, whose message says the read failed */
+			const char *m = json_string_value(json_object_get(json_array_get(
+				json_object_get(task, "Messages"), 0), "Message"));
+
+			CHECK(rc == FMD_OP_STARTED && task &&
+			      !strcmp(json_string_value(json_object_get(task, "TaskState")),
+				      "Running") &&
+			      m && strstr(m, "accepted") && strstr(m, "could not be read") &&
+			      cmds == cases[i].cmds,
+			      "%s: %d \"%s\", %u commands", cases[i].what, rc, m ? m : "",
+			      cmds);
+		} else {
+			CHECK(rc == FMD_DC_ACCEPTED_STALE && msg && strstr(msg, "accepted") &&
+			      strstr(msg, "Do not send") && cmds == cases[i].cmds,
+			      "%s: %d \"%s\", %u commands", cases[i].what, rc,
+			      msg ? msg : "", cmds);
+		}
+		json_decref(task);
 		if (cases[i].read == 4) {
 			CHECK(fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags),
 			      "%s: the tag list is not marked unknown", cases[i].what);
@@ -7166,23 +7548,24 @@ static void test_dc_accepted_stale(void)
 		char id[FMD_MAX_ID_LEN];
 		const char *msg;
 		unsigned int cmds;
+		json_t *task;
 		int rc;
 
 		if (dev) {
 			device_id(id, sizeof(id), 0xf6);
 			answer_rc(ep, 0x5604, CXLMI_RET_INTERNAL);
-			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg);
+			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg, &task);
 			CHECK(rc == -EIO && cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK,
 			      "5604h Internal Error: %d, %u commands, host 0 %d", rc, cmds,
 			      fmd_dc_host_sync(dev, 0));
 			answer_rc(ep, 0x5604, CXLMI_RET_RETRY);
-			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg);
+			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg, &task);
 			CHECK(rc == -EAGAIN && msg && strstr(msg, "try again"),
 			      "5604h Retry Required: %d", rc);
 
 			/* not known: the outcome, and the host is read again */
 			answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
-			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg);
+			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg, &task);
 			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
 			      cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY,
 			      "5604h with a response that cannot be read: %d, %u commands, "
@@ -7195,7 +7578,7 @@ static void test_dc_accepted_stale(void)
 			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
 			fmd_dcd_retry_stale(ctx);
 			answer(ep, 0x5605, (uint8_t[4]){ 0 }, 4);
-			rc = dc_accepted_case(ctx, ep, id, 1, &cmds, &msg);
+			rc = dc_accepted_case(ctx, ep, id, 1, &cmds, &msg, &task);
 			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
 			      cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY,
 			      "5605h with a response that cannot be read: %d, %u commands, "
@@ -7205,7 +7588,7 @@ static void test_dc_accepted_stale(void)
 			fmd_memdev_dcd(dev)->tags.unsupported = false;
 			fmd_memdev_dcd(dev)->tags.known = true;
 			answer(ep, 0x5606, (uint8_t[4]){ 0 }, 4);
-			rc = dc_accepted_case(ctx, ep, id, 4, &cmds, &msg);
+			rc = dc_accepted_case(ctx, ep, id, 4, &cmds, &msg, &task);
 			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
 			      cmds == 1 && fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags),
 			      "5606h with a response that cannot be read: %d, %u commands, "
@@ -10172,6 +10555,7 @@ static void test_mhd_route_head_mailbox(void)
 	uint8_t info[0x54] = { 0 }, pl[64];
 	struct fmd_mhd *mhd;
 	const char *msg = NULL;
+	json_t *task = NULL;
 	int before = failures, rc;
 	unsigned int sent;
 	uint16_t op = 0;
@@ -10203,10 +10587,14 @@ static void test_mhd_route_head_mailbox(void)
 	      "5401h: %d, %04xh, level %d, LD Pool CCI %d", rc, last_opcode(ep),
 	      ti.level, ti.mhd);
 
+	/* the host is read for the task's baseline, then 5604h is sent */
+	answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+	answer_dc_extents(ep, 1, 0, 0, NULL, 0);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
 	answer_rc(ep, 0x5604, CXLMI_RET_INPUT);
 	snprintf(body, sizeof(body), "{\"Policy\": \"Free\", \"RegionNumber\": 0, "
 		 "\"Length\": 256, \"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}");
-	rc = fmd_redfish_action_dc_add(ctx, id, id, "2", body, strlen(body), &msg);
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "2", body, strlen(body), &msg, &task);
 	cxlmi_mock_get_last_tunnel(ep, &ti);
 	last_payload(ep, &op, pl, sizeof(pl));
 	CHECK(rc == -EINVAL && op == 0x5604 && ti.level == 1 && ti.mhd &&
@@ -10218,7 +10606,7 @@ static void test_mhd_route_head_mailbox(void)
 	mhd->routes[0].role = FMD_CCI_HEAD_FMLD;
 	sent = commands_sent(ep);
 	msg = NULL;
-	rc = fmd_redfish_action_dc_add(ctx, id, id, "2", body, strlen(body), &msg);
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "2", body, strlen(body), &msg, &task);
 	CHECK(rc == -EOPNOTSUPP && msg && commands_sent(ep) == sent,
 	      "DC add with no LD Pool CCI: %d, %u sent", rc, commands_sent(ep) - sent);
 out:
@@ -11308,6 +11696,7 @@ int main(void)
 	test_dc_retry_on_tick();
 	test_dc_region_pages_staged();
 	test_dc_accepted_stale();
+	test_dc_tasks_hw();
 	test_rescan_reads_new_logs();
 	test_notification_route();
 	test_chunk_delete_partition_refused();

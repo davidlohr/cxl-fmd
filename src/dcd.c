@@ -1389,6 +1389,11 @@ static void dc_cmd_failed(struct fmd_ctx *ctx, struct fmd_component *dev,
 static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 			    const char *what);
 static void dc_hosts_dirty(struct fmd_component *dev, int host_id);
+static void dc_tasks_judge(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id);
+static bool dc_task_host_open(struct fmd_ctx *ctx, struct fmd_component *dev,
+			      int host_id);
+static void dc_tasks_add_response(struct fmd_ctx *ctx, struct fmd_component *dev,
+				  int host_id, const uint8_t *d);
 
 /* Host IDs a device exposes: SLD 0, MLD and MHD each LD */
 static int dc_hosts(struct fmd_component *dev, int *hosts, int max)
@@ -1982,6 +1987,9 @@ static int dcd_refresh_hosts_locked(struct fmd_ctx *ctx, struct fmd_component *d
 		if (r && !rc)
 			rc = r;
 	}
+	/* what the tasks following these hosts wait for */
+	for (int i = 0; i < n; i++)
+		dc_tasks_judge(ctx, dev, hosts[i]);
 	return rc;
 }
 
@@ -2291,6 +2299,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			}
 			hosts[host / 8] |= 1 << (host % 8);
 			named = true;
+			if (type == DC_EVENT_ADD_RESPONSE)
+				dc_tasks_add_response(ctx, dev, host, rec->data);
 			/* before the clear: the record will not name it again */
 			dc_host_dirty(dev, host);
 			dc_event_counts(dev, host, rec->data);
@@ -2389,7 +2399,9 @@ int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
  * on every --event-poll tick, one attempt each; with --event-poll 0 there
  * is no retry, and a host stays stale until something else reads it. The
  * devices whose DC event log is the host's are read too: their staleness
- * comes from cxl-fmd's own reads. All of it is cxl-fmd's choice; the
+ * comes from cxl-fmd's own reads. A host a Dynamic Capacity task follows
+ * is read on every tick too, current or not, so that its task sees what
+ * the host does when no record says so. All of it is cxl-fmd's choice; the
  * specification has no retry policy for an FM. A host never read (NEVER)
  * is not retried.
  */
@@ -2430,7 +2442,8 @@ static bool dc_retry_any(struct fmd_ctx *ctx, struct fmd_component **devs, int n
 
 		any = fmd_dc_tags_failed(&fmd_memdev_dcd(devs[i])->tags);
 		for (int h = 0; h < nall && !any; h++)
-			any = fmd_dc_sync_behind(fmd_dc_host_sync(devs[i], all[h]));
+			any = fmd_dc_sync_behind(fmd_dc_host_sync(devs[i], all[h])) ||
+			      dc_task_host_open(ctx, devs[i], all[h]);
 	}
 	pthread_mutex_unlock(&ctx->dcd_lock);
 	return any;
@@ -2466,7 +2479,8 @@ int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
 		pthread_mutex_lock(&ctx->dcd_lock);
 		nall = dc_hosts(dev, all, FMD_DC_MAX_HOST_ID + 1);
 		for (int h = 0; h < nall; h++) {
-			if (fmd_dc_sync_behind(fmd_dc_host_sync(dev, all[h])))
+			if (fmd_dc_sync_behind(fmd_dc_host_sync(dev, all[h])) ||
+			    dc_task_host_open(ctx, dev, all[h]))
 				list[m++] = all[h];
 		}
 		if (m) {
@@ -2881,4 +2895,483 @@ void fmd_dcd_retry_pending(struct fmd_ctx *ctx)
 			fmd_device_events_enable(ctx, comp);
 	}
 	free(ids);
+}
+
+/*
+ * ============================================================================
+ * Tasks
+ * ============================================================================
+ *
+ * Initiate Dynamic Capacity Add "shall complete when the device initiates
+ * the Add Capacity procedure" (CXL r4.0 Section 7.6.7.6.5), and Initiate
+ * Dynamic Capacity Release "when the device initiates the Remove Capacity
+ * procedure" (Section 7.6.7.6.6): the host answers after, in part, or not
+ * at all. "This allows the host to control exactly how much of the added
+ * capacity it wishes to utilize, which may be less than the amount of
+ * capacity sent in the add capacity event, or even 0", and of a release
+ * "The host may call Release Dynamic Capacity multiple times, returning
+ * different portions of the total capacity over time" (Section 9.13.3).
+ *
+ * So a request the device accepted is followed by a task, which ends only
+ * on what cxl-fmd sees of the host (cxl-fmd's rules, as none is given):
+ *
+ * - An add is Completed once capacity of it is in the host's extent list
+ *   (5603h: the parts of the host's extents with the add's Tag, in its
+ *   region, that the baseline did not have) and the host is not in the
+ *   tag's Pending Reference Bitmap, "an LD for which the tagged capacity
+ *   has been added with no host response yet" (Table 7-78). Less than was
+ *   asked is reported as such. It is an Exception when the host is seen to
+ *   accept none: its LD was seen in the Pending Reference Bitmap after the
+ *   command and is no longer, with no capacity of the add listed; or an
+ *   Add Capacity Response record, of which "the Dynamic Capacity Extent
+ *   field in this structure specifies the capacity accepted by the host"
+ *   (Table 8-229), names the host with no capacity. Otherwise it runs.
+ * - A release is Completed once what it named is gone from the host's
+ *   extent list: the extents of a Prescriptive list, or Length bytes of
+ *   the Tag for a Tag-based one. What has gone so far is reported while it
+ *   runs. Nothing says a host refuses a release, so none is an Exception
+ *   for that.
+ * - A task whose device is gone is an Exception whose outcome is unknown.
+ *   No time limit ends one, and no read that fails moves one; nothing here
+ *   sends a command or frees capacity.
+ *
+ * That 5603h lists only what the host accepted, as Section 9.13.3 says of
+ * the host's own Extent List, is cxl-fmd's reading (see dc_tags_check()).
+ * One task at a time follows a host and a tag (fmd_dc_task_prepare()):
+ * what is seen of a host cannot be told apart between two of them.
+ */
+
+static bool range_matches(const struct fmd_dc_range *r, const uint8_t *tag, int region)
+{
+	return (!tag || !memcmp(r->tag, tag, FMD_DC_TAG_LEN)) &&
+	       (region < 0 || r->region_id == region);
+}
+
+/*
+ * The parts of the ranges of @a that no range of @b covers, of those of
+ * each with @tag (NULL: any) in @region (-1: any): into *@out, with their
+ * sum in *@bytes. Returns how many, or -ENOMEM.
+ */
+static int ranges_minus(const struct fmd_dc_range *a, int na,
+			const struct fmd_dc_range *b, int nb,
+			const uint8_t *tag, int region,
+			struct fmd_dc_range **out, uint64_t *bytes)
+{
+	struct fmd_dc_range *v = NULL;
+	int n = 0, cap = 0;
+
+	*out = NULL;
+	*bytes = 0;
+	for (int i = 0; i < na; i++) {
+		uint64_t s = a[i].dpa, e = a[i].dpa + a[i].len;
+
+		if (!range_matches(&a[i], tag, region))
+			continue;
+		while (s < e) {
+			uint64_t next = e;
+			bool covered = false;
+
+			for (int j = 0; j < nb && !covered; j++) {
+				uint64_t bs = b[j].dpa, be = b[j].dpa + b[j].len;
+
+				if (!range_matches(&b[j], tag, region))
+					continue;
+				if (bs <= s && s < be) {
+					covered = true;
+					s = be;
+				} else if (bs > s && bs < next) {
+					next = bs;
+				}
+			}
+			if (covered)
+				continue;
+			if (n == cap) {
+				struct fmd_dc_range *tmp;
+
+				cap = cap ? 2 * cap : 4;
+				tmp = realloc(v, cap * sizeof(*v));
+				if (!tmp) {
+					free(v);
+					return -ENOMEM;
+				}
+				v = tmp;
+			}
+			v[n] = a[i];
+			v[n].dpa = s;
+			v[n].len = next - s;
+			*bytes += next - s;
+			n++;
+			s = next;
+		}
+	}
+	*out = v;
+	return n;
+}
+
+/* The host's extents, as copies: -ENOMEM, or how many */
+static int host_ranges(struct fmd_component *dev, int host_id,
+		       struct fmd_dc_range **out)
+{
+	struct fmd_component *child;
+	struct fmd_dc_range *v;
+	int n = 0;
+
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT)
+		n += fmd_to_dc_extent(child)->host_id == host_id;
+	v = calloc(n ? n : 1, sizeof(*v));
+	if (!v)
+		return -ENOMEM;
+	n = 0;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *ext = fmd_to_dc_extent(child);
+
+		if (ext->host_id != host_id)
+			continue;
+		v[n].dpa = ext->start_dpa;
+		v[n].len = ext->len;
+		memcpy(v[n].tag, ext->tag, FMD_DC_TAG_LEN);
+		v[n].region_id = ext->region_id;
+		n++;
+	}
+	*out = v;
+	return n;
+}
+
+/* "512 MiB", or bytes when it is not a whole number of MiB */
+static void size_str(uint64_t bytes, char *buf, size_t len)
+{
+	if (bytes % FMD_MIB)
+		snprintf(buf, len, "%" PRIu64 " bytes", bytes);
+	else
+		snprintf(buf, len, "%" PRIu64 " MiB", (uint64_t)(bytes / FMD_MIB));
+}
+
+/* Whether @dc, a task of @kind, names capacity with @tag */
+static bool dc_task_has_tag(const struct fmd_dc_task *dc, enum fmd_task_kind kind,
+			    const uint8_t *tag)
+{
+	if (kind == FMD_TASK_DC_RELEASE && dc->policy == FMD_DC_REL_POLICY_PRESCRIPTIVE) {
+		for (int i = 0; i < dc->n_req; i++) {
+			if (!memcmp(dc->req[i].tag, tag, FMD_DC_TAG_LEN))
+				return true;
+		}
+		return false;
+	}
+	return !memcmp(dc->tag, tag, FMD_DC_TAG_LEN);
+}
+
+/* Whether the tag list says @host has an add of @tag it has not answered */
+static bool dc_pending_known(struct fmd_component *dev, const uint8_t *tag)
+{
+	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+	/* Validity Bitmap Bit[1]: the Pending Reference Bitmap is valid (Table 7-77) */
+	return !dc_tag_is_zero(tag) && dcd->tags.known && (dcd->tags.validity & 0x02);
+}
+
+static bool dc_pending(struct fmd_component *dev, int host_id, const uint8_t *tag)
+{
+	const struct fmd_dc_tag *t = fmd_dc_tag_find(dev, tag);
+
+	return dc_pending_known(dev, tag) && t && fmd_dc_bm_test(t->pend, host_id);
+}
+
+static void dc_task_done(struct fmd_dc_task *dc, struct fmd_dc_range *v, int n,
+			 uint64_t bytes)
+{
+	free(dc->done);
+	dc->done = v;
+	dc->n_done = n;
+	dc->done_bytes = bytes;
+}
+
+static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
+			 struct fmd_task *task)
+{
+	struct fmd_dc_task *dc = task->dc;
+	struct fmd_dc_range *cur, *added;
+	char got[32], asked[32], msg[sizeof(task->message)];
+	uint64_t bytes;
+	int n, m;
+
+	n = host_ranges(dev, dc->host_id, &cur);
+	if (n < 0)
+		return;
+	m = ranges_minus(cur, n, dc->base, dc->n_base, dc->tag, dc->region_id,
+			 &added, &bytes);
+	free(cur);
+	if (m < 0)
+		return;
+	dc_task_done(dc, added, m, bytes);
+
+	if (dc_pending(dev, dc->host_id, dc->tag)) {
+		dc->pend_seen = true;
+		snprintf(task->message, sizeof(task->message), "The host has not "
+			 "answered the add: its LD is in the Pending Reference "
+			 "Bitmap of the tag");
+		return;
+	}
+
+	size_str(bytes, got, sizeof(got));
+	size_str(dc->length, asked, sizeof(asked));
+	if (bytes) {
+		bool sized = dc->policy == FMD_DC_POLICY_FREE ||
+			     dc->policy == FMD_DC_POLICY_CONTIGUOUS;
+
+		dc->partial = sized && bytes < dc->length;
+		if (dc->partial)
+			snprintf(msg, sizeof(msg), "The host accepted %s of the %s "
+				 "added, in %d extent(s)", got, asked, m);
+		else
+			snprintf(msg, sizeof(msg), "The host accepted the capacity "
+				 "added: %s, in %d extent(s)", got, m);
+		fmd_dc_task_end(ctx, task, true, FMD_TASK_OBSERVED, msg);
+		return;
+	}
+
+	if (dc->none_record || (dc_pending_known(dev, dc->tag) && dc->pend_seen)) {
+		snprintf(msg, sizeof(msg), "The host accepted none of the capacity "
+			 "added: %s", dc->none_record ?
+			 "an Add Capacity Response record named it with no capacity" :
+			 "its LD left the Pending Reference Bitmap of the tag, and "
+			 "its extent list has none of it");
+		fmd_dc_task_end(ctx, task, false, FMD_TASK_DC_REFUSED, msg);
+		return;
+	}
+	snprintf(task->message, sizeof(task->message), "Waiting for the host: "
+		 "none of the capacity added is in its extent list yet");
+}
+
+static void dc_judge_release(struct fmd_ctx *ctx, struct fmd_component *dev,
+			     struct fmd_task *task)
+{
+	struct fmd_dc_task *dc = task->dc;
+	struct fmd_dc_range *cur, *gone;
+	char got[32], asked[32], msg[sizeof(task->message)];
+	uint64_t bytes, total = dc->length;
+	bool prescriptive = dc->policy == FMD_DC_REL_POLICY_PRESCRIPTIVE;
+	int n, m;
+
+	n = host_ranges(dev, dc->host_id, &cur);
+	if (n < 0)
+		return;
+	if (prescriptive) {
+		total = 0;
+		for (int i = 0; i < dc->n_req; i++)
+			total += dc->req[i].len;
+		m = ranges_minus(dc->req, dc->n_req, cur, n, NULL, -1, &gone, &bytes);
+	} else {
+		m = ranges_minus(dc->base, dc->n_base, cur, n, dc->tag, -1,
+				 &gone, &bytes);
+	}
+	free(cur);
+	if (m < 0)
+		return;
+	dc_task_done(dc, gone, m, bytes);
+
+	size_str(bytes, got, sizeof(got));
+	size_str(total, asked, sizeof(asked));
+	if (bytes >= total) {
+		snprintf(msg, sizeof(msg), "The host released the capacity: %s, "
+			 "in %d extent(s)", got, m);
+		fmd_dc_task_end(ctx, task, true, FMD_TASK_OBSERVED, msg);
+		return;
+	}
+	if (bytes)
+		snprintf(task->message, sizeof(task->message), "The host has "
+			 "released %s of the %s so far", got, asked);
+	else
+		snprintf(task->message, sizeof(task->message), "Waiting for the "
+			 "host: none of the capacity is gone from its extent list yet");
+}
+
+static void dc_task_judge(struct fmd_ctx *ctx, struct fmd_component *dev,
+			  struct fmd_task *task)
+{
+	if (task->kind == FMD_TASK_DC_ADD)
+		dc_judge_add(ctx, dev, task);
+	else
+		dc_judge_release(ctx, dev, task);
+}
+
+static bool dc_task_of(const struct fmd_task *task, const struct fmd_component *dev,
+		       int host_id)
+{
+	return task->state == FMD_TASK_RUNNING && fmd_task_is_dc(task) &&
+	       task->dc->host_id == host_id && !strcmp(task->dc->dev_id, dev->id);
+}
+
+/*
+ * @host_id of @dev has just been read, its extents and the tag list after
+ * them: the tasks following it are judged on what was read. One whose host
+ * is not known to be as read (a read that failed) is not.
+ */
+static void dc_tasks_judge(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
+{
+	struct fmd_task *task;
+
+	if (dev_is_hw(dev) && fmd_dc_host_sync(dev, host_id) != FMD_DC_SYNC_OK)
+		return;
+	for (task = ctx->tasks; task; task = task->next) {
+		if (dc_task_of(task, dev, host_id))
+			dc_task_judge(ctx, dev, task);
+	}
+}
+
+/* Whether a task is following @host_id of @dev: it is read on every tick */
+static bool dc_task_host_open(struct fmd_ctx *ctx, struct fmd_component *dev,
+			      int host_id)
+{
+	struct fmd_task *task;
+
+	for (task = ctx->tasks; task; task = task->next) {
+		if (dc_task_of(task, dev, host_id))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * An Add Capacity Response record of @host_id; @d is the record from 30h,
+ * its Dynamic Capacity Extent at 38h (Table 8-230: Starting DPA, Length,
+ * Tag at 10h). One with a Length of 0 is the host accepting none (cxl-fmd's
+ * reading: what a device sends when the host accepts nothing is not said).
+ * It is taken to be the answer to the add of the record's Tag, or when the
+ * Tag is all zeros, to the add if one alone is followed on that host.
+ * One with capacity changes nothing: the extent list says what the host has.
+ */
+static void dc_tasks_add_response(struct fmd_ctx *ctx, struct fmd_component *dev,
+				  int host_id, const uint8_t *d)
+{
+	const uint8_t *ext = d + 0x08, *tag = ext + 0x10;
+	struct fmd_task *task;
+	uint64_t len = 0;
+	int adds = 0;
+
+	for (int i = 7; i >= 0; i--)
+		len = len << 8 | ext[8 + i];
+	if (len)
+		return;
+	for (task = ctx->tasks; task; task = task->next)
+		adds += dc_task_of(task, dev, host_id) && task->kind == FMD_TASK_DC_ADD;
+	for (task = ctx->tasks; task; task = task->next) {
+		if (!dc_task_of(task, dev, host_id) || task->kind != FMD_TASK_DC_ADD)
+			continue;
+		if (dc_tag_is_zero(tag) ? adds == 1 :
+		    !memcmp(tag, task->dc->tag, FMD_DC_TAG_LEN))
+			task->dc->none_record = true;
+	}
+}
+
+int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
+			struct fmd_task *task, const char **msg)
+{
+	struct fmd_dc_task *dc = task->dc;
+	struct fmd_task *t;
+	uint32_t *gen;
+	uint8_t *sync;
+	int *err, n;
+
+	snprintf(dc->dev_id, sizeof(dc->dev_id), "%s", dev->id);
+
+	/*
+	 * One task at a time for a host and a tag (cxl-fmd's choice): what
+	 * the host's list and the tag's bitmaps show cannot be told apart
+	 * between two. An all-zero Tag is a tag here too.
+	 */
+	for (t = ctx->tasks; t; t = t->next) {
+		bool meet = false;
+
+		if (!dc_task_of(t, dev, dc->host_id))
+			continue;
+		if (task->kind == FMD_TASK_DC_RELEASE &&
+		    dc->policy == FMD_DC_REL_POLICY_PRESCRIPTIVE) {
+			for (int i = 0; i < dc->n_req && !meet; i++)
+				meet = dc_task_has_tag(t->dc, t->kind, dc->req[i].tag);
+		} else {
+			meet = dc_task_has_tag(t->dc, t->kind, dc->tag);
+		}
+		if (meet) {
+			*msg = "Another Dynamic Capacity task is following this host "
+			       "and Tag: nothing was sent. Resubmit once it is over";
+			return -EALREADY;
+		}
+	}
+
+	/* the baseline is the host as the device has it now */
+	if (dev_is_hw(dev) &&
+	    (fmd_dc_host_sync(dev, dc->host_id) != FMD_DC_SYNC_OK ||
+	     fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags))) {
+		if (dcd_refresh_locked(ctx, dev, dc->host_id) == -EOPNOTSUPP) {
+			*msg = "No route to the LD Pool CCI of the Multi-Headed device "
+			       "is known: nothing was sent";
+			return -EOPNOTSUPP;
+		}
+		if (fmd_dc_host_sync(dev, dc->host_id) != FMD_DC_SYNC_OK) {
+			*msg = "The host's extents could not be read before the request: "
+			       "nothing was sent. Resubmit the request later";
+			return -EAGAIN;
+		}
+	}
+
+	/* an add of the tag the host has not answered: which is which? */
+	if (task->kind == FMD_TASK_DC_ADD && dc_pending(dev, dc->host_id, dc->tag)) {
+		*msg = "The host has an add of this Tag it has not answered (its LD is in "
+		       "the tag's PendingLDs): nothing was sent. Resubmit once it has";
+		return -EALREADY;
+	}
+
+	n = host_ranges(dev, dc->host_id, &dc->base);
+	if (n < 0) {
+		*msg = "No memory for the task: nothing was sent";
+		return -ENOMEM;
+	}
+	dc->n_base = n;
+	dc_host_sync_ptrs(dev, dc->host_id, &gen, &sync, &err);
+	dc->base_gen = gen ? *gen : 0;
+	return 0;
+}
+
+void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
+		       struct fmd_task *task, bool stale)
+{
+	struct fmd_dc_task *dc = task->dc;
+
+	fmd_dc_task_list(ctx, task);
+	dc->stale_after = stale;
+	if (stale) {
+		snprintf(task->message, sizeof(task->message), "The device accepted "
+			 "the request, but the host could not be read back after it: "
+			 "it is read again on the next --event-poll tick");
+		return;
+	}
+	/* what the read after the command saw; the task is judged from the next */
+	if (task->kind == FMD_TASK_DC_ADD && dc_pending(dev, dc->host_id, dc->tag))
+		dc->pend_seen = true;
+	snprintf(task->message, sizeof(task->message), "The device accepted the "
+		 "request: waiting for the host");
+}
+
+void fmd_dc_tasks_poll(struct fmd_ctx *ctx)
+{
+	struct fmd_task *task;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	for (task = ctx->tasks; task; task = task->next) {
+		struct fmd_component *dev;
+
+		if (task->state != FMD_TASK_RUNNING || !fmd_task_is_dc(task))
+			continue;
+		dev = fmd_topology_find(&ctx->topology, task->dc->dev_id);
+		if (!dev || !fmd_memdev_dcd(dev)) {
+			fmd_dc_task_end(ctx, task, false, FMD_TASK_UNKNOWN,
+					"The device is gone: what its host did is not known");
+			continue;
+		}
+		/* on hardware the host is read on the --event-poll tick */
+		if (dev_is_hw(dev))
+			continue;
+		dc_task_judge(ctx, dev, task);
+	}
+	pthread_mutex_unlock(&ctx->dcd_lock);
 }

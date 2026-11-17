@@ -231,6 +231,106 @@
           <Annotation Term="OData.AutoExpandReferences"/>
         </NavigationProperty>
       </ComplexType>
+
+      <ComplexType Name="Task" BaseType="Resource.OemObject">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="cxl-fmd's properties of a task."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a task that follows a dynamic capacity add or release."/>
+        <Property Name="DynamicCapacity" Type="Cxl.v1_0_0.DynamicCapacityTask" Nullable="false">
+          <Annotation Term="OData.Description" String="The dynamic capacity request the task follows, and what has been seen of the host."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the request of Initiate Dynamic Capacity Add (5604h) or Initiate Dynamic Capacity Release (5605h) the task follows, as recorded before it was sent, the host's extents before it, and the extents seen added to or released from the host since."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="DynamicCapacityTask">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="A dynamic capacity add or release, and what has been seen of it."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain a dynamic capacity request as sent, and what the service has seen of the host since in Get DC Region Extent Lists (5603h)."/>
+        <Property Name="HostId" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Host ID the request was sent with."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Host ID of the request (CXL r4.0 Tables 7-72 and 7-73)."/>
+        </Property>
+        <Property Name="Policy" Type="Edm.String" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The selection or removal policy of the request."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the policy of the request, as a value of CXLDynamicCapacityPolicies."/>
+        </Property>
+        <Property Name="RegionNumber" Type="Edm.Int64">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The region of an add."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Region Number of an add.  It shall be absent for a release."/>
+        </Property>
+        <Property Name="Tag" Type="Edm.String">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The tag of the request, as a UUID."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Tag of an add or a tag-based release, the empty string for an all-zero tag.  It shall be absent for a prescriptive release."/>
+        </Property>
+        <Property Name="LengthBytes" Type="Edm.Int64">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The length the request asked for, in bytes."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Length of a free or contiguous add, or of a tag-based release.  It shall be absent otherwise."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="ForcedRemoval" Type="Edm.Boolean">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Whether a release was forced."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Forced Removal flag of a release.  It shall be absent for an add."/>
+        </Property>
+        <Property Name="SanitizeOnRelease" Type="Edm.Boolean">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Whether a release asked for the capacity to be sanitized."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Sanitize on Release flag of a release.  It shall be absent for an add."/>
+        </Property>
+        <Property Name="RequestedExtents" Type="Collection(Cxl.v1_0_0.DynamicCapacityRange)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The extents a prescriptive release named."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Extent List of a prescriptive release.  It shall be absent otherwise."/>
+        </Property>
+        <Property Name="BaselineGeneration" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The Extent List Generation Number of the host's extents before the request."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the Extent List Generation Number of the read of the host's extents that BaselineExtents is."/>
+        </Property>
+        <Property Name="BaselineExtents" Type="Collection(Cxl.v1_0_0.DynamicCapacityRange)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The host's extents before the request was sent."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the host's extents as read before the request was sent."/>
+        </Property>
+        <Property Name="AcceptedExtents" Type="Collection(Cxl.v1_0_0.DynamicCapacityRange)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The capacity of an add seen in the host's extents."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the parts of the host's extents with the tag of the add, in its region, that BaselineExtents did not have, as last read.  It shall be absent for a release."/>
+        </Property>
+        <Property Name="ReleasedExtents" Type="Collection(Cxl.v1_0_0.DynamicCapacityRange)" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The capacity of a release seen gone from the host's extents."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the parts of what the release named that the host's extents no longer have, as last read.  It shall be absent for an add."/>
+        </Property>
+      </ComplexType>
+
+      <ComplexType Name="DynamicCapacityRange">
+        <Annotation Term="OData.AdditionalProperties" Bool="false"/>
+        <Annotation Term="OData.Description" String="A range of a host's dynamic capacity."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain a range of a host's DPA space, with the tag of the extent it is of."/>
+        <Property Name="ExtentOffsetBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The DPA the range starts at, in the host's DPA space."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the DPA the range starts at."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="ExtentSizeBytes" Type="Edm.Int64" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The length of the range."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the length of the range."/>
+          <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="Tag" Type="Edm.String" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="The tag of the extent, as a UUID."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain the tag of the extent the range is of, the empty string for an all-zero tag."/>
+        </Property>
+      </ComplexType>
     </Schema>
 
   </edmx:DataServices>

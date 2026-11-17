@@ -19,9 +19,11 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
+import requests
 
 from conftest import RedfishClient, _find_free_port, _wait_for_service
 
@@ -46,6 +48,48 @@ def extent_ids(api_client, device=SLD):
     status, data = api_client.get(device + "/MemoryExtents")
     assert status == 200
     return sorted(m["@odata.id"].rsplit("/", 1)[1] for m in data["Members"])
+
+
+def task_over(client, task, timeout=10):
+    """
+    Wait for a Dynamic Capacity task to end, by its monitor: what the
+    monitor answers then, (status, body). "As long as the operation is in
+    process, the service shall return the HTTP 202 Accepted status code"
+    (DSP0266 1.25.0 Section 12.2).
+    """
+    monitor = task["TaskMonitor"]
+    deadline = time.time() + timeout
+    while True:
+        r = requests.get(client.base_url + monitor, timeout=30)
+        if r.status_code != 202:
+            return r.status_code, (r.json() if r.content else None)
+        assert time.time() < deadline, f"{task['@odata.id']} still running"
+        time.sleep(0.05)
+
+
+def dc_post(client, path, body):
+    """
+    POST a Dynamic Capacity add or release: one the device accepts is 202
+    with a Task, and is answered here as its monitor answers once the host
+    has done it (the mock host does it at once). Anything else as it came.
+    Returns (status, body, location) as client.post().
+    """
+    status, data, location = client.post(path, body)
+    if status != 202:
+        return status, data, location
+    assert location == data["TaskMonitor"]
+    status, data = task_over(client, data)
+    return status, data, None
+
+
+def dc_delete(client, path):
+    """DELETE of a MemoryExtent: as dc_post(), the final status."""
+    r = requests.delete(client.base_url + path, timeout=30)
+    if r.status_code != 202:
+        return r.status_code
+    task = r.json()
+    assert r.headers.get("Location") == task["TaskMonitor"]
+    return task_over(client, task)[0]
 
 
 DCD_DEVICE = json.loads((Path(__file__).resolve().parent.parent /
@@ -165,7 +209,7 @@ class TestDCDDiscovery:
         status, data = api_client.get(SLD)
         assert "Prescriptive" in data["CXLDevice"]["DynamicCapacity"][
             "AddCapacityPoliciesSupported"]
-        status, data, _ = api_client.post(SLD_ADD, {
+        status, data, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Prescriptive",
             "ExtentList": [{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}]})
         assert status == 400
@@ -257,9 +301,9 @@ def test_add_allowable_follows_device(dcd_daemon):
                       "ext_0_200000000A", "ext_+0_200000000", "ext_0_+200000000"):
             status, _ = api_client.get(MLD + "/MemoryExtents/" + alias)
             assert status == 404, alias
-            assert api_client.delete(MLD + "/MemoryExtents/" + alias) == 404, alias
+            assert dc_delete(api_client, MLD + "/MemoryExtents/" + alias) == 404, alias
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(rel, release_body("Prescriptive", ExtentList=[
+        status, _, _ = dc_post(api_client, rel, release_body("Prescriptive", ExtentList=[
             {"@odata.id": MLD + "/MemoryExtents/ext_00_200000000"}]))
         assert status == 400
         status, data = api_client.get(MLD + "/MemoryExtents/ext_0_200000000")
@@ -309,7 +353,7 @@ def test_add_allowable_follows_device(dcd_daemon):
 class TestDynamicCapacityAdd:
 
     def test_add_free(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
         assert status == 200
 
@@ -331,7 +375,7 @@ class TestDynamicCapacityAdd:
         assert data["AvailableTags"] == 14         # TAG_NEW is a second tag
 
     def test_add_contiguous_other_region(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Contiguous", "RegionNumber": 1, "Length": 512, "Tag": TAG_NEW})
         assert status == 200
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions/1")
@@ -343,21 +387,21 @@ class TestDynamicCapacityAdd:
         """Free policy may be satisfied from several gaps; Contiguous may not."""
         # Three 256 MiB extents at the start of region 1, then punch a hole
         for _ in range(3):
-            status, _, _ = api_client.post(SLD_ADD, {
+            status, _, _ = dc_post(api_client, SLD_ADD, {
                 "Policy": "Contiguous", "RegionNumber": 1, "Length": 256, "Tag": TAG_NEW})
             assert status == 200
-        assert api_client.delete(SLD + "/MemoryExtents/ext_0_c10000000") == 204
+        assert dc_delete(api_client, SLD + "/MemoryExtents/ext_0_c10000000") == 204
 
         # Fill the rest of the region so only the hole and a 256 MiB tail are free
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Contiguous", "RegionNumber": 1, "Length": 16384 - 1024, "Tag": TAG_NEW})
         assert status == 200
 
         # 512 MiB contiguous cannot be satisfied, but Free can span both gaps
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Contiguous", "RegionNumber": 1, "Length": 512, "Tag": TAG_NEW})
         assert status == 409
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 1, "Length": 512, "Tag": TAG_NEW})
         assert status == 200
 
@@ -373,13 +417,13 @@ class TestDynamicCapacityAdd:
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
         other = "6f1a2c3e-0000-4000-8000-0000000000bb"
         for tag in (TAG_NEW, other, TAG_NEW):
-            status, _, _ = api_client.post(add, {
+            status, _, _ = dc_post(api_client, add, {
                 "Policy": "Contiguous", "RegionNumber": 0, "Length": 256, "Tag": tag})
             assert status == 200
-        status, _, _ = api_client.post(rel, release_body("TagBased", Tag=other, Length=256))
+        status, _, _ = dc_post(api_client, rel, release_body("TagBased", Tag=other, Length=256))
         assert status == 200
         # Free across the hole and the tail: two more pieces
-        status, _, _ = api_client.post(add, {
+        status, _, _ = dc_post(api_client, add, {
             "Policy": "Free", "RegionNumber": 0, "Length": 512, "Tag": TAG_NEW})
         assert status == 200
 
@@ -391,29 +435,29 @@ class TestDynamicCapacityAdd:
         assert sorted(seqs) == [0, 1, 2, 3]
 
     def test_length_not_block_aligned_400(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 100, "Tag": TAG_NEW})
         assert status == 400
 
     def test_insufficient_capacity_409(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Contiguous", "RegionNumber": 1, "Length": 16384 + 256, "Tag": TAG_NEW})
         assert status == 400   # larger than the region is a bad request
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 32768, "Tag": TAG_NEW})
         assert status == 409   # region 0 already has 4096 MiB allocated
 
     def test_unsupported_policy_400(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_NEW})
         assert status == 400
 
     def test_missing_parameters_400(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {"Policy": "Free", "RegionNumber": 0, "Length": 256})
+        status, _, _ = dc_post(api_client, SLD_ADD, {"Policy": "Free", "RegionNumber": 0, "Length": 256})
         assert status == 400
-        status, _, _ = api_client.post(SLD_ADD, {"Policy": "Prescriptive"})
+        status, _, _ = dc_post(api_client, SLD_ADD, {"Policy": "Prescriptive"})
         assert status == 400
-        status, _, _ = api_client.post(SLD_ADD, {"Policy": "Bogus"})
+        status, _, _ = dc_post(api_client, SLD_ADD, {"Policy": "Bogus"})
         assert status == 400
 
     def test_malformed_json_400(self, api_client):
@@ -421,17 +465,17 @@ class TestDynamicCapacityAdd:
         assert status == 400
 
     def test_bad_tag_400(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": "not-a-uuid"})
         assert status == 400
 
     def test_unknown_region_404(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 7, "Length": 256, "Tag": TAG_NEW})
         assert status == 404
 
     def test_non_dcd_ld_404(self, api_client):
-        status, _, _ = api_client.post(
+        status, _, _ = dc_post(api_client, 
             SLD + "/CXLLogicalDevices/3/Actions/CXLLogicalDevice.DynamicCapacityAdd",
             {"Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
         assert status == 404
@@ -439,7 +483,7 @@ class TestDynamicCapacityAdd:
     def test_shared_access_adds_host(self, api_client):
         """EnableSharedAccess gives host 0 an extent of its own with host 1's tag."""
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
-        status, _, _ = api_client.post(add, {
+        status, _, _ = dc_post(api_client, add, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_PENDING})
         assert status == 200
         status, src = api_client.get(MLD + "/MemoryExtents/ext_1_280000000")
@@ -460,16 +504,32 @@ class TestDynamicCapacityAdd:
     def test_shared_access_tag_already_held_400(self, api_client):
         """Invalid Input "When the same tagged capacity is currently accessible by the same LD"."""
         add = MLD + "/CXLLogicalDevices/1/Actions/CXLLogicalDevice.DynamicCapacityAdd"
-        status, _, _ = api_client.post(add, {
-            "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_PENDING})
+        status, _, _ = dc_post(api_client, add, {
+            "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_SHARED})
         assert status == 400
         status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
         assert data["AvailableExtents"] == 254     # unchanged: two extents held
 
+    def test_add_of_a_tag_the_host_has_pending_409(self, api_client):
+        """
+        LD 1 is in the Pending Reference Bitmap of TAG_PENDING: an add of it
+        to that host could not be told apart from the one it has not
+        answered, so nothing is sent (cxl-fmd's choice).
+        """
+        add = MLD + "/CXLLogicalDevices/1/Actions/CXLLogicalDevice.DynamicCapacityAdd"
+        status, data, _ = api_client.post(add, {
+            "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_PENDING})
+        assert status == 409
+        assert "PendingLDs" in data["error"]["message"]
+        assert data["error"]["@Message.ExtendedInfo"][0]["MessageId"] == \
+            "Base.1.24.ResourceInUse"
+        status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
+        assert data["AvailableExtents"] == 254
+
     def test_shared_access_tag_in_unsharable_region_400(self, api_client):
         """Invalid Input "When the tagged capacity is already mapped to any Host ID via a non-Sharable region"."""
         add = MLD + "/CXLLogicalDevices/1/Actions/CXLLogicalDevice.DynamicCapacityAdd"
-        status, _, _ = api_client.post(add, {
+        status, _, _ = dc_post(api_client, add, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_UNSHARED})
         assert status == 400
         status, data = api_client.get(MLD + "/MemoryExtents/ext_0_600000000")
@@ -479,13 +539,13 @@ class TestDynamicCapacityAdd:
     def test_shared_access_empty_tag_400(self, api_client):
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
         for tag in ("", "00000000-0000-0000-0000-000000000000"):
-            status, _, _ = api_client.post(add, {
+            status, _, _ = dc_post(api_client, add, {
                 "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": tag})
             assert status == 400
 
     def test_prescriptive_extent_already_held_400(self, api_client):
         """Invalid Extent List: "any of the DPAs are already accessible to the same LD"."""
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Prescriptive",
             "ExtentList": [{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}]})
         assert status == 400
@@ -496,7 +556,7 @@ class TestDynamicCapacityAdd:
         before anything is sent. Capacity another host holds is shared with
         EnableSharedAccess."""
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
-        status, data, _ = api_client.post(add, {
+        status, data, _ = dc_post(api_client, add, {
             "Policy": "Prescriptive",
             "ExtentList": [{"@odata.id": MLD + "/MemoryExtents/ext_1_280000000"}]})
         assert status == 400
@@ -508,6 +568,158 @@ class TestDynamicCapacityAdd:
 
 
 # =============================================================================
+# Tasks: an add, a release and a DELETE are followed until the host has
+# done them (review F06.6c, F13.C4, DCD-A1a, DCD-A1c)
+# =============================================================================
+
+def started(status, task, location):
+    """A request the device accepted: 202, the Task, its monitor in Location"""
+    assert status == 202, task
+    assert task["@odata.type"] == "#Task.v1_7_4.Task"
+    assert location == task["TaskMonitor"]
+    assert task["TaskMonitor"] == task["@odata.id"].replace("/Tasks/", "/TaskMonitors/")
+    assert "PercentComplete" not in task and "EndTime" not in task
+    return task
+
+
+def wait_task(client, task, timeout=10):
+    """The Task once it is no longer Running"""
+    deadline = time.time() + timeout
+    while True:
+        status, data = client.get(task["@odata.id"])
+        assert status == 200
+        if data["TaskState"] != "Running":
+            return data
+        assert time.time() < deadline, f"{task['@odata.id']} still Running"
+        time.sleep(0.05)
+
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+class TestDynamicCapacityTasks:
+
+    def test_add_is_a_task(self, api_client):
+        """
+        5604h "shall complete when the device initiates the Add Capacity
+        procedure" (Section 7.6.7.6.5): the add is answered 202 with a Task,
+        Running until the host is seen to have it, the request recorded
+        before it was sent. The mock host accepts at once: the Task is
+        Completed on the next turn of the loop, not in the request.
+        """
+        body = {"Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW}
+        task = started(*api_client.post(SLD_ADD, body))
+        assert task["TaskState"] == "Running"
+        assert task["Name"] == "Dynamic Capacity Add"
+        assert task["Payload"]["TargetUri"] == SLD_ADD
+        assert task["Payload"]["HttpOperation"] == "POST"
+        assert json.loads(task["Payload"]["JsonBody"]) == body
+        dc = task["Oem"]["Cxl"]["DynamicCapacity"]
+        assert task["Oem"]["Cxl"]["@odata.type"] == "#Cxl.v1_0_0.Task"
+        assert dc["HostId"] == 0 and dc["Policy"] == "Free"
+        assert dc["RegionNumber"] == 0 and dc["Tag"] == TAG_NEW
+        assert dc["LengthBytes"] == 1024 << 20
+        # the seed extent, before the add
+        assert dc["BaselineExtents"] == [{"ExtentOffsetBytes": 16384 << 20,
+                                          "ExtentSizeBytes": 4096 << 20,
+                                          "Tag": TAG_SEED}]
+        assert dc["AcceptedExtents"] == []
+
+        done = wait_task(api_client, task)
+        assert done["TaskState"] == "Completed" and done["TaskStatus"] == "OK"
+        assert "EndTime" in done
+        dc = done["Oem"]["Cxl"]["DynamicCapacity"]
+        assert dc["AcceptedExtents"] == [{"ExtentOffsetBytes": 0x500000000,
+                                          "ExtentSizeBytes": 1024 << 20,
+                                          "Tag": TAG_NEW}]
+        assert done["Links"]["CreatedResources"] == [
+            {"@odata.id": SLD + "/MemoryExtents/ext_0_500000000"}]
+        assert done["Messages"][0]["MessageId"] == "Base.1.24.Success"
+        assert "accepted" in done["Messages"][0]["Message"]
+
+        # the monitor answers as the action would have (DSP0266 Section 12.2)
+        r = requests.get(api_client.base_url + task["TaskMonitor"], timeout=30)
+        assert r.status_code == 200
+        assert r.json()["error"]["code"] == "Base.1.24.Success"
+        assert "1024 MiB" in r.json()["error"]["message"]
+
+    def test_release_is_a_task(self, api_client):
+        body = release_body("TagBased", Tag=TAG_SEED, Length=1024)
+        task = started(*api_client.post(SLD_RELEASE, body))
+        assert task["TaskState"] == "Running"
+        assert task["Name"] == "Dynamic Capacity Release"
+        dc = task["Oem"]["Cxl"]["DynamicCapacity"]
+        assert dc["Policy"] == "TagBased" and dc["Tag"] == TAG_SEED
+        assert dc["LengthBytes"] == 1024 << 20
+        assert dc["ForcedRemoval"] is False and dc["SanitizeOnRelease"] is False
+        assert dc["ReleasedExtents"] == []
+        assert "RegionNumber" not in dc and "AcceptedExtents" not in dc
+
+        done = wait_task(api_client, task)
+        assert done["TaskState"] == "Completed" and done["TaskStatus"] == "OK"
+        # the last 1024 MiB of the seed extent
+        assert done["Oem"]["Cxl"]["DynamicCapacity"]["ReleasedExtents"] == [
+            {"ExtentOffsetBytes": (16384 + 3072) << 20,
+             "ExtentSizeBytes": 1024 << 20, "Tag": TAG_SEED}]
+        assert "Links" not in done
+        r = requests.get(api_client.base_url + task["TaskMonitor"], timeout=30)
+        assert r.status_code == 200
+
+    def test_prescriptive_release_records_its_extents(self, api_client):
+        ext = SLD + "/MemoryExtents/ext_0_400000000"
+        task = started(*api_client.post(SLD_RELEASE, release_body(
+            "Prescriptive", ExtentList=[{"@odata.id": ext}])))
+        dc = task["Oem"]["Cxl"]["DynamicCapacity"]
+        assert dc["RequestedExtents"] == [{"ExtentOffsetBytes": 16384 << 20,
+                                           "ExtentSizeBytes": 4096 << 20,
+                                           "Tag": TAG_SEED}]
+        assert "Tag" not in dc and "LengthBytes" not in dc
+        done = wait_task(api_client, task)
+        assert done["TaskState"] == "Completed"
+        assert done["Oem"]["Cxl"]["DynamicCapacity"]["ReleasedExtents"] == \
+            dc["RequestedExtents"]
+        assert api_client.get(ext)[0] == 404
+
+    def test_delete_is_a_task(self, api_client):
+        ext = SLD + "/MemoryExtents/ext_0_400000000"
+        r = requests.delete(api_client.base_url + ext, timeout=30)
+        task = started(r.status_code, r.json(), r.headers.get("Location"))
+        assert task["Payload"] == {"TargetUri": ext, "HttpOperation": "DELETE"}
+        done = wait_task(api_client, task)
+        assert done["TaskState"] == "Completed"
+        # a DELETE that completed synchronously would be 204
+        r = requests.get(api_client.base_url + task["TaskMonitor"], timeout=30)
+        assert r.status_code == 204
+        assert api_client.get(ext)[0] == 404
+
+    def test_tasks_are_listed(self, api_client):
+        task = started(*api_client.post(SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW}))
+        status, data = api_client.get("/redfish/v1/TaskService/Tasks")
+        assert {"@odata.id": task["@odata.id"]} in data["Members"]
+        wait_task(api_client, task)
+
+    def test_refused_request_has_no_task(self, api_client):
+        """A request the device refuses is answered at once, with no Task"""
+        status, data, location = api_client.post(SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 1 << 20, "Tag": TAG_NEW})
+        assert status == 400 and location is None
+        status, data = api_client.get("/redfish/v1/TaskService/Tasks")
+        assert data["Members"] == []
+
+    def test_task_oem_has_its_schema(self, api_client):
+        """Oem/Cxl of a Task is #Cxl.v1_0_0.Task of Cxl_v1.xml"""
+        from test_oem_schema import check_oem
+        add = started(*api_client.post(SLD_ADD, {
+            "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW}))
+        rel = started(*api_client.post(SLD_RELEASE, release_body(
+            "Prescriptive",
+            ExtentList=[{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}])))
+        for task in (add, rel):
+            assert check_oem(task["@odata.id"], task) == ["Cxl.v1_0_0.Task"]
+            done = wait_task(api_client, task)
+            assert check_oem(done["@odata.id"], done) == ["Cxl.v1_0_0.Task"]
+
+
+# =============================================================================
 # Dynamic Capacity Release (5605h) and DELETE MemoryExtent
 # =============================================================================
 
@@ -515,7 +727,7 @@ class TestDynamicCapacityAdd:
 class TestDynamicCapacityRelease:
 
     def test_release_tag_based_all(self, api_client):
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=4096))
         assert status == 200
         assert extent_ids(api_client) == []
@@ -524,7 +736,7 @@ class TestDynamicCapacityRelease:
         assert data["AvailableTags"] == 16
 
     def test_release_tag_based_partial_trims_extent(self, api_client):
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=1024))
         assert status == 200
         status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
@@ -532,7 +744,7 @@ class TestDynamicCapacityRelease:
         assert data["ExtentSizeMiB"] == 4096 - 1024
 
     def test_release_prescriptive(self, api_client):
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "Prescriptive",
             ExtentList=[{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}]))
         assert status == 200
@@ -541,14 +753,14 @@ class TestDynamicCapacityRelease:
     def test_release_prescriptive_same_extent_twice_400(self, api_client):
         """Listing an extent twice is refused, and releases nothing."""
         link = {"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "Prescriptive", ExtentList=[link, link]))
         assert status == 400
         # the daemon is still there, and so is the extent
         assert extent_ids(api_client) == ["ext_0_400000000"]
 
     def test_delete_extent(self, api_client):
-        status = api_client.delete(SLD + "/MemoryExtents/ext_0_400000000")
+        status = dc_delete(api_client, SLD + "/MemoryExtents/ext_0_400000000")
         assert status == 204
         status, _ = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert status == 404
@@ -556,47 +768,47 @@ class TestDynamicCapacityRelease:
         assert data["ExtentsCount"] == 0
 
     def test_delete_unknown_extent_404(self, api_client):
-        status = api_client.delete(SLD + "/MemoryExtents/ext_1")
+        status = dc_delete(api_client, SLD + "/MemoryExtents/ext_1")
         assert status == 404
 
     def test_release_unknown_tag_404(self, api_client):
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "TagBased", Tag="00000000-0000-0000-0000-0000000000ff", Length=256))
         assert status == 404
 
     def test_release_tag_based_length_zero_400(self, api_client):
         """Length "Shall be > 0" (Table 7-73): 0 does not mean everything."""
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=0))
         assert status == 400
         assert extent_ids(api_client) == ["ext_0_400000000"]
 
     def test_release_tag_based_more_than_held_409(self, api_client):
         """More than the host holds with the tag is Resources Exhausted."""
-        status, _, _ = api_client.post(SLD_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=4096 + 256))
         assert status == 409
         status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert data["ExtentSizeMiB"] == 4096
 
     def test_release_requires_booleans(self, api_client):
-        status, _, _ = api_client.post(SLD_RELEASE, {
+        status, _, _ = dc_post(api_client, SLD_RELEASE, {
             "Policy": "TagBased", "Tag": TAG_SEED, "Length": 256})
         assert status == 400
-        status, _, _ = api_client.post(SLD_RELEASE, {
+        status, _, _ = dc_post(api_client, SLD_RELEASE, {
             "Policy": "TagBased", "Tag": TAG_SEED, "Length": 256,
             "ForcedRemoval": "no", "SanitizeOnRelease": False})
         assert status == 400
 
     def test_release_tag_based_requires_tag_and_length(self, api_client):
-        status, _, _ = api_client.post(SLD_RELEASE, release_body("TagBased", Tag=TAG_SEED))
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body("TagBased", Tag=TAG_SEED))
         assert status == 400
-        status, _, _ = api_client.post(SLD_RELEASE, release_body("Prescriptive"))
+        status, _, _ = dc_post(api_client, SLD_RELEASE, release_body("Prescriptive"))
         assert status == 400
 
     def test_shared_extent_release_keeps_other_host(self, api_client):
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(rel, release_body(
+        status, _, _ = dc_post(api_client, rel, release_body(
             "Prescriptive",
             ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_0_200000000"}]))
         assert status == 200
@@ -611,7 +823,7 @@ class TestDynamicCapacityRelease:
         """Host 0's list is host 0's: host 1's extent at the same DPA is not
         in it, and naming it is refused with 400."""
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, data, _ = api_client.post(rel, release_body(
+        status, data, _ = dc_post(api_client, rel, release_body(
             "Prescriptive",
             ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_1_200000000"}]))
         assert status == 400
@@ -624,7 +836,7 @@ class TestDynamicCapacityRelease:
         device's MemoryExtents is not this device's extent with the same Id,
         and naming it is refused with 400."""
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(rel, release_body(
+        status, _, _ = dc_post(api_client, rel, release_body(
             "Prescriptive",
             ExtentList=[{"@odata.id": SLD + "/MemoryExtents/ext_0_200000000"}]))
         assert status == 400
@@ -633,7 +845,7 @@ class TestDynamicCapacityRelease:
     def test_release_foreign_with_own_extent_400(self, api_client):
         """One foreign link refuses the whole list: nothing is released."""
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(rel, release_body(
+        status, _, _ = dc_post(api_client, rel, release_body(
             "Prescriptive",
             ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_0_200000000"},
                         {"@odata.id": MLD + "/MemoryExtents/ext_1_200000000"}]))
@@ -645,12 +857,12 @@ class TestDynamicCapacityRelease:
         """Invalid Physical Address for "a nonexistent or pending ... DPA range
         and the Forced Removal flag is not set" (Section 7.6.7.6.6)."""
         link = {"@odata.id": MLD + "/MemoryExtents/ext_1_280000000"}
-        status, _, _ = api_client.post(MLD_LD1_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, MLD_LD1_RELEASE, release_body(
             "Prescriptive", ExtentList=[link]))
         assert status == 400
         assert "ext_1_280000000" in extent_ids(api_client, MLD)
         # with it, the device marks the Extent Group "Dead"
-        status, _, _ = api_client.post(MLD_LD1_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, MLD_LD1_RELEASE, release_body(
             "Prescriptive", ForcedRemoval=True, ExtentList=[link]))
         assert status == 200
         assert "ext_1_280000000" not in extent_ids(api_client, MLD)
@@ -660,12 +872,12 @@ class TestDynamicCapacityRelease:
         Extent List covers only a portion of the capacity associated with
         the Tag": the mock takes a Length short of the host's for it."""
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(rel, release_body("TagBased", Tag=TAG_SHARED, Length=1024))
+        status, _, _ = dc_post(api_client, rel, release_body("TagBased", Tag=TAG_SHARED, Length=1024))
         assert status == 400
         status, data = api_client.get(MLD + "/MemoryExtents/ext_0_200000000")
         assert data["ExtentSizeMiB"] == 2048
         # the whole of it removes host 0's access, and only host 0's
-        status, _, _ = api_client.post(rel, release_body("TagBased", Tag=TAG_SHARED, Length=2048))
+        status, _, _ = dc_post(api_client, rel, release_body("TagBased", Tag=TAG_SHARED, Length=2048))
         assert status == 200
         ids = extent_ids(api_client, MLD)
         assert "ext_0_200000000" not in ids
@@ -675,7 +887,7 @@ class TestDynamicCapacityRelease:
         """A Prescriptive list of part of a host's sharable tag is refused too."""
         add = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd"
         rel = MLD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(add, {
+        status, _, _ = dc_post(api_client, add, {
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 256, "Tag": TAG_SHARED})
         assert status == 200
         # host 0 now has TAG_SHARED in two extents: 8192 MiB and 11264 MiB
@@ -683,10 +895,10 @@ class TestDynamicCapacityRelease:
         second = {"@odata.id": MLD + "/MemoryExtents/ext_0_2c0000000"}
         status, data = api_client.get(second["@odata.id"])
         assert status == 200 and data["SequenceNumber"] == 1
-        status, _, _ = api_client.post(rel, release_body("Prescriptive", ExtentList=[first]))
+        status, _, _ = dc_post(api_client, rel, release_body("Prescriptive", ExtentList=[first]))
         assert status == 400
         assert "ext_0_200000000" in extent_ids(api_client, MLD)
-        status, _, _ = api_client.post(rel, release_body("Prescriptive",
+        status, _, _ = dc_post(api_client, rel, release_body("Prescriptive",
                                                          ExtentList=[first, second]))
         assert status == 200
         ids = extent_ids(api_client, MLD)
@@ -704,19 +916,19 @@ class TestDynamicCapacityRelease:
             return data["MemorySizeMiB"]
 
         assert size() == 16384 + 4096
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
         assert status == 200
         assert size() == 16384 + 4096 + 1024
-        assert api_client.delete(SLD + "/MemoryExtents/ext_0_500000000") == 204
+        assert dc_delete(api_client, SLD + "/MemoryExtents/ext_0_500000000") == 204
         assert size() == 16384 + 4096
 
     def test_add_then_delete_round_trip(self, api_client):
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
         assert status == 200
         assert "ext_0_500000000" in extent_ids(api_client)
-        assert api_client.delete(SLD + "/MemoryExtents/ext_0_500000000") == 204
+        assert dc_delete(api_client, SLD + "/MemoryExtents/ext_0_500000000") == 204
         assert extent_ids(api_client) == ["ext_0_400000000"]
 
 
@@ -732,7 +944,7 @@ class TestSetDCRegionConfig:
         assert status == 409
 
     def test_patch_after_release(self, api_client):
-        assert api_client.delete(SLD + "/MemoryExtents/ext_0_400000000") == 204
+        assert dc_delete(api_client, SLD + "/MemoryExtents/ext_0_400000000") == 204
         status, _ = api_client.patch(SLD_LD0 + "/MemoryRegions/0",
                                      {"BlockSizeMiB": 512, "SanitizeOnRelease": False})
         assert status == 200
@@ -741,10 +953,10 @@ class TestSetDCRegionConfig:
         assert data["SanitizeOnRelease"] is False
 
         # Adds now have to honour the new block size
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
         assert status == 400
-        status, _, _ = api_client.post(SLD_ADD, {
+        status, _, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": 512, "Tag": TAG_NEW})
         assert status == 200
 
@@ -752,9 +964,9 @@ class TestSetDCRegionConfig:
         """Capacity an FM reference keeps is still allocated (Section 7.6.7.6.7)."""
         # DELETE releases an extent from its own host
         for ext in ("ext_0_200000000", "ext_1_200000000"):
-            assert api_client.delete(MLD + "/MemoryExtents/" + ext) == 204
+            assert dc_delete(api_client, MLD + "/MemoryExtents/" + ext) == 204
         # host 1 has not answered the add of this one: only Forced Removal
-        status, _, _ = api_client.post(MLD_LD1_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, MLD_LD1_RELEASE, release_body(
             "Prescriptive", ForcedRemoval=True,
             ExtentList=[{"@odata.id": MLD + "/MemoryExtents/ext_1_280000000"}]))
         assert status == 200
@@ -790,14 +1002,14 @@ class TestCXLReferenceDCMemory:
 
     def test_reference_keeps_released_capacity(self, api_client):
         rel = MLD + "/MemoryExtents/ext_1_280000000"
-        status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": True})
+        status, _, _ = dc_post(api_client, MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": True})
         assert status == 200
         status, data = api_client.get(rel)
         assert data["FMReferencedExtent"] is True
 
         # Host releases it (Forced Removal: it is pending): no host's list
         # has it, so it is no extent
-        status, _, _ = api_client.post(MLD_LD1_RELEASE, release_body(
+        status, _, _ = dc_post(api_client, MLD_LD1_RELEASE, release_body(
             "Prescriptive", ForcedRemoval=True, ExtentList=[{"@odata.id": rel}]))
         assert status == 200
         status, data = api_client.get(rel)
@@ -810,10 +1022,10 @@ class TestCXLReferenceDCMemory:
         assert data["AvailableTags"] == 62
 
         # A second DELETE has nothing to release
-        assert api_client.delete(rel) == 404
+        assert dc_delete(api_client, rel) == 404
 
         # Dropping the FM reference frees it
-        status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": False})
+        status, _, _ = dc_post(api_client, MLD_REFERENCE, {"Tag": TAG_PENDING, "FMReference": False})
         assert status == 200
         assert "ext_1_280000000" not in extent_ids(api_client, MLD)
         status, data = api_client.get(MLD + "/CXLLogicalDevices/1")
@@ -822,30 +1034,30 @@ class TestCXLReferenceDCMemory:
 
     def test_reference_unknown_tag_400(self, api_client):
         """5606h: "Invalid Input if the Tag ... does not match an existing sharable tag"."""
-        status, _, _ = api_client.post(SLD_REFERENCE, {
+        status, _, _ = dc_post(api_client, SLD_REFERENCE, {
             "Tag": "00000000-0000-0000-0000-0000000000ff", "FMReference": True})
         assert status == 400
 
     def test_reference_unsharable_tag_400(self, api_client):
         """The SLD's tag is in a region that is not Sharable."""
-        status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED, "FMReference": True})
+        status, _, _ = dc_post(api_client, SLD_REFERENCE, {"Tag": TAG_SEED, "FMReference": True})
         assert status == 400
         status, data = api_client.get(SLD + "/MemoryExtents/ext_0_400000000")
         assert data["FMReferencedExtent"] is False
 
     def test_reference_empty_tag_400(self, api_client):
         for tag in ("", "00000000-0000-0000-0000-000000000000"):
-            status, _, _ = api_client.post(MLD_REFERENCE, {"Tag": tag, "FMReference": True})
+            status, _, _ = dc_post(api_client, MLD_REFERENCE, {"Tag": tag, "FMReference": True})
             assert status == 400
 
     def test_reference_requires_parameters(self, api_client):
-        status, _, _ = api_client.post(SLD_REFERENCE, {"Tag": TAG_SEED})
+        status, _, _ = dc_post(api_client, SLD_REFERENCE, {"Tag": TAG_SEED})
         assert status == 400
-        status, _, _ = api_client.post(SLD_REFERENCE, {"FMReference": True})
+        status, _, _ = dc_post(api_client, SLD_REFERENCE, {"FMReference": True})
         assert status == 400
 
     def test_reference_on_non_dcd_404(self, api_client):
-        status, _, _ = api_client.post(
+        status, _, _ = dc_post(api_client, 
             "/redfish/v1/Chassis/nope/PCIeDevices/nope/Actions/PCIeDevice.CXLReferenceDCMemory",
             {"Tag": TAG_SEED, "FMReference": True})
         assert status == 404
@@ -920,7 +1132,7 @@ class TestNonDCDDevice:
         base = "/redfish/v1/Chassis/cxl_mem0/PCIeDevices/cxl_mem0"
         assert api_client.get(base + "/MemoryExtents")[0] == 404
         assert api_client.get(base + "/CXLLogicalDevices/0/MemoryRegions")[0] == 404
-        status, _, _ = api_client.post(
+        status, _, _ = dc_post(api_client, 
             base + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityAdd",
             {"Policy": "Free", "RegionNumber": 0, "Length": 256, "Tag": TAG_NEW})
         assert status == 404
@@ -1061,7 +1273,7 @@ class TestPerHostDPA:
         for ext in ("ext_0_240000000", "ext_1_440000000"):
             assert ph_extent(api_client, ext)[1]["FMReferencedExtent"] is True
         assert ph_extent(api_client, "ext_0_200000000")[1]["FMReferencedExtent"] is False
-        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(2, "DynamicCapacityAdd"), {
             "Policy": "Free", "RegionNumber": 2, "Length": 256, "Tag": TAG_NEW})
         assert status == 200
         assert ph_extent(api_client, "ext_0_240000000")[1]["FMReferencedExtent"] is True
@@ -1069,7 +1281,7 @@ class TestPerHostDPA:
     def test_enable_shared_access_creates_host_extent(self, api_client):
         """Host 2 gets the capacity at its own base plus the offset."""
         add = ph_action(2, "DynamicCapacityAdd")
-        status, _, _ = api_client.post(add, {
+        status, _, _ = dc_post(api_client, add, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_C1})
         assert status == 200
         status, data = ph_extent(api_client, "ext_2_0")
@@ -1081,7 +1293,7 @@ class TestPerHostDPA:
         assert data["Links"]["MemoryRegions"] == [
             {"@odata.id": PH + "/CXLLogicalDevices/2/MemoryRegions/0"}]
         # "currently accessible by the same LD"
-        status, _, _ = api_client.post(add, {
+        status, _, _ = dc_post(api_client, add, {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_C1})
         assert status == 400
 
@@ -1091,33 +1303,33 @@ class TestPerHostDPA:
         Section 7.6.7.6.5); region 1 is not Sharable."""
         add = ph_action(2, "DynamicCapacityAdd")
         for region in (2, 1):
-            status, _, _ = api_client.post(add, {
+            status, _, _ = dc_post(api_client, add, {
                 "Policy": "EnableSharedAccess", "RegionNumber": region, "Tag": TAG_C1})
             assert status == 400, region
         assert not [e for e in extent_ids(api_client, PH) if e.startswith("ext_2_")
                     and e != "ext_2_200000000"]
 
     def test_enable_shared_access_unknown_tag_404(self, api_client):
-        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(2, "DynamicCapacityAdd"), {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_NEW})
         assert status == 404
 
     def test_enable_shared_access_of_fm_held_capacity(self, api_client):
         """Capacity only an FM reference keeps is given to a host again, and
         kept again when that host releases it."""
-        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(2, "DynamicCapacityAdd"), {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_C3})
         assert status == 200
         status, data = ph_extent(api_client, "ext_2_80000000")    # 0 + 2048 MiB
         assert status == 200
         assert data["Tag"] == TAG_C3
         assert data["FMReferencedExtent"] is True
-        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityRelease"),
+        status, _, _ = dc_post(api_client, ph_action(2, "DynamicCapacityRelease"),
                                        release_body("TagBased", Tag=TAG_C3, Length=512))
         assert status == 200
         assert "ext_2_80000000" not in extent_ids(api_client, PH)
         # the reference still has it: a host can be given it once more
-        status, _, _ = api_client.post(ph_action(0, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(0, "DynamicCapacityAdd"), {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_C3})
         assert status == 200
         assert ph_extent(api_client, "ext_0_280000000")[0] == 200   # 8192 + 2048 MiB
@@ -1125,11 +1337,11 @@ class TestPerHostDPA:
     def test_allocation_skips_every_hosts_capacity(self, api_client):
         """Free capacity is free on every host: host 2's add goes past what
         hosts 0 and 1 and the FM reference have (offsets 0-1536 and 2048-2560)."""
-        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(2, "DynamicCapacityAdd"), {
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 512, "Tag": TAG_NEW})
         assert status == 200
         assert "ext_2_60000000" in extent_ids(api_client, PH)       # 0 + 1536 MiB
-        status, _, _ = api_client.post(ph_action(0, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(0, "DynamicCapacityAdd"), {
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
         assert status == 200
         assert "ext_0_2a0000000" in extent_ids(api_client, PH)      # 8192 + 2560 MiB
@@ -1147,19 +1359,19 @@ class TestPerHostDPA:
         status, _ = api_client.patch(PH + "/CXLLogicalDevices/2/MemoryRegions/0",
                                      {"BlockSizeMiB": 256})
         assert status == 409
-        status, _, _ = api_client.post(PH_REFERENCE, {"Tag": TAG_C3, "FMReference": False})
+        status, _, _ = dc_post(api_client, PH_REFERENCE, {"Tag": TAG_C3, "FMReference": False})
         assert status == 200
         # the capacity is free again, and the tag is gone
-        status, _, _ = api_client.post(ph_action(0, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(0, "DynamicCapacityAdd"), {
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 1024, "Tag": TAG_NEW})
         assert status == 200
         assert "ext_0_260000000" in extent_ids(api_client, PH)      # 8192 + 1536 MiB
         assert TAG_C3 not in tag_view(api_client)
-        status, _, _ = api_client.post(PH_REFERENCE, {"Tag": TAG_C3, "FMReference": True})
+        status, _, _ = dc_post(api_client, PH_REFERENCE, {"Tag": TAG_C3, "FMReference": True})
         assert status == 400
 
     def test_release_from_one_host(self, api_client):
-        status, _, _ = api_client.post(ph_action(1, "DynamicCapacityRelease"),
+        status, _, _ = dc_post(api_client, ph_action(1, "DynamicCapacityRelease"),
                                        release_body("TagBased", Tag=TAG_C1, Length=1024))
         assert status == 200
         ids = extent_ids(api_client, PH)
@@ -1199,7 +1411,7 @@ class TestPerHostDPA:
             assert ph_extent(api_client, ext)[1].get("Tag") != TAG_C4
 
     def test_tag_view_follows_shared_access(self, api_client):
-        status, _, _ = api_client.post(ph_action(2, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(2, "DynamicCapacityAdd"), {
             "Policy": "EnableSharedAccess", "RegionNumber": 0, "Tag": TAG_C1})
         assert status == 200
         row = tag_view(api_client)[TAG_C1]
@@ -1210,7 +1422,7 @@ class TestPerHostDPA:
         """DELETE of an extent of a sharable tag removes its host's access to
         the whole of the tag, Tag-based (Section 7.6.7.6.6): every extent of
         that host with the tag goes, and no other host's."""
-        status, _, _ = api_client.post(ph_action(1, "DynamicCapacityAdd"), {
+        status, _, _ = dc_post(api_client, ph_action(1, "DynamicCapacityAdd"), {
             "Policy": "Contiguous", "RegionNumber": 0, "Length": 256, "Tag": TAG_C1})
         assert status == 200
         # host 1 has TAG_C1 in two extents now: 16384 MiB and 16384 + 1536 MiB
@@ -1218,7 +1430,7 @@ class TestPerHostDPA:
         assert status == 200 and data["SequenceNumber"] == 1
         fm_ref = ph_extent(api_client, "ext_0_200000000")[1]["FMReferencedExtent"]
 
-        assert api_client.delete(PH + "/MemoryExtents/ext_1_400000000") == 204
+        assert dc_delete(api_client, PH + "/MemoryExtents/ext_1_400000000") == 204
         ids = extent_ids(api_client, PH)
         assert "ext_1_400000000" not in ids
         assert "ext_1_460000000" not in ids
@@ -1239,18 +1451,18 @@ class TestPerHostDPA:
         a region that is not Sharable, the host's other extents stay."""
         add = ph_action(2, "DynamicCapacityAdd")
         for _ in range(2):
-            status, _, _ = api_client.post(add, {
+            status, _, _ = dc_post(api_client, add, {
                 "Policy": "Contiguous", "RegionNumber": 1, "Length": 256, "Tag": TAG_NEW})
             assert status == 200
         ids = extent_ids(api_client, PH)
         assert "ext_2_220000000" in ids and "ext_2_230000000" in ids
 
-        assert api_client.delete(PH + "/MemoryExtents/ext_2_220000000") == 204
+        assert dc_delete(api_client, PH + "/MemoryExtents/ext_2_220000000") == 204
         ids = extent_ids(api_client, PH)
         assert "ext_2_220000000" not in ids
         assert "ext_2_230000000" in ids
         # an extent with no tag
-        assert api_client.delete(PH + "/MemoryExtents/ext_2_200000000") == 204
+        assert dc_delete(api_client, PH + "/MemoryExtents/ext_2_200000000") == 204
         ids = extent_ids(api_client, PH)
         assert "ext_2_200000000" not in ids
         assert "ext_2_230000000" in ids
@@ -1286,13 +1498,13 @@ class TestDeleteWithoutTagBased:
         assert data["CXLDevice"]["DynamicCapacity"]["ReleaseCapacityPoliciesSupported"] == [
             "Prescriptive"]
         rel = PR + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
-        status, _, _ = api_client.post(rel, release_body("TagBased", Tag=TAG_D1, Length=1536))
+        status, _, _ = dc_post(api_client, rel, release_body("TagBased", Tag=TAG_D1, Length=1536))
         assert status == 400
 
     def test_delete_shared_releases_one_host(self, api_client):
         assert extent_ids(api_client, PR) == [
             "ext_0_200000000", "ext_0_240000000", "ext_1_200000000"]
-        assert api_client.delete(PR + "/MemoryExtents/ext_0_240000000") == 204
+        assert dc_delete(api_client, PR + "/MemoryExtents/ext_0_240000000") == 204
         assert extent_ids(api_client, PR) == ["ext_1_200000000"]
         status, data = api_client.get(PR + "/MemoryExtents/ext_1_200000000")
         assert data["Tag"] == TAG_D1 and data["ExtentSizeMiB"] == 1024
@@ -1318,19 +1530,19 @@ class TestDCMiBRange:
     @pytest.mark.parametrize("length", [(1 << 44) + 256, 1 << 44, (1 << 63) - 1])
     def test_add_length_out_of_range_400(self, api_client, length):
         before = extent_ids(api_client)
-        status, data, _ = api_client.post(SLD_ADD, {
+        status, data, _ = dc_post(api_client, SLD_ADD, {
             "Policy": "Free", "RegionNumber": 0, "Length": length, "Tag": TAG_NEW})
         assert status == 400, data
         assert extent_ids(api_client) == before
 
     def test_release_length_out_of_range_400(self, api_client):
-        status, data, _ = api_client.post(SLD_RELEASE, release_body(
+        status, data, _ = dc_post(api_client, SLD_RELEASE, release_body(
             "TagBased", Tag=TAG_SEED, Length=(1 << 44) + 1024))
         assert status == 400, data
         assert self.extent_size(api_client) == 4096
 
     def test_block_size_out_of_range_400(self, api_client):
-        assert api_client.delete(SLD + "/MemoryExtents/ext_0_400000000") == 204
+        assert dc_delete(api_client, SLD + "/MemoryExtents/ext_0_400000000") == 204
         status, data = api_client.patch(SLD_LD0 + "/MemoryRegions/0",
                                         {"BlockSizeMiB": (1 << 44) + 512})
         assert status == 400, data
