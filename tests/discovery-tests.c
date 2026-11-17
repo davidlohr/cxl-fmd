@@ -2511,7 +2511,8 @@ out:
  * (Section 7.6.7.6.5); Release (5605h) also "with Invalid Physical Address"
  * (Section 7.6.7.6.6); Set DC Region Configuration (5602h) "shall fail with
  * Unsupported" while blocks are allocated (Section 7.6.7.6.3). A command
- * that is not carried is a failure of the daemon, not of the request.
+ * libcxlmi could not carry, or whose response it could not read, has an
+ * outcome that is not known.
  */
 static void test_dc_return_codes(void)
 {
@@ -2550,11 +2551,17 @@ static void test_dc_return_codes(void)
 		      add[i].rc, rc, add[i].err);
 	}
 
-	/* a payload where 5604h has none: libcxlmi fails to carry it */
+	/*
+	 * a payload where 5604h has none: the device answered, and libcxlmi
+	 * cannot read the response; whether the add was carried out is not
+	 * known, and the host is to be read again
+	 */
 	answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
 	rc = fmd_dc_add(ctx, dev, 0, FMD_DC_POLICY_FREE, 0, 1ULL << 28,
 			dc_tag, NULL, 0);
-	CHECK(rc == -EIO, "5604h not carried: %d", rc);
+	CHECK(rc == -EREMOTEIO && fmd_dc_sync_behind(fmd_dc_host_sync(dev, 0)),
+	      "5604h with a response that cannot be read: %d, host 0 %d", rc,
+	      fmd_dc_host_sync(dev, 0));
 
 	ext = fmd_dc_find_extent(dev, 0, 1ULL << 30);
 	answer_rc(ep, 0x5605, CXLMI_RET_PADDR);
@@ -5297,6 +5304,251 @@ static void test_dc_retry_on_tick(void)
 out:
 	fmd_ctx_free(ctx);
 	report("a stale DC host is read on the --event-poll tick", before);
+}
+
+/*
+ * The review's reproduction (F06): Initiate Dynamic Capacity Add (5604h)
+ * "shall complete when the device initiates the Add Capacity procedure"
+ * (CXL r4.0 Section 7.6.7.6.5), and Release (5605h) "when the device
+ * initiates the Remove Capacity procedure" (Section 7.6.7.6.6). An add the
+ * device answered Success for, whose 5601h read after it failed, was -EIO,
+ * "Initiate Dynamic Capacity Add failed" and 500; a 5601h answered Retry
+ * Required, a 5603h that failed, and a 5605h likewise. A client told so
+ * may send a Free add again, and get a second one. Now each is
+ * FMD_DC_ACCEPTED_STALE with a message that says the request was accepted
+ * and is not to be sent again, one command sent, and the host stale and
+ * read again on the next tick. A 5603h whose generation keeps changing is
+ * not 503 either. The same for an extent DELETE, a MemoryRegion PATCH
+ * (5602h) and CXLReferenceDCMemory (5606h). A device that refuses is
+ * still a failure.
+ */
+static int dc_accepted_case(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+			    const char *id, int kind,
+			    unsigned int *cmds, const char **msg)
+{
+	static const char *add =
+		"{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": 256, "
+		"\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}";
+	static const char *rel =
+		"{\"Policy\": \"TagBased\", \"ForcedRemoval\": false, "
+		"\"SanitizeOnRelease\": false, \"Length\": 256, "
+		"\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\"}";
+	static const char *patch = "{\"BlockSizeMiB\": 256}";
+	static const char *ref =
+		"{\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000aa\", \"FMReference\": true}";
+	unsigned int sent = commands_sent(ep);
+	int rc;
+
+	*msg = NULL;
+	switch (kind) {
+	case 0:
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", add, strlen(add), msg);
+		break;
+	case 1:
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel), msg);
+		break;
+	case 2:
+		rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000", msg);
+		break;
+	case 3:
+		rc = fmd_redfish_patch_dc_memory_region(ctx, id, id, "0", "0", patch,
+							strlen(patch), msg);
+		break;
+	default:
+		rc = fmd_redfish_action_dc_reference(ctx, id, id, ref, strlen(ref), msg);
+		break;
+	}
+	*cmds = commands_sent(ep) - sent;
+	return rc;
+}
+
+static void test_dc_accepted_stale(void)
+{
+	static const struct {
+		const char *what;
+		int kind;		/* 0 add, 1 release, 2 DELETE, 3 PATCH, 4 reference */
+		uint16_t op;
+		int read;		/* 0: 5601h fails, 1: Retry Required, 2: 5603h fails,
+					 * 3: 5603h generation churn, 4: 5608h fails */
+		unsigned int cmds;
+	} cases[] = {
+		{ "5604h, 5601h Internal Error", 0, 0x5604, 0, 3 },
+		{ "5604h, 5601h Retry Required", 0, 0x5604, 1, 3 },
+		{ "5604h, 5603h Internal Error", 0, 0x5604, 2, 4 },
+		{ "5604h, 5603h list keeps changing", 0, 0x5604, 3, 11 },
+		{ "5604h, 5608h Internal Error", 0, 0x5604, 4, 4 },
+		{ "5605h, 5601h Internal Error", 1, 0x5605, 0, 3 },
+		{ "DELETE extent, 5601h Internal Error", 2, 0x5605, 0, 3 },
+		{ "PATCH region, 5601h Internal Error", 3, 0x5602, 0, 3 },
+		{ "5606h, 5608h Internal Error", 4, 0x5606, 4, 2 },
+	};
+	struct dc_ext e[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag, 0 },
+	};
+	int before = failures;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0xf6, 0x08);
+		char id[FMD_MAX_ID_LEN];
+		const char *msg;
+		unsigned int cmds;
+		json_t *j;
+		int rc;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		device_id(id, sizeof(id), 0xf6);
+		if (cases[i].kind == 3)		/* 5602h is refused while it has one */
+			fmd_topology_remove(&ctx->topology,
+					    &fmd_dc_find_extent(dev, 0, 1ULL << 30)->base);
+		if (cases[i].read == 4) {	/* a device with a tag list */
+			fmd_memdev_dcd(dev)->tags.unsupported = false;
+			fmd_memdev_dcd(dev)->tags.known = true;
+		}
+
+		answer_rc(ep, cases[i].op, CXLMI_RET_SUCCESS);
+		switch (cases[i].read) {
+		case 0:
+			answer_rc(ep, 0x5601, CXLMI_RET_INTERNAL);
+			break;
+		case 1:
+			answer_rc(ep, 0x5601, CXLMI_RET_RETRY);
+			break;
+		case 2:
+			answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+			answer_rc(ep, 0x5603, CXLMI_RET_INTERNAL);
+			break;
+		case 3:
+			answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+			for (int k = 0; k < 5; k++) {
+				answer_dc_extents(ep, 10 + 2 * k, 0, 2, &e[0], 1);
+				answer_dc_extents(ep, 11 + 2 * k, 1, 2, &e[1], 1);
+			}
+			break;
+		default:
+			if (cases[i].kind != 4) {	/* the host is read, the tag list not */
+				answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+				answer_dc_extents(ep, 1, 0, 1, &e[0], 1);
+			}
+			break;
+		}
+		answer_rc(ep, 0x5608, cases[i].read == 4 ? CXLMI_RET_INTERNAL :
+			  CXLMI_RET_UNSUPPORTED);
+
+		rc = dc_accepted_case(ctx, ep, id, cases[i].kind, &cmds, &msg);
+		CHECK(rc == FMD_DC_ACCEPTED_STALE && msg && strstr(msg, "accepted") &&
+		      strstr(msg, "Do not send") && cmds == cases[i].cmds,
+		      "%s: %d \"%s\", %u commands", cases[i].what, rc, msg ? msg : "",
+		      cmds);
+		if (cases[i].read == 4) {
+			CHECK(fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags),
+			      "%s: the tag list is not marked unknown", cases[i].what);
+		} else {
+			CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_STALE,
+			      "%s: host 0 %d", cases[i].what, fmd_dc_host_sync(dev, 0));
+		}
+		if (cases[i].kind == 0) {
+			j = fmd_redfish_dc_memory_extent(ctx, id, id, "ext_0_40000000");
+			CHECK(j && json_string_value(json_object_get(json_object_get(j, "Status"),
+								     "Health")) &&
+			      !strcmp(json_string_value(json_object_get(
+					json_object_get(j, "Status"), "Health")), "Warning"),
+			      "%s: the extent is not Warning", cases[i].what);
+			json_decref(j);
+		}
+
+		/* the next tick reads it, and it is current again */
+		cxlmi_mock_clear_responses(ep);
+		answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+		answer_dc_extents(ep, 1, 0, 1, &e[0], 1);
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+		CHECK(fmd_dcd_retry_stale(ctx) == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK &&
+		      !fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags),
+		      "%s: not read again on the next tick", cases[i].what);
+		fmd_ctx_free(ctx);
+	}
+
+	/* refused by the device: still a failure, nothing marked */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0xf6, 0x08);
+		char id[FMD_MAX_ID_LEN];
+		const char *msg;
+		unsigned int cmds;
+		int rc;
+
+		if (dev) {
+			device_id(id, sizeof(id), 0xf6);
+			answer_rc(ep, 0x5604, CXLMI_RET_INTERNAL);
+			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg);
+			CHECK(rc == -EIO && cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK,
+			      "5604h Internal Error: %d, %u commands, host 0 %d", rc, cmds,
+			      fmd_dc_host_sync(dev, 0));
+			answer_rc(ep, 0x5604, CXLMI_RET_RETRY);
+			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg);
+			CHECK(rc == -EAGAIN && msg && strstr(msg, "try again"),
+			      "5604h Retry Required: %d", rc);
+
+			/* not known: the outcome, and the host is read again */
+			answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
+			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg);
+			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
+			      cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY,
+			      "5604h with a response that cannot be read: %d, %u commands, "
+			      "host 0 %d", rc, cmds, fmd_dc_host_sync(dev, 0));
+
+			/* 5605h likewise */
+			cxlmi_mock_clear_responses(ep);
+			answer_dc_regions(ep, 1ULL << 30, 4, 1ULL << 30, 0x08);
+			answer_dc_extents(ep, 1, 0, 1, &e[0], 1);
+			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+			fmd_dcd_retry_stale(ctx);
+			answer(ep, 0x5605, (uint8_t[4]){ 0 }, 4);
+			rc = dc_accepted_case(ctx, ep, id, 1, &cmds, &msg);
+			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
+			      cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY,
+			      "5605h with a response that cannot be read: %d, %u commands, "
+			      "host 0 %d", rc, cmds, fmd_dc_host_sync(dev, 0));
+
+			/* 5606h: the tag list is read again */
+			fmd_memdev_dcd(dev)->tags.unsupported = false;
+			fmd_memdev_dcd(dev)->tags.known = true;
+			answer(ep, 0x5606, (uint8_t[4]){ 0 }, 4);
+			rc = dc_accepted_case(ctx, ep, id, 4, &cmds, &msg);
+			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
+			      cmds == 1 && fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags),
+			      "5606h with a response that cannot be read: %d, %u commands, "
+			      "tags known %d", rc, cmds, fmd_memdev_dcd(dev)->tags.known);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/* 5602h: every host is read again, on an MLD whose hosts were current */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep;
+		struct fmd_component *dev = dc_retry_dev(ctx, &ep, 0xfb, NULL, 0);
+		int rc;
+
+		if (dev) {
+			answer(ep, 0x5602, (uint8_t[4]){ 0 }, 4);
+			rc = fmd_dc_set_region_config(ctx, dev, fmd_dc_find_region(dev, 1, 1),
+						      1ULL << 28, false);
+			CHECK(rc == -EREMOTEIO &&
+			      fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY &&
+			      fmd_dc_host_sync(dev, 1) == FMD_DC_SYNC_DIRTY,
+			      "5602h with a response that cannot be read: %d, hosts %d %d", rc,
+			      fmd_dc_host_sync(dev, 0), fmd_dc_host_sync(dev, 1));
+		}
+		fmd_ctx_free(ctx);
+	}
+	report("a DC request the device accepted is not reported as a failure", before);
 }
 
 /*
@@ -8389,6 +8641,7 @@ int main(void)
 	test_dc_retry_overflow_and_tags();
 	test_dc_retry_on_tick();
 	test_dc_region_pages_staged();
+	test_dc_accepted_stale();
 	test_rescan_reads_new_logs();
 	test_notification_route();
 	test_chunk_delete_partition_refused();

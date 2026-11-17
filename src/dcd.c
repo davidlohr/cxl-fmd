@@ -1316,8 +1316,10 @@ static struct cxlmi_tunnel_info *dcd_tunnel(struct fmd_component *dev,
 
 /*
  * What a DCD Management command that failed comes to. A negative @rc is
- * libcxlmi failing to carry the command, which says nothing of the request;
- * anything else is the Return Code the device gave. Initiate Dynamic
+ * libcxlmi failing to carry the command: alike for a request not sent, one
+ * not answered, and a response it could not read, so the device may have
+ * carried it out, and the outcome is not known (-EREMOTEIO); anything else
+ * is the Return Code the device gave. Initiate Dynamic
  * Capacity Add (5604h) and Release (5605h) fail with Invalid Input, Invalid
  * Extent List or Invalid Physical Address for what was asked, with
  * Resources Exhausted when the device has no room for it, and with Retry
@@ -1329,12 +1331,13 @@ static struct cxlmi_tunnel_info *dcd_tunnel(struct fmd_component *dev,
  * refused before the command is sent.
  *
  * Returns -EINVAL, -ENOSPC, -EAGAIN (Retry Required or Busy), -EBUSY
- * (5602h Unsupported) or -EIO for anything else.
+ * (5602h Unsupported), -EREMOTEIO (outcome not known) or -EIO for anything
+ * else.
  */
 static int dc_cmd_errno(int rc, bool unsupported_is_busy)
 {
 	if (rc < 0)
-		return -EIO;
+		return -EREMOTEIO;
 
 	switch (rc) {
 	case CXLMI_RET_INPUT:
@@ -1357,18 +1360,20 @@ static void dc_cmd_failed(struct fmd_ctx *ctx, struct fmd_component *dev,
 			  const char *what, int rc)
 {
 	if (rc < 0)
-		fmd_warn(ctx, "%s: %s was not carried out: %d", dev->id, what, rc);
+		fmd_warn(ctx, "%s: %s: outcome not known (not sent, not answered, or "
+			 "the response could not be read): %d", dev->id, what, rc);
 	else
 		fmd_warn(ctx, "%s: %s failed: %d (%s)", dev->id, what, rc,
 			 cxlmi_cmd_retcode_tostr(rc));
 }
 
 /*
- * The refresh after a command the device accepted. A list that keeps
- * changing as it is read (-EAGAIN) is not a reason to send the command
- * again, which a client told to retry would do.
+ * The refresh after a command the device accepted, or whose outcome is not
+ * known: see dc_refresh_after().
  */
-static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id);
+static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+			    const char *what);
+static void dc_hosts_dirty(struct fmd_component *dev, int host_id);
 
 /* Host IDs a device exposes: SLD 0, MLD and MHD each LD */
 static int dc_hosts(struct fmd_component *dev, int *hosts, int max)
@@ -1976,11 +1981,52 @@ static int dcd_refresh_locked(struct fmd_ctx *ctx, struct fmd_component *dev, in
 	return dcd_refresh_hosts_locked(ctx, dev, hosts, n);
 }
 
-static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
+/* One host, or every host for @host_id -1, is to be read again */
+static void dc_hosts_dirty(struct fmd_component *dev, int host_id)
 {
-	int rc = dcd_refresh_locked(ctx, dev, host_id);
+	int hosts[FMD_DC_MAX_HOST_ID + 1];
+	int n;
 
-	return rc == -EAGAIN ? -EIO : rc;
+	if (host_id >= 0) {
+		dc_host_dirty(dev, host_id);
+		return;
+	}
+	n = dc_hosts(dev, hosts, FMD_DC_MAX_HOST_ID + 1);
+	for (int i = 0; i < n; i++)
+		dc_host_dirty(dev, hosts[i]);
+}
+
+/*
+ * The read after a command the device answered Success for. The command
+ * was carried out, whatever the read says: 5604h "shall complete when the
+ * device initiates the Add Capacity procedure" (CXL r4.0 Section
+ * 7.6.7.6.5), 5605h "when the device initiates the Remove Capacity
+ * procedure" (Section 7.6.7.6.6). A read that fails, a list that keeps
+ * changing as it is read (-EAGAIN) among them, is not a failure of the
+ * command, nor a reason to send it again, which a client told it failed,
+ * or to retry, would do: it is FMD_DC_ACCEPTED_STALE, and the hosts it did
+ * not read are read again by fmd_dcd_retry_stale(). They are marked before
+ * the read, so that one that does not get as far as recording itself is
+ * read again too.
+ */
+static int dc_refresh_after(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
+			    const char *what)
+{
+	int rc;
+
+	dc_hosts_dirty(dev, host_id);
+	rc = dcd_refresh_locked(ctx, dev, host_id);
+	/*
+	 * A tag list that could not be read is stale too: an add a host has
+	 * not answered shows only there (PendingLDs).
+	 */
+	if (!rc && fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags))
+		rc = -EIO;
+	if (!rc)
+		return 0;
+	fmd_warn(ctx, "%s: %s was carried out, but the read after it failed (%d): "
+		 "its state is stale until it is read again", dev->id, what, rc);
+	return FMD_DC_ACCEPTED_STALE;
 }
 
 int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
@@ -2389,9 +2435,11 @@ int fmd_dc_set_region_config(struct fmd_ctx *ctx, struct fmd_component *dev,
 		rc = cxlmi_cmd_fmapi_set_dc_region_config(dev->ep, ti, &req);
 		if (rc) {
 			dc_cmd_failed(ctx, dev, "Set DC Region Configuration", rc);
+			if (rc < 0)
+				dc_hosts_dirty(dev, -1);
 			return dc_cmd_errno(rc, true);
 		}
-		return dc_refresh_after(ctx, dev, -1);
+		return dc_refresh_after(ctx, dev, -1, "Set DC Region Configuration");
 	}
 
 	fmd_info(ctx, "%s: mock set DC region %u block size %" PRIu64 " MB sanitize=%d",
@@ -2501,10 +2549,12 @@ int fmd_dc_add(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		free(req);
 		if (rc) {
 			dc_cmd_failed(ctx, dev, "Initiate Dynamic Capacity Add", rc);
+			if (rc < 0)
+				dc_hosts_dirty(dev, host_id);
 			return dc_cmd_errno(rc, false);
 		}
 
-		return dc_refresh_after(ctx, dev, host_id);
+		return dc_refresh_after(ctx, dev, host_id, "Initiate Dynamic Capacity Add");
 	}
 }
 
@@ -2599,10 +2649,12 @@ int fmd_dc_release(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id,
 		free(req);
 		if (rc) {
 			dc_cmd_failed(ctx, dev, "Initiate Dynamic Capacity Release", rc);
+			if (rc < 0)
+				dc_hosts_dirty(dev, host_id);
 			return dc_cmd_errno(rc, false);
 		}
 
-		return dc_refresh_after(ctx, dev, host_id);
+		return dc_refresh_after(ctx, dev, host_id, "Initiate Dynamic Capacity Release");
 	}
 }
 
@@ -2640,9 +2692,21 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		if (rc) {
 			dc_cmd_failed(ctx, dev, add ? "Dynamic Capacity Add Reference" :
 				      "Dynamic Capacity Remove Reference", rc);
+			/* the tag list is to be read again */
+			if (rc < 0 && !fmd_memdev_dcd(dev)->tags.unsupported)
+				fmd_memdev_dcd(dev)->tags.known = false;
 			return dc_cmd_errno(rc, false);
 		}
 
-		return hw_refresh_tags(ctx, dev, dev->ep, ti);
+		/* carried out: a tag list that cannot be read is stale, as above */
+		rc = hw_refresh_tags(ctx, dev, dev->ep, ti);
+		if (rc || fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags)) {
+			fmd_warn(ctx, "%s: %s was carried out, but the tag list could not "
+				 "be read after it", dev->id,
+				 add ? "Dynamic Capacity Add Reference" :
+				 "Dynamic Capacity Remove Reference");
+			return FMD_DC_ACCEPTED_STALE;
+		}
+		return 0;
 	}
 }

@@ -27,6 +27,38 @@
 #define DC_RETRY_MSG "The device cannot carry out the request now; try again"
 
 /*
+ * FMD_DC_ACCEPTED_STALE: the device answered Success, and the read after
+ * it failed. Not a failure, and not to be sent again (cxl-fmd's wording).
+ */
+#define DC_ACCEPTED_STALE_MSG \
+	"The device accepted the request, but its state could not be read back after it: " \
+	"what is shown is stale until it is read again, on the next event poll. " \
+	"Do not send the request again"
+
+/* -EREMOTEIO: no response, or one that could not be read */
+#define DC_UNKNOWN_MSG \
+	"Outcome unknown: the device may or may not have carried out the request, and it " \
+	"is read again on the next event poll: check its state before sending this again"
+
+/*
+ * The message for what the four DC operations return in common, or NULL
+ * for the rest, which each handler words itself.
+ */
+static const char *dc_common_msg(int rc)
+{
+	switch (rc) {
+	case FMD_DC_ACCEPTED_STALE:
+		return DC_ACCEPTED_STALE_MSG;
+	case -EREMOTEIO:
+		return DC_UNKNOWN_MSG;
+	case -EAGAIN:
+		return DC_RETRY_MSG;
+	default:
+		return NULL;
+	}
+}
+
+/*
  * ============================================================================
  * Helpers
  * ============================================================================
@@ -662,11 +694,11 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 	free(extents);
 out:
 	if (rc) {
-		*msg = rc == -EAGAIN ? DC_RETRY_MSG :
-		       "Dynamic capacity release failed";
-		return rc;
+		*msg = dc_common_msg(rc);
+		if (!*msg)
+			*msg = "Dynamic capacity release failed";
 	}
-	return 0;
+	return rc;
 }
 
 /*
@@ -880,6 +912,10 @@ static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassi
 	json_decref(root);
 
 	rc = fmd_dc_set_region_config(ctx, dev, region, block_size, sanitize);
+	if (dc_common_msg(rc)) {
+		*msg = dc_common_msg(rc);
+		return rc;
+	}
 	switch (rc) {
 	case 0:
 		return 0;
@@ -888,9 +924,6 @@ static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassi
 		return rc;
 	case -EBUSY:
 		*msg = "Region has extents allocated; release them before reconfiguring";
-		return rc;
-	case -EAGAIN:
-		*msg = DC_RETRY_MSG;
 		return rc;
 	default:
 		*msg = "Set DC Region Configuration failed";
@@ -1026,6 +1059,10 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 			length, tag, extents, ext_count);
 	free(extents);
 
+	if (dc_common_msg(rc)) {
+		*msg = dc_common_msg(rc);
+		return rc;
+	}
 	switch (rc) {
 	case 0:
 		return 0;
@@ -1035,9 +1072,6 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		return rc;
 	case -ENOSPC:
 		*msg = "Insufficient free capacity in the region, or no room left to track the extents or tag";
-		return rc;
-	case -EAGAIN:
-		*msg = DC_RETRY_MSG;
 		return rc;
 	case -ENOENT:
 		*msg = "Region or extents not found for this host";
@@ -1159,6 +1193,10 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 			    length, tag, extents, ext_count);
 	free(extents);
 
+	if (dc_common_msg(rc)) {
+		*msg = dc_common_msg(rc);
+		return rc;
+	}
 	switch (rc) {
 	case 0:
 		return 0;
@@ -1171,9 +1209,6 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		return rc;
 	case -ENOSPC:
 		*msg = "Length exceeds the capacity assigned with the Tag";
-		return rc;
-	case -EAGAIN:
-		*msg = DC_RETRY_MSG;
 		return rc;
 	default:
 		*msg = "Initiate Dynamic Capacity Release failed";
@@ -1225,12 +1260,12 @@ static int action_dc_reference_locked(struct fmd_ctx *ctx, const char *chassis_i
 	json_decref(root);
 
 	rc = fmd_dc_reference(ctx, dev, tag, add);
-	if (rc == -ENOENT)
+	if (dc_common_msg(rc))
+		*msg = dc_common_msg(rc);
+	else if (rc == -ENOENT)
 		*msg = "No extents carry the given Tag";
 	else if (rc == -EINVAL)
 		*msg = "The Tag names no sharable capacity (an empty or all-zero Tag is none)";
-	else if (rc == -EAGAIN)
-		*msg = DC_RETRY_MSG;
 	else if (rc)
 		*msg = "Dynamic Capacity reference update failed";
 	return rc;

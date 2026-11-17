@@ -161,8 +161,28 @@ HTTP status says what kind of failure it is. When the device refuses a
 command, its return code decides it: Invalid Input, Invalid Extent List and
 Invalid Physical Address are `400`, Resources Exhausted is `409`, Retry
 Required and Busy are `503` (with no `Retry-After`), Unsupported from 5602h
-is `409`; a command that could not be carried, and any other return code,
-is `500`.
+is `409`; any other return code is `500`. A command libcxlmi could not
+carry, or whose response it could not read, is `500` with a message that
+starts "Outcome unknown": libcxlmi gives the same result for a request not
+sent, one not answered, and a response it could not read, so the device
+may have carried it out; the host (every host for 5602h, the tag list for
+5606h and 5607h) is read again on the next `--event-poll` tick, and the
+client is to check before sending it again.
+
+A command the device answered Success for is not a failure, even when the
+read after it fails: 5604h "shall complete when the device initiates the
+Add Capacity procedure" (Section 7.6.7.6.5), 5605h "when the device
+initiates the Remove Capacity procedure" (Section 7.6.7.6.6). The answer
+is then `200 OK` (a DELETE too), with an error object whose `code` is
+`Base.1.0.Success` and whose `message` says the device accepted the
+request, that what is shown is stale until it is read again, and not to
+send the request again: a Free, Contiguous or Tag-based request sent again
+is another add or release. A 5603h list that keeps changing as it is read
+is such a read, not `503`. The host is shown `Warning` and read again on
+the next `--event-poll` tick. That the answer is `200` with this message,
+rather than a `Task`, and that a DELETE and a PATCH answer it too, where
+DSP0266 says they "should" return the resource or `204`, is cxl-fmd's
+choice.
 
 **Comment 4:** DMTF has no resource for a tag, and no property for the LDs
 that have accepted a tag or been offered it. cxl-fmd shows the device's
@@ -246,7 +266,8 @@ shown only in the tag view, as `PendingLDs` (Comment 4). Why:
   device sends 04h for a host that accepts no capacity, nor 05h after a
   Forced Removal, so the records give no dependable completion signal. The
   actions answer `200 OK` once the FM-API command succeeds, with no
-  `Task`, and a record only makes cxl-fmd read the host again (cxl-fmd's
+  `Task` (with the message of Comment 3 when the read after it failed),
+  and a record only makes cxl-fmd read the host again (cxl-fmd's
   choice). The mock host accepts added capacity at once, so in the mock
   only a topology file has an add the host has not answered.
 
@@ -619,7 +640,7 @@ exceed the region's decode length (Section 7.6.7.6.5), which is `409`
 and 5603h for that host again, then 5608h; whether the new extent is then
 listed, or only shown in `PendingLDs` of its tag until the host answers,
 depends on the device (Comment 5). The
-answer is `200 OK`.
+answer is `200 OK`, with the message of Comment 3 when that read failed.
 
 ### Initiate Dynamic Capacity Release (5605h)
 
@@ -655,7 +676,8 @@ other: "To remove a host's access to the shared extent, the FM issues
 Initiate Dynamic Capacity Release Request with Selection Policy=Tag-based
 with the Host ID associated with that host" (Section 7.6.7.6.6). The
 answer is `200 OK`; on hardware 5601h and 5603h of that host are then
-read again, and 5608h.
+read again, and 5608h (when that read fails, `200` with the message of
+Comment 3).
 
 What the mock refuses, as the specification says a device does:
 
@@ -878,10 +900,10 @@ As implemented; the comments are the header's.
 #define FMD_DC_REGION_NONE     0xFF  /* extent lies in no region of its host */
 
 enum fmd_dc_sync {
-	FMD_DC_SYNC_NEVER = 0,
-	FMD_DC_SYNC_OK,
-	FMD_DC_SYNC_STALE,                   /* the last read failed */
-	FMD_DC_SYNC_DIRTY,                   /* to be read: a record named it */
+	FMD_DC_SYNC_NEVER = 0,		/* not read yet */
+	FMD_DC_SYNC_OK,			/* the last read completed */
+	FMD_DC_SYNC_STALE,		/* the last read failed */
+	FMD_DC_SYNC_DIRTY,		/* to be read: a record, an overflow or a command */
 };
 
 /* One Dynamic Capacity Tag Information entry of 5608h (Table 7-78) */
@@ -1134,7 +1156,8 @@ where it says so), not the specification's.
    reclaim, is not said; nor whether the FM's 04h records follow the order
    the host answered in. Choice: a record only makes cxl-fmd read the host
    again and take its counts (78h, 7Ch). The actions answer `200 OK` when
-   the FM-API command succeeds, DELETE `204`; there is no `Task`, and no
+   the FM-API command succeeds, DELETE `204` (both `200` with a message
+   when the read after it failed: Comment 3); there is no `Task`, and no
    record is matched to a request.
 8. **Which log carries 04h and 05h on an MLD or a Multi-Headed device.**
    Choice: the device's FM-side Dynamic Capacity Event Log, read through

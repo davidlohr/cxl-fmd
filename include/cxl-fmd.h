@@ -947,16 +947,18 @@ struct fmd_mem_chunk {
  * Whether a host's extents are those of its last Get DC Region Extent
  * Lists (5603h): never read, read, kept from an earlier read after the
  * last one failed (STALE), or to be read again (DIRTY): a DC event record
- * named the host or the log overflowed, and the host has not been read
- * since. A record that is cleared is not reported again, so STALE and
- * DIRTY hosts are read again on every --event-poll tick until a read
- * completes (cxl-fmd's choice; see fmd_dcd_retry_stale()).
+ * named the host, the log overflowed, a command to it was accepted and it
+ * is about to be read, or a command's outcome is not known, and the host
+ * has not been read since. A record that is cleared is not reported
+ * again, so STALE and DIRTY hosts are read again on every --event-poll
+ * tick until a read completes (cxl-fmd's choice; see
+ * fmd_dcd_retry_stale()).
  */
 enum fmd_dc_sync {
-	FMD_DC_SYNC_NEVER = 0,
-	FMD_DC_SYNC_OK,
-	FMD_DC_SYNC_STALE,
-	FMD_DC_SYNC_DIRTY,
+	FMD_DC_SYNC_NEVER = 0,		/* not read yet */
+	FMD_DC_SYNC_OK,			/* the last read completed */
+	FMD_DC_SYNC_STALE,		/* the last read failed */
+	FMD_DC_SYNC_DIRTY,		/* to be read: a record, an overflow or a command */
 };
 
 /* Whether a host's DC state is not known to be what the device has now */
@@ -2341,9 +2343,20 @@ int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
 /*
  * The four return, when the device refused the command: -EINVAL for
  * Invalid Input, Invalid Extent List or Invalid Physical Address, -ENOSPC
- * for Resources Exhausted, -EAGAIN for Retry Required or Busy; -EIO when
- * the command was not carried, or for any other return code.
+ * for Resources Exhausted, -EAGAIN for Retry Required or Busy; -EIO for
+ * any other return code. -EREMOTEIO when the outcome is not known: no
+ * response, or one libcxlmi could not read, which cannot be told from a
+ * request that was not sent; the host (every host for 5602h, the tag list
+ * for 5606h and 5607h) is then marked to be read again.
+ *
+ * FMD_DC_ACCEPTED_STALE (positive) when the device answered Success and
+ * the read after it failed: the command was carried out (5604h "shall
+ * complete when the device initiates the Add Capacity procedure", Section
+ * 7.6.7.6.5; 5605h likewise, Section 7.6.7.6.6), and what cxl-fmd shows
+ * is stale until fmd_dcd_retry_stale() reads it. It is not a failure, and
+ * the command is not to be sent again.
  */
+#define FMD_DC_ACCEPTED_STALE 1
 
 /*
  * Set DC Region Configuration (5602h)
@@ -2494,7 +2507,8 @@ int fmd_redfish_action_reset_ppb(struct fmd_ctx *ctx, const char *switch_id,
  *
  * Write handlers return 0 on success or a negative errno that server.c
  * maps to an HTTP status: -ENOENT 404, -EINVAL 400, -EBUSY/-ENOSPC/-EEXIST 409,
- * anything else 500. @msg receives a static error message when non-NULL.
+ * -EAGAIN 503, anything else 500. @msg receives a static error message when
+ * non-NULL. FMD_DC_ACCEPTED_STALE is a success, 200 with @msg in the body.
  */
 json_t *fmd_redfish_dc_capabilities(struct fmd_ctx *ctx, struct fmd_component *dev,
 				    const char *chassis_id, const char *dev_id);

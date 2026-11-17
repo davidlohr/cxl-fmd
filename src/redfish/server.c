@@ -142,6 +142,24 @@ static enum MHD_Result send_error(struct MHD_Connection *conn,
 	return send_json_response(conn, status, error);
 }
 
+/*
+ * A DC request the device accepted, whose state could not be read back
+ * after it (FMD_DC_ACCEPTED_STALE): 200, with "An error response, with a
+ * message that indicates success or any additional relevant messages"
+ * (DSP0266 Table 11, for an action), here the Success code with @message.
+ * A DELETE and a PATCH answer the same, where DSP0266 says they "should"
+ * return the resource or 204: what cxl-fmd has of the resource is what is
+ * stale (cxl-fmd's choice).
+ */
+static enum MHD_Result send_dc_accepted_stale(struct MHD_Connection *conn,
+					      const char *message)
+{
+	return send_json_response(conn, MHD_HTTP_OK,
+		json_pack("{s:{s:s, s:s}}", "error",
+			  "code", "Base.1.0.Success",
+			  "message", message ? message : "Accepted"));
+}
+
 /* An error with the Allow header a 405 has to have (RFC 9110 Section 15.5.6) */
 static enum MHD_Result send_error_allow(struct MHD_Connection *conn,
 					unsigned int status, const char *message,
@@ -1185,6 +1203,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		free_params(params, 8);
 		free(norm_url);
 
+		if (rc == FMD_DC_ACCEPTED_STALE)
+			return send_dc_accepted_stale(conn, msg);
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		return send_errno(conn, rc, msg);
@@ -1200,6 +1220,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		free_params(params, 8);
 		free(norm_url);
 
+		if (rc == FMD_DC_ACCEPTED_STALE)
+			return send_dc_accepted_stale(conn, msg);
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		return send_errno(conn, rc, msg);
@@ -1215,6 +1237,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		free_params(params, 8);
 		free(norm_url);
 
+		if (rc == FMD_DC_ACCEPTED_STALE)
+			return send_dc_accepted_stale(conn, msg);
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		return send_errno(conn, rc, msg);
@@ -1559,6 +1583,8 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 		free_params(params, 8);
 		free(norm_url);
 
+		if (rc == FMD_DC_ACCEPTED_STALE)
+			return send_dc_accepted_stale(conn, msg);
 		if (rc == 0)
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		return send_errno(conn, rc, msg);
@@ -1673,6 +1699,8 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		free_params(params, 8);
 		free(norm_url);
 
+		if (rc == FMD_DC_ACCEPTED_STALE)
+			return send_dc_accepted_stale(conn, msg);
 		if (rc == 0)
 			return send_no_content(conn);
 		return send_errno(conn, rc, msg);
