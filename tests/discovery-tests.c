@@ -3113,7 +3113,8 @@ static void dc_region_health(struct fmd_component *dev, struct fmd_ctx *ctx, con
  * (cxl-fmd's choice). Hosts 0 and 1 both list tag dc_tag, host 0 in the
  * Reference Bitmap and host 1 in the Pending one: neither listed extent is
  * pending, and host 1's add is in the tag's row. FM Holds Reference is the
- * tag's.
+ * tag's. The Redfish view writes Pending false whatever ext->pending is, so
+ * the extents' own flag is checked too: on hardware it is set by nothing.
  */
 static void test_dc_tags_pending(void)
 {
@@ -3142,6 +3143,10 @@ static void test_dc_tags_pending(void)
 	CHECK(e0 && e1 && t, "no extents, or no tag entry");
 	if (!e0 || !e1 || !t)
 		goto out;
+	/* the extent itself, which the Redfish view does not read */
+	CHECK(!e0->pending && !e1->pending,
+	      "made pending from the tag's bitmap: host 0 %d, host 1 %d",
+	      e0->pending, e1->pending);
 	CHECK(dc_region_pending(dev, ctx, "1", "1", "ext_1_40000000") == 0,
 	      "host 1's listed extent is Pending %d",
 	      dc_region_pending(dev, ctx, "1", "1", "ext_1_40000000"));
@@ -3174,7 +3179,8 @@ out:
  * has not answered under one tag, its bit set in both the Reference and the
  * Pending Reference Bitmap (Table 7-78). Its two extents that 5603h lists
  * are neither of them pending, nor Starting: the bitmap does not say which
- * extent, if any, is the add.
+ * extent, if any, is the add. Neither is their ext->pending, which the
+ * Redfish view does not read.
  */
 static void test_dc_tags_accepted_and_pending(void)
 {
@@ -3195,8 +3201,10 @@ static void test_dc_tags_accepted_and_pending(void)
 		       { 0 }, 1, { 0 }, 1 }, 1);
 	dc_refresh_host_tags(ctx, ep, dev, 0, e, 2);
 	for (int i = 0; i < 2; i++) {
+		struct fmd_dc_extent *x = fmd_dc_find_extent(dev, 0, e[i].dpa);
 		int p = dc_region_pending(dev, ctx, "0", "1", ids[i]);
 
+		CHECK(x && !x->pending, "%s made pending from the tag's bitmap", ids[i]);
 		dc_extent_status(dev, ctx, ids[i], state, health, sizeof(state));
 		CHECK(p == 0 && !strcmp(state, "Enabled"),
 		      "%s, accepted under a tag with an add outstanding: Pending %d, %s",
