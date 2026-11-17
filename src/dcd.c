@@ -2039,6 +2039,25 @@ int fmd_dcd_refresh(struct fmd_ctx *ctx, struct fmd_component *dev, int host_id)
 	return rc;
 }
 
+/* Whether a memory device's Get DCD Info is owed, and its retry state */
+static bool *dcd_pending_of(struct fmd_component *dev, struct fmd_retry **retry)
+{
+	switch (dev->type) {
+	case FMD_COMPONENT_SLD:
+		*retry = &fmd_to_sld(dev)->dcd_retry;
+		return &fmd_to_sld(dev)->dcd_pending;
+	case FMD_COMPONENT_MLD:
+		*retry = &fmd_to_mld(dev)->dcd_retry;
+		return &fmd_to_mld(dev)->dcd_pending;
+	case FMD_COMPONENT_MHD:
+		*retry = &fmd_to_mhd(dev)->dcd_retry;
+		return &fmd_to_mhd(dev)->dcd_pending;
+	default:
+		*retry = NULL;
+		return NULL;
+	}
+}
+
 int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 {
 	struct cxlmi_cmd_fmapi_get_dcd_info_rsp info = {0};
@@ -2051,11 +2070,43 @@ int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev)
 
 	ti = dcd_tunnel(dev, &tbuf);
 
-	/* Get DCD Info (5600h) - failure simply means not a DCD */
+	/*
+	 * Get DCD Info (5600h). Its Possible Command Return Codes are
+	 * Success, Unsupported, Internal Error and Retry Required (Section
+	 * 7.6.7.6.1): only Unsupported says the device has no Dynamic
+	 * Capacity. One that fails otherwise is asked again, with backoff
+	 * and up to a cap (fmd_dcd_retry_pending(), cxl-fmd's policy).
+	 */
+	errno = 0;	/* see fmd_probe_result() */
 	rc = cxlmi_cmd_fmapi_get_dcd_info(dev->ep, ti, &info);
 	if (rc) {
-		fmd_dbg(ctx, "%s: no dynamic capacity support (%d)", dev->id, rc);
-		return 0;
+		struct fmd_retry *retry;
+		bool *pending = dcd_pending_of(dev, &retry);
+
+		if (fmd_probe_result(rc) != FMD_PROBE_TRANSIENT || !pending) {
+			fmd_dbg(ctx, "%s: no dynamic capacity support (%d)", dev->id, rc);
+			if (pending)
+				*pending = false;
+			return 0;
+		}
+		*pending = !fmd_retry_failed(retry);
+		if (*pending)
+			fmd_warn(ctx, "%s: get dcd info failed for now (%d): "
+				 "asked again", dev->id, rc);
+		else
+			fmd_err(ctx, "%s: get dcd info failed in %d tries (%d): "
+				"taken as no DCD until cxl-fmd is restarted",
+				dev->id, FMD_RETRY_MAX, rc);
+		return -EAGAIN;
+	}
+	{
+		struct fmd_retry *retry;
+		bool *pending = dcd_pending_of(dev, &retry);
+
+		if (pending) {
+			*pending = false;
+			fmd_retry_reset(retry);
+		}
 	}
 
 	dcd = calloc(1, sizeof(*dcd));
@@ -2709,4 +2760,37 @@ int fmd_dc_reference(struct fmd_ctx *ctx, struct fmd_component *dev,
 		}
 		return 0;
 	}
+}
+
+void fmd_dcd_retry_pending(struct fmd_ctx *ctx)
+{
+	static const enum fmd_component_type types[] = {
+		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
+	};
+	char (*ids)[FMD_MAX_ID_LEN];
+	struct fmd_component *comp;
+	int n = 0, max = ctx->topology.root->device_count;
+
+	/* by ID: discovering a DCD adds to the topology */
+	ids = calloc(max ? max : 1, sizeof(*ids));
+	if (!ids)
+		return;
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, types[t]) {
+			struct fmd_retry *retry;
+			bool *pending = dcd_pending_of(comp, &retry);
+
+			if (n < max && *pending && fmd_retry_due(retry))
+				snprintf(ids[n++], FMD_MAX_ID_LEN, "%s", comp->id);
+		}
+	}
+	for (int i = 0; i < n; i++) {
+		comp = fmd_topology_find(&ctx->topology, ids[i]);
+		if (!comp || fmd_dcd_discover(ctx, comp) == -EAGAIN)
+			continue;
+		/* the DC log's notification, which was not asked for */
+		if (fmd_memdev_dcd(comp))
+			fmd_device_events_enable(ctx, comp);
+	}
+	free(ids);
 }

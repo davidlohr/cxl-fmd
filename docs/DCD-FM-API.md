@@ -341,8 +341,16 @@ CXL r4.0's.
 
 ### Get DCD Info (5600h)
 
-Sent on discovery to every Type 3 device, whatever its CEL says; a device
-that does not answer it with Success is taken not to be a DCD. Like every
+Sent on discovery to every Type 3 device, whatever its CEL says. Its
+Possible Command Return Codes are Success, Unsupported, Internal Error and
+Retry Required (Section 7.6.7.6.1): a device that answers Unsupported (or
+Unsupported Mailbox or CCI) is taken not to be a DCD. One that fails
+otherwise, or that cannot be reached for a timeout or an I/O error, is
+asked again from the next `--rescan` on, with the backoff and the cap of
+discovery (cxl-fmd's policy: see "Devices that are not ready" in
+[Redfish-API.md](Redfish-API.md)); until it answers it has no Dynamic
+Capacity resources, and once it does it is read as at discovery and its
+Dynamic Capacity Event Log notification is asked for. Like every
 56xxh command, it is sent on the device's own FM-API endpoint, or, for an
 MLD on a switch port, through that port with
 `DEFINE_CXLMI_TUNNEL_SWITCH` (see `dcd_tunnel()` in `src/dcd.c` and

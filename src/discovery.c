@@ -2228,6 +2228,12 @@ int fmd_rescan(struct fmd_ctx *ctx)
 			switches[n++] = fmd_to_switch(comp);
 	}
 
+	/*
+	 * Get DCD Info that could not be read for the moment, of the
+	 * devices found before this re-scan
+	 */
+	fmd_dcd_retry_pending(ctx);
+
 	for (int i = 0; i < n; i++)
 		discover_switch(ctx, switches[i]);
 	free(switches);

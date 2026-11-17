@@ -2014,6 +2014,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of a device on hardware whose Get Multi-Headed Info (5500h) or Get LD Info (5400h) failed at discovery with a code other than Unsupported or Unsupported Mailbox or CCI (Retry Required, Busy, Internal Error, Invalid Input), or because the command did not reach the device or its response did not come back (a timeout, a route that is down) | an SLD for good (its endpoint was not asked again), of capacity 0 if Identify Memory Device was not answered either | `404` until it is discovered whole: see "Devices that are not ready" below |
 | The same for an MLD whose Get LD Allocations (5401h) failed that way or gave a reserved Memory Granularity, or whose second Get LD Info did, directly attached or on a switch port (and a switch-port MLD whose tunnelled Identify did) | an MLD for good, with LDs of 0 MiB and no `MemoryDomain` (or with no LDs) | likewise `404`, then the MLD whole |
 | The same for an SLD whose Identify Memory Device (4000h) failed that way | an SLD of capacity 0 for good | likewise |
+| `GET` of the `PCIeDevice` (`CXLDevice.DynamicCapacity`), `MemoryRegion`s and `MemoryExtent`s of a DCD on hardware whose Get DCD Info (5600h) failed at discovery other than with Unsupported (Retry Required, Internal Error) | no Dynamic Capacity, for good | none until a `--rescan` reads Get DCD Info (with the backoff and cap of "Devices that are not ready"); then the DCD as at discovery, its DC event notification asked for |
 
 Mock topologies and discovery:
 
@@ -2046,7 +2047,9 @@ Mock topologies and discovery:
   Memory Device (4000h) of an SLD, and the tunnelled Identify of an MLD
   on a switch port; the others (Get Head Info, QoS, Get Partition Info,
   Get Health Info, the CEL, per-LD commands) do not keep a device from
-  being added.
+  being added. Get DCD Info (5600h) is read the same way, but the device
+  is added without it: whether it is a DCD is asked again on the same
+  terms, on the `--rescan` timer only (with `--rescan 0`, not at all).
 
 ---
 

@@ -636,6 +636,9 @@ struct fmd_sld {
 
 	/* Dynamic capacity capabilities (NULL if not a DCD) */
 	struct fmd_dcd_info *dcd;
+	/* Get DCD Info failed for the moment: asked again (fmd_dcd_retry_pending()) */
+	bool dcd_pending;
+	struct fmd_retry dcd_retry;
 };
 
 
@@ -695,6 +698,9 @@ struct fmd_mld {
 
 	/* Dynamic capacity capabilities (NULL if not a DCD) */
 	struct fmd_dcd_info *dcd;
+	/* Get DCD Info failed for the moment: asked again (fmd_dcd_retry_pending()) */
+	bool dcd_pending;
+	struct fmd_retry dcd_retry;
 };
 
 
@@ -907,6 +913,9 @@ struct fmd_mhd {
 
 	/* Dynamic capacity capabilities (NULL if not a DCD) */
 	struct fmd_dcd_info *dcd;
+	/* Get DCD Info failed for the moment: asked again (fmd_dcd_retry_pending()) */
+	bool dcd_pending;
+	struct fmd_retry dcd_retry;
 };
 
 
@@ -2419,8 +2428,21 @@ struct fmd_dc_extent *fmd_dc_find_extent(struct fmd_component *dev, int host_id,
 unsigned int fmd_dc_host_extent_count(struct fmd_component *dev, int host_id,
 				      uint8_t region_id);
 
-/* Hardware discovery: 5600h, then 5601h/5603h per host and 5608h */
+/*
+ * Hardware discovery: 5600h, then 5601h/5603h per host and 5608h. A 5600h
+ * answered Unsupported (or Unsupported Mailbox or CCI) says the device is
+ * no DCD; one that fails otherwise (enum fmd_probe) leaves it dcd_pending,
+ * and returns -EAGAIN.
+ */
 int fmd_dcd_discover(struct fmd_ctx *ctx, struct fmd_component *dev);
+
+/*
+ * Get DCD Info again of the memory devices whose last one failed for the
+ * moment (dcd_pending), each when its backoff says (struct fmd_retry);
+ * one found to be a DCD has its DC event notification asked for. Called
+ * by fmd_rescan(), fabric_lock held exclusively.
+ */
+void fmd_dcd_retry_pending(struct fmd_ctx *ctx);
 
 /*
  * Drain the Dynamic Capacity Event Log of every DCD and refresh the hosts

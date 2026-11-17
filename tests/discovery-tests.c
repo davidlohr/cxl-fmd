@@ -4193,6 +4193,98 @@ static uint16_t last_policy_set(struct cxlmi_endpoint *ep)
 	return set == 0x01 && cmd == 0x05 ? (uint16_t)(pl[0] | pl[1] << 8) : 0xffff;
 }
 
+/*
+ * Get DCD Info (5600h) that fails for the moment does not make a DCD a
+ * device with no Dynamic Capacity (the review's F09 case E): it is asked
+ * again on the next re-scan, with backoff, and the DCD is then read whole,
+ * its DC log's notification asked for. Unsupported still says it is none.
+ */
+static void answer_dcd_info(struct cxlmi_endpoint *ep)
+{
+	uint8_t info[0x54] = { 0 };
+
+	info[0x00] = 1;				/* Number of Hosts */
+	info[0x01] = 1;				/* Number of Supported DC Regions */
+	put16(info + 0x04, 0x07);		/* Free, Contiguous, Prescriptive */
+	put16(info + 0x08, 0x03);		/* Tag-based, Prescriptive */
+	put64(info + 0x0c, 4);			/* Total Dynamic Capacity: 1 GiB */
+	put64(info + 0x14, 1ULL << 28);		/* Region 0: 256 MB blocks */
+	answer(ep, 0x5600, info, sizeof(info));
+}
+
+static void test_dcd_info_transient(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	struct fmd_component *dev;
+	struct fmd_sld *sld = NULL;
+	char id[FMD_MAX_ID_LEN];
+	int before = failures, rc;
+	unsigned int sent;
+
+	answer_identify(ep, 0xf09e, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	answer_rc(ep, 0x5600, CXLMI_RET_RETRY);
+	rc = fmd_discover(ctx);
+	device_id(id, sizeof(id), 0xf09e);
+	dev = fmd_topology_find(&ctx->topology, id);
+	if (dev && dev->type == FMD_COMPONENT_SLD)
+		sld = fmd_to_sld(dev);
+	CHECK(rc == 1 && sld && !sld->dcd && sld->dcd_pending,
+	      "E: discover %d, SLD %p, a DCD or not pending", rc, (void *)sld);
+	if (!sld)
+		goto out;
+
+	/* Internal Error, the next time: still not known, and then let pass */
+	answer_rc(ep, 0x5600, CXLMI_RET_INTERNAL);
+	fmd_rescan(ctx);
+	CHECK(last_opcode(ep) == 0x5600 && !sld->dcd && sld->dcd_pending &&
+	      sld->dcd_retry.skip == 1, "E: re-scan 1: last %04xh, skip %d",
+	      last_opcode(ep), sld->dcd_retry.skip);
+	answer_dcd_info(ep);
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent && !sld->dcd,
+	      "E: Get DCD Info asked again while backing off");
+
+	/* then it answers: the DCD, its region and extent, its notification */
+	answer_dc_refresh(ep, 0);
+	answer(ep, 0x0104, (uint8_t[2]){ 0, 0 }, 2);
+	answer_rc(ep, 0x0105, CXLMI_RET_SUCCESS);
+	fmd_rescan(ctx);
+	CHECK(sld->dcd && !sld->dcd_pending && sld->dcd->total_dc_capacity == 1ULL << 30 &&
+	      fmd_dc_find_region(dev, 0, 0) && fmd_dc_find_extent(dev, 0, 1ULL << 30),
+	      "E: no DCD with its region and extent after the re-scan");
+	CHECK(last_policy_set(ep) != 0xffff && (last_policy_set(ep) & 0x0010),
+	      "E: DC log notification not asked for: %04x", last_policy_set(ep));
+
+	/* and once read, not again */
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent, "E: %u commands by a re-scan of a DCD known",
+	      commands_sent(ep) - sent);
+	fmd_ctx_free(ctx);
+
+	/* Unsupported: no DCD, and not asked again */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	answer_identify(ep, 0xf09e, 0x03);
+	answer_memdev_identify(ep, 64, 64, 0);
+	answer_rc(ep, 0x5600, CXLMI_RET_UNSUPPORTED);
+	fmd_discover(ctx);
+	dev = fmd_topology_find(&ctx->topology, id);
+	sld = dev && dev->type == FMD_COMPONENT_SLD ? fmd_to_sld(dev) : NULL;
+	CHECK(sld && !sld->dcd && !sld->dcd_pending, "Unsupported: a DCD pending");
+	answer_dcd_info(ep);
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent && sld && !sld->dcd,
+	      "Unsupported: Get DCD Info asked again");
+out:
+	fmd_ctx_free(ctx);
+	report("Get DCD Info that cannot be read for the moment is asked again", before);
+}
+
 static void test_switch_events(void)
 {
 	static const uint8_t ld1[3] = { 0x03, 5, 1 };
@@ -9459,6 +9551,7 @@ int main(void)
 	test_rescan();
 	test_discovery_transient();
 	test_discovery_retry_cap();
+	test_dcd_info_transient();
 	test_switch_events();
 	test_mailbox_events_are_the_hosts();
 	test_device_removal();
