@@ -1107,14 +1107,17 @@ struct fmd_vppb *fmd_vcs_find_vppb(struct fmd_vcs *vcs, uint8_t vppb_id)
  * Identify Switch Device.
  *
  * The table is replaced only once it has been read. A VCS that cannot be
- * asked about keeps what was last known of it, so a failed command does not
- * make its bindings look unbound, and one the switch calls invalid goes.
- * The table is in the order the VCSs were read, not indexed by VCS ID: use
- * fmd_switch_find_vcs().
+ * asked about keeps what was last known of it, marked stale, so a failed
+ * command does not make its bindings look unbound, and one the switch calls
+ * invalid goes. The table is in the order the VCSs were read, not indexed by
+ * VCS ID: use fmd_switch_find_vcs(). Returns -EIO if a VCS could not be
+ * read: what is kept of it, or its absence when nothing was, is not what the
+ * switch has now.
  */
 int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 {
 	struct fmd_vcs *table;
+	bool unread = false;
 	int n = 0;
 
 	if (!ctx || !sw)
@@ -1141,10 +1144,14 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		if (rc == -ENOENT)
 			continue;
 		if (rc) {
+			unread = true;
 			old = fmd_switch_find_vcs(sw, id);
 			if (!old)
 				continue;
 			table[n] = *old;
+			table[n].stale = true;
+		} else {
+			table[n].stale = false;
 		}
 		n++;
 	}
@@ -1174,7 +1181,7 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	/* bindings this run made that the vPPBs no longer hold */
 	fmd_binding_marks_prune(ctx, sw->base.id);
 
-	return 0;
+	return unread ? -EIO : 0;
 }
 
 

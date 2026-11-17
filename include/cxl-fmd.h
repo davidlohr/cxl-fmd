@@ -451,6 +451,8 @@ struct fmd_vcs {
 	uint8_t state;               /* VCS state from FM-API */
 	uint8_t hdm_decoders;        /* Number of HDM decoders */
 	uint8_t upstream_port_id;    /* USP this VCS is bound to */
+	bool stale;                  /* the last fmd_vcs_refresh() could not
+					read it: this is what was known before */
 
 	/* vPPB bindings for this VCS */
 	uint8_t num_vppbs;
@@ -1685,7 +1687,9 @@ struct fmd_task {
 	enum fmd_task_kind kind;
 	enum fmd_task_state state;
 	int percent;                         /* Percentage Complete of 0002h */
-	int failed_polls;
+	int failed_polls;                    /* 0002h reads that failed in a row */
+	int unobserved;                      /* 0002h said over, and the vPPB
+						was not seen settled */
 	char switch_id[FMD_MAX_ID_LEN];
 	uint8_t vcs_id;
 	uint8_t vppb_id;
@@ -2004,12 +2008,15 @@ int fmd_redfish_switch_log_clear(struct fmd_ctx *ctx, const char *chassis_id,
 void fmd_switch_events_enable(struct fmd_ctx *ctx, struct fmd_switch *sw);
 
 /*
- * A Binding Change of a vPPB, from a Virtual CXL Switch Event Record: the
- * end of the bind or unbind a task is following. Returns false if no task
- * is following that vPPB. fabric_lock held.
+ * A Binding Change of a vPPB, from a Virtual CXL Switch Event Record, with
+ * its vPPB Binding Status, Port ID and LD ID (33h-35h, Table 7-80): the
+ * end of the bind or unbind a task is following, if those fit it. Returns
+ * false if no task is following that vPPB, or the record does not fit the
+ * one that is. fabric_lock held.
  */
 bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
-			      uint8_t vcs_id, uint8_t vppb_id, bool failed);
+			      uint8_t vcs_id, uint8_t vppb_id, bool failed,
+			      uint8_t status, uint8_t port_id, uint8_t ld_id);
 
 /*
  * VCS Bind/Unbind Operations (CXL r4.0 Section 7.6.7.2)
@@ -2062,9 +2069,12 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * @sw: Target switch
  *
  * Re-queries the switch for current VCS/vPPB state. Useful after bind/unbind
- * operations to update the local view of the switch configuration.
+ * operations to update the local view of the switch configuration. A VCS
+ * that could not be read keeps what was known of it, with stale set, and
+ * one never read before is left out.
  *
- * Return: 0 on success, negative errno on failure
+ * Return: 0 when every active VCS was read, -EIO when one or more could not
+ * be, another negative errno on failure
  */
 int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw);
 

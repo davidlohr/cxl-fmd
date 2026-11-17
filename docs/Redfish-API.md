@@ -1402,12 +1402,35 @@ bind and unbind operations generate events to the Warning Event Log"
 (Table 7-80). A switch that finishes a bind before it answers is answered
 for with `201`, and no task.
 
+The outcome is judged only on a read of the vPPB made after the switch
+said the operation was over (cxl-fmd's choice). A vPPB that still reads
+01h, "Bind or unbind in progress" (Table 7-34), is still being bound or
+unbound, and a VCS that cannot be read (Get Virtual CXL Switch Info, 5200h,
+fails) says nothing either way: the task stays `Running` and the switch is
+asked again. Success is never taken without a read that shows it; a failure
+the switch reported is taken without one. After five such answers in a row
+the task is lost (see below).
+
+A Binding Change record is taken as the end of a task only if its vPPB
+Binding Status, Port ID and LD ID fit it. Of a Binding Change, 33h "contains
+the updated binding state of a vPPB following the binding change"
+(Table 7-80), and 34h and 35h likewise, but nothing in a record says which
+command it is of: one read while a bind is under way can be that of an
+earlier unbind of the same vPPB. So the fields only turn a record away
+(cxl-fmd's choice): an Informational one fits only if it shows what the
+task asked for (unbound, for an unbind), a Warning one only if it does not,
+and neither if it shows 01h. One turned away has the VCSs read again, as a
+record no task follows does.
+
 However a task ends, what was under way is forgotten, and the Connection is
 what the vPPB is: completed, failed, its switch gone, five reads of
-Background Operation Status that failed, or no task made after the switch
-started. After a task is lost the switch is read again if it answers, and
-a vPPB that still reads busy (01h) gives no Connection until it reads
-otherwise. The specification sets no time limit on a bind or an unbind,
+Background Operation Status that failed (or five answers that the
+operation was over with no read of the vPPB to show it), or no task made
+after the switch started. After a task is lost the switch is read again if
+it answers: a vPPB that reads 01h then is still being bound or unbound,
+and its task goes on, asking the switch again; a VCS that cannot be read
+ends it, and a vPPB that still reads busy (01h) later gives no Connection
+until it reads otherwise. The specification sets no time limit on a bind or an unbind,
 and cxl-fmd does not abort one (see "Forcing an Unbind").
 
 ### Deleting Connections (DELETE)
@@ -1955,6 +1978,9 @@ Changes from the fixes of the external design review (branch
 | `GET` of a `MemoryExtent` whose region is gone from its host's 5601h, when the 5603h after it fails | `Links/MemoryRegions` to the region that is gone (`404`) | no `Links/MemoryRegions`, `Status.Health` `Warning` |
 | `DynamicCapacityAdd`, `DynamicCapacityRelease`, `CXLReferenceDCMemory`, a `MemoryExtent` `DELETE` or a `MemoryRegion` `PATCH` on hardware that the device answered Success for, when the read after it (5601h, 5603h or 5608h) fails, is answered Retry Required, or finds the extent list changing each time it is read | `500` "Initiate Dynamic Capacity Add failed" (and the like); a client that sent it again got a second add or release | `200` (a `DELETE` too, not `204`) with `{"error": {"code": "Base.1.0.Success", "message": "The device accepted the request, but its state could not be read back after it: ... Do not send the request again"}}`; the host's resources `Warning` until the next `--event-poll` tick reads it |
 | The same requests when libcxlmi cannot carry the command or read its response (a 5604h answered Success with a payload) | `500` with the request's "failed" message, logged as "was not carried out" | `500` "Outcome unknown: the device may or may not have carried out the request ...: check its state before sending this again"; the host (the tag list for `CXLReferenceDCMemory`) is read again on the next tick |
+| A bind or unbind task whose Background Operation Status (0002h) says Success while the switch's VCSs cannot be read (5200h fails) | `Exception`, "... the vPPB is not bound to what was asked" (or "is still bound"), and the Connection of a bind gone, though the switch bound it | `Running`; it ends when the vPPB is read, or is lost after five such answers |
+| A bind or unbind task whose 0002h says it is over while the vPPB still reads 01h, or whose fifth failed 0002h read finds the vPPB at 01h | `Exception`, its Connection gone (the vPPB at 01h gave none) and the switch not asked again | `Running`, the Connection `Starting` or `Updating`, and the switch asked again |
+| A Binding Change record (Table 7-80) of a vPPB a task follows whose 33h-35h are not what the task asked for (an earlier unbind's record read during a bind), or that shows 01h | taken for the end of the task: `Exception` while the vPPB read 01h, and the real end never read | turned away: the VCSs are read again, and the task goes on |
 
 Mock topologies and discovery:
 

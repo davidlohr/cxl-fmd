@@ -4525,7 +4525,7 @@ static void test_device_removal(void)
 	      "a connection being bound was not left to its task");
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, unbound, unbound);
-	fmd_task_binding_changed(ctx, sw, 2, 2, true);
+	fmd_task_binding_changed(ctx, sw, 2, 2, true, 0x00, 0, 0xff);
 	CHECK(task->state == FMD_TASK_EXCEPTION && conn_state(ctx, b_id) < 0 &&
 	      !ops_count(ctx), "task %d: %s", task->state, task->message);
 
@@ -4575,7 +4575,7 @@ static void test_device_removal(void)
 	      conn_state(ctx, c_id));
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, unbound, unbound);
-	fmd_task_binding_changed(ctx, sw, 2, 1, false);
+	fmd_task_binding_changed(ctx, sw, 2, 1, false, 0x00, 0, 0xff);
 	CHECK(conn_state(ctx, c_id) < 0 && !ops_count(ctx),
 	      "the connection is still there");
 
@@ -6534,6 +6534,235 @@ static void test_lost_task_frees_op(void)
 out:
 	fmd_ctx_free(ctx);
 	report("a lost task frees its op", before);
+}
+
+/*
+ * A task is judged on the vPPB as read after the switch says the operation
+ * is over, and only on such a read (Review F08). Switch @serial, a bind of
+ * LD 1 of port 5 to vPPB 1 of VCS 2 (@unbind: an unbind of it, bound), the
+ * Connection's ID in @cid.
+ */
+static const uint8_t vppb_busy[3] = { 0x01, 0x00, 0xff };
+static const uint8_t vppb_ld1[3] = { 0x03, 5, 1 };
+
+static struct fmd_task *task_on(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+				uint64_t serial, bool unbind, char *cid,
+				struct fmd_switch **swp)
+{
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_bind_key key;
+	struct fmd_switch *sw;
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), serial);
+	sw = fmd_topology_find_switch(&ctx->topology, id);
+	*swp = sw;
+	if (!sw)
+		return NULL;
+	key = bind_key(id, 2, 1, 5, 1);
+	fmd_conn_id_format(&key, cid, FMD_CONN_ID_LEN);
+	if (unbind) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+		fmd_vcs_refresh(ctx, sw);
+		return fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, 1);
+	}
+	fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL);
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	if (fmd_vppb_bind(ctx, sw, 2, 1, 5, 1) != FMD_OP_STARTED)
+		return NULL;
+	return fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
+}
+
+/* the switch says it is over, with Success, and the vPPB reads what was asked */
+static void task_done(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep, bool unbind)
+{
+	answer_bg_status(ep, false, 100, unbind ? 0x5202 : 0x5201, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbind ? unbound : vppb_ld1, unbound);
+	fmd_tasks_poll(ctx);
+}
+
+static void test_task_fresh_observation(void)
+{
+	int before = failures;
+
+	for (int unbind = 0; unbind < 2; unbind++) {
+		const char *what = unbind ? "unbind" : "bind";
+		enum fmd_conn_state during = unbind ? FMD_CONN_UPDATING : FMD_CONN_STARTING;
+		struct fmd_ctx *ctx;
+		struct cxlmi_endpoint *ep;
+		struct fmd_switch *sw;
+		struct fmd_task *task;
+		char cid[FMD_CONN_ID_LEN];
+		unsigned int sent;
+
+		/*
+		 * 0002h says it is over with Success, and neither VCS can be
+		 * read: what is known of the vPPB is from before, which says
+		 * nothing of the outcome. The task goes on, and ends when the
+		 * vPPB is read.
+		 */
+		ctx = new_ctx();
+		ep = new_switch(ctx, 0x5f10 + unbind);
+		task = task_on(ctx, ep, 0x5f10 + unbind, unbind, cid, &sw);
+		CHECK(task, "%s: no task", what);
+		if (task) {
+			answer_bg_status(ep, false, 100, unbind ? 0x5202 : 0x5201,
+					 CXLMI_RET_SUCCESS);
+			answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+			answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+			fmd_tasks_poll(ctx);
+			CHECK(task->state == FMD_TASK_RUNNING && ops_count(ctx) == 1 &&
+			      conn_state(ctx, cid) == (int)during,
+			      "%s over, VCSs not read: task %d (%s), %d ops, "
+			      "Connection %d", what, task->state, task->message,
+			      ops_count(ctx), conn_state(ctx, cid));
+			task_done(ctx, ep, unbind);
+			CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+			      task->percent == 100,
+			      "%s read at last: task %d (%s)", what, task->state,
+			      task->message);
+		}
+		fmd_ctx_free(ctx);
+
+		/*
+		 * A Binding Change of the vPPB, in the Informational log, from
+		 * before: its 33h-35h are not what the task asked for (an
+		 * earlier unbind of it, for a bind; an earlier bind, for an
+		 * unbind), and the vPPB reads 01h. The task goes on, and the
+		 * next poll asks the switch.
+		 */
+		ctx = new_ctx();
+		ep = new_switch(ctx, 0x5f12 + unbind);
+		task = task_on(ctx, ep, 0x5f12 + unbind, unbind, cid, &sw);
+		CHECK(task, "%s: no task", what);
+		if (task) {
+			if (unbind)
+				answer_event(ep, virtual_switch_event, 0x31,
+					     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+			else
+				answer_event(ep, virtual_switch_event, 0x31,
+					     (uint8_t[6]){ 2, 1, 0x00, 0x00, 0, 0xff }, 6);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, vppb_busy, unbound);
+			fmd_switch_events_poll(ctx);
+			CHECK(task->state == FMD_TASK_RUNNING && ops_count(ctx) == 1 &&
+			      task->percent != 100,
+			      "%s, a record from before: task %d (%s) at %d%%", what,
+			      task->state, task->message, task->percent);
+			/* turned away, not taken for the end and then not seen */
+			CHECK(!task->unobserved, "%s: a record from before was "
+			      "taken for the end of the task", what);
+
+			/*
+			 * A Warning record (a failure) that shows what the task
+			 * asked for, and a record that shows 01h: neither can
+			 * be its end, and both are turned away.
+			 */
+			answer_no_events(ep, false);
+			if (unbind)
+				answer_event(ep, virtual_switch_event, 0x32,
+					     (uint8_t[6]){ 2, 1, 0x00, 0x00, 0, 0xff }, 6);
+			else
+				answer_event(ep, virtual_switch_event, 0x32,
+					     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, vppb_busy, unbound);
+			fmd_switch_events_poll(ctx);
+			CHECK(task->state == FMD_TASK_RUNNING && !task->unobserved,
+			      "%s: a Warning record of what was asked was taken: "
+			      "task %d (%s)", what, task->state, task->message);
+			answer_event(ep, virtual_switch_event, 0x33,
+				     (uint8_t[6]){ 2, 1, 0x00, 0x01, 0, 0xff }, 6);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, vppb_busy, unbound);
+			fmd_switch_events_poll(ctx);
+			CHECK(task->state == FMD_TASK_RUNNING && !task->unobserved,
+			      "%s: a record of 01h was taken: task %d (%s)", what,
+			      task->state, task->message);
+			cxlmi_mock_clear_responses(ep);
+			sent = commands_sent(ep);
+			task_done(ctx, ep, unbind);
+			CHECK(commands_sent(ep) > sent &&
+			      task->state == FMD_TASK_COMPLETED && !ops_count(ctx),
+			      "%s after the record: task %d (%s)", what,
+			      task->state, task->message);
+		}
+		fmd_ctx_free(ctx);
+
+		/*
+		 * 0002h says it is over, and the vPPB still reads 01h: the
+		 * operation is not over, and the task goes on.
+		 */
+		ctx = new_ctx();
+		ep = new_switch(ctx, 0x5f14 + unbind);
+		task = task_on(ctx, ep, 0x5f14 + unbind, unbind, cid, &sw);
+		CHECK(task, "%s: no task", what);
+		if (task) {
+			answer_bg_status(ep, false, 100, unbind ? 0x5202 : 0x5201,
+					 CXLMI_RET_SUCCESS);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, vppb_busy, unbound);
+			fmd_tasks_poll(ctx);
+			CHECK(task->state == FMD_TASK_RUNNING && ops_count(ctx) == 1 &&
+			      conn_state(ctx, cid) == (int)during,
+			      "%s over and the vPPB at 01h: task %d (%s), Connection %d",
+			      what, task->state, task->message, conn_state(ctx, cid));
+			task_done(ctx, ep, unbind);
+			CHECK(task->state == FMD_TASK_COMPLETED, "%s: task %d (%s)",
+			      what, task->state, task->message);
+		}
+		fmd_ctx_free(ctx);
+
+		/*
+		 * Five failed reads of 0002h, the vPPB at 01h when it is read
+		 * after the fifth: it is still being bound or unbound, and
+		 * the switch is asked again, to the end.
+		 */
+		ctx = new_ctx();
+		ep = new_switch(ctx, 0x5f16 + unbind);
+		task = task_on(ctx, ep, 0x5f16 + unbind, unbind, cid, &sw);
+		CHECK(task, "%s: no task", what);
+		if (task) {
+			for (int i = 0; i < 4; i++)
+				fmd_tasks_poll(ctx);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, vppb_busy, unbound);
+			fmd_tasks_poll(ctx);
+			CHECK(task->state != FMD_TASK_EXCEPTION && ops_count(ctx) == 1 &&
+			      conn_state(ctx, cid) == (int)during,
+			      "%s lost with the vPPB at 01h: task %d (%s), %d ops, "
+			      "Connection %d", what, task->state, task->message,
+			      ops_count(ctx), conn_state(ctx, cid));
+			task_done(ctx, ep, unbind);
+			CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx),
+			      "%s, then over: task %d (%s)", what, task->state,
+			      task->message);
+		}
+		fmd_ctx_free(ctx);
+
+		/*
+		 * 0002h says it is over five times, and the VCSs are never
+		 * read: the task is not followed for ever.
+		 */
+		ctx = new_ctx();
+		ep = new_switch(ctx, 0x5f18 + unbind);
+		task = task_on(ctx, ep, 0x5f18 + unbind, unbind, cid, &sw);
+		CHECK(task, "%s: no task", what);
+		if (task) {
+			for (int i = 0; i < 5; i++) {
+				answer_bg_status(ep, false, 100,
+						 unbind ? 0x5202 : 0x5201,
+						 CXLMI_RET_SUCCESS);
+				fmd_tasks_poll(ctx);
+			}
+			CHECK(task->state != FMD_TASK_RUNNING,
+			      "%s never seen: task still running", what);
+		}
+		fmd_ctx_free(ctx);
+	}
+	report("a task is judged on a fresh read of its vPPB", before);
 }
 
 /*
@@ -8694,6 +8923,7 @@ int main(void)
 	test_disabled_vcs_has_no_host();
 	test_untracked_binding_change_refreshes();
 	test_lost_task_frees_op();
+	test_task_fresh_observation();
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
 	test_chunk_plan();

@@ -17,9 +17,9 @@
  *    things when its binding has changed. "Successful bind and unbind
  *    operations generate events to the Informational Event Log. Failed bind
  *    and unbind operations generate events to the Warning Event Log." A
- *    Binding Change ends the task following that vPPB, if one is; one that
- *    no task follows has the VCSs read again. Nothing else in these
- *    records is acted on.
+ *    Binding Change ends the task following that vPPB, if one is and the
+ *    record's binding fields (33h-35h) fit it; any other has the VCSs
+ *    read again. Nothing else in these records is acted on.
  *
  * Not every removal gives a Physical Switch Event Record. Of a surprise
  * removal, "The switch notifies the FM ... by generating Virtual CXL Switch
@@ -100,18 +100,21 @@ static void handle_record(struct fmd_ctx *ctx, struct fmd_switch *sw, int log,
 			vcs_id, rec->data[3]);
 		/*
 		 * 00h = Binding Change; a failed one is in the Warning log.
-		 * One that no task follows is a bind or unbind cxl-fmd did
-		 * not ask for: by another FM, through another CCI, or by
-		 * the switch. Its VCS is read again rather than taking the
-		 * record's binding fields (33h-35h) as they are (cxl-fmd's
-		 * choice).
+		 * One that no task follows, or whose binding fields (33h-35h)
+		 * do not fit the task that does, is a bind or unbind cxl-fmd
+		 * did not ask for, or not the one it is waiting for: by
+		 * another FM, through another CCI, by the switch, or an
+		 * earlier one of the same vPPB. Its VCS is read again rather
+		 * than taking those fields as they are (cxl-fmd's choice).
 		 */
 		if (rec->data[2] == 0x00 &&
 		    !fmd_task_binding_changed(ctx, sw, vcs_id, vppb_id,
-					      log == EVENT_LOG_WARNING)) {
+					      log == EVENT_LOG_WARNING,
+					      rec->data[3], rec->data[4],
+					      rec->data[5])) {
 			fmd_info(ctx, "%s: vPPB %d of VCS %d changed binding, "
-				 "and cxl-fmd did not ask for it", sw->base.id,
-				 vppb_id, vcs_id);
+				 "and no task of cxl-fmd's was waiting for it",
+				 sw->base.id, vppb_id, vcs_id);
 			ev->bindings = true;
 		}
 		return;

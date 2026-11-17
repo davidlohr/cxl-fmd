@@ -2743,7 +2743,10 @@ int fmd_mock_external_next(struct fmd_ctx *ctx)
 	fmd_binding_marks_prune(ctx, sw->base.id);
 	if (e->emit_event) {
 		fmd_mock_binding_record(sw, 0, e->vcs_id, vppb);
-		fmd_task_binding_changed(ctx, sw, e->vcs_id, e->vppb_id, false);
+		fmd_task_binding_changed(ctx, sw, e->vcs_id, e->vppb_id, false,
+					 vppb->binding_status,
+					 vppb->bound_port_id,
+					 vppb->bound_ld_id);
 	}
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);

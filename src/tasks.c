@@ -13,7 +13,9 @@
  * operation is over. While it runs, a struct fmd_binding_op says what the
  * vPPB is becoming, since a vPPB being bound or unbound reads 01h; the task
  * frees it when the operation is over, however that is learnt, and the
- * Connection is then what the vPPB is.
+ * Connection is then what the vPPB is. That the operation is over is
+ * judged on the vPPB read again after the switch says it is, and only then
+ * (task_complete()).
  */
 
 #include <stdio.h>
@@ -25,6 +27,8 @@
 
 /* finished tasks kept for a client to collect */
 #define FMD_TASKS_KEPT 64
+/* answers in a row that tell nothing before a task is lost (cxl-fmd's) */
+#define FMD_TASK_TRIES 5
 
 struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 				struct fmd_switch *sw,
@@ -143,21 +147,73 @@ static void task_key(const struct fmd_task *task, struct fmd_bind_key *key)
 }
 
 /*
- * The outcome of one task whose operation is over, with return code @rc.
- * @logged_failed: the switch recorded it as failed, with no return code
- * known.
+ * What the task's vPPB is now: the switch's VCSs are read again. @observed
+ * is false when the task's VCS could not be read, so that what is known of
+ * it is from before; a VCS that is gone was read as gone only if every VCS
+ * was read (fmd_vcs_refresh()).
+ */
+static struct fmd_vppb *task_observe(struct fmd_ctx *ctx, struct fmd_task *task,
+				     struct fmd_switch *sw, bool *observed)
+{
+	int rc = fmd_vcs_refresh(ctx, sw);
+	struct fmd_vcs *vcs = fmd_switch_find_vcs(sw, task->vcs_id);
+
+	*observed = vcs ? !vcs->stale : rc == 0;
+	return vcs ? fmd_vcs_find_vppb(vcs, task->vppb_id) : NULL;
+}
+
+static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
+		      struct fmd_switch *sw, const char *message);
+
+/*
+ * The switch said the operation is over, and the vPPB, read again, does not
+ * show it: it still reads 01h, or could not be read. The task goes on, and
+ * the switch is asked again; after FMD_TASK_TRIES such answers in a row it
+ * is lost.
+ */
+static void task_unseen(struct fmd_ctx *ctx, struct fmd_task *task,
+			struct fmd_switch *sw, bool busy)
+{
+	fmd_warn(ctx, "Task %d: the switch says the %s is over, and vPPB %d of "
+		 "VCS %d %s", task->id,
+		 task->kind == FMD_TASK_BIND ? "bind" : "unbind", task->vppb_id,
+		 task->vcs_id, busy ? "still reads 01h (bind or unbind in progress)" :
+		 "could not be read");
+	if (++task->unobserved >= FMD_TASK_TRIES)
+		task_lost(ctx, task, sw, busy ?
+			  "The switch says the operation is over, and the vPPB "
+			  "still reads in progress" :
+			  "The switch says the operation is over, and the vPPB "
+			  "could not be read");
+}
+
+/*
+ * The outcome of one task whose operation the switch says is over, with
+ * return code @rc. @logged_failed: the switch recorded it as failed, with
+ * no return code known.
+ *
+ * Judged on the vPPB as it is read now, and only then (cxl-fmd's choice):
+ * a vPPB that still reads 01h is still being bound or unbound, and one that
+ * could not be read says nothing either way, so the task goes on. Success
+ * is not taken without a vPPB that shows it; a failure the switch reported
+ * is taken without one, unless the vPPB reads 01h.
  */
 static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 			  struct fmd_switch *sw, uint16_t rc, bool logged_failed)
 {
-	struct fmd_vcs *vcs;
+	bool failed = rc != CXLMI_RET_SUCCESS || logged_failed;
 	struct fmd_vppb *vppb;
+	bool observed, busy;
 	char msg[128];
 
 	/* what the switch has now */
-	fmd_vcs_refresh(ctx, sw);
-	vcs = fmd_switch_find_vcs(sw, task->vcs_id);
-	vppb = vcs ? fmd_vcs_find_vppb(vcs, task->vppb_id) : NULL;
+	vppb = task_observe(ctx, task, sw, &observed);
+	busy = observed && vppb && vppb->binding_status == FMD_VPPB_BUSY;
+	if (busy || (!observed && !failed)) {
+		task_unseen(ctx, task, sw, busy);
+		return;
+	}
+	task->percent = 100;
 
 	if (task->kind == FMD_TASK_BIND) {
 		/*
@@ -173,7 +229,7 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 			  vppb->binding_status == FMD_VPPB_BOUND_LD &&
 			  vppb->bound_ld_id == task->ld_id));
 
-		if (rc == CXLMI_RET_SUCCESS && bound && !logged_failed) {
+		if (!failed && bound) {
 			struct fmd_bind_key key;
 
 			task_key(task, &key);
@@ -197,8 +253,7 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 	}
 
 	/* unbind */
-	if (rc == CXLMI_RET_SUCCESS && !logged_failed &&
-	    (!vppb || vppb->binding_status == FMD_VPPB_UNBOUND)) {
+	if (!failed && (!vppb || vppb->binding_status == FMD_VPPB_UNBOUND)) {
 		task_finish(ctx, task, true, "The vPPB is unbound");
 		return;
 	}
@@ -217,14 +272,48 @@ static void task_complete(struct fmd_ctx *ctx, struct fmd_task *task,
 }
 
 /*
+ * Whether a Binding Change record whose vPPB Binding Status, Port ID and LD
+ * ID are @status, @port_id and @ld_id can be the end of @task's operation.
+ * Of a Binding Change, 33h "contains the updated binding state of a vPPB
+ * following the binding change. Successful bind and unbind operations
+ * generate events to the Informational Event Log. Failed bind and unbind
+ * operations generate events to the Warning Event Log" (Table 7-80), and
+ * 34h and 35h likewise. Nothing in a record says which command it is of
+ * (an earlier unbind of the same vPPB, or another FM's bind), so the fields
+ * are used to turn a record away, never to decide an outcome (cxl-fmd's
+ * choice): a successful one fits only if it shows what the task asked
+ * for, a failed one only if it does not, and neither if it shows 01h.
+ */
+static bool record_fits(const struct fmd_task *task, bool failed,
+			uint8_t status, uint8_t port_id, uint8_t ld_id)
+{
+	bool asked;
+
+	if (status == FMD_VPPB_BUSY)
+		return false;
+	if (task->kind == FMD_TASK_BIND)
+		asked = port_id == task->port_id &&
+			((task->ld_id == FMD_LD_NONE &&
+			  status == FMD_VPPB_BOUND_PHYSICAL_PORT) ||
+			 (task->ld_id != FMD_LD_NONE &&
+			  status == FMD_VPPB_BOUND_LD && ld_id == task->ld_id));
+	else
+		asked = status == FMD_VPPB_UNBOUND;
+	return failed ? !asked : asked;
+}
+
+/*
  * The switch has recorded a Binding Change of a vPPB. If a task is following
- * a bind or unbind of it, this is its end, and the switch's own word on how
- * it went: "Failed bind and unbind operations generate events to the
- * Warning Event Log" (Table 7-80). The record has no return code: that is
- * in Background Operation Status, if the switch has run nothing since.
+ * a bind or unbind of it, and the record fits it (record_fits()), this is
+ * its end, and the switch's own word on how it went: "Failed bind and
+ * unbind operations generate events to the Warning Event Log" (Table 7-80).
+ * The record has no return code: that is in Background Operation Status,
+ * if the switch has run nothing since. The task is still judged on the vPPB
+ * read again (task_complete()).
  */
 bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
-			      uint8_t vcs_id, uint8_t vppb_id, bool failed)
+			      uint8_t vcs_id, uint8_t vppb_id, bool failed,
+			      uint8_t status, uint8_t port_id, uint8_t ld_id)
 {
 	struct fmd_task *task;
 	uint16_t rc = CXLMI_RET_SUCCESS;
@@ -235,7 +324,14 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		    strcmp(task->switch_id, sw->base.id) != 0)
 			continue;
 
-		task->percent = 100;
+		if (!record_fits(task, failed, status, port_id, ld_id)) {
+			fmd_info(ctx, "Task %d: a Binding Change of vPPB %d of "
+				 "VCS %d (%02xh, port %d, LD %d) that is not "
+				 "the end of its %s", task->id, vppb_id, vcs_id,
+				 status, port_id, ld_id,
+				 task->kind == FMD_TASK_BIND ? "bind" : "unbind");
+			return false;
+		}
 		if (failed) {
 			int percent;
 
@@ -252,15 +348,28 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 /*
  * A task that nothing follows any more: its switch is gone, or does not
  * answer. It ends as an Exception, its op goes, and its Connection is
- * what the vPPB, read again if @sw answers, now is: a vPPB still busy
- * gives none until it settles. @sw may be NULL.
+ * what the vPPB, read again if @sw answers, now is. A vPPB that reads 01h
+ * when read again is still being bound or unbound: the task goes on, and
+ * the switch is asked again. @sw may be NULL.
  */
 static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
 		      struct fmd_switch *sw, const char *message)
 {
+	if (sw) {
+		struct fmd_vppb *vppb;
+		bool observed;
+
+		vppb = task_observe(ctx, task, sw, &observed);
+		if (observed && vppb && vppb->binding_status == FMD_VPPB_BUSY) {
+			fmd_warn(ctx, "Task %d: %s; the vPPB is still being "
+				 "bound or unbound, and is followed still",
+				 task->id, message);
+			task->failed_polls = 0;
+			task->unobserved = 0;
+			return;
+		}
+	}
 	task_finish(ctx, task, false, message);
-	if (sw)
-		fmd_vcs_refresh(ctx, sw);
 }
 
 /* forget the oldest finished tasks beyond the number kept */
@@ -314,15 +423,19 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 				&percent, &rc);
 		if (status < 0) {
 			/* a switch that cannot be asked, several times over */
-			if (++task->failed_polls >= 5)
+			if (++task->failed_polls >= FMD_TASK_TRIES)
 				task_lost(ctx, task, sw, "The switch does not "
 					  "answer Background Operation Status");
 			continue;
 		}
 		task->failed_polls = 0;
-		task->percent = percent;
-		if (status == 0)
+		if (status == 0) {
 			task_complete(ctx, task, sw, rc, false);
+			continue;
+		}
+		/* in progress: the switch is working on it */
+		task->percent = percent;
+		task->unobserved = 0;
 	}
 	tasks_prune(ctx);
 	pthread_rwlock_unlock(&ctx->fabric_lock);
