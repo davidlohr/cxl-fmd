@@ -1125,6 +1125,7 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	if (!sw->base.ep) {
 		/* mock: the table is all there is */
 		fmd_binding_marks_prune(ctx, sw->base.id);
+		fmd_tasks_reconcile(ctx, sw, 0);
 		return 0;
 	}
 
@@ -1180,6 +1181,8 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
 	/* bindings this run made that the vPPBs no longer hold */
 	fmd_binding_marks_prune(ctx, sw->base.id);
+	/* tasks that lost track of their vPPB, and can see it again */
+	fmd_tasks_reconcile(ctx, sw, unread ? -EIO : 0);
 
 	return unread ? -EIO : 0;
 }

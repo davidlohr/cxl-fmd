@@ -500,7 +500,7 @@ All error responses follow the Redfish error format with an `error` object conta
 |--------|---------|-----------|
 | 200 OK | Success | GET requests returning data; actions; a `POST` of a Connection the host has already, switch-attached (bound, `Absent` included) or direct-attached, with the Connection and `Location`; a Dynamic Capacity action, `MemoryExtent` `DELETE` or `MemoryRegion` `PATCH` the device accepted whose state could not be read back after it, with a `Base.1.0.Success` error object whose message says not to send it again (see [DCD-FM-API.md](DCD-FM-API.md), Comment 3) |
 | 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
-| 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs (see "Binds and unbinds in the background") |
+| 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs or is `Interrupted` (see "Binds and unbinds in the background") |
 | 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once; the task monitor of an unbind once it has succeeded |
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input; `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind` |
@@ -1389,7 +1389,7 @@ cxl-fmd does not wait:
 | `DELETE .../Connections/{id}` | `202 Accepted`, a `Task`, `Location:` the task monitor | The Connection stands, `Updating`, until the vPPB reads unbound; then a `GET` of it is `404` |
 | `POST` of a target being bound for the host | `202 Accepted` and the same `Task` | |
 | Another bind or unbind while the switch is busy | `503 Service Unavailable` | Try again |
-| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs; then `201` and the Connection for a bind, `204` for an unbind, or the error | |
+| `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs or is `Interrupted`; then `201` and the Connection for a bind, `204` for an unbind, or the error | |
 
 The task is at `/redfish/v1/TaskService/Tasks/{id}`. Its `PercentComplete` is
 the Percentage Complete of Background Operation Status (0002h), which the
@@ -1422,16 +1422,39 @@ task asked for (unbound, for an unbind), a Warning one only if it does not,
 and neither if it shows 01h. One turned away has the VCSs read again, as a
 record no task follows does.
 
-However a task ends, what was under way is forgotten, and the Connection is
-what the vPPB is: completed, failed, its switch gone, five reads of
-Background Operation Status that failed (or five answers that the
-operation was over with no read of the vPPB to show it), or no task made
-after the switch started. After a task is lost the switch is read again if
-it answers: a vPPB that reads 01h then is still being bound or unbound,
-and its task goes on, asking the switch again; a VCS that cannot be read
-ends it, and a vPPB that still reads busy (01h) later gives no Connection
-until it reads otherwise. The specification sets no time limit on a bind or an unbind,
-and cxl-fmd does not abort one (see "Forcing an Unbind").
+The task of a bind or unbind is made before Bind vPPB or Unbind vPPB is
+sent. If it cannot be (no memory), nothing is sent, and the request is
+`500`: nothing is left that the switch carries out with no task following
+it.
+
+A task is lost when its switch is gone, or does not answer Background
+Operation Status five times in a row (or answers five times that the
+operation is over with no read of the vPPB to show it). The switch's VCSs
+are then read:
+
+- The switch is gone: the task ends in `Exception`, what was under way is
+  forgotten, and the Connection is what the vPPB is (none).
+- The vPPB reads anything but 01h: the task ends on what it reads, as
+  above, but with no return code; its message says it was read from the
+  vPPB.
+- The vPPB still reads 01h, or cannot be read: the task is `Interrupted`
+  (Task_v1: "the task has been interrupted but is expected to restart and
+  is therefore not complete"), with no `EndTime` or `TaskStatus` and a
+  message saying why; its monitor still answers `202`. What was under way
+  is kept: the Connection stays `Starting` or `Updating`, and a `DELETE`
+  of it is `503`. The switch is no longer asked how it went (Return Code
+  "Only valid when Percentage Complete = 100", Table 8-217, and the
+  switch may run another command since). Each later read of that switch's
+  VCSs (after a Binding Change record, on the `--rescan` timer, and before
+  each `POST`, `DELETE` and `#Cxl.ForceUnbind`) ends the task on what the
+  vPPB then reads, once it no longer reads 01h; a `DELETE` of the
+  Connection is that read too. With `--rescan 0`, on a switch whose
+  event logs are the host's, only a request makes that read. If the
+  switch goes, the task ends in `Exception`.
+
+Which tasks become `Interrupted`, and that a read of the vPPB ends them,
+are cxl-fmd's choices. The specification sets no time limit on a bind or
+an unbind, and cxl-fmd does not abort one (see "Forcing an Unbind").
 
 ### Deleting Connections (DELETE)
 
@@ -1488,7 +1511,9 @@ parameters, and a body, if any, is ignored.
   still sends option 2h. If the switch takes it, the answer is `202` with
   the task of that unbind, which ends when the vPPB is unbound; a switch
   still running the first command answers Busy, and the action `503`,
-  leaving the managed unbind as it was. A bind under way, or an unbind
+  leaving the managed unbind as it was. The same holds for an unbind
+  whose task is `Interrupted`: if the switch takes option 2h, the task is
+  followed again from there. A bind under way, or an unbind
   already forced, is `503`.
 - A direct-attached Connection has no vPPB to unbind: no action is
   offered, and a `POST` to its action URI is `400`.
@@ -1852,7 +1877,8 @@ types has to change.
 - **Tasks.** A bind's `Task` lists the Connection in
   `Links.CreatedResources` while it runs (only once `Completed`, before).
   A task that is lost no longer leaves its Connection `Starting` or
-  `Updating`.
+  `Updating` (since the design review, one whose vPPB still reads 01h is
+  `Interrupted` and does: see "Requests after the design review").
 
 ### Requests and status codes
 
@@ -1873,7 +1899,7 @@ types has to change.
 | `DELETE` of a Connection whose binding cxl-fmd did not make, or adopted | `204` and nothing unbound | Unbind vPPB, option 1h: `204` or `202` |
 | `DELETE` of a direct-attached Connection | `204` | `405`, `Allow: GET` |
 | `DELETE` of a stale ID (the vPPB now holds something else) | (IDs were not tied to a vPPB) | `404`, nothing unbound |
-| `DELETE` of a Connection whose task was lost | `503`, for good | taken |
+| `DELETE` of a Connection whose task was lost | `503`, for good | taken (since the design review, `503` while the vPPB of an `Interrupted` task reads 01h) |
 | `PATCH` of a Connection | `501` | `405`, `Allow: GET, DELETE` |
 | `POST .../Actions/Oem/Cxl.ForceUnbind` | (not served) | Unbind vPPB, option 2h |
 | Chunk `DELETE`, or a chunk `POST` that sends Set LD Allocations or Set Partition Info, on an LD or SLD a switch-attached Connection binds | sent | `409`, nothing sent |
@@ -1979,8 +2005,12 @@ Changes from the fixes of the external design review (branch
 | `DynamicCapacityAdd`, `DynamicCapacityRelease`, `CXLReferenceDCMemory`, a `MemoryExtent` `DELETE` or a `MemoryRegion` `PATCH` on hardware that the device answered Success for, when the read after it (5601h, 5603h or 5608h) fails, is answered Retry Required, or finds the extent list changing each time it is read | `500` "Initiate Dynamic Capacity Add failed" (and the like); a client that sent it again got a second add or release | `200` (a `DELETE` too, not `204`) with `{"error": {"code": "Base.1.0.Success", "message": "The device accepted the request, but its state could not be read back after it: ... Do not send the request again"}}`; the host's resources `Warning` until the next `--event-poll` tick reads it |
 | The same requests when libcxlmi cannot carry the command or read its response (a 5604h answered Success with a payload) | `500` with the request's "failed" message, logged as "was not carried out" | `500` "Outcome unknown: the device may or may not have carried out the request ...: check its state before sending this again"; the host (the tag list for `CXLReferenceDCMemory`) is read again on the next tick |
 | A bind or unbind task whose Background Operation Status (0002h) says Success while the switch's VCSs cannot be read (5200h fails) | `Exception`, "... the vPPB is not bound to what was asked" (or "is still bound"), and the Connection of a bind gone, though the switch bound it | `Running`; it ends when the vPPB is read, or is lost after five such answers |
-| A bind or unbind task whose 0002h says it is over while the vPPB still reads 01h, or whose fifth failed 0002h read finds the vPPB at 01h | `Exception`, its Connection gone (the vPPB at 01h gave none) and the switch not asked again | `Running`, the Connection `Starting` or `Updating`, and the switch asked again |
+| A bind or unbind task whose 0002h says it is over while the vPPB still reads 01h | `Exception`, its Connection gone (the vPPB at 01h gave none) and the switch not asked again | `Running`, the Connection `Starting` or `Updating`, and the switch asked again (after five such answers, see the next rows) |
 | A Binding Change record (Table 7-80) of a vPPB a task follows whose 33h-35h are not what the task asked for (an earlier unbind's record read during a bind), or that shows 01h | taken for the end of the task: `Exception` while the vPPB read 01h, and the real end never read | turned away: the VCSs are read again, and the task goes on |
+| A bind or unbind task whose switch does not answer Background Operation Status five times, or answers five times that it is over with the vPPB at 01h or not read, while the vPPB reads 01h or cannot be read | `Exception`, "The switch does not answer Background Operation Status"; its Connection gone (none for a vPPB at 01h) and a `DELETE` of it no longer `503`; the task never corrected | `TaskState` `Interrupted`, no `EndTime` or `TaskStatus`, its monitor `202`; the Connection `Starting` or `Updating`, a `DELETE` `503`; the next read of the switch's VCSs (a Binding Change record, `--rescan`, a request) that sees the vPPB settled ends the task `Completed` or `Exception` on what it reads |
+| The same when the vPPB, read then, has settled | `Exception` whatever it read | `Completed` if it reads what was asked (bound to the port and LD, or unbound), else `Exception`; the message says it was read from the vPPB |
+| `#Cxl.ForceUnbind` of a Connection whose managed unbind was lost with the vPPB at 01h | `404`: the task had ended and the vPPB at 01h gave no Connection | option 2h sent; if the switch takes it, `202` with that task, `Running` again |
+| `POST` or `DELETE` of a Connection when the task cannot be allocated | Bind vPPB or Unbind vPPB sent, then `500`, the switch carrying the operation out with no task | `500`, nothing sent |
 
 Mock topologies and discovery:
 

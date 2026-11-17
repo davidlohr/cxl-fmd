@@ -565,7 +565,9 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 		"Id", uri + strlen("/redfish/v1/TaskService/Tasks/"),
 		"Name", task->kind == FMD_TASK_BIND ? "Bind vPPB" : "Unbind vPPB",
 		"TaskState", task->state == FMD_TASK_RUNNING ? "Running" :
-			     task->state == FMD_TASK_COMPLETED ? "Completed" : "Exception",
+			     task->state == FMD_TASK_COMPLETED ? "Completed" :
+			     task->state == FMD_TASK_INTERRUPTED ? "Interrupted" :
+			     "Exception",
 		/* Percentage Complete of Background Operation Status */
 		"PercentComplete", task->percent,
 		"StartTime", start,
@@ -580,7 +582,13 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 	 * "shall not appear if the task is running or otherwise has not been
 	 * completed" (Task_v1)
 	 */
-	if (task->state != FMD_TASK_RUNNING) {
+	if (task->state == FMD_TASK_INTERRUPTED) {
+		/* not complete: why the switch is no longer asked */
+		json_object_set_new(result, "Messages",
+			json_pack("[{s:s, s:s}]",
+				  "MessageId", "Base.1.0.GeneralError",
+				  "Message", task->message));
+	} else if (task->state != FMD_TASK_RUNNING) {
 		bool ok = task->state == FMD_TASK_COMPLETED;
 		char end[32];
 
@@ -622,7 +630,9 @@ int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 	if (!task)
 		return 404;
 
-	if (task->state == FMD_TASK_RUNNING) {
+	/* Interrupted is not complete either (Task_v1) */
+	if (task->state == FMD_TASK_RUNNING ||
+	    task->state == FMD_TASK_INTERRUPTED) {
 		snprintf(location, len, "/redfish/v1/TaskService/TaskMonitors/%d", id);
 		*response = fmd_redfish_task(ctx, id);
 		return 202;
@@ -6537,22 +6547,27 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 	if (fmd_conn_id_format(&key, id, sizeof(id)))
 		return -6;
 
-	/* recorded before the switch is asked */
-	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL);
-	if (!op)
+	/*
+	 * Recorded, and its task made, before the switch is asked: nothing
+	 * is allocated once it may have started.
+	 */
+	task = fmd_task_alloc(ctx, FMD_TASK_BIND, sw, &key);
+	if (!task)
 		return -6;
+	op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL);
+	if (!op) {
+		fmd_task_discard(task);
+		return -6;
+	}
 
 	rc = fmd_vppb_bind(ctx, sw, key.vcs_id, key.vppb_id, port_id, ld_id);
 	if (rc == FMD_OP_STARTED) {
 		/* answered with the task; the Connection is Starting meanwhile */
-		task = fmd_task_start(ctx, FMD_TASK_BIND, sw, &key, 0);
-		if (!task) {
-			fmd_vcs_refresh(ctx, sw);
-			return -6;
-		}
-		*response = fmd_redfish_task(ctx, task->id);
-		return FMD_OP_STARTED;
+		task = fmd_task_activate(ctx, task, 0);
+		*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
+		return task ? FMD_OP_STARTED : -6;
 	}
+	fmd_task_discard(task);
 	fmd_binding_op_remove(ctx, op);
 
 	if (rc == 0) {
@@ -6812,9 +6827,10 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 	struct fmd_conn_view v;
 	struct fmd_bind_key key;
 	struct fmd_switch *sw;
+	enum fmd_task_state was;
 	struct fmd_task *task;
 	enum fmd_conn_kind kind;
-	bool busy;
+	bool busy, lost;
 	int rc;
 
 	/* what the switch has now */
@@ -6859,31 +6875,47 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 
 		fmd_info(ctx, "Connection %s: forcing the unbind of vPPB %d of VCS %d",
 			 connection_id, key.vppb_id, key.vcs_id);
+		/*
+		 * An Interrupted task is followed again from here: the reads
+		 * of the VCSs around the command must not end it, and free
+		 * its op, under this one.
+		 */
+		was = task->state;
+		lost = op->lost;
+		task->state = FMD_TASK_RUNNING;
+		op->lost = false;
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id, option);
 		if (rc == 0 || rc == FMD_OP_STARTED) {
 			/* the task under way sees the vPPB unbound */
 			op->unbind_option = option;
+			task->failed_polls = 0;
+			task->unobserved = 0;
 			*response = fmd_redfish_task(ctx, task->id);
 			return FMD_OP_STARTED;
 		}
+		task->state = was;
+		op->lost = lost;
 	} else {
 		fmd_info(ctx, "Connection %s: unbinding vPPB %d of VCS %d (option %d)",
 			 connection_id, key.vppb_id, key.vcs_id, option);
-		op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, option, NULL);
-		if (!op)
+		/* its task is made before the switch is asked, as for a bind */
+		task = fmd_task_alloc(ctx, FMD_TASK_UNBIND, sw, &key);
+		if (!task)
 			return -2;
+		op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, option, NULL);
+		if (!op) {
+			fmd_task_discard(task);
+			return -2;
+		}
 
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id, option);
 		if (rc == FMD_OP_STARTED) {
 			/* it stands, Updating, until the vPPB is unbound */
-			task = fmd_task_start(ctx, FMD_TASK_UNBIND, sw, &key, option);
-			if (!task) {
-				fmd_vcs_refresh(ctx, sw);
-				return -2;
-			}
-			*response = fmd_redfish_task(ctx, task->id);
-			return FMD_OP_STARTED;
+			task = fmd_task_activate(ctx, task, option);
+			*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
+			return task ? FMD_OP_STARTED : -2;
 		}
+		fmd_task_discard(task);
 		fmd_binding_op_remove(ctx, op);
 	}
 

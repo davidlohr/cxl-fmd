@@ -6404,8 +6404,11 @@ out:
 
 /*
  * A task that is lost: its switch is gone, or does not answer Background
- * Operation Status five times. Its op is freed, and its Connection is what
- * the vPPB is: a DELETE answered 503 while it ran is accepted again.
+ * Operation Status five times. When the switch is gone, or the vPPB read
+ * then has settled, the task ends, its op is freed, and its Connection is
+ * what the vPPB is: a DELETE answered 503 while it ran is accepted again.
+ * The task ends on what the vPPB reads, as the switch was not asked how
+ * it went.
  */
 static void test_lost_task_frees_op(void)
 {
@@ -6451,8 +6454,9 @@ static void test_lost_task_frees_op(void)
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, ld1, unbound);
 	fmd_tasks_poll(ctx);
-	CHECK(task->state == FMD_TASK_EXCEPTION, "task state %d: %s",
-	      task->state, task->message);
+	CHECK(task->state == FMD_TASK_COMPLETED &&
+	      strstr(task->message, "the switch was not asked"),
+	      "task state %d: %s", task->state, task->message);
 	CHECK(!ops_count(ctx) && conn_state(ctx, conn_id) >= 0 &&
 	      conn_state(ctx, conn_id) != FMD_CONN_STARTING,
 	      "the Connection of a bound vPPB after its task is lost: %d, %d ops",
@@ -6513,7 +6517,8 @@ static void test_lost_task_frees_op(void)
 		answer_vcs(ep, 0, 0, port2, unbound);
 		answer_vcs(ep, 2, 1, done ? unbound : ld1, unbound);
 		fmd_tasks_poll(ctx);
-		CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx),
+		CHECK(task->state == (done ? FMD_TASK_COMPLETED : FMD_TASK_EXCEPTION) &&
+		      !ops_count(ctx),
 		      "task state %d, %d ops", task->state, ops_count(ctx));
 		if (done) {
 			CHECK(conn_state(ctx, conn_id) < 0,
@@ -6717,8 +6722,10 @@ static void test_task_fresh_observation(void)
 
 		/*
 		 * Five failed reads of 0002h, the vPPB at 01h when it is read
-		 * after the fifth: it is still being bound or unbound, and
-		 * the switch is asked again, to the end.
+		 * after the fifth: it is still being bound or unbound. The
+		 * task is Interrupted with its op, and the switch is no longer
+		 * asked; the next read of the VCSs that sees the vPPB settled
+		 * ends it (test_lost_task_interrupted).
 		 */
 		ctx = new_ctx();
 		ep = new_switch(ctx, 0x5f16 + unbind);
@@ -6735,9 +6742,15 @@ static void test_task_fresh_observation(void)
 			      "%s lost with the vPPB at 01h: task %d (%s), %d ops, "
 			      "Connection %d", what, task->state, task->message,
 			      ops_count(ctx), conn_state(ctx, cid));
-			task_done(ctx, ep, unbind);
+			CHECK(task->state == FMD_TASK_INTERRUPTED &&
+			      ctx->binding_ops && ctx->binding_ops->lost,
+			      "%s lost with the vPPB at 01h: task %d", what,
+			      task->state);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, unbind ? unbound : vppb_ld1, unbound);
+			fmd_vcs_refresh(ctx, sw);
 			CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx),
-			      "%s, then over: task %d (%s)", what, task->state,
+			      "%s, then settled: task %d (%s)", what, task->state,
 			      task->message);
 		}
 		fmd_ctx_free(ctx);
@@ -6757,12 +6770,298 @@ static void test_task_fresh_observation(void)
 						 CXLMI_RET_SUCCESS);
 				fmd_tasks_poll(ctx);
 			}
-			CHECK(task->state != FMD_TASK_RUNNING,
-			      "%s never seen: task still running", what);
+			CHECK(task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1,
+			      "%s never seen: task %d, %d ops", what, task->state,
+			      ops_count(ctx));
 		}
 		fmd_ctx_free(ctx);
 	}
 	report("a task is judged on a fresh read of its vPPB", before);
+}
+
+/*
+ * A task whose switch does not answer Background Operation Status, while
+ * its vPPB reads 01h, is Interrupted and keeps its op (Review F08): the
+ * Connection stays Starting or Updating, a DELETE is still 503, and the
+ * first read of the VCSs that sees the vPPB settled ends the task on it.
+ */
+static struct fmd_task *task_interrupted(struct fmd_ctx *ctx,
+					 struct cxlmi_endpoint *ep, uint64_t serial,
+					 bool unbind, char *cid,
+					 struct fmd_switch **sw)
+{
+	struct fmd_task *task = task_on(ctx, ep, serial, unbind, cid, sw);
+
+	if (!task)
+		return NULL;
+	for (int i = 0; i < 4; i++)
+		fmd_tasks_poll(ctx);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	fmd_tasks_poll(ctx);
+	return task;
+}
+
+static void test_lost_task_interrupted(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f20);
+	char cid[FMD_CONN_ID_LEN], loc[128], sw_id[FMD_MAX_ID_LEN];
+	struct fmd_switch *sw;
+	struct fmd_task *task;
+	struct fmd_bind_key key;
+	json_t *resp = NULL;
+	unsigned int sent;
+	int before = failures, rc;
+
+	/* S1: a bind lost with the vPPB at 01h */
+	task = task_interrupted(ctx, ep, 0x5f20, false, cid, &sw);
+	CHECK(task, "no task");
+	if (!task)
+		goto out;
+	CHECK(task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+	      ctx->binding_ops->lost && conn_state(ctx, cid) == FMD_CONN_STARTING &&
+	      !fmd_tasks_running(ctx),
+	      "a bind lost with the vPPB at 01h: task %d (%s), %d ops, Connection %d",
+	      task->state, task->message, ops_count(ctx), conn_state(ctx, cid));
+
+	/* as served: Interrupted, not complete */
+	resp = fmd_redfish_task(ctx, task->id);
+	CHECK(resp && !strcmp(json_string_value(json_object_get(resp, "TaskState")),
+			      "Interrupted") &&
+	      !json_object_get(resp, "EndTime") && !json_object_get(resp, "TaskStatus") &&
+	      json_object_get(resp, "Messages") && json_object_get(resp, "Links"),
+	      "an Interrupted task as served");
+	json_decref(resp);
+	resp = NULL;
+	rc = fmd_redfish_task_monitor(ctx, task->id, &resp, loc, sizeof(loc));
+	CHECK(rc == 202 && strstr(loc, "/TaskMonitors/"),
+	      "the monitor of an Interrupted task: %d", rc);
+	json_decref(resp);
+	resp = NULL;
+
+	/* the switch is not asked about it again */
+	answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_SUCCESS);
+	sent = commands_sent(ep);
+	for (int i = 0; i < 3; i++)
+		fmd_tasks_poll(ctx);
+	CHECK(commands_sent(ep) == sent, "%u commands sent for an Interrupted task",
+	      commands_sent(ep) - sent);
+	cxlmi_mock_clear_responses(ep);
+
+	/* DELETE while the vPPB still reads 01h: 503, nothing sent */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == -3 && last_opcode(ep) == 0x5200 &&
+	      task->state == FMD_TASK_INTERRUPTED,
+	      "DELETE of an Interrupted bind: %d, last %04xh", rc, last_opcode(ep));
+
+	/*
+	 * The switch's Binding Change record: no task is Running to take it,
+	 * so the VCSs are read, and the vPPB, bound to what was asked, ends
+	 * the task. The binding is cxl-fmd's.
+	 */
+	answer_event(ep, virtual_switch_event, 0x41,
+		     (uint8_t[6]){ 2, 1, 0x00, 0x03, 5, 1 }, 6);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	fmd_switch_events_poll(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5f20);
+	key = bind_key(sw_id, 2, 1, 5, 1);
+	CHECK(task->state == FMD_TASK_COMPLETED && task->percent == 100 &&
+	      task->end && !ops_count(ctx) && conn_state(ctx, cid) >= 0 &&
+	      conn_state(ctx, cid) != FMD_CONN_STARTING &&
+	      fmd_binding_mark_find(ctx, &key),
+	      "an Interrupted bind, then the vPPB bound: task %d (%s), %d ops, "
+	      "Connection %d", task->state, task->message, ops_count(ctx),
+	      conn_state(ctx, cid));
+	fmd_ctx_free(ctx);
+
+	/* one that the vPPB, read, shows did not happen */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f21);
+	task = task_interrupted(ctx, ep, 0x5f21, false, cid, &sw);
+	CHECK(task && task->state == FMD_TASK_INTERRUPTED, "no Interrupted task");
+	if (!task)
+		goto out;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	fmd_vcs_refresh(ctx, sw);
+	CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx) &&
+	      conn_state(ctx, cid) < 0 && strstr(task->message, "not bound"),
+	      "an Interrupted bind, then the vPPB unbound: task %d (%s)",
+	      task->state, task->message);
+
+	/* a read that fails settles nothing */
+	task = task_interrupted(ctx, ep, 0x5f21, false, cid, &sw);
+	CHECK(task && task->state == FMD_TASK_INTERRUPTED, "no Interrupted task");
+	if (!task)
+		goto out;
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	fmd_vcs_refresh(ctx, sw);
+	CHECK(task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1,
+	      "an Interrupted task ended by a read that failed: %d", task->state);
+
+	/* its switch is gone: the next poll ends it, and its op */
+	snprintf(task->switch_id, sizeof(task->switch_id), "no_such_switch");
+	fmd_tasks_poll(ctx);
+	CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx),
+	      "an Interrupted task whose switch is gone: %d, %d ops",
+	      task->state, ops_count(ctx));
+	fmd_ctx_free(ctx);
+
+	/*
+	 * An unbind lost the same way; the vPPB then still reads bound. A
+	 * DELETE reads the VCSs first: the task ends, and the DELETE is sent.
+	 */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f22);
+	task = task_interrupted(ctx, ep, 0x5f22, true, cid, &sw);
+	CHECK(task && task->state == FMD_TASK_INTERRUPTED &&
+	      conn_state(ctx, cid) == FMD_CONN_UPDATING,
+	      "an unbind lost with the vPPB at 01h: %d, Connection %d",
+	      task ? (int)task->state : -1, conn_state(ctx, cid));
+	if (!task)
+		goto out;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(task->state == FMD_TASK_EXCEPTION && strstr(task->message, "still bound") &&
+	      rc == 0 && !ops_count(ctx),
+	      "DELETE once the vPPB of an Interrupted unbind settled: %d, task %d (%s)",
+	      rc, task->state, task->message);
+	fmd_ctx_free(ctx);
+
+	/*
+	 * #Cxl.ForceUnbind of an Interrupted managed unbind: option 2h is
+	 * sent, and the task is followed again from there to its end.
+	 */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f23);
+	task = task_interrupted(ctx, ep, 0x5f23, true, cid, &sw);
+	CHECK(task && task->state == FMD_TASK_INTERRUPTED, "no Interrupted task");
+	if (!task)
+		goto out;
+	/* the switch is busy: 503, and the task Interrupted as it was */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	answer_rc(ep, 0x5202, CXLMI_RET_BUSY);
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", cid, &resp);
+	CHECK(rc == -3 && task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+	      ctx->binding_ops->lost && ctx->binding_ops->unbind_option == 1,
+	      "ForceUnbind of an Interrupted unbind, Busy: %d, task %d", rc,
+	      task->state);
+	json_decref(resp);
+	resp = NULL;
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_redfish_action_force_unbind(ctx, "CXL", cid, &resp);
+	CHECK(rc == FMD_OP_STARTED && resp &&
+	      atoi(json_string_value(json_object_get(resp, "Id"))) == task->id &&
+	      task->state == FMD_TASK_RUNNING && ops_count(ctx) == 1 &&
+	      !ctx->binding_ops->lost && ctx->binding_ops->unbind_option == 2,
+	      "ForceUnbind of an Interrupted unbind: %d, task %d", rc, task->state);
+	json_decref(resp);
+	resp = NULL;
+	task_done(ctx, ep, true);
+	CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      conn_state(ctx, cid) < 0,
+	      "the forced unbind, over: task %d (%s)", task->state, task->message);
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	report("a lost task is Interrupted, keeps its op, and is settled by a read",
+	       before);
+}
+
+/* a task allocation that fails */
+static void *no_task_calloc(size_t nmemb, size_t size)
+{
+	(void)nmemb;
+	(void)size;
+	return NULL;
+}
+
+/*
+ * The task of a bind or unbind is made before Bind vPPB or Unbind vPPB is
+ * sent (Review F08): if it cannot be, nothing is sent, and nothing is left
+ * that the switch would be carrying out with no task to follow it.
+ */
+static void test_task_before_command(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f24);
+	char sw_id[FMD_MAX_ID_LEN], body[512], cid[FMD_CONN_ID_LEN];
+	void *(*saved)(size_t, size_t) = fmd_task_calloc;
+	unsigned int taken, then;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	answer_ld_info(ep, 2ULL * 4 << 28, 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	device_id(sw_id, sizeof(sw_id), 0x5f24);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	host = sw ? vcs_host(ctx, sw_id, 2) : NULL;
+	CHECK(sw && host, "no switch or host of VCS 2");
+	if (!sw || !host)
+		goto out;
+
+	/* POST: Bind vPPB answered Background Command Started, never sent */
+	snprintf(body, sizeof(body),
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld1\"}]}}",
+		 host->base.id, sw_id);
+	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
+	cxlmi_mock_get_stats(ep, NULL, &then);
+	fmd_task_calloc = no_task_calloc;
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	fmd_task_calloc = saved;
+	cxlmi_mock_get_stats(ep, NULL, &taken);
+	CHECK(rc == -6 && !resp && taken == then && last_opcode(ep) != 0x5201 &&
+	      !ops_count(ctx) && !ctx->tasks,
+	      "POST with no task to be had: %d, %u responses taken, last %04xh, "
+	      "%d ops", rc, taken - then, last_opcode(ep), ops_count(ctx));
+	cxlmi_mock_clear_responses(ep);
+	json_decref(resp);
+	resp = NULL;
+
+	/* DELETE of a bound one: Unbind vPPB never sent */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	fmd_vcs_refresh(ctx, sw);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	CHECK(conn_state(ctx, cid) >= 0, "no Connection %s", cid);
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	cxlmi_mock_get_stats(ep, NULL, &then);
+	fmd_task_calloc = no_task_calloc;
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	fmd_task_calloc = saved;
+	cxlmi_mock_get_stats(ep, NULL, &taken);
+	CHECK(rc == -2 && taken == then && last_opcode(ep) != 0x5202 &&
+	      !ops_count(ctx) && conn_state(ctx, cid) == FMD_CONN_ENABLED,
+	      "DELETE with no task to be had: %d, %u responses taken, last %04xh",
+	      rc, taken - then, last_opcode(ep));
+	cxlmi_mock_clear_responses(ep);
+
+	/* and with one: sent, and followed */
+	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == FMD_OP_STARTED && resp && ops_count(ctx) == 1 && ctx->tasks &&
+	      ctx->tasks->state == FMD_TASK_RUNNING,
+	      "DELETE in the background: %d", rc);
+out:
+	fmd_task_calloc = saved;
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	report("a task is made before its command is sent", before);
 }
 
 /*
@@ -8924,6 +9223,8 @@ int main(void)
 	test_untracked_binding_change_refreshes();
 	test_lost_task_frees_op();
 	test_task_fresh_observation();
+	test_lost_task_interrupted();
+	test_task_before_command();
 	test_post_delete_on_a_switch();
 	test_chunk_guard();
 	test_chunk_plan();

@@ -1200,6 +1200,12 @@ struct fmd_binding_op {
 	enum fmd_bind_op_kind kind;
 	uint8_t unbind_option;		/* Unbind Option (Table 7-36), for an unbind */
 	char task_id[FMD_MAX_ID_LEN];
+	/*
+	 * Its task is Interrupted: the switch could not be asked how it went.
+	 * Kept until the vPPB, read again, no longer reads 01h
+	 * (fmd_tasks_reconcile()), or its switch is gone.
+	 */
+	bool lost;
 	struct fmd_binding_op *next;
 };
 
@@ -1680,7 +1686,12 @@ int fmd_topology_validate(struct fmd_ctx *ctx);
  * except fmd_tasks_running() and fmd_tasks_poll(), which take it.
  */
 enum fmd_task_kind { FMD_TASK_BIND, FMD_TASK_UNBIND };
-enum fmd_task_state { FMD_TASK_RUNNING, FMD_TASK_COMPLETED, FMD_TASK_EXCEPTION };
+enum fmd_task_state {
+	FMD_TASK_RUNNING,
+	FMD_TASK_COMPLETED,
+	FMD_TASK_EXCEPTION,
+	FMD_TASK_INTERRUPTED,	/* lost: not asked about, settled by a read */
+};
 
 struct fmd_task {
 	int id;
@@ -1703,21 +1714,43 @@ struct fmd_task {
 };
 
 /*
- * A task for the bind or unbind of @key that @sw has started in the
- * background. It takes over the struct fmd_binding_op of that vPPB, which
- * the caller added before it sent the command (one is added if there is
- * none), and frees it when the task ends, however it ends. If no task can
- * be made the op is freed here and NULL returned: the caller then reads the
- * VCSs again, and the Connection is what the vPPB is.
+ * A task for the bind or unbind of @key on @sw, made before the command is
+ * sent, so that nothing has to be allocated once the switch has started it:
+ * NULL if it cannot be made, and then nothing is to be sent. It is nobody's
+ * until fmd_task_activate(); fmd_task_discard() frees it if the command
+ * was not started in the background.
  */
+struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
+				struct fmd_switch *sw,
+				const struct fmd_bind_key *key);
+/*
+ * @sw has started the operation of @task in the background: the task is
+ * listed, and takes over the struct fmd_binding_op of its vPPB, which the
+ * caller added before it sent the command, and frees it when the task ends.
+ * If there is no op one is added with @unbind_option; if that cannot be,
+ * the task is freed and NULL returned.
+ */
+struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
+				   uint8_t unbind_option);
+void fmd_task_discard(struct fmd_task *task);
+/* fmd_task_alloc() and fmd_task_activate() */
 struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 				struct fmd_switch *sw,
 				const struct fmd_bind_key *key,
 				uint8_t unbind_option);
+/* what fmd_task_alloc() allocates with; tests replace it */
+extern void *(*fmd_task_calloc)(size_t nmemb, size_t size);
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
 void fmd_tasks_free(struct fmd_ctx *ctx);
+/*
+ * The VCSs of @sw have just been read, @refresh_rc as fmd_vcs_refresh()
+ * returns: each Interrupted task on @sw whose vPPB was read and no longer
+ * reads 01h ends on what it reads. Called by fmd_vcs_refresh().
+ */
+void fmd_tasks_reconcile(struct fmd_ctx *ctx, struct fmd_switch *sw,
+			 int refresh_rc);
 
 /*
  * fmd_vppb_bind() and fmd_vppb_unbind() return this when the switch has
