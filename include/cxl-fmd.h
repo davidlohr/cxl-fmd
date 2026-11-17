@@ -2648,6 +2648,49 @@ void fmd_redfish_stop(struct fmd_ctx *ctx);
  */
 json_t *fmd_redfish_unsupported_query_body(json_t *found, size_t n);
 
+/*
+ * Error responses (src/redfish/messages.c): the messages of the DMTF Base
+ * registry, Base.1.24.0.json, that cxl-fmd uses.
+ */
+#define FMD_RF_REGISTRY "Base.1.24"
+
+enum fmd_rf_msg {
+	FMD_RF_GENERAL_ERROR,
+	FMD_RF_SUCCESS,
+	FMD_RF_INVALID_URI,			/* 1 arg: the URI */
+	FMD_RF_OPERATION_NOT_ALLOWED,
+	FMD_RF_PAYLOAD_TOO_LARGE,
+	FMD_RF_MALFORMED_JSON,
+	FMD_RF_INTERNAL_ERROR,
+	FMD_RF_RESOURCE_IN_USE,
+	FMD_RF_RESOURCE_EXHAUSTION,		/* 1 arg: the resource */
+	FMD_RF_PROPERTY_MISSING,		/* 1 arg: the property */
+	FMD_RF_PROPERTY_VALUE_ERROR,		/* 1 arg: the property */
+	FMD_RF_ACTION_NOT_SUPPORTED,		/* 1 arg: the action */
+	FMD_RF_RESOURCE_CANNOT_BE_DELETED,
+	FMD_RF_QUERY_PARAMETER_UNSUPPORTED,	/* 1 arg: the parameter */
+	FMD_RF_MSG_COUNT
+};
+
+/* "Base.1.24.<key>" of @id */
+void fmd_redfish_message_id(enum fmd_rf_msg id, char *buf, size_t len);
+/*
+ * One message object of @id, with its @nargs arguments (const char *,
+ * as many as the registry's NumberOfArgs, or NULL is returned), the
+ * registry's Resolution unless @resolution is given, and @related (a JSON
+ * pointer) as RelatedProperties if given. NULL if out of memory.
+ */
+json_t *fmd_redfish_message(enum fmd_rf_msg id, const char *resolution,
+			    const char *related, int nargs, ...);
+/*
+ * {"error": {"code": GeneralError, "message": @message,
+ * "@Message.ExtendedInfo": [@info]}}. @info is consumed; NULL if it is
+ * NULL or out of memory.
+ */
+json_t *fmd_redfish_error_body(const char *message, json_t *info);
+/* the error body sent when one cannot be made */
+extern const char fmd_redfish_error_fallback[];
+
 
 /* Service root and metadata */
 json_t *fmd_redfish_odata(struct fmd_ctx *ctx);

@@ -587,21 +587,26 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
 	 * completed" (Task_v1)
 	 */
 	if (task->state == FMD_TASK_INTERRUPTED) {
+		char msgid[64];
+
 		/* not complete: why the switch is no longer asked */
+		fmd_redfish_message_id(FMD_RF_GENERAL_ERROR, msgid, sizeof(msgid));
 		json_object_set_new(result, "Messages",
 			json_pack("[{s:s, s:s}]",
-				  "MessageId", "Base.1.0.GeneralError",
+				  "MessageId", msgid,
 				  "Message", task->message));
 	} else if (task->state != FMD_TASK_RUNNING) {
 		bool ok = task->state == FMD_TASK_COMPLETED;
-		char end[32];
+		char end[32], msgid[64];
 
 		task_time(task->end, end, sizeof(end));
+		fmd_redfish_message_id(ok ? FMD_RF_SUCCESS : FMD_RF_GENERAL_ERROR,
+				       msgid, sizeof(msgid));
 		json_object_set_new(result, "EndTime", json_string(end));
 		json_object_set_new(result, "TaskStatus", json_string(ok ? "OK" : "Critical"));
 		json_object_set_new(result, "Messages",
 			json_pack("[{s:s, s:s}]",
-				  "MessageId", ok ? "Base.1.0.Success" : "Base.1.0.GeneralError",
+				  "MessageId", msgid,
 				  "Message", task->message));
 	}
 
@@ -643,9 +648,10 @@ int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 	}
 
 	if (task->state == FMD_TASK_EXCEPTION) {
-		*response = json_pack("{s:{s:s, s:s}}", "error",
-				      "code", "Base.1.0.GeneralError",
-				      "message", task->message);
+		*response = fmd_redfish_error_body(task->message,
+			fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+				"Read the Connection to see what the switch did before "
+				"the request is resubmitted.", NULL, 0));
 		return 500;
 	}
 

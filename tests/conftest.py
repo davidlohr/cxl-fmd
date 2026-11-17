@@ -32,6 +32,36 @@ from pathlib import Path
 import pytest
 import requests
 
+import redfish_messages
+
+
+@pytest.fixture(autouse=True)
+def error_responses_checked(monkeypatch):
+    """
+    Every error response a test gets through requests, with a JSON error
+    body, is checked against the DMTF Base registry (redfish_messages.py):
+    each test is a test of the errors it meets (review F18 claim 2).
+    """
+    send = requests.adapters.HTTPAdapter.send
+
+    def checked_send(self, request, *args, **kwargs):
+        response = send(self, request, *args, **kwargs)
+        if response.status_code >= 400:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict) and "error" in body:
+                try:
+                    redfish_messages.check_error(body)
+                except (AssertionError, KeyError, TypeError) as e:
+                    pytest.fail(f"{request.method} {request.url}: "
+                                f"{response.status_code} error not as the "
+                                f"Base registry has it: {e!r}\n{response.text}")
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", checked_send)
+
 # Project root (parent of tests/)
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 

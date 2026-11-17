@@ -271,6 +271,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # Error responses, and their messages of the DMTF Base registry
+    test(
+        'errors',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_errors.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # The mock switch's bind and unbind outcomes, and binds made elsewhere
     test(
         'mock-bindings',

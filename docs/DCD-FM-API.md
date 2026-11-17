@@ -154,10 +154,14 @@ listed in `MemoryBlockSizesSupported`, shows as `BlockSizeMiB` 0, and cannot
 be chosen with PATCH: a known limitation.
 
 Errors are a Redfish error object whose `code` is always
-`Base.1.0.GeneralError` and whose `message` says what was wrong; no Base
-registry MessageId such as `PropertyValueIncorrect`, `PropertyNotWritable`
-or `ResourceInUse` is emitted, and there is no `@Message.ExtendedInfo`. The
-HTTP status says what kind of failure it is. When the device refuses a
+`Base.1.24.GeneralError`, whose `message` says what was wrong, and whose
+`@Message.ExtendedInfo` has a message of the DMTF Base registry: for these
+requests `MalformedJSON` for a body that is not JSON, `ResourceInUse`
+(`409`, `503`), `ResourceExhaustion` (`409` for Resources Exhausted),
+`InvalidURI` (`404` for a URI that is not a resource), `ActionNotSupported`
+(`501` on an action), or else `GeneralError` with a `Resolution` of
+cxl-fmd's (see "Error Response Format" in Redfish-API.md). The HTTP status
+says what kind of failure it is. When the device refuses a
 command, its return code decides it: Invalid Input, Invalid Extent List and
 Invalid Physical Address are `400`, Resources Exhausted is `409`, Retry
 Required and Busy are `503` (with no `Retry-After`), Unsupported from 5602h
@@ -174,7 +178,8 @@ read after it fails: 5604h "shall complete when the device initiates the
 Add Capacity procedure" (Section 7.6.7.6.5), 5605h "when the device
 initiates the Remove Capacity procedure" (Section 7.6.7.6.6). The answer
 is then `200 OK` (a DELETE too), with an error object whose `code` is
-`Base.1.0.Success` and whose `message` says the device accepted the
+`Base.1.24.Success`, with `Base.1.24.Success` in its
+`@Message.ExtendedInfo`, and whose `message` says the device accepted the
 request, that what is shown is stale until it is read again, and not to
 send the request again: a Free, Contiguous or Tag-based request sent again
 is another add or release. A 5603h list that keeps changing as it is read

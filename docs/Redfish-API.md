@@ -623,13 +623,13 @@ Status to `Status`, Comment 3, and Media Status to nothing):
 
 ## Error Responses
 
-All error responses follow the Redfish error format with an `error` object containing a `code` and `message`.
+All error responses follow the Redfish error format: an `error` object with a `code`, a `message` and `@Message.ExtendedInfo` (see "Error Response Format").
 
 ### HTTP Status Codes
 
 | Status | Meaning | When Used |
 |--------|---------|-----------|
-| 200 OK | Success | GET requests returning data; actions; a `POST` of a Connection the host has already, switch-attached (bound, `Absent` included) or direct-attached, with the Connection and `Location`; a Dynamic Capacity action, `MemoryExtent` `DELETE` or `MemoryRegion` `PATCH` the device accepted whose state could not be read back after it, with a `Base.1.0.Success` error object whose message says not to send it again (see [DCD-FM-API.md](DCD-FM-API.md), Comment 3) |
+| 200 OK | Success | GET requests returning data; actions; a `POST` of a Connection the host has already, switch-attached (bound, `Absent` included) or direct-attached, with the Connection and `Location`; a Dynamic Capacity action, `MemoryExtent` `DELETE` or `MemoryRegion` `PATCH` the device accepted whose state could not be read back after it, with an error object whose `code` is `Base.1.24.Success`, with `Base.1.24.Success` in its `@Message.ExtendedInfo`, and whose message says not to send it again (see [DCD-FM-API.md](DCD-FM-API.md), Comment 3) |
 | 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering); the task monitor of a bind once it has succeeded |
 | 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs or is `Interrupted` (see "Binds and unbinds in the background") |
 | 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once; the task monitor of an unbind once it has succeeded |
@@ -639,7 +639,7 @@ All error responses follow the Redfish error format with an `error` object conta
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB; a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception`; "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
-| 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.15.0.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
+| 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
 | 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy, after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception) |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
@@ -647,20 +647,47 @@ specification sets it.
 
 ### Error Response Format
 
-```json
-{
-    "error": {
-        "@Message.ExtendedInfo": [{
-            "Message": "Human-readable error description",
-            "MessageId": "Base.1.0.GeneralError",
-            "Resolution": "Suggested resolution",
-            "Severity": "Critical"
-        }],
-        "code": "Base.1.0.GeneralError",
-        "message": "Brief error summary"
-    }
-}
-```
+Every error response is an `error` object with `code`, `message` and
+`@Message.ExtendedInfo` ("The @Message.ExtendedInfo property should be
+present in all error responses", DSP0266 1.25.0 Section 9.5.10):
+
+- `code` is always `Base.1.24.GeneralError`: "If no better message exists
+  or the ExtendedInfo array contains multiple messages, use GeneralError
+  from the Base Message Registry only in the code property of the error
+  object" (Section 9.5.11.2). Keeping one code is cxl-fmd's choice.
+- `message` is cxl-fmd's own sentence on what went wrong, the same text as
+  before `@Message.ExtendedInfo` was added (cxl-fmd's choice; Table 16 has
+  it "a human-readable error message").
+- `@Message.ExtendedInfo` holds messages of the DMTF Base registry 1.24.0
+  (`Base.1.24.0.json`, a copy of which is in `schema/dmtf/registries`):
+  `MessageId` `Base.1.24.<key>` (the format is
+  "<MessageRegistryPrefix>.<MajorVersion>.<MinorVersion>.<MessageKey>",
+  Section 9.5.11.2), `Message` the registry's with `MessageArgs` put in,
+  `MessageSeverity` (and the deprecated `Severity`, the same) the
+  registry's, `RelatedProperties` where cxl-fmd knows the property, and
+  `Resolution` the registry's unless cxl-fmd has a better one. Where no
+  message of the registry fits, it is `GeneralError` with a `Resolution`
+  of cxl-fmd's ("When an implementation uses GeneralError from the Base
+  Message Registry in ExtendedInfo, the implementation should include a
+  service-defined value for the Resolution property", Section 9.5.11.2).
+
+The messages cxl-fmd uses, and when (cxl-fmd's choices):
+
+| MessageId (`Base.1.24.`) | When |
+|--------------------------|------|
+| `InvalidURI` | `404` for a URI that is not a resource, with the URI; `400` for a chunk `DELETE` whose chunk is not in the MemoryDomain of its URI |
+| `OperationNotAllowed` | `405` |
+| `MalformedJSON` | `400` for a request body that is not JSON |
+| `PropertyMissing` | `400` for a chunk `POST` with no `MemoryChunkSizeMiB`, or no `AddressRangeType` where one has to be named |
+| `PropertyValueError` | `400` (and `404` for a Connection `POST` whose initiator, target or chunk is not found) where cxl-fmd knows which property is wrong |
+| `ResourceInUse` | `409` for a resource bound, being bound or unbound, or exposed by a Connection, and for a command that may not go as an MCTP message; `503` for a device or switch that is busy or asked for a retry |
+| `ResourceExhaustion` | `409` for a chunk its MemoryDomain cannot give, with the domain's URI; a Dynamic Capacity request the device has no room for |
+| `ActionNotSupported` | `501` for an action the device does not support; `400` for `ResetPPB` on a port that is not a DSP and `#Cxl.ForceUnbind` of a direct-attached Connection |
+| `ResourceCannotBeDeleted` | `501` for a chunk whose allocation cxl-fmd cannot give back, and a Connection the switch cannot unbind (Unsupported) |
+| `PayloadTooLarge` | `413` |
+| `InternalError` | `500` when cxl-fmd runs out of memory |
+| `QueryParameterUnsupported` | `501`, one for each query parameter that starts with `$` |
+| `GeneralError` | everything else, with a `Resolution` of cxl-fmd's; a `500` "Outcome unknown" has "Read the resource to learn whether the request was carried out before it is resubmitted: cxl-fmd does not know." |
 
 ### Common Errors
 
@@ -671,48 +698,69 @@ curl -s http://localhost:8080/redfish/v1/Chassis/nonexistent | jq
 ```json
 {
     "error": {
-        "code": "Base.1.0.ResourceNotFound",
-        "message": "Resource not found: nonexistent"
+        "code": "Base.1.24.GeneralError",
+        "message": "Resource not found",
+        "@Message.ExtendedInfo": [
+            {
+                "MessageId": "Base.1.24.InvalidURI",
+                "Message": "The URI '/redfish/v1/Chassis/nonexistent' was not found.",
+                "MessageSeverity": "Critical",
+                "Severity": "Critical",
+                "Resolution": "Provide a valid URI and resubmit the request.",
+                "MessageArgs": ["/redfish/v1/Chassis/nonexistent"]
+            }
+        ]
     }
 }
 ```
 
-**400 Bad Request - Missing Required Field:**
+**400 Bad Request - Missing Required Property:**
 ```bash
-curl -s -X POST http://localhost:8080/redfish/v1/Fabrics/CXL/Connections \
+curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks \
   -H "Content-Type: application/json" \
   -d '{}' | jq
 ```
 ```json
 {
     "error": {
-        "code": "Base.1.0.PropertyMissing",
-        "message": "Required property Links is missing"
+        "code": "Base.1.24.GeneralError",
+        "message": "Invalid request body - MemoryChunkSizeMiB required",
+        "@Message.ExtendedInfo": [
+            {
+                "MessageId": "Base.1.24.PropertyMissing",
+                "Message": "The property 'MemoryChunkSizeMiB' is a required property and must be included in the request.",
+                "MessageSeverity": "Warning",
+                "Severity": "Warning",
+                "Resolution": "Ensure that the property is in the request body and has a valid value and resubmit the request if the operation failed.",
+                "MessageArgs": ["MemoryChunkSizeMiB"],
+                "RelatedProperties": ["/MemoryChunkSizeMiB"]
+            }
+        ]
     }
 }
 ```
 
 **409 Conflict - Capacity Exceeded:**
 ```bash
-curl -s -X POST http://localhost:8080/redfish/v1/Chassis/dev/MemoryDomains/dom/MemoryChunks \
+curl -s -X POST http://localhost:8080/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks \
   -H "Content-Type: application/json" \
   -d '{"MemoryChunkSizeMiB": 999999999}' | jq
 ```
 ```json
 {
     "error": {
-        "code": "Base.1.0.ResourceExhaustion",
-        "message": "Requested size exceeds available capacity"
-    }
-}
-```
-
-**413 Payload Too Large:**
-```json
-{
-    "error": {
-        "code": "Base.1.0.PayloadTooLarge",
-        "message": "Request body exceeds maximum size of 65536 bytes"
+        "code": "Base.1.24.GeneralError",
+        "message": "Insufficient capacity in memory domain",
+        "@Message.ExtendedInfo": [
+            {
+                "MessageId": "Base.1.24.ResourceExhaustion",
+                "Message": "The resource '/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0' was unable to satisfy the request due to unavailability of resources.",
+                "MessageSeverity": "Critical",
+                "Severity": "Critical",
+                "Resolution": "Ensure that the resources are available and resubmit the request.",
+                "MessageArgs": ["/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0"]
+            }
+        ]
     }
 }
 ```
@@ -2169,7 +2217,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of any view of a device or LD whose Get Health Info failed at discovery | `Health` `OK`, `State` `Enabled`, from the zeroed response | no `Health` (or `HealthRollup`); `State` `Enabled` |
 | `GET` of any view of a device on hardware whose Health Status or Media Status changed after discovery | `Status` as discovery read it, until a restart | as Get Health Info reads after the next `--rescan`, or after a drain of the device's logs that found a Warning, Failure or Fatal record (or an overflow); a read that fails then leaves `Health` out. See "Status from Get Health Info" |
 | A request with a query parameter that starts with `$` (`GET /redfish/v1/Chassis?$filter=...`, `$top`, `$skip`, `$select`, `$expand`; a `POST` too) | `200` with the parameter ignored (the whole collection), or the request carried out | `501`, with an `@Message.ExtendedInfo` `QueryParameterUnsupported` entry for each `$` parameter; other parameters are still ignored |
-| The same, when cxl-fmd runs out of memory while it answers | the request carried out as if it had no `$` parameter (no memory to list them), or a `501` whose `@Message.ExtendedInfo` lacked entries, or whose body was `{}` | `501`, with the whole extended error, or else a `Base.1.0.GeneralError` one with no `@Message.ExtendedInfo` (`{}` if even that cannot be made) |
+| The same, when cxl-fmd runs out of memory while it answers | the request carried out as if it had no `$` parameter (no memory to list them), or a `501` whose `@Message.ExtendedInfo` lacked entries, or whose body was `{}` | `501`, with the whole extended error, or else one with a single `GeneralError` message (and if even that cannot be made, a fixed body whose message is `InternalError`) |
 | `PUT`, or a `POST`, `PATCH` or `DELETE` a resource does not take (`PUT /redfish/v1/Chassis`, `PATCH` or `DELETE` of a Chassis, `POST /redfish/v1/Chassis`) | `501` | `405` with an `Allow` header of the methods the resource takes; `404` for a URI that is not a resource |
 | `HEAD` or `OPTIONS` (or another method cxl-fmd does not serve) | `405` with no `Allow` header | `405` with `Allow`; `404` for a URI that is not a resource |
 | `PATCH` of a direct-attached Connection | `405`, `Allow: GET, DELETE` | `405`, `Allow: GET` |
@@ -2185,7 +2233,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of a DCD's `MemoryRegion` while, or after, a read of its host's regions (5601h) fails on a page after the first | `404` for the regions past the first page (they were removed when page 1 was read), the host's extents still linking to them, and `Status.Health` `OK` on the rest | the regions, and the `CXLLogicalDevice`'s extent and tag counters, as the last complete read had them; `Status.Health` `Warning` until the host is read again |
 | `GET` of a DCD's `MemoryRegion` whose host's last read failed, or is owed after an event record named it | `Status.Health` `OK` (unless the tag list could not be read) | `Warning`, as the host's `MemoryExtent`s |
 | `GET` of a `MemoryExtent` whose region is gone from its host's 5601h, when the 5603h after it fails | `Links/MemoryRegions` to the region that is gone (`404`) | no `Links/MemoryRegions`, `Status.Health` `Warning` |
-| `DynamicCapacityAdd`, `DynamicCapacityRelease`, `CXLReferenceDCMemory`, a `MemoryExtent` `DELETE` or a `MemoryRegion` `PATCH` on hardware that the device answered Success for, when the read after it (5601h, 5603h or 5608h) fails, is answered Retry Required, or finds the extent list changing each time it is read | `500` "Initiate Dynamic Capacity Add failed" (and the like); a client that sent it again got a second add or release | `200` (a `DELETE` too, not `204`) with `{"error": {"code": "Base.1.0.Success", "message": "The device accepted the request, but its state could not be read back after it: ... Do not send the request again"}}`; the host's resources `Warning` until the next `--event-poll` tick reads it |
+| `DynamicCapacityAdd`, `DynamicCapacityRelease`, `CXLReferenceDCMemory`, a `MemoryExtent` `DELETE` or a `MemoryRegion` `PATCH` on hardware that the device answered Success for, when the read after it (5601h, 5603h or 5608h) fails, is answered Retry Required, or finds the extent list changing each time it is read | `500` "Initiate Dynamic Capacity Add failed" (and the like); a client that sent it again got a second add or release | `200` (a `DELETE` too, not `204`) with `{"error": {"code": "Base.1.24.Success", "message": "The device accepted the request, but its state could not be read back after it: ... Do not send the request again"}}`; the host's resources `Warning` until the next `--event-poll` tick reads it |
 | The same requests when libcxlmi cannot carry the command or read its response (a 5604h answered Success with a payload) | `500` with the request's "failed" message, logged as "was not carried out" | `500` "Outcome unknown: the device may or may not have carried out the request ...: check its state before sending this again"; the host (the tag list for `CXLReferenceDCMemory`) is read again on the next tick |
 | A bind or unbind task whose Background Operation Status (0002h) says Success while the switch's VCSs cannot be read (5200h fails) | `Exception`, "... the vPPB is not bound to what was asked" (or "is still bound"), and the Connection of a bind gone, though the switch bound it | `Running`; it ends when the vPPB is read, or is lost after five such answers |
 | A bind or unbind task whose 0002h says it is over while the vPPB still reads 01h | `Exception`, its Connection gone (the vPPB at 01h gave none) and the switch not asked again | `Running`, the Connection `Starting` or `Updating`, and the switch asked again (after five such answers, see the next rows) |
@@ -2212,6 +2260,10 @@ Changes from the fixes of the external design review (branch
 | On hardware, a Dynamic Capacity action, a `MemoryRegion` `PATCH` or a `MemoryExtent` `DELETE` of a Multi-Headed device | the DCD Management command sent to the device's endpoint with no tunnel, whatever cxl-fmd knew of the route to its LD Pool CCI | sent on the route to the LD Pool CCI, the one Set LD Allocations goes on; `501`, with nothing sent, if no such route is known |
 | On hardware, a Multi-Headed device whose head presents an MLD, found on that head's FM-owned LD first (on a switch port, or on an endpoint of its own) and on its LD Pool CCI | an MLD (`DeviceClass` and the IDs of an MLD, on the switch port when it was found there), its LD Pool CCI never asked | a Multi-Headed device: its heads and pool LDs, at the root, the head on the switch port when it can be told which it is; the MLD's `Chassis`, `PCIeDevice`, LDs and chunks are gone |
 | On hardware, the same, found on its LD Pool CCI first | the Multi-Headed device, the other CCI dropped | the same, and a head placed on the switch port as above; that head's binding found by a vPPB is a Connection to its Endpoint, `Health` `Warning` |
+| Any error response (`4xx`, `5xx`) | `{"error": {"code": "Base.1.0.GeneralError", "message": ...}}`, with no `@Message.ExtendedInfo` | `code` `Base.1.24.GeneralError`, the same `message`, and `@Message.ExtendedInfo` with a message of the DMTF Base registry 1.24.0 (`InvalidURI`, `PropertyMissing`, `MalformedJSON`, `ResourceInUse`, ...; see "Error Response Format") |
+| A request with a query parameter that starts with `$` | `code` `Base.1.15.0.QueryParameterUnsupported`, and `MessageId` `Base.1.15.0.QueryParameterUnsupported` in `@Message.ExtendedInfo` | `code` `Base.1.24.GeneralError`, `MessageId` `Base.1.24.QueryParameterUnsupported`: a MessageId has one minor version, "<MessageRegistryPrefix>.<MajorVersion>.<MinorVersion>.<MessageKey>" (DSP0266 Section 9.5.11.2) |
+| A Dynamic Capacity request the device accepted whose state could not be read back (`200`) | `code` `Base.1.0.Success` | `code` `Base.1.24.Success`, and `Base.1.24.Success` in `@Message.ExtendedInfo` |
+| `Messages[].MessageId` of a `Task` | `Base.1.0.Success`, `Base.1.0.GeneralError` | `Base.1.24.Success`, `Base.1.24.GeneralError` |
 
 Mock topologies and discovery:
 
