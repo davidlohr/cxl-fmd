@@ -24,7 +24,10 @@ It fills a gap in the published DMTF material, which was checked on
 | [DSP8010 2026.2](https://redfish.dmtf.org/schemas/v1/) (bundle vendored in `schema/dmtf`) | `PCIeDevice v1.23.0` adds `CXLDevice/DeviceClass` (`SLD`, `MLD`, `MH_SLD`, `MH_MLD`). Not DCD-specific but directly useful to cxl-fmd. |
 
 So the JSON schema has everything the DCD surface needs and the vendored
-bundle carries it, but DSP0288 has not caught up with it. Everything below
+bundle carries it, but DSP0288 has not caught up with it. The mapping
+below is therefore cxl-fmd's profile of those schemas, not a DMTF
+mapping: where it puts a 56h field, and in what unit, is cxl-fmd's
+choice, and it may differ from what DSP0288 maps when it covers DCD. Everything below
 follows the 2026.1 model, with the FM-API field semantics taken from CXL r4.0
 Section 7.6.7.6 as encoded in libcxlmi (`struct cxlmi_cmd_fmapi_*` in
 `src/cxlmi/api-types.h`), which already implements all nine commands.
@@ -1061,9 +1064,17 @@ What the CXL specification or the DMTF material leaves open, and what
 cxl-fmd does about each. Every choice below is cxl-fmd's (or the mock's,
 where it says so), not the specification's.
 
-1. **Units of the `Length` action parameter.** The 2026.1 schema does not
-   annotate it with `MiBy`. cxl-fmd assumes MiB. This is worth raising with
-   the Redfish Forum together with the missing DCD rows in DSP0288.
+1. **Units of the `Length` action parameter.** In the vendored DSP8010
+   2026.2 schema, `Length` of `DynamicCapacityAdd` and
+   `DynamicCapacityRelease` is an `Edm.Int64`, "The size of the dynamic
+   capacity to add" (and "to release"), with no `Measures.Unit`
+   annotation (`CXLLogicalDevice_v1.xml`), where `MemorySizeMiB` of the
+   same resource is annotated `MiBy`. That the schema leaves it out does not make it
+   MiB. Choice: `Length` is in MiB, as cxl-fmd's profile; it is converted
+   to bytes with a check, and a value whose bytes do not fit is `400`.
+   An exact byte count cannot be asked for, which matters only for a
+   region with a block size below 1 MiB. This is to be raised with the
+   Redfish Forum together with the missing DCD rows in DSP0288.
 2. **Does 5603h list extents still pending for the host?** Section 9.13.3
    says the host's Extent List "does not contain extents that are still
    pending acceptance from the host"; 5603h (Table 7-71) does not say
@@ -1158,14 +1169,36 @@ where it says so), not the specification's.
 22. **When the mock host accepts.** Choice: at once; pending state comes
     only from the topology file (`per_host` `pending`, `tags`
     `pending_hosts`). There are no timers, Tasks or knobs.
-23. **Text of the specification that is not relied on.** "Similarly, the
-    Extent List does contain extents that are still pending release
-    acceptance from the host" (Section 9.13.3) reads as if "does not" was
-    meant, or the reverse; 5605h names an invalid region as a failure but
-    has no Region Number field; the Length fields name a "configured Region
-    Block Size returned in Get DCD Info", which Get DCD Info does not
-    return. Choice: there is no "pending release" state; an extent stays
-    until its host's 5603h no longer lists it.
+23. **An extent being released.** Section 9.13.3 says of the Extent
+    List a host sees: "The Extent List does not contain extents that are
+    still pending acceptance from the host via the Add Dynamic Capacity
+    Response command (see Section 8.2.10.9.9.3). Similarly, the Extent
+    List does contain extents that are still pending release acceptance
+    from the host via the Release Dynamic Capacity command (see Section
+    8.2.10.9.9.4)." So an extent the device has asked the host to release
+    stays in the host's list until the host accepts the release with
+    Release Dynamic Capacity. 5605h says only that it "shall complete
+    when the device initiates the Remove Capacity procedure" (Section
+    7.6.7.6.6). Choice: there is no "pending release" state; an extent
+    stays, and is served, until its host's 5603h no longer lists it. That
+    5603h, the "Extent list for the specified host as defined in Table
+    8-230" (Table 7-71), lists what Section 9.13.3 says of the host's list
+    is cxl-fmd's reading: the specification does not say they are one
+    list. Nor does an extent leaving the list say that the host's
+    software has stopped using the memory; it is the protocol state
+    between the device and the host, and taking pages or mappings out of
+    use is the host's (a host agent's) to coordinate.
+
+    Two other sentences are not relied on. 5605h fails with Invalid
+    Input "When the command is sent with an invalid Host ID, or an invalid
+    region number" (Section 7.6.7.6.6), but its request (Table 7-73) has
+    no Region Number field. The `Length` of 5604h and of 5605h is "Always
+    a multiple of the configured Region Block Size returned in Get DCD
+    Info" (Tables 7-72 and 7-73), and Get DCD Info returns only a
+    "Supported Block Size Mask" for each region (Table 7-65), not a
+    configured size. Choice: an add's `Length` is checked against the
+    block size the host's 5601h reports for the region; a release's is
+    left to the device.
 24. **GFD.** The GFAM equivalents (4907h-490Bh) share the same shapes but
     address the device via PBR. Out of scope here and listed separately in
     `TODO`.
