@@ -117,7 +117,7 @@ Returns the Redfish service root with links to available resource collections.
 | CXLLogicalDevice | `.../CXLLogicalDevices/{ld}` | Logical device with memory info and DCD actions |
 | MemoryRegions | `.../CXLLogicalDevices/{ld}/MemoryRegions` | Dynamic capacity regions seen by the LD's host (PATCH) |
 | MemoryRegion | `.../MemoryRegions/{region}` | DC region configuration and extent links |
-| MemoryExtents | `.../PCIeDevices/{dev}/MemoryExtents` | Dynamic capacity extents of every host of the device (DELETE releases from that extent's host) |
+| MemoryExtents | `.../PCIeDevices/{dev}/MemoryExtents` | Dynamic capacity extents of every host of the device (DELETE releases from that extent's host; for an extent of a sharable tag, all of that host's extents with the tag) |
 | MemoryExtent | `.../MemoryExtents/{ext}` | Extent offset, size, tag, FM reference |
 | MemoryDomains | `/redfish/v1/Chassis/{id}/MemoryDomains` | Memory domain collection |
 | MemoryDomain | `.../MemoryDomains/{dom}` | Memory domain details |

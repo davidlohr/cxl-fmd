@@ -76,7 +76,7 @@ table is cxl-fmd's proposal, not DSP0288 text.
 | Get DC Region Extent Lists | Extent List Generation Number | `MemoryExtent` | not shown; a read whose generation keeps changing leaves the host's extents as they were, `Status.Health` `Warning` (Comment 6) | Yes |
 | Initiate Dynamic Capacity Add (5604h) | All | `CXLLogicalDevice` | `DynamicCapacityAdd` action | Yes |
 | Initiate Dynamic Capacity Release (5605h) | All | `CXLLogicalDevice` | `DynamicCapacityRelease` action | Yes |
-| Initiate Dynamic Capacity Release | Tag-based or Prescriptive, from one host | `MemoryExtent` | DELETE (cxl-fmd's choice, see [DELETE](#delete-of-a-memoryextent)) | Yes |
+| Initiate Dynamic Capacity Release | Tag-based or Prescriptive, from one host | `MemoryExtent` | DELETE (cxl-fmd's choice): of an extent with a tag in a Sharable region, every extent of that host with the tag goes, see [DELETE](#delete-of-a-memoryextent) | Yes |
 | Dynamic Capacity Add Reference (5606h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `true` | Yes |
 | Dynamic Capacity Remove Reference (5607h) | Tag | `PCIeDevice` | `CXLReferenceDCMemory` action, `FMReference` = `false` | Yes |
 | Dynamic Capacity List Tags (5608h) | Generation Number | `PCIeDevice` | `Oem/Cxl/DynamicCapacityTags/Generation` (Comment 4) | Yes |
@@ -327,6 +327,7 @@ failure (cxl-fmd's choice).
 
 /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents            <- 5603h, every host's extents
 /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}      DELETE -> 5605h, from that extent's host
+                                                                    (all its extents of a sharable tag)
 
 /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}
     TotalSupportedExtents, AvailableExtents,
@@ -572,7 +573,7 @@ int cxlmi_cmd_fmapi_get_dc_region_ext_list(struct cxlmi_endpoint *ep,
 |----------------|--------------------------------|
 | `extents[i].start_dpa` | `ExtentOffsetMiB` (bytes / 2^20), in the DPA space of the request's host: the schema's "device address range" is taken to be that host's (cxl-fmd's reading). It also selects the host's region the extent is in |
 | `extents[i].len` | `ExtentSizeMiB` |
-| `extents[i].tag` | `Tag`, 16 bytes rendered as a UUID string (`8-4-4-4-12`). An all-zero tag is no tag (cxl-fmd's convention, as the specification calls the Tag "Optional", Table 8-230): `Tag` and `FMReferencedExtent` are left out |
+| `extents[i].tag` | `Tag`, 16 bytes rendered as a UUID string (`8-4-4-4-12`). An all-zero tag is no tag, cxl-fmd's convention: CXL r4.0 gives a zero Tag no reserved meaning (Open Question 5). `Tag` and `FMReferencedExtent` are left out |
 | `extents[i].shared_seq` | `SequenceNumber` |
 | `host_id` (request) | the `<ld>` of the extent's Id, and its one `Links/MemoryRegions` link, to that host's region; none when the extent is in no region of the host |
 
@@ -620,7 +621,7 @@ int cxlmi_cmd_fmapi_initiate_dc_add(struct cxlmi_endpoint *ep,
 | `selection_policy` | 0 Free, 1 Contiguous, 2 Prescriptive, 3 Enable Shared Access | `Policy` (required) |
 | `region_num` | region index; reserved for Prescriptive (Table 7-72) | `RegionNumber` (required for Free, Contiguous, EnableSharedAccess); sent as 0 for Prescriptive |
 | `length` | bytes, block-size multiple; reserved for Prescriptive and Enable Shared Access | `Length` in MiB (required for Free, Contiguous; sent as 0 for the other policies); the schema leaves the unit unannotated, cxl-fmd treats it as MiB like every other size property |
-| `tag` | 16 bytes; reserved for Prescriptive | `Tag` UUID string (required for Free, Contiguous, EnableSharedAccess; sent as zeros for Prescriptive). An empty or all-zero `Tag` is refused with `400` for EnableSharedAccess: cxl-fmd takes all zeros for no tag, its own convention, as the specification calls the Tag "Optional" (Table 8-230) without saying which value means none |
+| `tag` | 16 bytes; reserved for Prescriptive | `Tag` UUID string (required for Free, Contiguous, EnableSharedAccess; sent as zeros for Prescriptive). An empty or all-zero `Tag` is refused with `400` for EnableSharedAccess: cxl-fmd takes all zeros for no tag, its own convention, as CXL r4.0 gives a zero Tag no reserved meaning (Open Question 5) |
 | `ext_count` + `extents[]` | DPA/length/tag/shared_seq per extent | `ExtentList[]` of `MemoryExtent` links (required for Prescriptive); every link is refused, see Prescriptive below |
 
 Policy semantics (CXL r4.0 Section 7.6.7.6.5):
@@ -758,27 +759,54 @@ against the region, and Enable Shared Access gives it to a host again.
 
 #### DELETE of a MemoryExtent
 
+The contract, in short: **a `DELETE` of one extent with a tag in a
+Sharable region releases every extent that host has with that tag, not
+only the one the URI names.** The host's other extents with the tag are
+released with it; other hosts' extents with the tag stay, and so does the
+FM reference. In a mock, whose host accepts at once (Open Question 22),
+they are all gone (`404`) when the `DELETE` answers. On hardware the
+release is not forced, and the extents, the one the URI names too, stay
+and are served until the host accepts the release and its 5603h no
+longer lists them (Open Question 23). Anything narrower, or on other
+terms, is asked for with `DynamicCapacityRelease` (see below).
+
 `DELETE .../MemoryExtents/ext_<ld>_<dpa>` is sugar, cxl-fmd's own (DMTF
-does not say what DELETE of a `MemoryExtent` means), for a release of that
-extent from the host whose extent it is, and from no other host, with
+does not say what DELETE of a `MemoryExtent` means), for a release from
+the host whose extent it is, and from no other host, with
 `ForcedRemoval` `false` and `SanitizeOnRelease` taken from that host's
-region:
+region (`false` when the extent is in no region of the host):
 
 - An extent with a tag, in a Sharable region: a Tag-based release, with
   the Host ID of the extent's host and a `Length` that is the sum of
   every extent that host has with the tag. Every one of them goes, the
   other hosts' extents with the tag stay, and so does the FM reference.
   Releasing less would be the "portion" the specification fails with
-  Invalid Input.
+  Invalid Input: "When the Tag represents sharable capacity, and the
+  Extent List covers only a portion of the capacity associated with the
+  Tag" (Section 7.6.7.6.6). Refusing such a `DELETE` with `409` was
+  considered; the maintainer kept the wider release (Open Question 19).
 - On a device whose `ReleaseCapacityPoliciesSupported` lacks `TagBased`,
   the same capacity is released Prescriptive instead: a list of every
   extent the host has with the tag (cxl-fmd's choice).
   `mock/dcd-prescriptive-release.json` is such a device.
-- Any other extent (no tag, or a region that is not Sharable): a
-  Prescriptive release of that one extent.
+- Any other extent (no tag, a region that is not Sharable, or no region
+  of the host): a Prescriptive release of that one extent. An extent
+  whose tag is all zeros is one with no tag (Open Question 5), so in a
+  Sharable region it too is released by itself, which a device that
+  takes the zero Tag for an ordinary one may refuse as a "portion".
 
-The answer is `204 No Content`. A device that refuses is answered as in
-Comment 3; a policy the device does not support is `400`. This mirrors how
+`DynamicCapacityRelease` is the way to release on other terms:
+`ForcedRemoval` `true`, a `SanitizeOnRelease` other than the region's, a
+Tag-based `Length` of the client's choosing, or a Prescriptive list of
+the client's extents. What it names is sent as asked, and the device
+decides; a release of only part of what a host has of a sharable tag is
+expected to fail with Invalid Input as quoted above (the mock refuses it,
+Open Questions 11 and 12).
+
+The answer is `204 No Content`, or `200` when the device accepted the
+release and the read after it failed (Comment 3). A device that refuses
+is answered as in Comment 3; a policy the device does not support is
+`400`. This mirrors how
 `DELETE` on a `MemoryChunk` maps to Set LD Allocations. Capacity an FM
 reference keeps that no host holds is no `MemoryExtent`, so it cannot be
 deleted; only `CXLReferenceDCMemory` with `FMReference` `false` frees it.
@@ -1218,9 +1246,51 @@ where it says so), not the specification's.
    Block Size and Sanitize on Release, for every LD. Choice: whatever each
    host's 5601h reports is kept for that host; the mock's `host_base_mb`
    varies the base only.
-5. **Which Tag is "no tag"?** The Tag is "Optional" (Table 8-230). Choice:
-   all zeros. Such an extent has no `Tag` and no `FMReferencedExtent`;
-   Enable Shared Access, 5606h and 5607h with it are `400`.
+5. **Which Tag is "no tag"?** CXL r4.0 gives a zero Tag no reserved
+   meaning: no Tag field says what a Tag of all zeros is, and none sets a
+   value aside for "no tag". The Tag field definitions, as written:
+   - Dynamic Capacity Extent, Table 8-230, offset 10h: "Tag: Optional
+     opaque context field utilized by implementations making use of the
+     Dynamic Capacity feature. Within sharable regions, all extents
+     targeting the same range this field is required and all Tag values
+     shall be identical for all hosts sharing the same extent. See Section
+     7.6.7.6.5 for how the Tag field is utilized while setting up
+     sharing." (Section 7.6.7.6.5 names the tag only as what Enable
+     Shared Access enables access to, "as designated by the specified tag
+     value", and points to the examples of Section 9.13.3.2.)
+   - Initiate Dynamic Capacity Add, Table 7-72, offset 0Ch: "Tag: Context
+     field utilized by implementations that make use of the Dynamic
+     Capacity feature. This field is reserved when the Selection Policy is
+     set to Prescriptive."
+   - Initiate Dynamic Capacity Release, Table 7-73, offset 0Ch: "Tag:
+     Optional opaque context field utilized by implementations that make
+     use of the Dynamic Capacity feature. This field is reserved when the
+     Removal Policy is set to Prescriptive."
+   - Dynamic Capacity Add Reference, Table 7-74, offset 00h: "Tag: Tag that
+     is associated with the memory capacity to be preserved."
+   - Dynamic Capacity Remove Reference, Table 7-75, offset 00h: "Tag: Tag
+     that is associated with the memory capacity."
+   - Dynamic Capacity Tag Information, Table 7-78, offset 00h: "Tag: Tag
+     that is associated with the memory capacity."
+
+   "Optional" says that an implementation need not use the field, not
+   which value means it is not used; "required" in a sharable region does
+   not say that the value is non-zero. So taking all zeros for no tag is
+   **cxl-fmd's convention**, not the specification's; a device may use a
+   zero Tag as an ordinary one. Choice (kept by the maintainer): all zeros
+   is no tag. What follows from it:
+   - An extent whose tag is all zeros has no `Tag` and no
+     `FMReferencedExtent`, and is not shared capacity: `DELETE` releases
+     it by itself, Prescriptive, even in a Sharable region (see
+     [DELETE](#delete-of-a-memoryextent)).
+   - Enable Shared Access, 5606h and 5607h with an empty or all-zero `Tag`
+     are `400`, with nothing sent. An add with the other policies, and a
+     Tag-based release, are not refused for it: the Tag is passed on as
+     given, zeros too, and the device decides.
+   - A row of the device's tag list (5608h) whose Tag is all zeros is
+     served as the device lists it, in `Oem/Cxl/DynamicCapacityTags`, with
+     `Tag` `""` and every extent of all-zero tag as its `Extents`, though
+     those extents have no `Tag`; it gives no extent `FMReferencedExtent`.
 6. **One host with accepted and pending capacity under one tag.** The
    bitmaps are per tag (Table 7-78), and do not say which extent, if any,
    is the add. Choice: no extent is made pending from them; the host's LD
@@ -1286,7 +1356,15 @@ where it says so), not the specification's.
     that host's DPA space, one region link.
 19. **What POST and DELETE on `MemoryExtents` mean, the Tag's format.**
     The schema does not say. Choice: POST is not served; DELETE releases
-    from the extent's host only; the Tag is a UUID string.
+    from the extent's host only; the Tag is a UUID string. A DELETE of an
+    extent with a tag in a Sharable region releases every extent of that
+    host with the tag, as Section 7.6.7.6.6 makes a release of a
+    "portion" of sharable capacity Invalid Input (see
+    [DELETE](#delete-of-a-memoryextent)). The external design review
+    (DCD-Q A3) asked for a narrower contract, and refusing such a DELETE
+    with `409` was proposed; the maintainer kept the wider release, and
+    documented it. A client that wants something else uses
+    `DynamicCapacityRelease`.
 20. **No DMTF resource for a tag.** Choice: `Oem/Cxl/DynamicCapacityTags`
     on `PCIeDevice`, described by cxl-fmd's Oem schema `Cxl_v1.xml`
     (served at `/redfish/v1/Schemas/Cxl_v1.xml`). Whether to propose the

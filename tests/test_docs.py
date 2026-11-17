@@ -50,3 +50,49 @@ def test_high_availability_is_not_promised():
         for line_no, line in enumerate(path.read_text().splitlines(), 1):
             if re.search(r"high[- ]availability", line, re.I):
                 assert "not implemented" in line.lower(), f"{path.name}:{line_no}: {line}"
+
+
+def section(text, heading):
+    """The body of the Markdown section @heading, up to the next heading of
+    its level or above."""
+    level = len(heading) - len(heading.lstrip("#"))
+    start = text.index(heading + "\n")
+    end = re.compile(r"^#{1,%d} " % level, re.M).search(text, start + len(heading))
+    return text[start:end.start() if end else len(text)]
+
+
+def flat(text):
+    return re.sub(r"\s+", " ", text)
+
+
+def test_dcd_delete_contract_is_stated():
+    """A DELETE of one extent of a sharable tag releases every extent of that
+    host with the tag (review DCD-Q A3, kept by the maintainer), and the docs
+    say so where DELETE is described, not only by implication."""
+    dcd = flat(section((DOCS / "DCD-FM-API.md").read_text(),
+                       "#### DELETE of a MemoryExtent"))
+    assert ("a `DELETE` of one extent with a tag in a Sharable region "
+            "releases every extent that host has with that tag") in dcd, dcd
+    assert "`DynamicCapacityRelease`" in dcd
+    # the one-line descriptions of the DELETE (endpoint list and table)
+    lines = re.findall(r"^.*`DELETE [^`]*MemoryExtents/\{ext\}` *[|-].*$",
+                       (DOCS / "Redfish-API.md").read_text(), re.M)
+    assert len(lines) >= 2, lines
+    for line in lines:
+        assert "with the tag" in line, line
+
+
+def test_zero_tag_is_cxl_fmds_convention():
+    """CXL r4.0 gives an all-zero Tag no reserved meaning (review DCD-Q T6):
+    the docs call "all zeros is no tag" cxl-fmd's convention, and do not
+    give the specification's "Optional" as its reason."""
+    text = (DOCS / "DCD-FM-API.md").read_text()
+    q5 = flat(text[text.index("5. **Which Tag is \"no tag\"?**"):
+                   text.index("6. **One host with accepted")])
+    assert "CXL r4.0 gives a zero Tag no reserved meaning" in q5, q5
+    assert "**cxl-fmd's convention**" in q5, q5
+    for table in ("Table 8-230", "Table 7-72", "Table 7-73", "Table 7-74",
+                  "Table 7-75", "Table 7-78"):
+        assert table in q5, table
+    assert not re.search(r"as the specification calls the Tag\s+\"Optional\"",
+                         text), "the zero tag is not the specification's"

@@ -545,7 +545,7 @@ Currently implemented write operations:
 - `PATCH /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/CXLLogicalDevices/{ld}/MemoryRegions/{region}` - Set DC Region Configuration
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityAdd` - Initiate Dynamic Capacity Add
 - `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease` - Initiate Dynamic Capacity Release
-- `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` - Initiate Dynamic Capacity Release from the extent's host only: Tag-based for an extent with a tag in a Sharable region, Prescriptive for any other (cxl-fmd's meaning of DELETE, see [DCD-FM-API.md](DCD-FM-API.md#delete-of-a-memoryextent))
+- `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` - Initiate Dynamic Capacity Release from the extent's host only: for an extent with a tag in a Sharable region, Tag-based, which releases every extent of that host with the tag, not only this one; Prescriptive of this one extent for any other (cxl-fmd's meaning of DELETE, see [DCD-FM-API.md](DCD-FM-API.md#delete-of-a-memoryextent); `DynamicCapacityRelease` for any other release)
 - `POST /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory` - DC Add Reference / DC Remove Reference
 
 An SLD that a switch reports on one of its ports (`{switch}_port{n}_dev`)
@@ -979,7 +979,7 @@ CXL devices are modeled in the Chassis hierarchy.
 | `POST .../CXLLogicalDevices/{ld}/Actions/CXLLogicalDevice.DynamicCapacityRelease` | Initiate Dynamic Capacity Release |
 | `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents` | Dynamic capacity extents on the device, one per host's extent (`ext_<ld>_<hex DPA>`) |
 | `GET /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` | DC Extent |
-| `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` | Release the extent from its host only |
+| `DELETE /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}` | Release the extent from its host only; with a tag in a Sharable region, every extent of that host with the tag goes |
 | `POST /redfish/v1/Chassis/{id}/PCIeDevices/{dev}/Actions/PCIeDevice.CXLReferenceDCMemory` | DC Add/Remove Reference |
 | `GET /redfish/v1/Chassis/{id}/MemoryDomains` | Memory Domains |
 | `GET /redfish/v1/Chassis/{id}/MemoryDomains/{dom}` | Memory Domain |
