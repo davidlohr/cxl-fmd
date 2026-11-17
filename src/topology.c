@@ -221,8 +221,12 @@ static bool counted_change(const struct fmd_component *comp)
 int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 		     struct fmd_component *parent)
 {
-	if (!topo || !comp)
-		return -1;
+	if (!comp)
+		return -EINVAL;
+	if (!topo) {
+		fmd_component_free(comp);
+		return -EINVAL;
+	}
 
 	/* Default parent is root */
 	if (!parent)
@@ -232,10 +236,12 @@ int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 
 	/*
 	 * An Id names one component: lookup would find one of two and hide
-	 * the other. A second is refused before anything is changed.
+	 * the other. A second is refused before anything is changed, and
+	 * freed: whatever this returns, @comp is not the caller's after it.
 	 */
 	if (hash_table_find(&topo->components, comp->id)) {
 		pthread_rwlock_unlock(&topo->lock);
+		fmd_component_free(comp);
 		return -EEXIST;
 	}
 
@@ -824,10 +830,8 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	chunk->backing_ld = backing_ld;
 
 	/* Add to topology */
-	if (fmd_topology_add(topo, &chunk->base, &domain->base) < 0) {
-		fmd_component_free(&chunk->base);
-		return NULL;
-	}
+	if (fmd_topology_add(topo, &chunk->base, &domain->base) < 0)
+		return NULL;	/* freed */
 
 	/* Update domain remaining capacity */
 	domain->remaining -= size;
@@ -1078,18 +1082,19 @@ void fmd_switch_resolve_vppb_bindings(struct fmd_topology *topo, struct fmd_swit
 
 /*
  * Add @comp under @parent for a device's memory resources; on an error,
- * logged, @comp is freed and the error returned.
+ * logged, @comp is freed (by fmd_topology_add()) and the error returned.
  */
 static int add_resource(struct fmd_ctx *ctx, struct fmd_component *comp,
 			struct fmd_component *parent)
 {
-	int rc = fmd_topology_add(&ctx->topology, comp, parent);
+	char id[FMD_MAX_ID_LEN];
+	int rc;
 
-	if (rc) {
-		fmd_err(ctx, "%s: %s not added: %s", parent->id, comp->id,
+	snprintf(id, sizeof(id), "%s", comp->id);
+	rc = fmd_topology_add(&ctx->topology, comp, parent);
+	if (rc)
+		fmd_err(ctx, "%s: %s not added: %s", parent->id, id,
 			rc == -EEXIST ? "a component has that ID" : "error");
-		fmd_component_free(comp);
-	}
 	return rc;
 }
 

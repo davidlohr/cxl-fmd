@@ -2367,6 +2367,9 @@ static struct fmd_component *hw_dcd(struct fmd_ctx *ctx, struct cxlmi_endpoint *
  * An Id names one component (review F10): a second component with an Id
  * the topology has is refused, before anything of the topology changes,
  * so that lookup cannot find one and hide the other. The first is kept.
+ * A refused component is freed by fmd_topology_add(), so the test frees
+ * neither: with the refusal gone, it fails on the checks, not on a double
+ * free (ASan reports a leak instead if the refusal does not free).
  */
 static void test_duplicate_id_refused(void)
 {
@@ -2374,9 +2377,9 @@ static void test_duplicate_id_refused(void)
 	struct fmd_topology *topo = &ctx->topology;
 	struct fmd_sld *a = fmd_sld_create("dup_dev"), *b = fmd_sld_create("dup_dev");
 	struct fmd_host *h = fmd_host_create("dup_dev");
-	struct fmd_component *first_child;
+	struct fmd_component *first_child, *c;
 	unsigned int added;
-	int count, devices, hosts;
+	int count, devices, hosts, dups;
 	uint32_t generation;
 	int before = failures, rc;
 
@@ -2401,12 +2404,17 @@ static void test_duplicate_id_refused(void)
 	      topo->root->host_count == hosts && topo->root->base.first_child == first_child,
 	      "the topology changed: %d/%d components, generation %u/%u",
 	      topo->components.count, count, topo->generation, generation);
-	CHECK(!b->base.parent && !b->base.fabric && !h->base.parent,
-	      "a refused component was linked in");
+	dups = 0;
+	for (c = topo->root->base.first_child; c; c = c->next_sibling)
+		dups += !strcmp(c->id, "dup_dev");
+	CHECK(dups == 1, "%d components dup_dev under the root", dups);
 	CHECK(fmd_topology_find(topo, "dup_dev") == &a->base, "dup_dev is not the first");
 
-	fmd_component_free(&b->base);
-	fmd_component_free(&h->base);
+	/*
+	 * b and h are not the test's after the add: a refusal freed them,
+	 * and an add that went through gave them to the topology. Freeing
+	 * them here would free twice whenever the refusal is gone.
+	 */
 	fmd_ctx_free(ctx);
 	report("a second component with an Id is refused", before);
 }

@@ -48,21 +48,23 @@ static void load_error(const char *fmt, ...)
 
 /*
  * Add @comp under @parent (NULL: the root). A second component with its Id
- * is a load error, as validate.c would find it, and @comp is freed: the
- * caller is not to use it after false.
+ * is a load error, as validate.c would find it, and @comp is freed (by
+ * fmd_topology_add()): the caller is not to use it after false.
  */
 static bool mock_add(struct fmd_ctx *ctx, struct fmd_component *comp,
 		     struct fmd_component *parent)
 {
-	int rc = fmd_topology_add(&ctx->topology, comp, parent);
+	char id[FMD_MAX_ID_LEN];
+	int rc;
 
+	snprintf(id, sizeof(id), "%s", comp->id);
+	rc = fmd_topology_add(&ctx->topology, comp, parent);
 	if (!rc)
 		return true;
 	if (rc == -EEXIST)
-		load_error("two components with ID %s", comp->id);
+		load_error("two components with ID %s", id);
 	else
-		load_error("%s could not be added: %d", comp->id, rc);
-	fmd_component_free(comp);
+		load_error("%s could not be added: %d", id, rc);
 	return false;
 }
 

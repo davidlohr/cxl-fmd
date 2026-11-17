@@ -1486,7 +1486,9 @@ void fmd_topology_cleanup(struct fmd_topology *topo);
 /*
  * Add component to topology (handles tree insertion and hash table).
  * Returns 0, or -EEXIST, with nothing changed, if a component has its Id
- * already: the caller still owns @comp then, and frees it.
+ * already (-EINVAL with no topology). @comp is the topology's from the
+ * call on, whatever it returns: on an error it has been freed, and the
+ * caller is neither to use nor to free it.
  */
 int fmd_topology_add(struct fmd_topology *topo, struct fmd_component *comp,
 		     struct fmd_component *parent);

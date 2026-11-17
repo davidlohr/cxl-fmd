@@ -432,10 +432,8 @@ struct fmd_dc_region *fmd_dc_region_add(struct fmd_ctx *ctx, struct fmd_componen
 	if (!r)
 		return NULL;
 
-	if (fmd_topology_add(&ctx->topology, &r->base, owner) < 0) {
-		fmd_component_free(&r->base);
-		return NULL;
-	}
+	if (fmd_topology_add(&ctx->topology, &r->base, owner) < 0)
+		return NULL;	/* freed */
 	return r;
 }
 
@@ -462,10 +460,8 @@ struct fmd_dc_extent *fmd_dc_extent_add(struct fmd_ctx *ctx, struct fmd_componen
 	ext->shared_seq = shared_seq;
 	ext->region_id = region_id;
 
-	if (fmd_topology_add(&ctx->topology, &ext->base, dev) < 0) {
-		fmd_component_free(&ext->base);
-		return NULL;
-	}
+	if (fmd_topology_add(&ctx->topology, &ext->base, dev) < 0)
+		return NULL;	/* freed */
 	return ext;
 }
 

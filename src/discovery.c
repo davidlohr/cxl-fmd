@@ -416,19 +416,20 @@ static int discover_ld(struct fmd_ctx *ctx, struct fmd_ld *ld,
 /*
  * Add @comp, discovered, under @parent (NULL: the root). An Id some
  * component has already is refused (fmd_topology_add()): logged, and
- * @comp freed. Returns 0 or the error; the caller is not to use @comp
- * after an error.
+ * @comp freed (by fmd_topology_add()). Returns 0 or the error; the caller
+ * is not to use @comp after an error.
  */
 static int discovered_add(struct fmd_ctx *ctx, struct fmd_component *comp,
 			  struct fmd_component *parent)
 {
-	int rc = fmd_topology_add(&ctx->topology, comp, parent);
+	char id[FMD_MAX_ID_LEN];
+	int rc;
 
-	if (rc) {
-		fmd_err(ctx, "%s: not added: %s", comp->id,
+	snprintf(id, sizeof(id), "%s", comp->id);
+	rc = fmd_topology_add(&ctx->topology, comp, parent);
+	if (rc)
+		fmd_err(ctx, "%s: not added: %s", id,
 			rc == -EEXIST ? "a component has that ID already" : "error");
-		fmd_component_free(comp);
-	}
 	return rc;
 }
 
