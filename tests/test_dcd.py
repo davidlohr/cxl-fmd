@@ -14,9 +14,16 @@ docs/DCD-FM-API.md against mock/dcd-device.json:
 - PCIeDevice.CXLReferenceDCMemory               (DC Add/Remove Reference 5606h/5607h)
 """
 
+import copy
+import json
 import re
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
+
+from conftest import RedfishClient, _find_free_port, _wait_for_service
 
 SLD = "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0"
 SLD_LD0 = SLD + "/CXLLogicalDevices/0"
@@ -39,6 +46,45 @@ def extent_ids(api_client, device=SLD):
     status, data = api_client.get(device + "/MemoryExtents")
     assert status == 200
     return sorted(m["@odata.id"].rsplit("/", 1)[1] for m in data["Members"])
+
+
+DCD_DEVICE = json.loads((Path(__file__).resolve().parent.parent /
+                         "mock" / "dcd-device.json").read_text())
+
+
+@pytest.fixture
+def dcd_daemon(cxl_fmd_executable, tmp_path):
+    """start(change) runs cxl-fmd on mock/dcd-device.json as change() leaves
+    it, and returns a RedfishClient for it."""
+    started = []
+
+    def start(change):
+        topology = copy.deepcopy(DCD_DEVICE)
+        change(topology)
+        path = tmp_path / f"dcd-{len(started)}.json"
+        path.write_text(json.dumps(topology))
+        port = _find_free_port()
+        log = tempfile.TemporaryFile()
+        proc = subprocess.Popen([str(cxl_fmd_executable), "--mock", str(path),
+                                 "--port", str(port)],
+                                stdout=log, stderr=subprocess.STDOUT)
+        started.append((proc, log))
+        if not _wait_for_service(f"http://localhost:{port}/redfish/v1"):
+            log.seek(0)
+            pytest.fail("cxl-fmd did not start:\n" + log.read().decode(errors="replace"))
+        return RedfishClient(f"http://localhost:{port}")
+
+    yield start
+
+    for proc, log in started:
+        died = proc.poll()
+        proc.terminate()
+        rc = proc.wait(timeout=10)
+        log.seek(0)
+        text = log.read().decode(errors="replace")
+        log.close()
+        assert died is None, f"cxl-fmd exited during the test:\n{text[-4000:]}"
+        assert rc == 0, f"cxl-fmd did not shut down cleanly:\n{text[-4000:]}"
 
 
 def release_body(policy, **kw):
@@ -102,6 +148,40 @@ class TestDCDDiscovery:
         actions = data["Actions"]
         assert actions["#CXLLogicalDevice.DynamicCapacityAdd"]["target"] == SLD_ADD
         assert actions["#CXLLogicalDevice.DynamicCapacityRelease"]["target"] == SLD_RELEASE
+
+    def test_add_allowable_policies(self, api_client):
+        """
+        Review DCD-A5: the add offers the policies it can carry out. The
+        device supports Prescriptive, and AddCapacityPoliciesSupported says
+        so, but cxl-fmd cannot name capacity no host has: it is not offered,
+        and a Prescriptive add is still 400. EnableSharedAccess is offered
+        although Table 7-65 gives it no bit, as it is always sent.
+        """
+        status, data = api_client.get(SLD_LD0)
+        assert status == 200
+        add = data["Actions"]["#CXLLogicalDevice.DynamicCapacityAdd"]
+        assert add["Policy@Redfish.AllowableValues"] == [
+            "Free", "Contiguous", "EnableSharedAccess"]
+        status, data = api_client.get(SLD)
+        assert "Prescriptive" in data["CXLDevice"]["DynamicCapacity"][
+            "AddCapacityPoliciesSupported"]
+        status, data, _ = api_client.post(SLD_ADD, {
+            "Policy": "Prescriptive",
+            "ExtentList": [{"@odata.id": SLD + "/MemoryExtents/ext_0_400000000"}]})
+        assert status == 400
+
+
+def test_add_allowable_follows_device(dcd_daemon):
+    """A policy the device does not support is not offered (Review DCD-A5)."""
+    def free_only(t):
+        for dev in t["devices"]:
+            if "dcd" in dev:
+                dev["dcd"]["add_policies"] = ["Free"]
+    client = dcd_daemon(free_only)
+    status, data = client.get(SLD_LD0)
+    assert status == 200
+    add = data["Actions"]["#CXLLogicalDevice.DynamicCapacityAdd"]
+    assert add["Policy@Redfish.AllowableValues"] == ["Free", "EnableSharedAccess"]
 
     def test_memory_regions_collection(self, api_client):
         status, data = api_client.get(SLD_LD0 + "/MemoryRegions")

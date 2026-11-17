@@ -643,7 +643,14 @@ Policy semantics (CXL r4.0 Section 7.6.7.6.5):
   device", "An extent in ExtentList belongs to another logical device").
   A Prescriptive add therefore cannot be named through Redfish: there is
   no way to name free capacity, as `POST` on the `MemoryExtents`
-  collection is not served (cxl-fmd's limitation).
+  collection is not served (cxl-fmd's limitation). So the action's
+  `Policy@Redfish.AllowableValues` ("To specify the list of supported
+  values for a parameter, the service may include the
+  @Redfish.AllowableValues annotation", DSP0266 1.25.0 Section 9.6.14.1)
+  never has `Prescriptive`, even on a device whose
+  `AddCapacityPoliciesSupported` lists it (review DCD-A5). It has `Free`
+  and `Contiguous` when the device supports them, and `EnableSharedAccess`
+  always, as it is always sent (see Get DCD Info).
 - **EnableSharedAccess**: give this host access to the capacity tagged
   `Tag`, in `RegionNumber`; `Length` is not sent. The device fails it
   with Invalid Input "When the specified region is not Sharable", "When

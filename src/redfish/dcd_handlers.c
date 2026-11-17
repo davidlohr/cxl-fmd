@@ -467,6 +467,38 @@ json_t *fmd_redfish_dc_tags_oem(struct fmd_ctx *ctx, struct fmd_component *dev,
  * ============================================================================
  */
 
+/*
+ * The Policy values DynamicCapacityAdd takes: "To specify the list of
+ * supported values for a parameter, the service may include the
+ * @Redfish.AllowableValues annotation" (DSP0266 1.25.0 Section 9.6.14.1).
+ * Free and Contiguous when the device supports them (Supported Add Capacity
+ * Selection Policies, Table 7-65), and EnableSharedAccess always, as it is
+ * always sent (fmd_dc_add()). Prescriptive is left out even when the device
+ * supports it: its ExtentList names capacity by MemoryExtent links, and
+ * every MemoryExtent is capacity some host has, so a Prescriptive add is
+ * refused with 400 before anything is sent (action_dc_add_locked()).
+ * AddCapacityPoliciesSupported still says what the device supports
+ * (cxl-fmd's choices). Review DCD-A5.
+ */
+static json_t *dc_add_allowable(const struct fmd_dcd_info *dcd)
+{
+	static const int offered[] = {
+		FMD_DC_POLICY_FREE, FMD_DC_POLICY_CONTIGUOUS,
+		FMD_DC_POLICY_SHARED_ACCESS,
+	};
+	json_t *values = json_array();
+
+	for (size_t i = 0; i < sizeof(offered) / sizeof(offered[0]); i++) {
+		int v = offered[i];
+
+		if (v == FMD_DC_POLICY_SHARED_ACCESS ||
+		    (dcd->add_policies & fmd_dc_policy_cap_bit(false, v)))
+			json_array_append_new(values,
+				json_string(fmd_dc_policy_name(false, v)));
+	}
+	return values;
+}
+
 void fmd_redfish_dc_logical_device_props(struct fmd_ctx *ctx, struct fmd_component *dev,
 					 int ld_idx, const char *chassis_id,
 					 const char *dev_id, const char *ld_id,
@@ -514,10 +546,11 @@ void fmd_redfish_dc_logical_device_props(struct fmd_ctx *ctx, struct fmd_compone
 		json_object_set_new(result, "Actions", actions);
 	}
 	json_object_set_new(actions, "#CXLLogicalDevice.DynamicCapacityAdd",
-		json_pack("{s:s, s:s}",
+		json_pack("{s:s, s:s, s:o}",
 			"target", rf_uri(0, "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s/Actions/CXLLogicalDevice.DynamicCapacityAdd",
 					 chassis_id, dev_id, ld_id),
-			"title", "DynamicCapacityAdd"));
+			"title", "DynamicCapacityAdd",
+			"Policy@Redfish.AllowableValues", dc_add_allowable(dcd)));
 	json_object_set_new(actions, "#CXLLogicalDevice.DynamicCapacityRelease",
 		json_pack("{s:s, s:s}",
 			"target", rf_uri(1, "/redfish/v1/Chassis/%s/PCIeDevices/%s/CXLLogicalDevices/%s/Actions/CXLLogicalDevice.DynamicCapacityRelease",

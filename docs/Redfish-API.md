@@ -2013,10 +2013,9 @@ In summary:
    LD-ID, unverified, and Dynamic Capacity adds and releases are sent to
    such a device with it all the same (the maintainer's decision; see
    "Writes on a Multi-Headed DCD" in DCD-FM-API.md). The
-   `DynamicCapacityAdd` action has no `Policy@Redfish.AllowableValues`, so
-   nothing tells a client that a `Prescriptive` add, which a device may
-   list in `AddCapacityPoliciesSupported`, is always `400` (review DCD-Q
-   A5, not done). A `DELETE` of an extent with a tag in a Sharable region
+   `DynamicCapacityAdd` action leaves `Prescriptive` out of its
+   `Policy@Redfish.AllowableValues` for that reason, though the device may
+   list it in `AddCapacityPoliciesSupported`. A `DELETE` of an extent with a tag in a Sharable region
    releases every extent of that host with the tag, and an all-zero Tag
    is taken for no tag (cxl-fmd's convention). See Comments 4 and 5, "DELETE
    of a MemoryExtent" and the Open Questions of
@@ -2479,6 +2478,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of any resource with `Oem.Cxl` (a host's `MemoryDomain`, a `Connection`, a DCD's `PCIeDevice`) | `Oem.Cxl` with no `@odata.type`, and no schema for it | `@odata.type` `#Cxl.v1_0_0.MemoryDomain`, `#Cxl.v1_0_0.Connection` or `#Cxl.v1_0_0.PCIeDevice`, the types of cxl-fmd's Oem schema (see "Oem schema") |
 | `GET /redfish/v1/$metadata`; `GET /redfish/v1/Schemas/Cxl_v1.xml` | no reference to an Oem schema; `404` | a reference to `/redfish/v1/Schemas/Cxl_v1.xml`, which is served |
 | `GET` of a DCD's `PCIeDevice`, `MemoryRegion` or `MemoryExtent` | sizes and offsets only in whole MiB, rounded down: a 64 KiB block size `BlockSizeMiB` 0 and not in `MemoryBlockSizesSupported`, two 64 KiB extents both `ExtentOffsetMiB` 1024, `ExtentSizeMiB` 0 | the same, and each in bytes in `Oem.Cxl` (`TotalDynamicCapacityBytes`, `BlockSizeBytes`, `RegionBaseOffsetBytes`, `RegionSizeBytes`, `ExtentOffsetBytes`, `ExtentSizeBytes`; see DCD-FM-API.md, Comment 3) |
+| `GET` of a DCD's `CXLLogicalDevice` | `#CXLLogicalDevice.DynamicCapacityAdd` with no `Policy@Redfish.AllowableValues`, so nothing said that a `Prescriptive` add, which `AddCapacityPoliciesSupported` may list, is always `400` | `Policy@Redfish.AllowableValues`: `Free` and `Contiguous` when the device supports them, and `EnableSharedAccess`; never `Prescriptive`, which is still `400`. `AddCapacityPoliciesSupported` still lists what the device supports (review DCD-A5) |
 
 Mock topologies and discovery:
 
