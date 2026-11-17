@@ -690,8 +690,7 @@ struct fmd_mem_chunk *fmd_chunk_create(const char *id)
 		return NULL;
 	}
 
-	/* Default address range type */
-	strncpy(chunk->address_range_type, "PMEM", sizeof(chunk->address_range_type) - 1);
+	/* address_range_type empty: not known (fmd_chunk_range_type()) */
 	chunk->backing_ld = -1;		/* not LD 0 */
 
 	return chunk;
@@ -1095,6 +1094,75 @@ static int add_resource(struct fmd_ctx *ctx, struct fmd_component *comp,
 }
 
 /*
+ * The AddressRangeType of the memory of a device or LD that answered
+ * Identify Memory Device @id and Get Partition Info @part: "Volatile" if
+ * all of it is volatile, "PMEM" if all of it is persistent, NULL if it has
+ * both or nothing is known (cxl-fmd's rule). It is the active partition:
+ * Active Volatile Capacity is "the sum of the device's Volatile Only
+ * capacity and the capacity that is partitioned for volatile use", Active
+ * Persistent Capacity the same of persistent (CXL r4.0 Table 8-310). Both
+ * are 0 when Get Partition Info was not answered; of a device with no
+ * partitionable capacity ("Partition Alignment as zero", Section
+ * 8.2.10.9.2.2) the Volatile Only and Persistent Only capacities of
+ * Identify Memory Device (Table 8-309) are the same thing, and are used.
+ */
+const char *fmd_range_type(const struct cxlmi_cmd_memdev_identify_rsp *id,
+			   const struct cxlmi_cmd_memdev_get_partition_info_rsp *part)
+{
+	uint64_t vol = part->active_vmem, pers = part->active_pmem;
+
+	if (!vol && !pers && !id->partition_align) {
+		vol = id->volatile_capacity;
+		pers = id->persistent_capacity;
+	}
+	if (vol && !pers)
+		return "Volatile";
+	if (pers && !vol)
+		return "PMEM";
+	return NULL;
+}
+
+/*
+ * Whether a chunk of @type, "Volatile" or "PMEM", can be of the memory of
+ * a device or LD: some of it is of that type now, as fmd_range_type()
+ * reads the active partition or Identify Memory Device, or it has
+ * partitionable capacity (Total Capacity less Volatile Only and
+ * Persistent Only, with a Partition Alignment) that could be (cxl-fmd's
+ * rule).
+ */
+bool fmd_range_type_possible(const struct cxlmi_cmd_memdev_identify_rsp *id,
+			     const struct cxlmi_cmd_memdev_get_partition_info_rsp *part,
+			     const char *type)
+{
+	bool vol = !strcmp(type, "Volatile");
+	uint64_t now = vol ? part->active_vmem : part->active_pmem;
+	uint64_t only = vol ? id->volatile_capacity : id->persistent_capacity;
+
+	if (now || only)
+		return true;
+	return id->partition_align &&
+	       id->total_capacity > id->volatile_capacity + id->persistent_capacity;
+}
+
+/* The AddressRangeType of @chunk as served: what it was made with, or null */
+json_t *fmd_chunk_range_type(const struct fmd_mem_chunk *chunk)
+{
+	return chunk->address_range_type[0] ?
+	       json_string(chunk->address_range_type) : json_null();
+}
+
+/* @chunk is of a device or LD of type fmd_range_type() */
+static void set_range_type(struct fmd_mem_chunk *chunk,
+			   const struct cxlmi_cmd_memdev_identify_rsp *id,
+			   const struct cxlmi_cmd_memdev_get_partition_info_rsp *part)
+{
+	const char *type = fmd_range_type(id, part);
+
+	snprintf(chunk->address_range_type, sizeof(chunk->address_range_type),
+		 "%s", type ? type : "");
+}
+
+/*
  * Memory Resource Creation
  *
  * These functions create memory domain and chunk resources for devices.
@@ -1133,12 +1201,7 @@ int fmd_create_sld_memory_resources(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	chunk->base_address = 0;
 	chunk->size = sld->memory_size;
 
-	if (sld->memdev.volatile_capacity > 0 && sld->memdev.persistent_capacity == 0)
-		strncpy(chunk->address_range_type, "Volatile",
-			sizeof(chunk->address_range_type) - 1);
-	else
-		strncpy(chunk->address_range_type, "PMEM",
-			sizeof(chunk->address_range_type) - 1);
+	set_range_type(chunk, &sld->memdev, &sld->partition);
 
 	rc = add_resource(ctx, &chunk->base, &domain->base);
 	if (rc)
@@ -1245,12 +1308,7 @@ static int create_ld_memory_resources(struct fmd_ctx *ctx, struct fmd_component 
 		chunk->base_address = base_addr;
 		chunk->size = ld->memory_size;
 
-		if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
-			strncpy(chunk->address_range_type, "Volatile",
-				sizeof(chunk->address_range_type) - 1);
-		else
-			strncpy(chunk->address_range_type, "PMEM",
-				sizeof(chunk->address_range_type) - 1);
+		set_range_type(chunk, &ld->memdev, &ld->partition);
 
 		chunk->backing_ld = ld->ld_id;
 
@@ -1316,9 +1374,7 @@ static int sync_add_chunk(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return -ENOMEM;
 	chunk->base_address = offset;
 	chunk->size = size;
-	if (ld->memdev.volatile_capacity > 0 && ld->memdev.persistent_capacity == 0)
-		strncpy(chunk->address_range_type, "Volatile",
-			sizeof(chunk->address_range_type) - 1);
+	set_range_type(chunk, &ld->memdev, &ld->partition);
 	chunk->backing_ld = ld->ld_id;
 	return add_resource(ctx, &chunk->base, &domain->base);
 }

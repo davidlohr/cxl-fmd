@@ -1285,6 +1285,12 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		if (rc == -13)
 			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
 					  "No LD Pool CCI of the Multi-Headed device is known: its allocations cannot be changed");
+		if (rc == -15)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "Name the AddressRangeType: the memory of the device is not all of one type, or its type is not known");
+		if (rc == -16)
+			return send_error(conn, MHD_HTTP_BAD_REQUEST,
+					  "The device or LD has no memory of that AddressRangeType, and cannot be partitioned to have it");
 		if (rc == -14)
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again");

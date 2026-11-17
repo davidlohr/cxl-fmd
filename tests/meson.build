@@ -183,6 +183,24 @@ if pytest_available and requests_available
         suite: 'api',
     )
 
+    # AddressRangeType of a chunk, alike in every view
+    test(
+        'range-type',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            files('test_range_type.py'),
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 180,
+        suite: 'api',
+    )
+
     # Query parameters, and methods a resource does not take
     test(
         'protocol',

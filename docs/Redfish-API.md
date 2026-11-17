@@ -841,7 +841,7 @@ or
 | Property | Type | Required | Description |
 |----------|------|:--------:|-------------|
 | `MemoryChunkSizeMiB` | integer | Conditional | Size of the chunk in MiB, greater than 0 (required unless InterleaveSets[0].SizeMiB provided; if both are, they are equal) |
-| `AddressRangeType` | string | No | `"Volatile"` or `"PMEM"` (default: `"PMEM"`); any other value is `400` |
+| `AddressRangeType` | string | No | `"Volatile"` or `"PMEM"`; any other value is `400`. The device or LD has to have memory of that type, or partitionable capacity (Total Capacity less Volatile Only and Persistent Only, with a Partition Alignment) that could be, else `400`; an LD that did not answer Identify Memory Device takes any. Left out: the type all of its memory is now (see below); on an SLD whose memory is of both types, or of none known, `400`; on an LD, the chunk has none (`null`) |
 | `AddressRangeOffsetMiB` | integer | No | Offset of the chunk in its domain, in MiB: from 0 to the domain's `MemorySizeMiB` less `MemoryChunkSizeMiB`. If omitted, the lowest offset where the chunk fits (first fit) |
 | `InterleaveSets` | array | No | One entry at most (see below) |
 | `Links.CXLLogicalDevices` | array | No | One entry at most: the LD, by the URI of its `CXLLogicalDevice` |
@@ -1552,10 +1552,16 @@ In summary:
    a device is discovered: a `Status` does not follow the device after
    that. When that read fails, the device's views have no `Health` (see
    "Status from Get Health Info").
-10. `AddressRangeType` is `Volatile` only for a device or LD with volatile
-    and no persistent capacity. Every other one is `PMEM`, a device with
-    both kinds of capacity or with unknown capacities included. A `POST` of
-    a MemoryChunk without it makes a `PMEM` chunk.
+10. A chunk's `AddressRangeType` is the one it was made with, the same in
+    every view (`Chassis`, `Systems`, the `POST` answer). A chunk found at
+    discovery is `Volatile` if all of its device's or LD's memory is
+    volatile in the active partition (Get Partition Info, Active Volatile
+    and Active Persistent Capacity, CXL r4.0 Table 8-310; Identify Memory
+    Device's Volatile Only and Persistent Only for a device with no
+    Partition Alignment that did not answer it), `PMEM` if all is
+    persistent, and `null` ("not known") if it has both or neither is
+    known: one chunk of mixed memory is not split (cxl-fmd's rules).
+    The chunks of a switch's pool domain are typed the same way.
 11. Set Partition Info, Scan Media and the security commands are sent
     over MCTP without knowing whether a host is using the device's
     mailboxes (see "Memory device writes").
@@ -1801,6 +1807,10 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` with an `AddressRangeOffsetMiB` that is negative, not an integer, or puts any of the chunk past the domain's `MemorySizeMiB` | `201` (a negative or wrapped offset, or an offset past the end; one that was not an integer was ignored) | `400` |
 | Chunk `POST` with no `AddressRangeOffsetMiB` | placed after the chunk that ends last, even past the end of the domain | placed at the lowest offset where it fits, within the domain, or `409` |
 | Chunk `POST` with an `AddressRangeType` other than `PMEM` or `Volatile`, or not a string | `201`, as `PMEM` | `400` |
+| Chunk `GET` of a device or LD with both volatile and persistent capacity, or of unknown capacities (Identify Memory Device not answered) | `AddressRangeType` `PMEM` | `null` |
+| Chunk `GET` under `/redfish/v1/Systems/...` of a device with no Volatile Only or Persistent Only capacity, partitioned all volatile | `PMEM` (and `Volatile` under `Chassis`) | `Volatile` in both: every view serves the type the chunk was made with, from the active partition |
+| Chunk `POST` with no `AddressRangeType` | `PMEM` in the answer, whatever the device (a volatile-only SLD's then read `Volatile` on a `GET`) | the type all of the device's or LD's memory is; on an SLD with both, or neither known, `400`; on such an LD, `null` |
+| Chunk `POST` with an `AddressRangeType` the device or LD has no memory of and cannot be partitioned to (`PMEM` on a volatile-only SLD, `Volatile` on an LD all persistent) | `201` | `400`, nothing made or sent |
 | Chunk `POST` on an MLD or MHD that names no LD, an LD the device does not have, or another device's (no `InterleaveSets`, `.../Memory/{dev}_ld9`, `/redfish/v1/Chassis/other/Memory/other_ld0`) | `201`, and nothing sent: no LD's allocation grew | `400`, nothing made or sent |
 | Chunk `POST` naming its LD in another form than the URI of its `Memory` (the LD's component ID `{dev}_ld0`, `/not/a/redfish/uri/{dev}_ld1`) | `201`: the number after the first `_ld` taken, if the string had the Chassis ID in it | `400` |
 | Chunk `POST` naming its LD by the URI of its `Memory`, on a device whose ID is longer than the mock's (`cxl_{serial}` on hardware) | `201`, and nothing sent: the URI was cut to 63 characters, which lost the `_ld{N}` | Set LD Allocations for that LD |

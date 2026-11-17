@@ -883,7 +883,7 @@ struct fmd_mem_chunk {
 
 	uint64_t base_address;
 	uint64_t size;
-	char address_range_type[16];       /* "PMEM" or "Volatile" */
+	char address_range_type[16];       /* "PMEM", "Volatile", or "" if not known */
 	/*
 	 * The LD whose allocation the chunk is part of: an LD-ID of an MLD,
 	 * a pool index of a Multi-Headed device, -1 for none (an SLD's
@@ -1518,6 +1518,12 @@ struct fmd_ld *fmd_head_whole_ld(const struct fmd_head *head);
  * The LD of @dev (an MLD or a Multi-Headed device) that chunk @chunk is
  * on, its backing_ld; NULL if it has none, or @dev has no such LD.
  */
+const char *fmd_range_type(const struct cxlmi_cmd_memdev_identify_rsp *id,
+			   const struct cxlmi_cmd_memdev_get_partition_info_rsp *part);
+bool fmd_range_type_possible(const struct cxlmi_cmd_memdev_identify_rsp *id,
+			     const struct cxlmi_cmd_memdev_get_partition_info_rsp *part,
+			     const char *type);
+json_t *fmd_chunk_range_type(const struct fmd_mem_chunk *chunk);
 const struct fmd_ld *fmd_chunk_ld(const struct fmd_component *dev,
 				  const struct fmd_mem_chunk *chunk);
 

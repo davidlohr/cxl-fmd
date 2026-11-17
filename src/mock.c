@@ -1890,6 +1890,9 @@ static int parse_device(struct fmd_ctx *ctx, json_t *jdev,
 				if (ld) {
 					ld->health_valid = true;
 					ld->memory_size = per_ld_mb * 1024ULL * 1024;
+					/* all persistent, as parse_ld() has an LD by default */
+					ld->memdev.total_capacity = per_ld_mb / 256;
+					ld->memdev.persistent_capacity = per_ld_mb / 256;
 					/* 100% ≈ 255 in CXL format (8-bit fraction) */
 					ld->qos_allocated_bw = 255;
 					ld->qos_limit_bw = 255;

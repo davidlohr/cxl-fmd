@@ -382,6 +382,7 @@ The FM accesses the FMLD implicitly via MLD Component commands (opcodes 5400h-54
 |-------|------|---------|-------------|
 | `ld_id` | integer | array index | Logical Device identifier (0 to ld_count-1) |
 | `memory_size_mb` | integer | auto | Memory allocated to this LD (MiB) |
+| `volatile_capacity_mb`, `persistent_capacity_mb` | integer | 0, `memory_size_mb` | The LD's Volatile Only and Persistent Only capacity, as Identify Memory Device through the LD would give it: all persistent if neither is given. Its chunks' `AddressRangeType` follows (`PMEM`, `Volatile`, or `null` for both) |
 | `qos_allocated_bw` | integer | 100 | Allocated bandwidth percentage (0-100) |
 | `qos_limit_bw` | integer | 100 | Bandwidth limit percentage (0-100) |
 | `health_info` | object | inherited | Per-LD health override (optional) |
@@ -407,6 +408,8 @@ If `health_info` is not specified for an LD, it inherits the device-level health
 
 If `logical_devices` array is not provided but `ld_count > 1`, LDs are automatically created with:
 - Equal memory distribution: `total_capacity / ld_count`
+- All of it persistent, as an LD in `logical_devices` with no
+  `volatile_capacity_mb` or `persistent_capacity_mb` (their chunks are `PMEM`)
 - Default QoS: 100% allocated and limit
 - Inherited health status from device level
 

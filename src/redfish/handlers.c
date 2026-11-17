@@ -433,7 +433,7 @@ json_t *fmd_redfish_system_memory_chunk(struct fmd_ctx *ctx,
 		"  s:s,"
 		"  s:s,"
 		"  s:I,"
-		"  s:s,"
+		"  s:o,"
 		"  s:s,"
 		"  s:{s:o}"
 		"}",
@@ -442,7 +442,7 @@ json_t *fmd_redfish_system_memory_chunk(struct fmd_ctx *ctx,
 		"Id", chunk_id,
 		"Name", chunk_id,
 		"MemoryChunkSizeMiB", (json_int_t)(f.found->size / (1024 * 1024)),
-		"AddressRangeType", f.found->address_range_type,
+		"AddressRangeType", fmd_chunk_range_type(f.found),
 		"MediaLocation", "Remote",
 		"Links", "Endpoints", targets
 	);
@@ -2528,6 +2528,12 @@ static json_t *rf_rollup_status(const struct fmd_status_rollup *r, bool health,
 	return status;
 }
 
+/* @str as a JSON string, or null if it is NULL */
+static json_t *json_string_or_null(const char *str)
+{
+	return str ? json_string(str) : json_null();
+}
+
 /* Add the LDs of @dev, an MLD or a Multi-Headed device, to @r */
 static void rollup_lds(struct fmd_status_rollup *r, const struct fmd_component *dev)
 {
@@ -4159,7 +4165,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 	uint64_t size_mib = 0;
 	uint64_t offset_mib = 0;
 	bool offset_known = false;
-	const char *address_range_type = "PMEM";
+	json_t *range_type = NULL;
 	struct fmd_status_rollup r = { 0 };
 	const char *chunk_name = "CXL Memory Chunk";
 	char ld_link_uri[512] = {0};
@@ -4214,9 +4220,8 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 			size_mib = sld->memory_size / (1024ULL * 1024);
 			offset_known = true;	/* the whole device, from 0 */
 			fmd_rollup_add(&r, &sld->health, sld->health_valid);
-
-			if (sld->partition.active_vmem > 0 && sld->partition.active_pmem == 0)
-				address_range_type = "Volatile";
+			range_type = json_string_or_null(fmd_range_type(&sld->memdev,
+									&sld->partition));
 
 			/* Link to device's CXLLogicalDevice */
 			snprintf(ld_link_uri, sizeof(ld_link_uri),
@@ -4233,10 +4238,8 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 					if (ld->ld_id == ld_idx) {
 						size_mib = ld->memory_size / (1024ULL * 1024);
 						fmd_rollup_add(&r, &ld->health, ld->health_valid);
-
-						if (ld->memdev.volatile_capacity > 0 &&
-						    ld->memdev.persistent_capacity == 0)
-							address_range_type = "Volatile";
+						range_type = json_string_or_null(
+							fmd_range_type(&ld->memdev, &ld->partition));
 
 						/* Link to device's CXLLogicalDevice */
 						snprintf(ld_link_uri, sizeof(ld_link_uri),
@@ -4250,8 +4253,10 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 
 		fmd_topology_rdunlock(&ctx->topology);
 
-		if (size_mib == 0)
+		if (size_mib == 0) {
+			json_decref(range_type);
 			return NULL;
+		}
 
 		chunk_name = "CXL Pool Memory Chunk";
 
@@ -4277,32 +4282,20 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		/* an SLD's chunk is of its LD 0, any other of its backing LD */
 		int ld_idx = chassis->type == FMD_COMPONENT_SLD ? 0 : chunk->backing_ld;
 
+		/* the type it was made with; its LD's health, an MHD's too */
+		range_type = fmd_chunk_range_type(chunk);
+		fmd_topology_rdlock(&ctx->topology);
 		if (chassis->type == FMD_COMPONENT_SLD) {
 			struct fmd_sld *sld = fmd_to_sld(chassis);
+
 			fmd_rollup_add(&r, &sld->health, sld->health_valid);
+		} else {
+			const struct fmd_ld *cl = fmd_chunk_ld(chassis, chunk);
 
-			if (sld->partition.active_vmem > 0 && sld->partition.active_pmem == 0)
-				address_range_type = "Volatile";
-		} else if (chassis->type == FMD_COMPONENT_MLD) {
-			struct fmd_mld *mld = fmd_to_mld(chassis);
-			struct fmd_component *child;
-
-			fmd_topology_rdlock(&ctx->topology);
-			fmd_for_each_child(&mld->base, child) {
-				if (child->type == FMD_COMPONENT_LD) {
-					struct fmd_ld *ld = fmd_to_ld(child);
-					if (ld->ld_id == ld_idx) {
-						fmd_rollup_add(&r, &ld->health, ld->health_valid);
-
-						if (ld->memdev.volatile_capacity > 0 &&
-						    ld->memdev.persistent_capacity == 0)
-							address_range_type = "Volatile";
-						break;
-					}
-				}
-			}
-			fmd_topology_rdunlock(&ctx->topology);
+			if (cl)
+				fmd_rollup_add(&r, &cl->health, cl->health_valid);
 		}
+		fmd_topology_rdunlock(&ctx->topology);
 
 		/* Link to this chassis's CXLLogicalDevice, if it has one */
 		if (ld_idx >= 0)
@@ -4321,7 +4314,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"  s:s,"   /* Id */
 		"  s:s,"   /* Name */
 		"  s:I,"   /* MemoryChunkSizeMiB */
-		"  s:s,"   /* AddressRangeType */
+		"  s:o,"   /* AddressRangeType */
 		"  s:b,"   /* IsMirrorEnabled */
 		"  s:o"   /* Status */
 		"}",
@@ -4330,7 +4323,7 @@ json_t *fmd_redfish_memory_chunk(struct fmd_ctx *ctx,
 		"Id", chunk_id,
 		"Name", chunk_name,
 		"MemoryChunkSizeMiB", (json_int_t)size_mib,
-		"AddressRangeType", address_range_type,
+		"AddressRangeType", range_type ? range_type : json_null(),
 		"IsMirrorEnabled", false,
 		"Status", rf_rollup_status(&r, true, false)
 	);
@@ -4541,12 +4534,12 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
 
 	memset(plan, 0, sizeof(*plan));
 	plan->ld = -1;
-	snprintf(plan->type, sizeof(plan->type), "PMEM");
 
 	/*
 	 * AddressRangeType (optional): PMEM or Volatile. Any other value,
 	 * Block included, which cxl-fmd cannot make, is a bad request rather
-	 * than a chunk of another type than the one asked for.
+	 * than a chunk of another type than the one asked for. Left empty if
+	 * not given: chunk_plan_type() gives it the device's.
 	 */
 	type_j = json_object_get(root, "AddressRangeType");
 	if (type_j) {
@@ -4677,6 +4670,47 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
 }
 
 /*
+ * The AddressRangeType of the chunk of @plan, on @dev and its LD @ld (NULL
+ * for an SLD). One asked for is taken if the device or LD can have memory
+ * of that type (fmd_range_type_possible()), or if nothing is known of its
+ * memory (an LD that did not answer Identify Memory Device). One not asked
+ * for is the type all of its memory is (fmd_range_type()): on an SLD, whose
+ * Volatile chunks change the partition, there has to be one; the chunk of
+ * an LD, which grows its allocation whatever the type, is left with none
+ * known (null) if its memory is of both types or not known. Returns 0, -15
+ * if an SLD's chunk has no type, or -16 if the type asked for cannot be.
+ * cxl-fmd's rules: a chunk is not given a type its memory does not have, as
+ * it was given PMEM whatever the device.
+ */
+static int chunk_plan_type(const struct fmd_component *dev, const struct fmd_ld *ld,
+			   struct chunk_plan *plan)
+{
+	const struct cxlmi_cmd_memdev_identify_rsp *id;
+	const struct cxlmi_cmd_memdev_get_partition_info_rsp *part;
+	const char *type;
+
+	if (dev->type == FMD_COMPONENT_SLD) {
+		id = &fmd_to_sld((struct fmd_component *)dev)->memdev;
+		part = &fmd_to_sld((struct fmd_component *)dev)->partition;
+	} else if (ld) {
+		id = &ld->memdev;
+		part = &ld->partition;
+	} else {
+		return -15;
+	}
+	if (plan->type[0]) {
+		if (dev->type != FMD_COMPONENT_SLD && !id->total_capacity)
+			return 0;	/* nothing known of the LD's memory */
+		return fmd_range_type_possible(id, part, plan->type) ? 0 : -16;
+	}
+	type = fmd_range_type(id, part);
+	if (!type)
+		return dev->type == FMD_COMPONENT_SLD ? -15 : 0;
+	snprintf(plan->type, sizeof(plan->type), "%s", type);
+	return 0;
+}
+
+/*
  * POST /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks
  *
  * Create a new memory chunk in the specified domain.
@@ -4684,7 +4718,8 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
  * Request body:
  * {
  *   "MemoryChunkSizeMiB": 4096,        // > 0; or InterleaveSets[0].SizeMiB
- *   "AddressRangeType": "PMEM",        // optional, "PMEM" or "Volatile"
+ *   "AddressRangeType": "PMEM",        // "PMEM" or "Volatile"; optional if
+ *                                      // all of the memory is of one type
  *   "AddressRangeOffsetMiB": 0,        // optional, auto-assigned if omitted
  *   "InterleaveSets": [{"Memory": {"@odata.id": <the LD's Memory>}}],
  *   "Links": {"CXLLogicalDevices": [{"@odata.id": <the LD>}]}
@@ -4724,8 +4759,12 @@ static int parse_chunk_plan(struct fmd_ctx *ctx, const struct fmd_component *dev
  * -14 = Set LD Allocations had an outcome that could not be told, and the
  *       LD could not be read back (fmd_ld_alloc_set()): the chunk is kept,
  *       and no chunk of the device is changed until the LD is read
- * Every one of -2, -6 and -8 to -12 is answered before anything is changed
- * or sent.
+ * -15 = no AddressRangeType, and the SLD's memory is of both types, or of
+ *       none known (chunk_plan_type())
+ * -16 = an AddressRangeType the device or LD has no memory of, and cannot
+ *       be partitioned to
+ * Every one of -2, -6, -8 to -12, -15 and -16 is answered before anything
+ * is changed or sent.
  */
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -4771,6 +4810,9 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	if (chassis->type != FMD_COMPONENT_SLD)
 		ld = (struct fmd_ld *)fmd_chunk_ld(chassis, &(struct fmd_mem_chunk){
 							  .backing_ld = plan.ld });
+	rc = chunk_plan_type(chassis, ld, &plan);
+	if (rc)
+		return rc;
 
 	/*
 	 * A chunk of an LD a vPPB has bound changes the LD's allocation
@@ -4913,7 +4955,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		"  s:s,"   /* Name */
 		"  s:I,"   /* MemoryChunkSizeMiB */
 		"  s:I,"   /* AddressRangeOffsetMiB */
-		"  s:s"    /* AddressRangeType */
+		"  s:o"    /* AddressRangeType */
 		"}",
 		"@odata.id", uri,
 		"@odata.type", "#MemoryChunks.v1_6_2.MemoryChunks",
@@ -4921,7 +4963,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 		"Name", "CXL Memory Chunk",
 		"MemoryChunkSizeMiB", (json_int_t)(chunk->size / (1024ULL * 1024)),
 		"AddressRangeOffsetMiB", (json_int_t)(chunk->base_address / (1024ULL * 1024)),
-		"AddressRangeType", chunk->address_range_type
+		"AddressRangeType", fmd_chunk_range_type(chunk)
 	);
 
 	/*

@@ -176,7 +176,9 @@ is not reused while cxl-fmd runs):
 }
 ```
 
-`AddressRangeType` defaults to `"PMEM"` (a known gap). For an MLD the
+`AddressRangeType`, if left out, is the type all of the device's or LD's
+memory is; a device with both has to be told (see "Creating Memory
+Chunks" in `docs/Redfish-API.md`). For an MLD the
 chunk grows the LD with Set LD Allocations; see "Memory Provisioning" in
 `docs/Redfish-API.md` for what each device type sends.
 
