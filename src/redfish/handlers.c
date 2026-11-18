@@ -7003,8 +7003,20 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 	/*
 	 * What the switch has now, every VCS of it: another FM, or a request
 	 * through another CCI, may have bound or unbound since it was read.
+	 * The host's VCS is the one decided on: nothing is answered from it,
+	 * nor bound in it, unless it was just read whole. One that could not
+	 * be read may be read on a retry (503); one wider than cxl-fmd reads,
+	 * or past the VCSs it reads, will not be (409).
 	 */
 	fmd_vcs_refresh(ctx, sw);
+	switch (fmd_vcs_check(sw, host->vcs_id)) {
+	case FMD_VCS_UNREAD:
+		return -26;
+	case FMD_VCS_TRUNCATED:
+		return -27;
+	default:
+		break;
+	}
 
 	/*
 	 * The host's VCS has it already, or is being given it: the same
@@ -7103,9 +7115,20 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 	}
 
 	rc = fmd_vppb_bind(ctx, sw, key.vcs_id, key.vppb_id, port_id, ld_id);
-	if (rc == FMD_OP_STARTED) {
+	if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED) {
 		/* answered with the task; the Connection is Starting meanwhile */
 		task = fmd_task_activate(ctx, task, 0);
+		/*
+		 * Success, and the vPPB not read bound after it: what the
+		 * switch did is shown by the next read of the VCS that sees
+		 * the vPPB settled (fmd_tasks_reconcile()), not taken from
+		 * its answer alone (cxl-fmd's choice).
+		 */
+		if (task && rc == FMD_OP_UNCONFIRMED)
+			fmd_task_interrupt(ctx, task, "The switch answered Bind "
+					   "vPPB with Success, and the vPPB, read "
+					   "after it, does not show the bind; the "
+					   "vPPB is read again until it settles");
 		*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
 		return task ? FMD_OP_STARTED : -6;
 	}
@@ -7127,6 +7150,10 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 	case -EAGAIN:		/* Busy, or Retry Required twice */
 	case -EALREADY:		/* the vPPB chosen is no longer unbound */
 		return -11;
+	case -ESTALE:		/* the host's VCS could not be read again */
+		return -26;
+	case -E2BIG:		/* nor read whole */
+		return -27;
 	case -EINVAL:		/* an LD-ID the port does not have */
 		return -13;
 	case -EOPNOTSUPP:	/* Unsupported */
@@ -7183,8 +7210,9 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  *
  * Returns:
  *   0 bound: *response is the Connection (201)
- *   FMD_OP_STARTED: the switch binds in the background, or was already:
- *     *response is the Task (202)
+ *   FMD_OP_STARTED: the switch binds in the background, or was already, or
+ *     answered Success and the vPPB was not read bound after it (the
+ *     task Interrupted until a read settles it): *response is the Task (202)
  *   FMD_CONN_EXISTS: *response is the Connection there already (200)
  *  -1 fabric not found
  *  -2 invalid request body
@@ -7214,7 +7242,10 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  *     reset (struct fmd_mem_chunk)
  * -24 VolumeInfo, which names volumes, not memory
  * -25 a MemoryChunkInfo AccessState other than Optimized
- * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -25.
+ * -26 the host's VCS could not be read: try again
+ * -27 the host's VCS is not read whole: more vPPBs than FMD_MAX_VPPB, or
+ *     past the FMD_MAX_VCS VCSs read
+ * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -27.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -7353,6 +7384,10 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 	}
 }
 
+#define UNBIND_UNCONFIRMED "The switch answered Unbind vPPB with Success, " \
+	"and the vPPB, read after it, does not show it unbound; the vPPB is " \
+	"read again until it settles"
+
 /*
  * Unbind the vPPB of Connection @connection_id with Unbind Option @option
  * (Table 7-36), whoever bound it, the Connection Absent included. The
@@ -7445,8 +7480,10 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		op->lost = false;
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
 				     key.port_id, key.ld_id, option);
-		if (rc == 0 || rc == FMD_OP_STARTED) {
+		if (rc == 0 || rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED) {
 			/* the task under way sees the vPPB unbound */
+			if (rc == FMD_OP_UNCONFIRMED)
+				fmd_task_interrupt(ctx, task, UNBIND_UNCONFIRMED);
 			op->unbind_option = option;
 			task->failed_polls = 0;
 			task->unobserved = 0;
@@ -7474,9 +7511,14 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
 				     key.port_id, key.ld_id, option);
-		if (rc == FMD_OP_STARTED) {
-			/* it stands, Updating, until the vPPB is unbound */
+		if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED) {
+			/*
+			 * it stands, Updating, until the vPPB is unbound; on
+			 * a Success not read back, until a read shows it
+			 */
 			task = fmd_task_activate(ctx, task, option);
+			if (task && rc == FMD_OP_UNCONFIRMED)
+				fmd_task_interrupt(ctx, task, UNBIND_UNCONFIRMED);
 			*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
 			return task ? FMD_OP_STARTED : -2;
 		}

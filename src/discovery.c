@@ -3009,6 +3009,22 @@ struct fmd_vppb *fmd_switch_bind_target_user(struct fmd_switch *sw,
 	return NULL;
 }
 
+/*
+ * Whether @vppb, as read, holds port @port_id, and LD @ld_id of it
+ * (FMD_LD_NONE: the whole port). Bound Port ID is "Valid only when Binding
+ * Status is 02h or 03h", and Bound LD ID "Valid only when vPPB[Start vPPB]
+ * Binding Status is 03h" (Table 7-34).
+ */
+static bool vppb_holds(const struct fmd_vppb *vppb, uint8_t port_id,
+		       uint16_t ld_id)
+{
+	if (ld_id == FMD_LD_NONE)
+		return vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT &&
+		       vppb->bound_port_id == port_id;
+	return vppb->binding_status == FMD_VPPB_BOUND_LD &&
+	       vppb->bound_port_id == port_id && vppb->bound_ld_id == ld_id;
+}
+
 int fmd_vppb_errno(uint16_t rc)
 {
 	switch (rc) {
@@ -3040,12 +3056,20 @@ int fmd_vppb_errno(uint16_t rc)
  *  - LD ID is the LD-ID if the target port is an MLD port and FFFFh for
  *    other endpoint types (Table 7-35).
  *
- * Returns 0 once the switch has bound the vPPB, FMD_OP_STARTED if it is
- * binding it in the background, -EINVAL for a VCS, vPPB or LD that does not
- * exist, -EALREADY if the vPPB is not unbound, -EBUSY if the target is bound
- * to a vPPB, -EAGAIN if the switch answered Busy, or Retry Required twice,
- * -EOPNOTSUPP if it answered Unsupported, -EPROTO if Invalid Input, and -EIO
- * if it refused otherwise. fmd_vppb_unbind() returns the same.
+ * The VCSs are read first, and the bind is decided on VCS @vcs_id only as
+ * just read whole: -ESTALE if it could not be read, -E2BIG if it has more
+ * vPPBs than cxl-fmd reads (a binding past them is not seen). Other VCSs
+ * are taken as last read: the target in use there is judged on that.
+ *
+ * Returns 0 once the switch has bound the vPPB and the read after it shows
+ * it bound to the target, FMD_OP_STARTED if it is binding it in the
+ * background, FMD_OP_UNCONFIRMED if it answered Success and the read after
+ * it does not show the binding (or could not be made), -EINVAL for a VCS,
+ * vPPB or LD that does not exist, -EALREADY if the vPPB is not unbound,
+ * -EBUSY if the target is bound to a vPPB, -EAGAIN if the switch answered
+ * Busy, or Retry Required twice, -EOPNOTSUPP if it answered Unsupported,
+ * -EPROTO if Invalid Input, and -EIO if it refused otherwise.
+ * fmd_vppb_unbind() returns the same.
  */
 int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		  uint8_t vcs_id, uint8_t vppb_id,
@@ -3062,6 +3086,19 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 
 	/* decide on what the switch has now, not on what discovery found */
 	fmd_vcs_refresh(ctx, sw);
+
+	switch (fmd_vcs_check(sw, vcs_id)) {
+	case FMD_VCS_UNREAD:
+		fmd_warn(ctx, "%s: VCS %d could not be read: nothing is bound",
+			 sw->base.id, vcs_id);
+		return -ESTALE;
+	case FMD_VCS_TRUNCATED:
+		fmd_warn(ctx, "%s: VCS %d is not read whole: nothing is bound",
+			 sw->base.id, vcs_id);
+		return -E2BIG;
+	default:
+		break;
+	}
 
 	vcs = fmd_switch_find_vcs(sw, vcs_id);
 	if (!vcs) {
@@ -3189,24 +3226,19 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	fmd_info(ctx, "%s: bind of vPPB %d in VCS %d %s",
 		 sw->base.id, vppb_id, vcs_id,
 		 rc == CXLMI_RET_BACKGROUND ? "started" : "done");
+	if (rc == CXLMI_RET_BACKGROUND)
+		return FMD_OP_STARTED;
 
-	return rc == CXLMI_RET_BACKGROUND ? FMD_OP_STARTED : 0;
-}
-
-/*
- * Whether @vppb, as read, holds port @port_id, and LD @ld_id of it
- * (FMD_LD_NONE: the whole port). Bound Port ID is "Valid only when Binding
- * Status is 02h or 03h", and Bound LD ID "Valid only when vPPB[Start vPPB]
- * Binding Status is 03h" (Table 7-34).
- */
-static bool vppb_holds(const struct fmd_vppb *vppb, uint8_t port_id,
-		       uint16_t ld_id)
-{
-	if (ld_id == FMD_LD_NONE)
-		return vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT &&
-		       vppb->bound_port_id == port_id;
-	return vppb->binding_status == FMD_VPPB_BOUND_LD &&
-	       vppb->bound_port_id == port_id && vppb->bound_ld_id == ld_id;
+	/* Success: taken as done only once the vPPB, read, shows it */
+	vcs = fmd_switch_find_vcs(sw, vcs_id);
+	vppb = vcs && !vcs->stale ? fmd_vcs_find_vppb(vcs, vppb_id) : NULL;
+	if (!vppb || !vppb_holds(vppb, port_id, ld_id)) {
+		fmd_warn(ctx, "%s: the switch bound vPPB %d in VCS %d, and the "
+			 "vPPB %s", sw->base.id, vppb_id, vcs_id,
+			 vppb ? "does not read bound to it" : "could not be read");
+		return FMD_OP_UNCONFIRMED;
+	}
+	return 0;
 }
 
 /*
@@ -3227,7 +3259,9 @@ static bool vppb_holds(const struct fmd_vppb *vppb, uint8_t port_id,
  * (a forced unbind of a managed one). What the switch does between that
  * read and the command cannot be checked.
  *
- * Returns as fmd_vppb_bind(), and -ESTALE if the VCS could not be read,
+ * Returns as fmd_vppb_bind() (FMD_OP_UNCONFIRMED: Success, and the read
+ * after it does not show the vPPB unbound), and -ESTALE if the VCS could
+ * not be read,
  * -ENOENT if the vPPB holds anything else, or nothing, -EAGAIN as well if
  * it reads 01h for an operation not cxl-fmd's (nothing is sent for any of
  * these), -EINVAL for a reserved @option or a VCS or vPPB the switch does
@@ -3368,8 +3402,19 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	fmd_info(ctx, "%s: unbind of vPPB %d in VCS %d %s",
 		 sw->base.id, vppb_id, vcs_id,
 		 rc == CXLMI_RET_BACKGROUND ? "started" : "done");
+	if (rc == CXLMI_RET_BACKGROUND)
+		return FMD_OP_STARTED;
 
-	return rc == CXLMI_RET_BACKGROUND ? FMD_OP_STARTED : 0;
+	/* Success: taken as done only once the vPPB, read, is unbound */
+	vcs = fmd_switch_find_vcs(sw, vcs_id);
+	vppb = vcs && !vcs->stale ? fmd_vcs_find_vppb(vcs, vppb_id) : NULL;
+	if (!vppb || vppb->binding_status != FMD_VPPB_UNBOUND) {
+		fmd_warn(ctx, "%s: the switch unbound vPPB %d in VCS %d, and the "
+			 "vPPB %s", sw->base.id, vppb_id, vcs_id,
+			 vppb ? "does not read unbound" : "could not be read");
+		return FMD_OP_UNCONFIRMED;
+	}
+	return 0;
 }
 
 /*

@@ -207,6 +207,22 @@ struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 	return NULL;
 }
 
+void fmd_task_interrupt(struct fmd_ctx *ctx, struct fmd_task *task,
+			const char *message)
+{
+	struct fmd_binding_op *op;
+	char id[16];
+
+	task->state = FMD_TASK_INTERRUPTED;
+	snprintf(task->message, sizeof(task->message), "%s", message);
+	snprintf(id, sizeof(id), "%d", task->id);
+	for (op = ctx->binding_ops; op; op = op->next) {
+		if (!strcmp(op->task_id, id))
+			op->lost = true;
+	}
+	fmd_warn(ctx, "Task %d: Interrupted: %s", task->id, message);
+}
+
 /* The task is over: the op it followed goes, and the view reads the vPPB */
 static void task_drop_op(struct fmd_ctx *ctx, struct fmd_task *task)
 {

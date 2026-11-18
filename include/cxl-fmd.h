@@ -2052,6 +2052,15 @@ struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
  */
 struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
 				   uint8_t unbind_option);
+/*
+ * @task, listed (fmd_task_activate()), is Interrupted with @message: its op
+ * is kept, lost, and fmd_tasks_reconcile() ends it on the first read of
+ * the VCSs that sees its vPPB settled. For an operation whose outcome the
+ * switch's answer and the vPPB, read after it, do not agree on, or that
+ * could not be read (FMD_OP_UNCONFIRMED).
+ */
+void fmd_task_interrupt(struct fmd_ctx *ctx, struct fmd_task *task,
+			const char *message);
 void fmd_task_discard(struct fmd_task *task);
 /* fmd_task_alloc() and fmd_task_activate() */
 struct fmd_task *fmd_task_start(struct fmd_ctx *ctx, enum fmd_task_kind kind,
@@ -2089,6 +2098,14 @@ void fmd_tasks_reconcile(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * started the operation and has not finished it.
  */
 #define FMD_OP_STARTED 1
+/*
+ * ... and this when the switch answered Success at once, and the read of
+ * the vPPB after it does not show the operation done: the VCS could not be
+ * read, or the vPPB holds something else (cxl-fmd's choice). The caller
+ * follows it with a task, Interrupted, which the next read of the VCS
+ * settles (fmd_task_interrupt()).
+ */
+#define FMD_OP_UNCONFIRMED 3
 
 /*
  * Background Operation Status (0002h) of a switch, for an operation with
@@ -2447,8 +2464,12 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
  *
  * The switch may initiate Managed Hot-Add if the host has already booted.
  * Upon completion, the switch generates a Virtual CXL Switch Event Record.
+ * The VCSs are read first, and nothing is sent unless VCS @vcs_id was read
+ * whole.
  *
- * Return: 0 on success, negative errno on failure
+ * Return: 0 once bound and read back, FMD_OP_STARTED, FMD_OP_UNCONFIRMED,
+ * -ESTALE if the VCS could not be read, -E2BIG if it was not read whole,
+ * another negative errno on failure (see src/discovery.c)
  */
 /*
  * The errno fmd_vppb_bind() and fmd_vppb_unbind() return for the switch's
@@ -3017,6 +3038,9 @@ json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg);
 	"request was carried out before it is resubmitted: cxl-fmd does not know."
 #define FMD_RES_UNREAD "Resubmit the request: nothing was sent, as what " \
 	"the switch holds could not be read just before the command."
+#define FMD_RES_INCOMPLETE "This service reads at most 8 Virtual CXL " \
+	"Switches of a switch and 32 vPPBs of each, and does not change a " \
+	"binding it cannot see whole: manage this switch otherwise."
 
 /*
  * The answer to a bind (@kind FMD_TASK_BIND: a POST of a Connection) or an

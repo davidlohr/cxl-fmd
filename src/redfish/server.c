@@ -1942,6 +1942,12 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -11)
 			return send_vppb_failure(conn, FMD_TASK_BIND, -EAGAIN);
+		if (rc == -26)
+			return send_vppb_failure(conn, FMD_TASK_BIND, -ESTALE);
+		if (rc == -27)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "This service does not read the host's Virtual CXL Switch whole (more than 32 vPPBs, or past the 8 VCSs it reads): a binding past them would not be seen",
+					  RF_GENERAL(FMD_RES_INCOMPLETE));
 		if (rc == -12)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The host's Virtual CXL Switch has no unbound vPPB",

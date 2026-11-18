@@ -321,6 +321,9 @@ When it has started one and not finished it,
 answers the request with
 .B 202 Accepted
 and a Redfish task.
+So it does when the switch answers Success at once and the read of its
+virtual switches after it does not show the vPPB bound (or unbound): the
+task is then Interrupted until a later read shows what the vPPB holds.
 The connection is listed meanwhile with the state Starting while it is bound,
 or Updating while it is unbound; a bind that fails leaves none, and an unbind
 removes it once the vPPB reads unbound.

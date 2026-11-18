@@ -842,12 +842,23 @@ static void test_port_resource(void)
 	report("Port resource of a discovered switch", before);
 }
 
-/* bind, and say whether Bind vPPB (5201h) went to the switch */
+/*
+ * bind, and say whether Bind vPPB (5201h) went to the switch. The VCSs are
+ * read first: VCS 0 as new_switch() has it, and VCS 2 with vPPB 1 @vppb1
+ * (NULL: the caller queued what they read).
+ */
 static int try_bind(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 		    struct fmd_switch *sw, uint8_t vcs_id, uint8_t vppb_id,
-		    uint8_t port_id, uint16_t ld_id, bool *sent)
+		    uint8_t port_id, uint16_t ld_id, const uint8_t *vppb1,
+		    bool *sent)
 {
-	int rc = fmd_vppb_bind(ctx, sw, vcs_id, vppb_id, port_id, ld_id);
+	int rc;
+
+	if (vppb1) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb1, unbound);
+	}
+	rc = fmd_vppb_bind(ctx, sw, vcs_id, vppb_id, port_id, ld_id);
 
 	*sent = (last_opcode(ep) == 0x5201);
 	return rc;
@@ -861,7 +872,7 @@ static int try_bind(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
  */
 static void test_switch_bind(void)
 {
-	static const uint8_t ld1[3] = { 0x03, 5, 1 };
+	static const uint8_t ld1[3] = { 0x03, 5, 1 }, ld0_of_5[3] = { 0x03, 5, 0 };
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5003);
 	int before = failures, rc;
@@ -880,16 +891,16 @@ static void test_switch_bind(void)
 	/* the VCS IDs are 0 and 2: 2 is a VCS, 1 is not */
 	CHECK(sw->num_vcs == 2 && fmd_switch_find_vcs(sw, 2) &&
 	      !fmd_switch_find_vcs(sw, 1), "%d VCSs", sw->num_vcs);
-	rc = try_bind(ctx, ep, sw, 1, 1, 4, 0xffff, &sent);
+	rc = try_bind(ctx, ep, sw, 1, 1, 4, 0xffff, unbound, &sent);
 	CHECK(rc == -EINVAL && !sent, "bind in VCS 1, which is no VCS: %d", rc);
 
 	/* port 2 is bound to VCS 0: it is not an unused port */
-	rc = try_bind(ctx, ep, sw, 2, 1, 2, 0xffff, &sent);
+	rc = try_bind(ctx, ep, sw, 2, 1, 2, 0xffff, unbound, &sent);
 	CHECK(rc == -EBUSY && !sent, "bind of a port bound to another VCS: %d",
 	      rc);
 
 	/* nor is port 0, the USP of VCS 0 */
-	rc = try_bind(ctx, ep, sw, 2, 1, 0, 0xffff, &sent);
+	rc = try_bind(ctx, ep, sw, 2, 1, 0, 0xffff, unbound, &sent);
 	CHECK(rc == -EBUSY && !sent, "bind of a USP: %d", rc);
 
 	/*
@@ -897,7 +908,7 @@ static void test_switch_bind(void)
 	 * from a target in use: a vPPB taken since it was chosen is not the
 	 * client's conflict.
 	 */
-	rc = try_bind(ctx, ep, sw, 0, 1, 4, 0xffff, &sent);
+	rc = try_bind(ctx, ep, sw, 0, 1, 4, 0xffff, unbound, &sent);
 	CHECK(rc == -EALREADY && !sent, "bind of a bound vPPB: %d", rc);
 
 	/*
@@ -905,13 +916,13 @@ static void test_switch_bind(void)
 	 * other EP types (Table 7-35). Port 5 has Supported LD Count 1, the
 	 * number of additional LDs: LD-IDs 0 and 1.
 	 */
-	rc = try_bind(ctx, ep, sw, 2, 1, 5, 0xffff, &sent);
+	rc = try_bind(ctx, ep, sw, 2, 1, 5, 0xffff, unbound, &sent);
 	CHECK(rc == -EINVAL && !sent, "bind of an MLD port without an LD: %d",
 	      rc);
-	rc = try_bind(ctx, ep, sw, 2, 1, 4, 0, &sent);
+	rc = try_bind(ctx, ep, sw, 2, 1, 4, 0, unbound, &sent);
 	CHECK(rc == -EINVAL && !sent, "bind of an LD of a port with no MLD: %d",
 	      rc);
-	rc = try_bind(ctx, ep, sw, 2, 1, 5, 2, &sent);
+	rc = try_bind(ctx, ep, sw, 2, 1, 5, 2, unbound, &sent);
 	CHECK(rc == -EINVAL && !sent, "bind of LD 2 of an MLD with LDs 0 and 1: %d",
 	      rc);
 
@@ -925,7 +936,7 @@ static void test_switch_bind(void)
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, ld1, unbound);
-	rc = try_bind(ctx, ep, sw, 2, 1, 5, 1, &sent);
+	rc = try_bind(ctx, ep, sw, 2, 1, 5, 1, NULL, &sent);
 	CHECK(rc == FMD_OP_STARTED, "bind of LD 1 of port 5: %d", rc);
 
 	vcs = fmd_switch_find_vcs(sw, 2);
@@ -944,11 +955,16 @@ static void test_switch_bind(void)
 	}
 
 	/* LD 1 is now bound to a host; LD 0 of the same MLD is not */
-	rc = try_bind(ctx, ep, sw, 0, 2, 5, 1, &sent);
+	rc = try_bind(ctx, ep, sw, 0, 2, 5, 1, ld1, &sent);
 	CHECK(rc == -EBUSY && !sent, "bind of an LD bound to another VCS: %d",
 	      rc);
+	/* Success: done once the read after it shows VCS 0 vPPB 2 bound */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld1, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
-	rc = try_bind(ctx, ep, sw, 0, 2, 5, 0, &sent);
+	answer_vcs(ep, 0, 0, port2, ld0_of_5);
+	answer_vcs(ep, 2, 1, ld1, unbound);
+	rc = try_bind(ctx, ep, sw, 0, 2, 5, 0, NULL, &sent);
 	CHECK(rc == 0, "bind of the other LD of the MLD: %d", rc);
 
 	/*
@@ -4675,6 +4691,8 @@ static void test_bind_task(bool succeeds)
 		goto out;
 
 	/* LD 1 of port 5 to vPPB 1 of VCS 2: started, not done */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
@@ -4757,6 +4775,8 @@ static void test_bind_busy(void)
 
 		answer_rc(ep, 0x5201, CXLMI_RET_BUSY);
 		sent = commands_sent(ep);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
 		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
 		CHECK(rc == -EAGAIN, "bind on a busy switch: %d", rc);
 		/* the VCSs are read, then Bind vPPB is sent once */
@@ -4771,6 +4791,8 @@ static void test_bind_busy(void)
 		answer_rc(ep, 0x5201, CXLMI_RET_RETRY);
 		answer_rc(ep, 0x5201, CXLMI_RET_RETRY);
 		sent = commands_sent(ep);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
 		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
 		CHECK(rc == -EAGAIN, "bind answered Retry Required twice: %d", rc);
 		/* Bind vPPB is sent twice, and not a third time */
@@ -4778,6 +4800,8 @@ static void test_bind_busy(void)
 		      last_opcode(ep) == 0x5201, "%u commands sent, %u for Busy",
 		      commands_sent(ep) - sent, once);
 
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
 		answer_rc(ep, 0x5201, CXLMI_RET_RETRY);
 		answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 		rc = fmd_vppb_bind(ctx, sw, 2, 1, 4, 0xffff);
@@ -5435,6 +5459,8 @@ static void test_switch_events(void)
 	      "not read unbound before the bind");
 	if (!task)
 		goto out;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
@@ -8978,6 +9004,8 @@ static void test_lost_task_frees_op(void)
 	      "not read unbound before the bind");
 	if (!task)
 		goto out;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
@@ -9007,7 +9035,8 @@ static void test_lost_task_frees_op(void)
 
 	/*
 	 * It is deleted, and the vPPB the switch bound is unbound: the reads
-	 * of the DELETE and of the unbind, and 5202h, are taken.
+	 * of the DELETE and of the unbind, 5202h, and the read after it that
+	 * shows the vPPB unbound, are taken.
 	 */
 	{
 		unsigned int taken, then;
@@ -9018,9 +9047,11 @@ static void test_lost_task_frees_op(void)
 			answer_vcs(ep, 2, 1, ld1, unbound);
 		}
 		answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
 		rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
 		cxlmi_mock_get_stats(ep, NULL, &taken);
-		CHECK(rc == 0 && taken - then == 5 && !ops_count(ctx),
+		CHECK(rc == 0 && taken - then == 7 && !ops_count(ctx),
 		      "DELETE after the task was lost: %d, %u responses taken",
 		      rc, taken - then);
 	}
@@ -9028,6 +9059,8 @@ static void test_lost_task_frees_op(void)
 	resp = NULL;
 
 	/* a bind whose switch is gone: nothing says it is bound */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	rc = fmd_vppb_bind(ctx, sw, 2, 2, 4, 0xffff);
 	CHECK(rc == FMD_OP_STARTED, "bind: %d", rc);
@@ -9084,6 +9117,8 @@ static void test_lost_task_frees_op(void)
 				answer_vcs(ep, 2, 1, ld1, unbound);
 			}
 			answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, unbound, unbound);
 			rc = fmd_redfish_delete_connection(ctx, "CXL", conn_id, &resp);
 			CHECK(rc == 0, "DELETE after the unbind was lost: %d", rc);
 			json_decref(resp);
@@ -9130,6 +9165,8 @@ static struct fmd_task *task_on(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
 	}
 	fmd_vppb_seen(sw, 2, 1, &seen);
 	fmd_binding_op_add(ctx, &key, FMD_BIND_OP_BIND, 0, NULL, &seen);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	if (fmd_vppb_bind(ctx, sw, 2, 1, 5, 1) != FMD_OP_STARTED)
 		return NULL;
@@ -9590,6 +9627,8 @@ static void test_lost_task_interrupted(void)
 		answer_vcs(ep, 2, 1, vppb_ld1, unbound);
 	}
 	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
 	CHECK(task->state == FMD_TASK_EXCEPTION && strstr(task->message, "still bound") &&
 	      rc == 0 && !ops_count(ctx),
@@ -9917,13 +9956,16 @@ static void test_task_before_command(void)
 		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
 		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld1\"}]}}",
 		 host->base.id, sw_id);
+	/* the POST's own read of the VCSs is taken, and nothing else */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	cxlmi_mock_get_stats(ep, NULL, &then);
 	fmd_task_calloc = no_task_calloc;
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	fmd_task_calloc = saved;
 	cxlmi_mock_get_stats(ep, NULL, &taken);
-	CHECK(rc == -6 && !resp && taken == then && last_opcode(ep) != 0x5201 &&
+	CHECK(rc == -6 && !resp && taken - then == 2 && last_opcode(ep) != 0x5201 &&
 	      !ops_count(ctx) && !ctx->tasks,
 	      "POST with no task to be had: %d, %u responses taken, last %04xh, "
 	      "%d ops", rc, taken - then, last_opcode(ep), ops_count(ctx));
@@ -10711,7 +10753,14 @@ static void test_post_delete_on_a_switch(void)
 	"\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld%d\"}]}}", \
 	host->base.id, sw_id, n)
 
-	/* LD 0: the switch binds it in the background, to vPPB 1 */
+	/*
+	 * LD 0: the switch binds it in the background, to vPPB 1. The POST
+	 * reads the VCSs, and the bind again before 5201h.
+	 */
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	POST_LD(0);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
@@ -10727,6 +10776,9 @@ static void test_post_delete_on_a_switch(void)
 	      conn_state(ctx, cid));
 
 	/* again: the same task, and no 5201h, which nothing would answer */
+	cxlmi_mock_clear_responses(ep);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	CHECK(rc == FMD_OP_STARTED && resp &&
 	      atoi(json_string_value(json_object_get(resp, "Id"))) == task_id &&
@@ -10739,6 +10791,10 @@ static void test_post_delete_on_a_switch(void)
 	 * LD 1, while vPPB 1 still reads unbound: vPPB 2 is chosen. The
 	 * switch answers Unsupported: 501, and nothing is left of it.
 	 */
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
 	answer_rc(ep, 0x5201, CXLMI_RET_UNSUPPORTED);
 	POST_LD(1);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
@@ -10767,6 +10823,8 @@ static void test_post_delete_on_a_switch(void)
 	      conn_state(ctx, cid));
 
 	/* and again: 200, that Connection */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
 	POST_LD(0);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	CHECK(rc == FMD_CONN_EXISTS && last_opcode(ep) != 0x5201,
@@ -10800,6 +10858,8 @@ static void test_post_delete_on_a_switch(void)
 	cxlmi_mock_clear_responses(ep);
 	READ_LD0_TWICE();
 	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
 	CHECK(rc == 0 && !ops_count(ctx), "DELETE: %d", rc);
 #undef READ_LD0_TWICE
@@ -10846,6 +10906,10 @@ static void test_chunk_guard(void)
 		goto out;
 
 	/* bind LD 0 to vPPB 1 of VCS 2, in the background */
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	snprintf(body, sizeof(body),
 		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
@@ -10892,6 +10956,8 @@ static void test_chunk_guard(void)
 		answer_vcs(ep, 2, 1, ld0, unbound);
 	}
 	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
 	json_decref(resp);
 	resp = NULL;
@@ -11871,6 +11937,10 @@ static void test_force_unbind(void)
 	json_decref(c);
 
 	/* LD 0, bound by cxl-fmd in the background: Service once it is done */
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, ld1);
+	}
 	answer_rc(ep, 0x5201, CXLMI_RET_BACKGROUND);
 	snprintf(body, sizeof(body),
 		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
@@ -11909,6 +11979,8 @@ static void test_force_unbind(void)
 	cxlmi_mock_clear_responses(ep);
 	READ_TWICE(ld0, ld1);
 	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
 	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c1, &resp);
 	CHECK(rc == 0 && !resp && !ops_count(ctx), "ForceUnbind: %d", rc);
 	answer_vcs(ep, 0, 0, port2, unbound);
@@ -12835,6 +12907,294 @@ out:
 	report("Unbind vPPB is sent only for the port and LD asked for", before);
 }
 
+/*
+ * Follow-up review items 1 and 6: a bind POST is answered only from a VCS
+ * just read whole, and a Success the read after it does not show is
+ * followed by a task, Interrupted, not answered from the table.
+ */
+static void w1_post_body(char *body, size_t len, const struct fmd_host *host,
+			 const char *sw_id)
+{
+	snprintf(body, len,
+		 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
+		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%.32s_port5_dev_ld1\"}]}}",
+		 host->base.id, sw_id);
+}
+
+/* a duplicate bind POST, its VCS unread, or wider than read */
+static void test_w1_duplicate_bind_stale(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f70);
+	char sw_id[FMD_MAX_ID_LEN], body[512];
+	unsigned int r0, r1;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	sw = w1_setup(ctx, ep, 0x5f70, sw_id, &host);
+	CHECK(sw && host, "no switch or host");
+	if (!sw || !host)
+		goto out;
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	w1_post_body(body, sizeof(body), host, sw_id);
+
+	/* VCS 2 cannot be read: the switch may have unbound vPPB 1 since */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	cxlmi_mock_get_stats(ep, NULL, &r0);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	cxlmi_mock_get_stats(ep, NULL, &r1);
+	CHECK(rc == -26 && !resp && r1 - r0 == 2 && last_opcode(ep) == 0x5200,
+	      "a duplicate bind POST of an unread VCS: %d, %u responses taken",
+	      rc, r1 - r0);
+	json_decref(resp);
+	resp = NULL;
+
+	/* read again: 200, the Connection */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == FMD_CONN_EXISTS && resp, "the duplicate, read: %d", rc);
+	json_decref(resp);
+	resp = NULL;
+
+	/* VCS 2 of 33 vPPBs: not read whole, 409, nothing sent */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	w2_answer_vcs_wide(ep, 2, 1, 33);
+	answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == -27 && !resp && last_opcode(ep) == 0x5200 && !ops_count(ctx),
+	      "a bind POST in a truncated VCS: %d, last %04xh", rc,
+	      last_opcode(ep));
+	json_decref(resp);
+out:
+	fmd_ctx_free(ctx);
+	report("a bind POST is answered from a VCS just read whole", before);
+}
+
+/*
+ * The VCS is read whole by the POST, and not by the bind's own read just
+ * before 5201h: 503, nothing sent; read wider than kept there: 409.
+ */
+static void test_bind_gate_last_read(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f71);
+	char sw_id[FMD_MAX_ID_LEN], body[512];
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	sw = w1_setup(ctx, ep, 0x5f71, sw_id, &host);
+	CHECK(sw && host, "no switch or host");
+	if (!sw || !host)
+		goto out;
+	w1_post_body(body, sizeof(body), host, sw_id);
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == -26 && last_opcode(ep) == 0x5200 && !ops_count(ctx) &&
+	      !ctx->tasks, "VCS 2 unread before 5201h: %d, last %04xh", rc,
+	      last_opcode(ep));
+	json_decref(resp);
+	resp = NULL;
+	cxlmi_mock_clear_responses(ep);
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	w2_answer_vcs_wide(ep, 2, 1, 33);
+	answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == -27 && last_opcode(ep) == 0x5200 && !ops_count(ctx) &&
+	      !ctx->tasks, "VCS 2 truncated before 5201h: %d, last %04xh", rc,
+	      last_opcode(ep));
+	json_decref(resp);
+out:
+	fmd_ctx_free(ctx);
+	report("a bind is sent only on the VCS read whole just before it", before);
+}
+
+/* the switch answers 5201h Success, and the read after it fails */
+static void test_w1_bind_success_refresh_fails(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f72);
+	char sw_id[FMD_MAX_ID_LEN], body[512], cid[FMD_CONN_ID_LEN];
+	unsigned int s0, s1;
+	struct fmd_bind_key key;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	sw = w1_setup(ctx, ep, 0x5f72, sw_id, &host);
+	CHECK(sw && host, "no switch or host");
+	if (!sw || !host)
+		goto out;
+	read_vppb1(ctx, ep, sw, unbound);
+	w1_post_body(body, sizeof(body), host, sw_id);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	key = bind_key(sw_id, 2, 1, 5, 1);
+
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
+	answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && resp && task &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+	      ctx->binding_ops->lost && conn_state(ctx, cid) == FMD_CONN_STARTING &&
+	      !fmd_binding_mark_find(ctx, &key),
+	      "a Success not read back: %d, task %d, %d ops, Connection %d, mark %d",
+	      rc, task ? (int)task->state : -1, ops_count(ctx),
+	      conn_state(ctx, cid), !!fmd_binding_mark_find(ctx, &key));
+	CHECK(resp && !strcmp(json_string_value(json_object_get(resp, "TaskState")),
+			      "Interrupted"), "the 202 is not of the Interrupted task");
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+
+	/* the client retries; VCS 2 still cannot be read: 503, no 5201h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5201, CXLMI_RET_INPUT);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	s1 = commands_sent(ep);
+	CHECK(rc == -26 && s1 - s0 == 2 && last_opcode(ep) == 0x5200 &&
+	      task->state == FMD_TASK_INTERRUPTED,
+	      "a retry while unread: %d, %u sent, last %04xh", rc, s1 - s0,
+	      last_opcode(ep));
+	json_decref(resp);
+	resp = NULL;
+	cxlmi_mock_clear_responses(ep);
+
+	/* a read of the vPPB bound ends the task, and the bind is cxl-fmd's */
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      conn_state(ctx, cid) == FMD_CONN_ENABLED &&
+	      fmd_binding_mark_find(ctx, &key),
+	      "after the read: task %d (%s), %d ops, Connection %d", task->state,
+	      task->message, ops_count(ctx), conn_state(ctx, cid));
+
+	/* and the POST again: 200 */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == FMD_CONN_EXISTS, "POST once bound: %d", rc);
+	json_decref(resp);
+	resp = NULL;
+	fmd_ctx_free(ctx);
+
+	/* Success, and the vPPB read whole after it still unbound */
+	ctx = new_ctx();
+	ep = new_switch(ctx, 0x5f73);
+	sw = w1_setup(ctx, ep, 0x5f73, sw_id, &host);
+	CHECK(sw && host, "no switch or host");
+	if (!sw || !host)
+		goto out;
+	read_vppb1(ctx, ep, sw, unbound);
+	w1_post_body(body, sizeof(body), host, sw_id);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	for (int i = 0; i < 3; i++) {
+		if (i == 2)
+			answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && task && task->state == FMD_TASK_INTERRUPTED,
+	      "a Success read back unbound: %d, task %d", rc,
+	      task ? (int)task->state : -1);
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+	/* settled by the next read: not bound */
+	read_vppb1(ctx, ep, sw, unbound);
+	CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx) &&
+	      conn_state(ctx, cid) < 0,
+	      "a Success read back unbound, read again: task %d (%s)",
+	      task->state, task->message);
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	report("an immediate bind Success that cannot be read back is a task",
+	       before);
+}
+
+/* the switch answers 5202h Success, and the read after it fails */
+static void test_unbind_success_refresh_fails(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f74);
+	char sw_id[FMD_MAX_ID_LEN], cid[FMD_CONN_ID_LEN];
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	json_t *resp = NULL;
+	int before = failures, rc;
+
+	sw = w1_setup(ctx, ep, 0x5f74, sw_id, &host);
+	CHECK(sw, "no switch");
+	if (!sw)
+		goto out;
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	}
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && resp && task &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+	      conn_state(ctx, cid) == FMD_CONN_UPDATING,
+	      "an unbind Success not read back: %d, task %d, Connection %d", rc,
+	      task ? (int)task->state : -1, conn_state(ctx, cid));
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+
+	/* a DELETE meanwhile, its VCS still unread: 503, nothing sent */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == -7 && last_opcode(ep) == 0x5200, "DELETE while unread: %d", rc);
+	cxlmi_mock_clear_responses(ep);
+
+	/* read unbound: done, and the Connection gone */
+	read_vppb1(ctx, ep, sw, unbound);
+	CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      conn_state(ctx, cid) < 0, "after the read: task %d (%s)",
+	      task->state, task->message);
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	report("an immediate unbind Success that cannot be read back is a task",
+	       before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -12970,6 +13330,10 @@ int main(void)
 	test_vcs_check_unread_gone();
 	test_w1_delete_replaced_target();
 	test_vppb_unbind_target();
+	test_w1_duplicate_bind_stale();
+	test_bind_gate_last_read();
+	test_w1_bind_success_refresh_fails();
+	test_unbind_success_refresh_fails();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);
