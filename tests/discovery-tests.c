@@ -12039,6 +12039,94 @@ static void answer_set_ld(struct cxlmi_endpoint *ep, uint8_t ld, uint64_t r1)
 	answer(ep, 0x5402, pl, sizeof(pl));
 }
 
+/*
+ * Follow-up review item 5 (e): when a page of Get LD Allocations after the
+ * first failed, get_ld_allocations() returned the LDs of the pages before
+ * it, and fmd_ld_alloc_refresh() took those and kept the rest as cached,
+ * returning 0: a mixed view, reported complete. The MLD has 16 LDs of
+ * 1 GiB and 256-byte messages (15 entries a page). Another FM makes each
+ * 2 GiB; the re-read's second page fails. The LD not read is made
+ * alloc_unknown, the refresh is -EAGAIN, and the next chunk POST, of
+ * another LD, reads it first.
+ */
+static void test_ld_alloc_partial_page(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t idp[0x12] = { 0 }, alloc[4 + 16 * 16] = { 0 }, one[4 + 16] = { 0 };
+	char name[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[512];
+	struct fmd_ld *ld0, *ld14, *ld15;
+	struct fmd_mem_domain *domain;
+	unsigned int sent;
+	json_t *rsp = NULL;
+	uint16_t op = 0;
+	uint8_t pl[8];
+	int before = failures, rc;
+
+	put64(idp + 0x08, 0x5e01);
+	idp[0x10] = 8;			/* 256-byte messages: 15 entries a page */
+	idp[0x11] = 0x03;
+	answer(ep, 0x0001, idp, sizeof(idp));
+	answer_ld_info(ep, 64ULL << 30, 16);
+	answer_ld_info(ep, 64ULL << 30, 16);
+	alloc[0] = 16; alloc[3] = 1; put64(alloc + 4, 4);
+	answer(ep, 0x5401, alloc, 4 + 16);
+	alloc[2] = 1; alloc[3] = 15;
+	for (int i = 0; i < 15; i++)
+		put64(alloc + 4 + 16 * i, 4);	/* 1 GiB each */
+	answer(ep, 0x5401, alloc, 4 + 15 * 16);
+	fmd_discover(ctx);
+	device_id(name, sizeof(name), 0x5e01);
+	snprintf(dom, sizeof(dom), "%s_domain0", name);
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
+	ld0 = fmd_topology_find_ld(&ctx->topology, name, 0);
+	ld14 = fmd_topology_find_ld(&ctx->topology, name, 14);
+	ld15 = fmd_topology_find_ld(&ctx->topology, name, 15);
+	CHECK(domain && ld0 && ld14 && ld15 && ld15->memory_size == 1ULL << 30,
+	      "no MLD of 16 LDs of 1 GiB");
+	if (!domain || !ld0 || !ld14 || !ld15)
+		goto out;
+
+	/* every LD 2 GiB now: page 1 (LDs 0 to 14) answered, page 2 fails */
+	answer_ld_info(ep, 64ULL << 30, 16);
+	memset(alloc, 0, sizeof(alloc));
+	alloc[0] = 16; alloc[3] = 15;
+	for (int i = 0; i < 15; i++)
+		put64(alloc + 4 + 16 * i, 8);
+	answer(ep, 0x5401, alloc, 4 + 15 * 16);
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	rc = fmd_ld_alloc_refresh(ctx, fmd_topology_find(&ctx->topology, name));
+	CHECK(rc == -EAGAIN && ld0->memory_size == 2ULL << 30 &&
+	      ld14->memory_size == 2ULL << 30 && !ld14->alloc_unknown &&
+	      ld15->memory_size == 1ULL << 30 && ld15->alloc_unknown,
+	      "partial refresh: %d, LD14 %" PRIu64 " MiB unknown %d, LD15 %" PRIu64
+	      " MiB unknown %d", rc, ld14->memory_size >> 20, ld14->alloc_unknown,
+	      ld15->memory_size >> 20, ld15->alloc_unknown);
+
+	/* a chunk of LD0: LD15 is read first, then LD0, then Set LD Allocations */
+	one[0] = 16; one[2] = 15; one[3] = 1; put64(one + 4, 8);
+	answer(ep, 0x5401, one, sizeof(one));
+	one[2] = 0;
+	answer(ep, 0x5401, one, sizeof(one));
+	answer_set_ld(ep, 0, 12);
+	snprintf(body, sizeof(body), "{\"MemoryChunkSizeMiB\": 1024, \"InterleaveSets\": "
+		 "[{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}",
+		 name, name);
+	sent = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, name, dom, body, strlen(body), &rsp);
+	json_decref(rsp);
+	last_payload(ep, &op, pl, sizeof(pl));
+	CHECK(rc == 0 && commands_sent(ep) == sent + 3 && op == 0x5402 &&
+	      !ld15->alloc_unknown && ld15->memory_size == 2ULL << 30 &&
+	      ld0->memory_size == 3ULL << 30,
+	      "POST on LD0: %d, %u sent, last %04xh, LD15 %" PRIu64 " MiB unknown %d",
+	      rc, commands_sent(ep) - sent, op, ld15->memory_size >> 20,
+	      ld15->alloc_unknown);
+out:
+	fmd_ctx_free(ctx);
+	report("a partial Get LD Allocations leaves the LDs not read unknown", before);
+}
+
 /* the @odata.id of member @key of @obj, or of its first array entry */
 static const char *odata_of(json_t *obj, const char *key)
 {
@@ -14788,6 +14876,7 @@ int main(void)
 	test_sld_partition_pending();
 	test_sld_staged_delete();
 	test_sld_partition_lost();
+	test_ld_alloc_partial_page();
 	test_o4_gate();
 	test_ld_security();
 	test_security_cel();

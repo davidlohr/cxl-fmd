@@ -783,7 +783,7 @@ struct fmd_ld {
 	/* From Get LD Allocations (5401h) */
 	uint64_t memory_size;
 	uint64_t alloc_range2;               /* Range 2 Allocation Multiplier */
-	bool alloc_unknown;                  /* see fmd_ld_alloc_set() */
+	bool alloc_unknown;                  /* see fmd_ld_alloc_set(), fmd_ld_alloc_refresh() */
 	uint64_t range_start;
 	uint64_t range_length;
 
@@ -2637,7 +2637,9 @@ int fmd_mld_set_ld_allocation(struct fmd_ctx *ctx, struct fmd_mld *mld,
  *
  * Each returns 0, -EOPNOTSUPP if no LD Pool CCI of a Multi-Headed device
  * is known (nothing sent), or -EIO if the allocations could not be read,
- * in which case nothing is changed.
+ * in which case nothing is changed. fmd_ld_alloc_refresh() returns -EAGAIN
+ * when a page after the first could not be read: the LDs read take what
+ * the device says, and those not read are made alloc_unknown.
  */
 int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev);
 int fmd_ld_alloc_refresh_ld(struct fmd_ctx *ctx, struct fmd_component *dev,

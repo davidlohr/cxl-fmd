@@ -3795,16 +3795,20 @@ static void ld_alloc_set_granularity(struct fmd_component *dev, uint8_t code)
  * answer fewer of than asked (it returns min(limit, LDs enabled)), or -EIO
  * if not even the first could be: a failed command, a response for other
  * LDs than asked, a reserved granularity, a change of granularity between
- * pages, or a size past 64 bits.
+ * pages, or a size past 64 bits. *@complete, if @complete is not NULL, is
+ * false when one of those stopped the read after the first page, so that
+ * LDs from @start plus the number returned on were not read; a device
+ * that answers no more LDs leaves it true.
  */
 static int get_ld_allocations(struct fmd_ctx *ctx, struct fmd_component *dev,
 			      struct cxlmi_endpoint *ep, struct cxlmi_tunnel_info *ti,
 			      uint8_t start, unsigned int count, uint64_t *bytes,
-			      uint64_t *range2, uint8_t *code)
+			      uint64_t *range2, uint8_t *code, bool *complete)
 {
 	struct cxlmi_cmd_fmapi_get_ld_allocations_req req;
 	struct cxlmi_cmd_fmapi_get_ld_allocations_rsp *rsp;
 	unsigned int got = 0;
+	bool whole = true;
 	int rc;
 
 	rsp = calloc(1, sizeof(*rsp) +
@@ -3825,6 +3829,7 @@ static int get_ld_allocations(struct fmd_ctx *ctx, struct fmd_component *dev,
 		    (got && rsp->memory_granularity != *code)) {
 			fmd_warn(ctx, "%s: cannot read the allocation of LD %u: %d",
 				 dev->id, req.start_ld_id, rc);
+			whole = false;
 			break;
 		}
 		*code = rsp->memory_granularity;
@@ -3842,6 +3847,7 @@ static int get_ld_allocations(struct fmd_ctx *ctx, struct fmd_component *dev,
 						   &bytes[got])) {
 				fmd_warn(ctx, "%s: LD %u allocation does not fit in 64 bits",
 					 dev->id, start + got);
+				whole = false;
 				goto out;
 			}
 			range2[got++] = a->range_2_allocation_mult;
@@ -3849,6 +3855,8 @@ static int get_ld_allocations(struct fmd_ctx *ctx, struct fmd_component *dev,
 	}
 out:
 	free(rsp);
+	if (complete)
+		*complete = whole;
 	return got ? (int)got : -EIO;
 }
 
@@ -3875,7 +3883,8 @@ static int read_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
 	uint8_t code = 0;
 	int rc;
 
-	rc = get_ld_allocations(ctx, dev, ep, ti, ld->ld_id, 1, &bytes, &range2, &code);
+	rc = get_ld_allocations(ctx, dev, ep, ti, ld->ld_id, 1, &bytes, &range2, &code,
+				NULL);
 	if (rc < 0)
 		return rc;
 	ld_alloc_set_granularity(dev, code);
@@ -3932,6 +3941,7 @@ int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev)
 	struct cxlmi_endpoint *ep;
 	struct fmd_component *child;
 	unsigned int count = 0;
+	bool complete;
 	uint8_t code = 0;
 	int rc, got;
 
@@ -3960,7 +3970,8 @@ int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev)
 	if (count > FMD_MAX_LD_POOL)
 		count = FMD_MAX_LD_POOL;
 
-	got = get_ld_allocations(ctx, dev, ep, ti, 0, count, bytes, range2, &code);
+	got = get_ld_allocations(ctx, dev, ep, ti, 0, count, bytes, range2, &code,
+				 &complete);
 	if (got < 0)
 		return got;	/* nothing changed */
 
@@ -3978,8 +3989,25 @@ int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev)
 		ld->alloc_range2 = range2[i];
 		ld->alloc_unknown = false;
 	}
-	/* one not read keeps what it had, unknown or not, for the next time */
-	return fmd_ld_domain_sync(ctx, dev);
+	/*
+	 * One not read, past a page that failed, keeps what it had, and is
+	 * not known: its allocation as cached may not be the device's
+	 * ("Number of LDs enabled in the device", Table 7-48, says it has
+	 * one), and the next chunk POST or DELETE of the device reads it
+	 * first (fmd_ld_alloc_refresh_ld()).
+	 */
+	if (!complete) {
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_LD) {
+			struct fmd_ld *ld = fmd_to_ld(child);
+
+			if (ld->ld_id >= (unsigned int)got && ld->ld_id < count)
+				ld->alloc_unknown = true;
+		}
+		fmd_warn(ctx, "%s: the allocations of LDs %d to %u were not read: "
+			 "not known until they are", dev->id, got, count - 1);
+	}
+	rc = fmd_ld_domain_sync(ctx, dev);
+	return rc ? rc : complete ? 0 : -EAGAIN;
 }
 
 /*
