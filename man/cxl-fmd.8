@@ -273,7 +273,9 @@ or unbinds on it.
 Every
 .B \-\-rescan
 seconds the switches are read again in full and new endpoints are looked for,
-including any that was not ready before.
+and a device that was not ready before is tried again, less often as its
+failed tries add up, and not after the 8th until a restart (or, on a switch
+port, until the port reports another device).
 A binding made elsewhere that the switch logged nothing for is seen then.
 .IP \(bu 2
 Every
