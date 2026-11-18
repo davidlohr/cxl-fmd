@@ -735,6 +735,13 @@ unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
 		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_REFUSED,
 					   NULL, 0);
 		break;
+	case -ESTALE:		/* the VCS could not be read: nothing sent */
+		status = 503;
+		msg = "The switch's Virtual CXL Switch could not be read: "
+		      "nothing was sent; try again";
+		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_UNREAD,
+					   NULL, 0);
+		break;
 	default:
 		status = 500;
 		msg = bind ? "Failed to create connection" : "Failed to delete connection";
@@ -7350,7 +7357,10 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
  * Unbind the vPPB of Connection @connection_id with Unbind Option @option
  * (Table 7-36), whoever bound it, the Connection Absent included. The
  * switch is read first: an ID whose vPPB now holds something else is not
- * found, and nothing is unbound.
+ * found, and nothing is unbound. fmd_vppb_unbind() reads it again just
+ * before Unbind vPPB, and sends it only if the vPPB still holds the port
+ * and LD the ID names. If the ID's VCS could not be read, at either read,
+ * nothing is sent.
  *
  * While an unbind with Simulate Managed Hot-Remove is under way, one with
  * Simulate Surprise Hot-Remove is still sent: "There is no requirement for
@@ -7375,11 +7385,18 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 	bool busy, lost;
 	int rc;
 
-	/* what the switch has now */
+	/*
+	 * What the switch has now. A VCS that could not be read is not
+	 * looked up as it was last known: the switch may have changed it
+	 * since (nothing is sent; try again).
+	 */
 	if (!fmd_conn_id_parse(connection_id, &key)) {
 		sw = fmd_topology_find_switch(&ctx->topology, key.switch_id);
-		if (sw)
+		if (sw) {
 			fmd_vcs_refresh(ctx, sw);
+			if (fmd_vcs_check(sw, key.vcs_id) == FMD_VCS_UNREAD)
+				return -7;
+		}
 	}
 
 	fmd_topology_rdlock(&ctx->topology);
@@ -7426,7 +7443,8 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		lost = op->lost;
 		task->state = FMD_TASK_RUNNING;
 		op->lost = false;
-		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id, option);
+		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
+				     key.port_id, key.ld_id, option);
 		if (rc == 0 || rc == FMD_OP_STARTED) {
 			/* the task under way sees the vPPB unbound */
 			op->unbind_option = option;
@@ -7454,7 +7472,8 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 			return -2;
 		}
 
-		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id, option);
+		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
+				     key.port_id, key.ld_id, option);
 		if (rc == FMD_OP_STARTED) {
 			/* it stands, Updating, until the vPPB is unbound */
 			task = fmd_task_activate(ctx, task, option);
@@ -7470,7 +7489,9 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		return 0;
 	case -EAGAIN:
 		return -3;
-	case -ENOENT:		/* unbound by the time it was asked */
+	case -ESTALE:		/* the last read before 5202h failed */
+		return -7;
+	case -ENOENT:		/* unbound, or another target, by then */
 		return -1;
 	case -EOPNOTSUPP:
 		return -5;
@@ -7500,6 +7521,7 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
  *  -4 a direct-attached Connection: there is nothing to unbind
  *  -5 the switch answered Unsupported
  *  -6 the switch answered Invalid Input
+ *  -7 the Connection's VCS could not be read: nothing is sent, try again
  */
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				  const char *connection_id, json_t **response)

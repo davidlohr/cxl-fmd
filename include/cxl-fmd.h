@@ -2467,16 +2467,23 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * @sw: Target switch
  * @vcs_id: VCS identifier (0-based)
  * @vppb_id: vPPB identifier within the VCS
+ * @port_id: the port the vPPB is to be found bound to
+ * @ld_id: the LD-ID of that port it is to be found bound to, FMD_LD_NONE
+ *	for the whole port
  * @option: Unbind option (Managed Hot-Remove, Surprise Hot-Remove, etc.)
  *
  * The switch initiates Hot-Remove based on the option specified.
  * Upon completion, the switch generates a Virtual CXL Switch Event Record.
+ * The VCSs are read first, and nothing is sent unless the vPPB holds port
+ * @port_id, LD @ld_id.
  *
- * Return: 0 on success, negative errno on failure
+ * Return: 0 on success, FMD_OP_STARTED, -ESTALE if the VCS could not be
+ * read, -ENOENT if the vPPB holds anything else, another negative errno on
+ * failure
  */
 int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
-		    uint8_t vcs_id, uint8_t vppb_id,
-		    enum fmd_unbind_option option);
+		    uint8_t vcs_id, uint8_t vppb_id, uint8_t port_id,
+		    uint16_t ld_id, enum fmd_unbind_option option);
 
 /**
  * fmd_vcs_refresh - Refresh VCS configuration from switch
@@ -3008,6 +3015,8 @@ json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg);
 	"command as Invalid Input."
 #define FMD_RES_OUTCOME_UNKNOWN "Read the resource to learn whether the " \
 	"request was carried out before it is resubmitted: cxl-fmd does not know."
+#define FMD_RES_UNREAD "Resubmit the request: nothing was sent, as what " \
+	"the switch holds could not be read just before the command."
 
 /*
  * The answer to a bind (@kind FMD_TASK_BIND: a POST of a Connection) or an

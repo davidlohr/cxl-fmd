@@ -3194,6 +3194,22 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 }
 
 /*
+ * Whether @vppb, as read, holds port @port_id, and LD @ld_id of it
+ * (FMD_LD_NONE: the whole port). Bound Port ID is "Valid only when Binding
+ * Status is 02h or 03h", and Bound LD ID "Valid only when vPPB[Start vPPB]
+ * Binding Status is 03h" (Table 7-34).
+ */
+static bool vppb_holds(const struct fmd_vppb *vppb, uint8_t port_id,
+		       uint16_t ld_id)
+{
+	if (ld_id == FMD_LD_NONE)
+		return vppb->binding_status == FMD_VPPB_BOUND_PHYSICAL_PORT &&
+		       vppb->bound_port_id == port_id;
+	return vppb->binding_status == FMD_VPPB_BOUND_LD &&
+	       vppb->bound_port_id == port_id && vppb->bound_ld_id == ld_id;
+}
+
+/*
  * Unbind a vPPB from its physical port/LD: Unbind vPPB (5202h), CXL r4.0
  * Section 7.6.7.2.3. As for bind, @vcs_id and @vppb_id are the switch's IDs.
  *
@@ -3201,12 +3217,28 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
  *   0: Wait for port Link Down before unbinding
  *   1: Simulate Managed Hot-Remove
  *   2: Simulate Surprise Hot-Remove
+ *
+ * The request names only the VCS and the vPPB (Table 7-36): nothing in it
+ * says what the vPPB is to hold, so the switch unbinds whatever it holds
+ * when the command arrives. The vPPB is read just before, and the command
+ * is sent only if that read shows it bound to port @port_id, LD @ld_id
+ * (FMD_LD_NONE: the whole port), what the caller means to unbind; or, at
+ * 01h, if an unbind of exactly that, which cxl-fmd started, is under way
+ * (a forced unbind of a managed one). What the switch does between that
+ * read and the command cannot be checked.
+ *
+ * Returns as fmd_vppb_bind(), and -ESTALE if the VCS could not be read,
+ * -ENOENT if the vPPB holds anything else, or nothing, -EAGAIN as well if
+ * it reads 01h for an operation not cxl-fmd's (nothing is sent for any of
+ * these), -EINVAL for a reserved @option or a VCS or vPPB the switch does
+ * not have.
  */
 int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
-		    uint8_t vcs_id, uint8_t vppb_id,
-		    enum fmd_unbind_option option)
+		    uint8_t vcs_id, uint8_t vppb_id, uint8_t port_id,
+		    uint16_t ld_id, enum fmd_unbind_option option)
 {
 	struct cxlmi_cmd_fmapi_unbind_vppb_req req;
+	const struct fmd_binding_op *op;
 	const char *option_str;
 	struct fmd_vcs *vcs;
 	struct fmd_vppb *vppb;
@@ -3215,9 +3247,31 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (!ctx || !sw)
 		return -EINVAL;
 
+	switch (option) {
+	case FMD_UNBIND_WAIT_FOR_CLEAN:
+		option_str = "wait-for-clean";
+		break;
+	case FMD_UNBIND_MANAGED_HOT_REMOVE:
+		option_str = "managed";
+		break;
+	case FMD_UNBIND_SURPRISE_HOT_REMOVE:
+		option_str = "surprise";
+		break;
+	default:
+		/* all other encodings are reserved */
+		return -EINVAL;
+	}
+
+	/* the last read before the command */
 	fmd_vcs_refresh(ctx, sw);
 
 	vcs = fmd_switch_find_vcs(sw, vcs_id);
+	if ((vcs && vcs->stale) ||
+	    (!vcs && fmd_vcs_check(sw, vcs_id) == FMD_VCS_UNREAD)) {
+		fmd_warn(ctx, "%s: VCS %d could not be read: vPPB %d is not "
+			 "unbound", sw->base.id, vcs_id, vppb_id);
+		return -ESTALE;
+	}
 	if (!vcs) {
 		fmd_err(ctx, "%s: no VCS %d", sw->base.id, vcs_id);
 		return -EINVAL;
@@ -3244,19 +3298,21 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		return -EPERM;
 	}
 
-	switch (option) {
-	case FMD_UNBIND_WAIT_FOR_CLEAN:
-		option_str = "wait-for-clean";
-		break;
-	case FMD_UNBIND_MANAGED_HOT_REMOVE:
-		option_str = "managed";
-		break;
-	case FMD_UNBIND_SURPRISE_HOT_REMOVE:
-		option_str = "surprise";
-		break;
-	default:
-		/* all other encodings are reserved */
-		return -EINVAL;
+	if (vppb->binding_status == FMD_VPPB_BUSY) {
+		/* 01h has no port or LD: only an unbind of ours says what */
+		op = fmd_binding_op_find(ctx, sw->base.id, vcs_id, vppb_id);
+		if (!op || op->kind != FMD_BIND_OP_UNBIND || !op->task_id[0] ||
+		    op->key.port_id != port_id || op->key.ld_id != ld_id) {
+			fmd_warn(ctx, "%s: vPPB %d in VCS %d is being bound or "
+				 "unbound", sw->base.id, vppb_id, vcs_id);
+			return -EAGAIN;
+		}
+	} else if (!vppb_holds(vppb, port_id, ld_id)) {
+		fmd_warn(ctx, "%s: vPPB %d in VCS %d now holds status %02xh, "
+			 "port %d, LD %d, not port %d LD %d: not unbound",
+			 sw->base.id, vppb_id, vcs_id, vppb->binding_status,
+			 vppb->bound_port_id, vppb->bound_ld_id, port_id, ld_id);
+		return -ENOENT;
 	}
 
 	if (!sw->base.ep) {

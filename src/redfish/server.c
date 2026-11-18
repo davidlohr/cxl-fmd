@@ -1856,6 +1856,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  "The switch is carrying out another operation; try again",
 					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
 							      FMD_RES_RETRY, NULL, 0));
+		if (rc == -7)
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -ESTALE);
 		if (rc == -4)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "ForceUnbind is offered only on a switch-attached connection",
@@ -2227,6 +2229,8 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		json_decref(task);
 		if (rc == -3)
 			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EAGAIN);
+		if (rc == -7)
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -ESTALE);
 
 		if (rc == 0)
 			return send_no_content(conn);
