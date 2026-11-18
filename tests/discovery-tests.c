@@ -15158,6 +15158,42 @@ static void test_r6_dc_lost_reply(void)
 		}
 	}
 	fmd_ctx_free(ctx);
+
+	/* the same for a release of dc_tag whose 5605h response is lost */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xfc, 0x00);
+	device_id(id, sizeof(id), 0xfc);
+	if (dev) {
+		struct dc_tag_row held[1] = { { dc_tag, false, { 0 }, 1, { 0 }, 0 } };
+
+		cxlmi_mock_clear_responses(ep);
+		answer(ep, 0x5605, (void *)r6_lost, sizeof(r6_lost));
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", r6_rel,
+						   strlen(r6_rel), &msg, &task);
+		json_decref(task);
+		task = NULL;
+		t = ctx->tasks;
+		CHECK(rc == FMD_OP_STARTED && t && t->kind == FMD_TASK_DC_RELEASE &&
+		      t->dc->unknown_send, "a release of dc_tag, 5605h lost: %d", rc);
+		if (t && t->kind == FMD_TASK_DC_RELEASE) {
+			answer_dcd_host_nt(ep, 2, &seed, 1);
+			answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+			fmd_dcd_retry_stale(ctx);
+			CHECK(t->state == FMD_TASK_RUNNING && t->dc->quiet_reads == 0,
+			      "a release, a read with the tag list failing: %d, %d",
+			      t->state, t->dc->quiet_reads);
+			for (int i = 0; i < 3; i++) {
+				answer_dcd_host_nt(ep, 2, &seed, 1);
+				answer_dc_tags(ep, 120 + i, 1, 0x03, held, 1);
+				fmd_dcd_retry_stale(ctx);
+			}
+			CHECK(t->state == FMD_TASK_EXCEPTION && t->dc->quiet_reads == 3,
+			      "a release, three reads with the tag list read: %d, %d",
+			      t->state, t->dc->quiet_reads);
+		}
+	}
+	fmd_ctx_free(ctx);
 	report("a DC request whose response is lost keeps its task and hold", before);
 }
 
