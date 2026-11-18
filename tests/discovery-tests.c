@@ -7167,6 +7167,233 @@ static int dc_task_add(struct fmd_ctx *ctx, const char *id, const char *tag, int
 #define TAG_B "6f1a2c3e-0000-4000-8000-00000000000b"
 #define TAG_C "6f1a2c3e-0000-4000-8000-00000000000c"
 
+/*
+ * Follow-up review item 4: a whole-tag DELETE (a tagged extent in a
+ * Sharable region) is built from the read of its host for the task's
+ * baseline, not from the view before it. hw_dcd(.., 0x08) has host 0 with
+ * one 256 MB extent tagged dc_tag at 1 GiB, Sharable. Each case makes host
+ * 0 stale (5603h fails), so that the DELETE reads it again first.
+ */
+static void dc_sharable_regions(struct cxlmi_endpoint *ep)
+{
+	uint8_t regions[0x04 + 0x28 + 0x10] = { 0 };
+
+	regions[0x02] = 1;
+	regions[0x03] = 1;
+	put64(regions + 0x04, 1ULL << 30);
+	put64(regions + 0x0c, 4);
+	put64(regions + 0x14, 1ULL << 30);
+	put64(regions + 0x1c, 1ULL << 28);
+	regions[0x24] = 0x08;			/* Attributes1: Sharable */
+	put16(regions + 0x2c, 64);
+	put16(regions + 0x30, 63);
+	put16(regions + 0x34, 16);
+	put16(regions + 0x38, 15);
+	answer(ep, 0x5601, regions, sizeof(regions));
+}
+
+static struct fmd_component *dc_sharable_stale(struct fmd_ctx *ctx,
+					       struct cxlmi_endpoint *ep,
+					       uint64_t serial, char *id, size_t idlen)
+{
+	struct fmd_component *dev = hw_dcd(ctx, ep, serial, 0x08);
+
+	if (!dev)
+		return NULL;
+	device_id(id, idlen, serial);
+	dc_sharable_regions(ep);
+	answer_rc(ep, 0x5603, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_refresh(ctx, dev, 0);
+	CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_STALE, "host 0 of %s not stale", id);
+	return dev;
+}
+
+static void dc_tasks_whole_tag_delete(void)
+{
+	const uint64_t mb256 = 1ULL << 28, first = 1ULL << 30, second = first + mb256;
+	struct dc_ext two[2] = {
+		{ first, mb256, dc_tag, 0 },
+		{ second, mb256, dc_tag, 0 },
+	};
+	struct dc_ext only_second[1] = { { second, mb256, dc_tag, 0 } };
+	struct dc_ext retagged[1] = { { first, mb256, dc_tag_b, 0 } };
+	static const char *const what[] = {
+		"the tag grew to 512 MB (Tag-based)",
+		"the extent is gone, another of the tag stays",
+		"the extent and the tag are gone",
+		"the tag grew to 512 MB (Prescriptive)",
+		"the extent's DPA now has another tag",
+	};
+
+	for (int c = 0; c < 5; c++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		char id[FMD_MAX_ID_LEN];
+		struct fmd_component *dev = dc_sharable_stale(ctx, ep, 0x2e0 + c, id,
+							      sizeof(id));
+		const char *msg = NULL;
+		json_t *task = NULL;
+		uint8_t pl[256];
+		uint16_t op = 0;
+		size_t n;
+		int rc;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		if (c == 3)
+			fmd_memdev_dcd(dev)->release_policies =
+				fmd_dc_policy_cap_bit(true, FMD_DC_REL_POLICY_PRESCRIPTIVE);
+
+		/* the read for the baseline */
+		dc_sharable_regions(ep);
+		if (c == 0 || c == 3)
+			answer_dc_extents(ep, 5, 0, 2, two, 2);
+		else if (c == 1)
+			answer_dc_extents(ep, 5, 0, 1, only_second, 1);
+		else if (c == 4)
+			answer_dc_extents(ep, 5, 0, 1, retagged, 1);
+		else
+			answer_dc_extents(ep, 5, 0, 0, NULL, 0);
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+		/* refused, so that the 5605h, if sent, is the last command */
+		answer_rc(ep, 0x5605, CXLMI_RET_INPUT);
+
+		rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000",
+							 &msg, &task);
+		n = last_payload(ep, &op, pl, sizeof(pl));
+		switch (c) {
+		case 0:
+			CHECK(op == 0x5605 && n >= 0x20 && (pl[2] & 0xf) == 0 &&
+			      get64(pl + 4) == 2 * mb256 && pl[0x1c] == 0,
+			      "DELETE, %s: last %04xh, policy %u, Length 0x%" PRIx64
+			      ": want Tag-based of the whole tag, 0x20000000", what[c], op,
+			      pl[2] & 0xf, get64(pl + 4));
+			break;
+		case 3:
+			CHECK(op == 0x5605 && n >= 0x20 + 2 * 0x28 && (pl[2] & 0xf) == 1 &&
+			      pl[0x1c] == 2 &&
+			      get64(pl + 0x20) + get64(pl + 0x48) == first + second &&
+			      get64(pl + 0x28) + get64(pl + 0x50) == 2 * mb256,
+			      "DELETE, %s: last %04xh, policy %u, ExtentCount %u: want "
+			      "both extents of the tag", what[c], op, pl[2] & 0xf, pl[0x1c]);
+			break;
+		default:
+			CHECK(rc == -ENOENT && op != 0x5605 && !task && !ctx->tasks &&
+			      msg && strstr(msg, "no longer the host's"),
+			      "DELETE, %s: rc %d, last %04xh, %s: want 404 and no 5605h",
+			      what[c], rc, op, msg ? msg : "");
+			break;
+		}
+		json_decref(task);
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * The tag grew to 512 MB, and the device accepts the release: the
+	 * task is not Completed while the host still has the second 256 MB
+	 */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		char id[FMD_MAX_ID_LEN];
+		struct fmd_component *dev = dc_sharable_stale(ctx, ep, 0x2f0, id, sizeof(id));
+		const char *msg = NULL, *m;
+		json_t *task = NULL, *t;
+		int rc, tid = -1, monitor = 0;
+
+		if (dev) {
+			dc_sharable_regions(ep);
+			answer_dc_extents(ep, 5, 0, 2, two, 2);
+			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+			answer_rc(ep, 0x5605, CXLMI_RET_SUCCESS);
+			/* the read after the command: the host has both still */
+			dc_sharable_regions(ep);
+			answer_dc_extents(ep, 6, 0, 2, two, 2);
+			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+			rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000",
+								 &msg, &task);
+			tid = dc_task_id(task);
+			CHECK(rc == FMD_OP_STARTED && tid > 0 &&
+			      json_array_size(dc_task_oem(task, "BaselineExtents")) == 2 &&
+			      json_integer_value(dc_task_oem(task, "LengthBytes")) ==
+			      (json_int_t)(2 * mb256),
+			      "an accepted whole-tag DELETE: rc %d, task %d", rc, tid);
+			json_decref(task);
+
+			/* the next tick: the host gave back the first 256 MB only */
+			dc_sharable_regions(ep);
+			answer_dc_extents(ep, 7, 0, 1, only_second, 1);
+			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+			fmd_dcd_retry_stale(ctx);
+			fmd_dc_tasks_poll(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			m = json_string_value(json_object_get(json_array_get(
+				json_object_get(t, "Messages"), 0), "Message"));
+			CHECK(!strcmp(dc_task_state(t), "Running") && monitor == 202 &&
+			      m && strstr(m, "256 MiB of the 512 MiB") &&
+			      fmd_dc_find_extent(dev, 0, second),
+			      "a whole-tag DELETE with 256 MB of the tag still held: %s, "
+			      "monitor %d, \"%s\"", dc_task_state(t), monitor, m ? m : "");
+			json_decref(t);
+
+			/* and the second */
+			dc_sharable_regions(ep);
+			answer_dc_extents(ep, 8, 0, 0, NULL, 0);
+			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+			fmd_dcd_retry_stale(ctx);
+			fmd_dc_tasks_poll(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(!strcmp(dc_task_state(t), "Completed") && monitor == 204,
+			      "a whole-tag DELETE, the whole tag gone: %s, monitor %d",
+			      dc_task_state(t), monitor);
+			json_decref(t);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * A Tag-based release of 512 MB of a tag the host has 256 MB of, at
+	 * the baseline: it is over once those 256 MB are gone, as no more of
+	 * the tag can be seen to go
+	 */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x2f1, 0x00);
+		struct dc_ext seed = { first, mb256, dc_tag, 0 };
+		static const char *rel =
+			"{\"Policy\": \"TagBased\", \"ForcedRemoval\": false, "
+			"\"SanitizeOnRelease\": false, \"Length\": 512, "
+			"\"Tag\": \"6f1a2c3e-0000-4000-8000-000000000001\"}";
+		char id[FMD_MAX_ID_LEN];
+		const char *msg = NULL;
+		json_t *task = NULL, *t;
+		int rc, tid, monitor = 0;
+
+		if (dev) {
+			device_id(id, sizeof(id), 0x2f1);
+			answer_rc(ep, 0x5605, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
+			rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel),
+							   &msg, &task);
+			tid = dc_task_id(task);
+			json_decref(task);
+			answer_dcd_host(ep, 3, NULL, 0, NULL, -1);
+			fmd_dcd_retry_stale(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(t), "Completed") &&
+			      monitor == 200,
+			      "a Tag-based release longer than the host's tag, all of it gone: "
+			      "%d, %s, monitor %d", rc, dc_task_state(t), monitor);
+			json_decref(t);
+		}
+		fmd_ctx_free(ctx);
+	}
+}
+
 static void test_dc_tasks_hw(void)
 {
 	struct dc_ext seed = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
@@ -7491,6 +7718,7 @@ static void test_dc_tasks_hw(void)
 		fmd_ctx_free(ctx);
 	}
 
+	dc_tasks_whole_tag_delete();
 	report("Dynamic Capacity tasks follow the host", before);
 }
 

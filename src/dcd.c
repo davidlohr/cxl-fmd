@@ -3209,8 +3209,9 @@ void fmd_dcd_retry_pending(struct fmd_ctx *ctx)
  *   field in this structure specifies the capacity accepted by the host"
  *   (Table 8-229), names the host with no capacity. Otherwise it runs.
  * - A release is Completed once what it named is gone from the host's
- *   extent list: the extents of a Prescriptive list, or Length bytes of
- *   the Tag for a Tag-based one. What has gone so far is reported while it
+ *   extent list: the extents of a Prescriptive list, or for a Tag-based
+ *   one Length bytes of the Tag, or what the host had of the Tag at the
+ *   baseline when that is less. What has gone so far is reported while it
  *   runs. Nothing says a host refuses a release, so none is an Exception
  *   for that.
  * - A task whose device is gone is an Exception whose outcome is unknown.
@@ -3443,6 +3444,19 @@ static void dc_judge_release(struct fmd_ctx *ctx, struct fmd_component *dev,
 			total += dc->req[i].len;
 		m = ranges_minus(dc->req, dc->n_req, cur, n, NULL, -1, &gone, &bytes);
 	} else {
+		uint64_t had = 0;
+
+		/*
+		 * Length bytes of the tag, but no more than the host had of
+		 * it at the baseline: what it did not have cannot be seen to
+		 * go. A baseline with none of the tag keeps Length.
+		 */
+		for (int i = 0; i < dc->n_base; i++) {
+			if (range_matches(&dc->base[i], dc->tag, -1))
+				had += dc->base[i].len;
+		}
+		if (had && had < total)
+			total = had;
 		m = ranges_minus(dc->base, dc->n_base, cur, n, dc->tag, -1,
 				 &gone, &bytes);
 	}

@@ -814,6 +814,14 @@ region (`false` when the extent is in no region of the host):
   the Host ID of the extent's host and a `Length` that is the sum of
   every extent that host has with the tag. Every one of them goes, the
   other hosts' extents with the tag stay, and so does the FM reference.
+  The `Length`, and the extents of the Prescriptive form below, are
+  taken from the read of the host that is the task's baseline (on
+  hardware a host whose last read failed is read again first, see
+  [Tasks of an add or a release](#tasks-of-an-add-or-a-release)), not
+  from what was read before it: an extent of the tag the host has
+  gained since is released too. If that read no longer lists the extent
+  the URI names, or lists it with another Tag, length or region, the
+  `DELETE` is `404` and nothing is sent.
   Releasing less would be the "portion" the specification fails with
   Invalid Input: "When the Tag represents sharable capacity, and the
   Extent List covers only a portion of the capacity associated with the
@@ -888,7 +896,10 @@ Number (`BaselineGeneration`). On hardware a host whose last read failed,
 or is owed, or a tag list that could not be read, is read first; if the
 host still cannot be read, nothing is sent and the answer is `503`. An
 extent a Prescriptive release or a `DELETE` names that the read no
-longer lists for the host is not sent either: `404`.
+longer lists for the host is not sent either: `404`; so is a whole-tag
+`DELETE` whose extent that read lists with another Tag, length or
+region. A whole-tag `DELETE` releases what that read shows the host to
+have of the tag.
 
 **One task at a time for a host and a tag.** What 5603h and the bitmaps
 show of a host cannot be told apart between two requests of one tag, so
@@ -906,7 +917,7 @@ task is judged on a read of its host that completed, 5603h and then
 | Task | `Running` while | `Completed` when | `Exception` when |
 |------|-----------------|------------------|------------------|
 | Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host) |
-| Release | any of what it named is still in the host's 5603h; the message says how much has gone | all of it is gone: the extents of a Prescriptive list, or `Length` bytes of the Tag for a Tag-based one (a `DELETE` is one of these) | never on what the host does: nothing says a host refuses a release |
+| Release | any of what it named is still in the host's 5603h; the message says how much has gone | all of it is gone: the extents of a Prescriptive list, or for a Tag-based one `Length` bytes of the Tag, or what `BaselineExtents` has of the Tag when that is less and not none (a `DELETE` is one of these) | never on what the host does: nothing says a host refuses a release |
 | Either | | | the device is gone: what its host did is not known (`500` "Outcome unknown") |
 
 The capacity seen is in the task as `AcceptedExtents` or

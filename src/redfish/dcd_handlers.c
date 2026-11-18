@@ -812,6 +812,44 @@ static json_t *dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_
 }
 
 /*
+ * What @host_id of @dev has of @tag: the sum of its extents with it in
+ * *@length, and when @prescriptive, those extents in *@extents (*@n of
+ * them). -ENOMEM, or 0.
+ */
+static int whole_tag_members(struct fmd_component *dev, int host_id, const uint8_t *tag,
+			     bool prescriptive, struct fmd_dc_extent ***extents, int *n,
+			     uint64_t *length)
+{
+	struct fmd_component *child;
+	int k = 0;
+
+	*extents = NULL;
+	*n = 0;
+	*length = 0;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+		if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN)) {
+			*length += e->len;
+			k++;
+		}
+	}
+	if (!prescriptive)
+		return 0;
+	*length = 0;
+	*extents = calloc(k ? k : 1, sizeof(**extents));
+	if (!*extents)
+		return -ENOMEM;
+	fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
+		struct fmd_dc_extent *e = fmd_to_dc_extent(child);
+
+		if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
+			(*extents)[(*n)++] = e;
+	}
+	return 0;
+}
+
+/*
  * DELETE on an extent releases it from the host whose extent it is, and
  * from no other host (cxl-fmd's meaning of DELETE: DMTF does not say).
  *
@@ -838,11 +876,11 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 	struct fmd_dcd_info *dcd;
 	struct fmd_dc_region *region;
 	struct fmd_dc_extent *ext, **extents = NULL;
-	struct fmd_component *child;
 	uint8_t tag[FMD_DC_TAG_LEN];
-	uint64_t length = 0;
+	uint64_t length = 0, dpa, len;
 	bool sanitize, sharable;
 	int host_id, n = 0, rc;
+	uint8_t region_id;
 
 	if (!dev) {
 		*msg = "Device is not a dynamic capacity device";
@@ -856,10 +894,13 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		return -ENOENT;
 	}
 
-	/* the release can free @ext: what is needed of it is copied */
+	/* the read for the baseline, or the release, can free @ext: it is copied */
 	host_id = ext->host_id;
+	dpa = ext->start_dpa;
+	len = ext->len;
+	region_id = ext->region_id;
 	memcpy(tag, ext->tag, FMD_DC_TAG_LEN);
-	region = fmd_dc_find_region(dev, host_id, ext->region_id);
+	region = fmd_dc_find_region(dev, host_id, region_id);
 	sanitize = region ? region->sanitize_on_release : false;
 	sharable = region && (region->flags & FMD_DC_REGION_SHAREABLE) &&
 		   !tag_is_zero(tag);
@@ -871,34 +912,13 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		extents[n++] = ext;
 		policy = FMD_DC_REL_POLICY_PRESCRIPTIVE;
 	} else {
-		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
-
-			if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
-				length += e->len;
-		}
-		policy = FMD_DC_REL_POLICY_TAG_BASED;
-	}
-
-	if (sharable && !(dcd->release_policies &
-			  fmd_dc_policy_cap_bit(true, FMD_DC_REL_POLICY_TAG_BASED))) {
-		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
-
-			n += e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN);
-		}
-		extents = calloc(n, sizeof(*extents));
-		if (!extents)
+		policy = (dcd->release_policies &
+			  fmd_dc_policy_cap_bit(true, FMD_DC_REL_POLICY_TAG_BASED)) ?
+			 FMD_DC_REL_POLICY_TAG_BASED : FMD_DC_REL_POLICY_PRESCRIPTIVE;
+		if (whole_tag_members(dev, host_id, tag,
+				      policy == FMD_DC_REL_POLICY_PRESCRIPTIVE,
+				      &extents, &n, &length))
 			goto nomem;
-		n = 0;
-		fmd_for_each_child_type(dev, child, FMD_COMPONENT_DC_EXTENT) {
-			struct fmd_dc_extent *e = fmd_to_dc_extent(child);
-
-			if (e->host_id == host_id && !memcmp(e->tag, tag, FMD_DC_TAG_LEN))
-				extents[n++] = e;
-		}
-		policy = FMD_DC_REL_POLICY_PRESCRIPTIVE;
-		length = 0;
 	}
 
 	task = dc_task_new(ctx, FMD_TASK_DC_RELEASE, dev, host_id, chassis_id, NULL,
@@ -910,11 +930,40 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 	rc = fmd_dc_task_prepare(ctx, dev, task, msg);
 	if (rc)
 		goto out;
-	if (policy == FMD_DC_REL_POLICY_PRESCRIPTIVE &&
-	    !dc_task_extents_again(dev, task, extents, n)) {
-		*msg = EXTENT_GONE_MSG;
-		rc = -ENOENT;
-		goto out;
+	if (!sharable) {
+		if (!dc_task_extents_again(dev, task, extents, n)) {
+			*msg = EXTENT_GONE_MSG;
+			rc = -ENOENT;
+			goto out;
+		}
+	} else {
+		/*
+		 * The whole tag is what the host has of it as read for the
+		 * task's baseline, which may have been read again just now:
+		 * the extent the URI names must still be there, the same
+		 * extent of the same tag in a Sharable region, and the
+		 * release is of every extent the host now has with the tag.
+		 */
+		ext = fmd_dc_find_extent(dev, host_id, dpa);
+		region = ext ? fmd_dc_find_region(dev, host_id, region_id) : NULL;
+		if (!ext || ext->len != len || ext->region_id != region_id ||
+		    memcmp(ext->tag, tag, FMD_DC_TAG_LEN) || !region ||
+		    !(region->flags & FMD_DC_REGION_SHAREABLE)) {
+			*msg = EXTENT_GONE_MSG;
+			rc = -ENOENT;
+			goto out;
+		}
+		free(extents);
+		if (whole_tag_members(dev, host_id, tag,
+				      policy == FMD_DC_REL_POLICY_PRESCRIPTIVE,
+				      &extents, &n, &length))
+			goto nomem;
+		free(task->dc->req);
+		task->dc->req = NULL;
+		task->dc->n_req = 0;
+		if (dc_task_release_fill(task, policy, false, sanitize, length, tag,
+					 extents, n))
+			goto nomem;
 	}
 
 	rc = fmd_dc_release(ctx, dev, host_id, policy, false, sanitize,
