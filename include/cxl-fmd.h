@@ -1731,6 +1731,8 @@ struct fmd_ctx *fmd_ctx_new(void);
 void fmd_ctx_free(struct fmd_ctx *ctx);
 
 
+/* Draw a boot id (FMD_BOOT_ID_LEN) for this run into @buf */
+void fmd_boot_id_draw(char *buf, size_t len);
 int fmd_topology_init(struct fmd_topology *topo);
 void fmd_topology_cleanup(struct fmd_topology *topo);
 

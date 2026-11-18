@@ -16504,6 +16504,59 @@ static void test_journal_file(void)
  * A record that cannot be synced: 503 (FMD_JOURNAL_UNAVAILABLE), nothing
  * sent, and nothing more is written until a restart
  */
+/*
+ * A run's boot id is not one the journal has: neither an earlier run's nor
+ * the prefix of a recovered operation, so no Task of this run can take the
+ * Id of one recovered.
+ */
+static void test_journal_boot_id(void)
+{
+	char dir[64];
+	struct fmd_ctx *ctx;
+	int before = failures, rc;
+
+	/* this run drew an earlier run's boot id */
+	journal_tmpdir(dir, sizeof(dir));
+	journal_write(dir, "{\"t\":\"boot\",\"v\":1,\"boot\":\"0badcafe\"}\n");
+	ctx = new_ctx();
+	snprintf(ctx->topology.boot_id, FMD_BOOT_ID_LEN, "0badcafe");
+	rc = fmd_journal_open(ctx, dir);
+	CHECK(rc == 0 && strcmp(ctx->topology.boot_id, "0badcafe") &&
+	      strlen(ctx->topology.boot_id) == 8,
+	      "an earlier run's boot id is drawn again: %d, %s", rc,
+	      ctx->topology.boot_id);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+
+	/* or the prefix of an operation not ended */
+	journal_tmpdir(dir, sizeof(dir));
+	journal_write(dir, "{\"t\":\"boot\",\"v\":1,\"boot\":\"11111111\"}\n"
+		      J_OP("feedf00d-3"));
+	ctx = new_ctx();
+	snprintf(ctx->topology.boot_id, FMD_BOOT_ID_LEN, "feedf00d");
+	rc = fmd_journal_open(ctx, dir);
+	CHECK(rc == 0 && strcmp(ctx->topology.boot_id, "feedf00d") &&
+	      fmd_journal_open_ops(ctx) == 1,
+	      "a recovered operation's prefix is drawn again: %d, %s", rc,
+	      ctx->topology.boot_id);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+
+	/* one that no run in the journal had is kept */
+	journal_tmpdir(dir, sizeof(dir));
+	journal_write(dir, "{\"t\":\"boot\",\"v\":1,\"boot\":\"11111111\"}\n"
+		      J_OP("11111111-1"));
+	ctx = new_ctx();
+	snprintf(ctx->topology.boot_id, FMD_BOOT_ID_LEN, "22222222");
+	rc = fmd_journal_open(ctx, dir);
+	CHECK(rc == 0 && !strcmp(ctx->topology.boot_id, "22222222"),
+	      "an unused boot id is kept: %d, %s", rc, ctx->topology.boot_id);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+	if (failures == before)
+		printf("  ok: a run's boot id is not one the journal has\n");
+}
+
 static void test_journal_fail_closed(void)
 {
 	char dir[64], sw_id[FMD_MAX_ID_LEN], body[512], id[FMD_MAX_ID_LEN];
@@ -16734,6 +16787,7 @@ int main(void)
 	test_journal_restart();
 	test_journal_file();
 	test_journal_fail_closed();
+	test_journal_boot_id();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

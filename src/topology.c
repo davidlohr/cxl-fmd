@@ -149,7 +149,7 @@ void fmd_topology_wrunlock(struct fmd_topology *topo)
  * getrandom() fail, the time and the process ID stand in: what is asked of
  * the id is that it differ from an earlier run's, not that it be secret.
  */
-static void boot_id_draw(char *buf, size_t len)
+void fmd_boot_id_draw(char *buf, size_t len)
 {
 	uint32_t v;
 
@@ -179,7 +179,7 @@ int fmd_topology_init(struct fmd_topology *topo)
 	hash_table_insert(&topo->components, &topo->root->base);
 
 	topo->generation = 1;
-	boot_id_draw(topo->boot_id, sizeof(topo->boot_id));
+	fmd_boot_id_draw(topo->boot_id, sizeof(topo->boot_id));
 
 	return 0;
 }

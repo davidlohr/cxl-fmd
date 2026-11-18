@@ -373,7 +373,8 @@ int fmd_journal_compact(struct fmd_ctx *ctx)
  * last line with no newline is a crash's: its offset is set in @cut.
  */
 static int journal_replay(struct fmd_ctx *ctx, struct fmd_journal *j,
-			  const char *buf, size_t len, size_t *cut)
+			  const char *buf, size_t len, size_t *cut,
+			  json_t *boots)
 {
 	size_t start = 0;
 	int lineno = 0;
@@ -405,6 +406,10 @@ static int journal_replay(struct fmd_ctx *ctx, struct fmd_journal *j,
 			return -EPROTO;
 		}
 		if (!strcmp(t, "boot")) {
+			const char *b = json_string_value(json_object_get(rec, "boot"));
+
+			if (b)
+				json_object_set_new(boots, b, json_true());
 			if (get_int(rec, "v", -1) != FMD_JOURNAL_VERSION) {
 				fmd_err(ctx, "journal: %s/%s is of version %d, not %d: "
 					"not started (move the file away to start "
@@ -428,6 +433,46 @@ static int journal_replay(struct fmd_ctx *ctx, struct fmd_journal *j,
 		}
 		json_decref(rec);
 		start = (size_t)(nl - buf) + 1;
+	}
+	return 0;
+}
+
+/* Whether @id is taken by a run the journal names, or by a record's Id */
+static bool boot_id_taken(struct fmd_journal *j, json_t *boots, const char *id)
+{
+	size_t n = strlen(id);
+	const char *key;
+	json_t *rec;
+
+	if (json_object_get(boots, id))
+		return true;
+	json_object_foreach(j->live, key, rec) {
+		(void)rec;
+		if (!strncmp(key, id, n) && key[n] == '-')
+			return true;
+	}
+	return false;
+}
+
+/*
+ * This run's boot id is drawn again while it is one an earlier run in the
+ * journal had, or the prefix of an operation recovered from it: a Task
+ * "<boot>-<n>" of this run must not take the Id of a recovered one.
+ * Nothing has been named after the boot id yet: the journal is read before
+ * discovery, chunks or Tasks.
+ */
+static int boot_id_unused(struct fmd_ctx *ctx, struct fmd_journal *j,
+			  json_t *boots)
+{
+	char *id = ctx->topology.boot_id;
+
+	for (int tries = 0; boot_id_taken(j, boots, id); tries++) {
+		if (tries == 16) {
+			fmd_err(ctx, "journal: no boot id unused by %s/%s",
+				j->dir, FMD_JOURNAL_FILE);
+			return -EEXIST;
+		}
+		fmd_boot_id_draw(id, FMD_BOOT_ID_LEN);
 	}
 	return 0;
 }
@@ -484,7 +529,7 @@ int fmd_journal_open(struct fmd_ctx *ctx, const char *dir)
 	struct fmd_journal *j = calloc(1, sizeof(*j));
 	size_t len = 0, cut;
 	bool made = false;
-	json_t *boot;
+	json_t *boot, *boots;
 	char *buf;
 	int rc;
 
@@ -542,8 +587,12 @@ int fmd_journal_open(struct fmd_ctx *ctx, const char *dir)
 		fmd_err(ctx, "journal: cannot read %s/%s", dir, FMD_JOURNAL_FILE);
 		goto fail;
 	}
-	rc = journal_replay(ctx, j, buf, len, &cut);
+	boots = json_object();
+	rc = boots ? journal_replay(ctx, j, buf, len, &cut, boots) : -ENOMEM;
 	free(buf);
+	if (!rc)
+		rc = boot_id_unused(ctx, j, boots);
+	json_decref(boots);
 	if (rc)
 		goto fail;
 	/* a line cut short is cut off before anything is appended to it */
