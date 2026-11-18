@@ -92,6 +92,9 @@ PROJECT_ROOT = os.path.realpath(os.path.join(SCRIPT_DIR, ".."))
 SCHEMA_PATH = os.path.join(PROJECT_ROOT, "schema", "dmtf", "csdl")
 JSON_SCHEMA_PATH = os.path.join(PROJECT_ROOT, "schema", "dmtf", "json-schema")
 
+# Unversioned JSON schemas kept beside the newest versioned one
+KEEP_UNVERSIONED = {"Resource"}
+
 
 def backup_custom_files(directory, dmtf_filenames, suffix=None):
     """
@@ -276,16 +279,26 @@ def main():
 
     print(f"Extracted {len(csdl_filenames)} CSDL files")
 
-    # Extract JSON schema files and recreate installed symlinks
+    # Extract JSON schema files and recreate installed symlinks. The
+    # newest version of each schema is kept, and also the unversioned files
+    # in KEEP_UNVERSIONED: every DMTF JSON schema $refs Resource.json for
+    # the definitions of Id, Name, Description, Oem and Health, which the
+    # versioned Resource files do not hold.
     for schema_filename, versions in json_schema_files.items():
-        zip_filepath = os.path.join(VERSION + "/json-schema", versions[0])
+        keep = [versions[0]]
+        unversioned = schema_filename + ".json"
+        if (schema_filename in KEEP_UNVERSIONED and unversioned in versions
+                and unversioned != versions[0]):
+            keep.append(unversioned)
+        for filename in keep:
+            zip_filepath = os.path.join(VERSION + "/json-schema", filename)
 
-        with open(
-            os.path.join(JSON_SCHEMA_PATH, versions[0]), "wb"
-        ) as schema_file:
-            content = zip_ref.read(zip_filepath)
-            content = content.replace(b"\r\n", b"\n")
-            schema_file.write(content)
+            with open(
+                os.path.join(JSON_SCHEMA_PATH, filename), "wb"
+            ) as schema_file:
+                content = zip_ref.read(zip_filepath)
+                content = content.replace(b"\r\n", b"\n")
+                schema_file.write(content)
 
         if schema_filename in json_base_symlinks:
             os.symlink(

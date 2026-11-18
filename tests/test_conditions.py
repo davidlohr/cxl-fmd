@@ -181,7 +181,12 @@ def test_registry_is_a_message_registry():
         for prefix in ("http://redfish.dmtf.org/schemas/v1/",
                        "https://redfish.dmtf.org/schemas/v1/"):
             store[prefix + path.name] = doc
-    resolver = jsonschema.RefResolver.from_schema(schema, store=store)
+    def offline(uri):
+        # every $ref must be in schema/dmtf/json-schema: nothing is fetched
+        raise AssertionError(f"$ref {uri} is not in {JSON_SCHEMA_DIR}")
+
+    resolver = jsonschema.RefResolver.from_schema(
+        schema, store=store, handlers={"http": offline, "https": offline})
     # DSP8010's own metaschema has keywords draft 7 does not: the schema
     # itself is not checked, only the registry against it
     errors = list(jsonschema.Draft7Validator(schema, resolver=resolver).iter_errors(REGISTRY))
