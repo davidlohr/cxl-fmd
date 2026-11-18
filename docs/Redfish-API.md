@@ -1514,6 +1514,28 @@ CXL command to a chunk `POST`. In cxl-fmd:
 - the chunk of an SLD is cxl-fmd's own division of the device: a `"PMEM"`
   one sends nothing, a reservation in cxl-fmd's record only.
 
+**When an allocation takes effect.** cxl-fmd serves the allocation a Set
+LD Allocations (5402h) response or a Get LD Allocations (5401h) read
+gives as the LD's current one: the chunk of a `POST` is `Enabled`, and
+can be in a Connection, at once, with no `StandbyOffline` state as a
+staged SLD chunk has. That is cxl-fmd's choice, and it may be wrong for
+a device: CXL r4.0 says of 5402h that "The allocations provided in the
+response reflect the state of the LD allocations after the command is
+processed, which allows the FM to check for partial success" (Section
+7.6.7.4.3), and lists among its Command Effects "Configuration Change
+after Cold Reset", "Configuration Change after Conventional Reset",
+"Configuration Change after CXL Reset", "Immediate Configuration Change"
+and "Immediate Data Change". Which of them a device has is
+device-specific, and cxl-fmd does not read the Command Effects Log on
+the CCI an MLD's 5402h is sent to (its FM-owned LD) or on an LD Pool
+CCI, and keeps a Command Effect from any CEL it reads only for 4101h, of
+an SLD (an LD's own CEL is read for the commands it lists alone).
+Nor could a read show an allocation waiting for a reset: unlike Get
+Partition Info, Get LD Allocations has no Next field, only "Number of
+LDs", "Memory Granularity", "Start LD ID", "LD Allocation List Length"
+and, per LD, "Range 1 Allocation Multiplier" and "Range 2 Allocation
+Multiplier" (Tables 7-48 and 7-49). See Known Gaps.
+
 Chunk IDs:
 
 - the chunk of an LD, found at discovery: `{device}_ld{N}_chunk` (e.g.,
@@ -2471,6 +2493,18 @@ In summary:
     bind, an unbind or a chunk write narrow what it misses, and fence
     nothing: a binding another FM makes between that read and the command
     is not seen.
+16. The allocation of an LD of an MLD or Multi-Headed device that Set LD
+    Allocations or Get LD Allocations gives is served as active at once
+    (see "When an allocation takes effect" under "MLD Memory Model"),
+    though 5402h may have effects after a reset on a given device. To
+    check on hardware, before such a device is relied on: the Command
+    Effect the device's CEL gives 5402h on its MLD or LD Pool CCI, and,
+    if it names a reset, whether the allocation a 5402h response or the
+    next 5401h read gives is usable by a host before that reset. Should
+    one be found that needs a reset, the CEL is to be read on those CCIs
+    and an allocation that waits for a reset served `StandbyOffline`, as
+    a staged SLD chunk is; that needs a means to tell that the reset has
+    come, which 5401h cannot give.
 
 ### Event logs and switch events
 
