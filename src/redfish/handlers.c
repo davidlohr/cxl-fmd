@@ -4803,6 +4803,244 @@ static bool ld_connected(struct fmd_ctx *ctx, const struct fmd_component *dev,
 	return rc == 1;
 }
 
+/*
+ * What a fresh read of the switches that can expose a chunk shows
+ * (binding_coverage()).
+ */
+enum chunk_cover {
+	COVER_NONE = 0,		/* read whole, and no vPPB exposes it */
+	COVER_BOUND,		/* a vPPB exposes it, or may: refused (409) */
+	COVER_UNREAD,		/* a VCS could not be read: try again (503) */
+	COVER_INCOMPLETE,	/* not all that could expose it is seen (409) */
+};
+
+#define COVER_MAX_PORTS (FMD_MAX_HEADS + FMD_MAX_ROUTES)
+
+/* a switch port that can expose the chunk, and what of it does */
+struct cover_port {
+	struct fmd_switch *sw;
+	uint8_t port;
+	/* an LD-ID only a 03h binding of that LD exposes; FMD_LD_NONE: any */
+	uint16_t ld_id;
+	/* the head on it is not known: any binding of the port is incomplete */
+	bool unplaced;
+};
+
+static int cover_add(struct cover_port *p, int n, struct fmd_switch *sw,
+		     uint8_t port, uint16_t ld_id, bool unplaced)
+{
+	for (int i = 0; i < n; i++) {
+		if (p[i].sw == sw && p[i].port == port) {
+			/* the stricter of the two */
+			if (ld_id == FMD_LD_NONE)
+				p[i].ld_id = FMD_LD_NONE;
+			p[i].unplaced &= unplaced;
+			return n;
+		}
+	}
+	if (n == COVER_MAX_PORTS)
+		return n;
+	p[n] = (struct cover_port){ .sw = sw, .port = port, .ld_id = ld_id,
+				    .unplaced = unplaced };
+	return n + 1;
+}
+
+/* the switch whose endpoint @ep is, NULL if none */
+static struct fmd_switch *switch_on_ep(struct fmd_ctx *ctx,
+				       const struct cxlmi_endpoint *ep)
+{
+	struct fmd_component *comp;
+
+	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SWITCH) {
+		if (ep && comp->ep == ep)
+			return fmd_to_switch(comp);
+	}
+	return NULL;
+}
+
+/*
+ * The switch ports that can expose the chunks of @ld of @dev (NULL: of an
+ * SLD, or of no LD), into @p: the port an SLD or an MLD is on; for a pool
+ * LD of a Multi-Headed device, the port its head is placed on, and every
+ * switch port the device was found through with no head placed on it.
+ * *@incomplete is set when what a head of the device presents is not
+ * known (FMD_HEAD_UNKNOWN): which head a binding reaches cannot be told.
+ * Caller holds the topology read lock.
+ */
+static int cover_ports(struct fmd_ctx *ctx, const struct fmd_component *dev,
+		       const struct fmd_ld *ld, struct cover_port *p,
+		       bool *incomplete)
+{
+	struct fmd_component *child;
+	int n = 0;
+
+	*incomplete = false;
+	if (dev->type == FMD_COMPONENT_SLD || dev->type == FMD_COMPONENT_MLD) {
+		const struct fmd_port *port;
+
+		if (!dev->parent || dev->parent->type != FMD_COMPONENT_PORT ||
+		    !dev->parent->parent ||
+		    dev->parent->parent->type != FMD_COMPONENT_SWITCH)
+			return 0;	/* direct-attached: not gated */
+		port = fmd_to_port(dev->parent);
+		return cover_add(p, n, fmd_to_switch(dev->parent->parent),
+				 port->port_number,
+				 dev->type == FMD_COMPONENT_MLD && ld ?
+				 ld->ld_id : FMD_LD_NONE, false);
+	}
+	if (dev->type != FMD_COMPONENT_MHD)
+		return 0;
+
+	{
+		const struct fmd_mhd *mhd = fmd_to_mhd(dev);
+		const struct fmd_head *head = ld ? fmd_ld_head(ld) : NULL;
+
+		fmd_for_each_child_type(dev, child, FMD_COMPONENT_HEAD) {
+			const struct fmd_head *h = fmd_to_head(child);
+
+			if (h->presentation == FMD_HEAD_UNKNOWN)
+				*incomplete = true;
+			/*
+			 * The LD's head: any binding of its port (a head
+			 * that presents an MLD maps its LD-IDs to pool LDs
+			 * by no rule the FM is told, Section 2.5.1)
+			 */
+			if (h == head && h->port && h->port->base.parent)
+				n = cover_add(p, n, fmd_to_switch(h->port->base.parent),
+					      h->port->port_number, FMD_LD_NONE,
+					      false);
+		}
+		/* a switch port the device was found through, no head there */
+		for (int i = 0; i < mhd->nroutes; i++) {
+			const struct fmd_route *r = &mhd->routes[i];
+			struct fmd_switch *sw;
+			struct fmd_port *port;
+
+			if (!r->tunnel.level)
+				continue;
+			sw = switch_on_ep(ctx, r->ep);
+			port = sw ? fmd_topology_find_port(&ctx->topology,
+							   sw->base.id,
+							   r->tunnel.port) : NULL;
+			if (!port || port->head)
+				continue;
+			n = cover_add(p, n, sw, r->tunnel.port, FMD_LD_NONE, true);
+		}
+	}
+	return n;
+}
+
+/*
+ * Whether a binding of a switch can expose the chunks of @ld of @dev, as
+ * the switch is now: each switch with a port that can expose them
+ * (cover_ports()) is read again (fmd_vcs_refresh()), and every vPPB of
+ * every VCS read is looked at, whether or not its VCS has a host and so a
+ * Connection. A vPPB exposes them when it is bound to the port (02h), or
+ * to the port and the LD (03h; any LD of a port whose LD is not named, or
+ * that a head of a Multi-Headed device is on). One that is Busy (01h), or
+ * bound to a PBR ID (04h), names no port: it may, so it is taken to
+ * (cxl-fmd's choice). A binding read now is COVER_BOUND, whatever else is
+ * so; a switch not read whole, or a head that cannot be told, is
+ * COVER_INCOMPLETE; and a VCS that could not be read (whose table, as last
+ * read, is not looked at) COVER_UNREAD. Logged as refusing @what. Called
+ * with fabric_lock held exclusively and the topology lock not held.
+ */
+static enum chunk_cover binding_coverage(struct fmd_ctx *ctx,
+					 const struct fmd_component *dev,
+					 const struct fmd_ld *ld,
+					 const char *what)
+{
+	struct cover_port p[COVER_MAX_PORTS];
+	enum chunk_cover cover = COVER_NONE;
+	bool incomplete, partial = false;
+	int n;
+
+	fmd_topology_rdlock(&ctx->topology);
+	n = cover_ports(ctx, dev, ld, p, &incomplete);
+	fmd_topology_rdunlock(&ctx->topology);
+	if (incomplete) {
+		fmd_warn(ctx, "%s: what a head of %s presents is not known, so "
+			 "which head a binding reaches cannot be told: refused",
+			 what, dev->id);
+		return COVER_INCOMPLETE;
+	}
+
+	/* each switch once, outside the topology lock, which it takes */
+	for (int i = 0; i < n; i++) {
+		bool seen = false;
+
+		for (int j = 0; j < i; j++)
+			seen |= p[j].sw == p[i].sw;
+		if (!seen)
+			fmd_vcs_refresh(ctx, p[i].sw);
+	}
+
+	fmd_topology_rdlock(&ctx->topology);
+	for (int i = 0; i < n && cover != COVER_BOUND; i++) {
+		struct fmd_switch *sw = p[i].sw;
+
+		if (sw->vcs_unread && cover == COVER_NONE)
+			cover = COVER_UNREAD;
+		if (sw->vcs_incomplete)
+			cover = COVER_INCOMPLETE, partial = true;
+		for (int v = 0; v < sw->num_vcs && cover != COVER_BOUND; v++) {
+			const struct fmd_vcs *vcs = &sw->vcs[v];
+
+			/* what it held before says nothing of it now */
+			if (vcs->stale) {
+				if (cover == COVER_NONE)
+					cover = COVER_UNREAD;
+				continue;
+			}
+			if (vcs->truncated)
+				cover = COVER_INCOMPLETE, partial = true;
+			for (int b = 0; b < vcs->num_vppbs; b++) {
+				const struct fmd_vppb *vppb = &vcs->vppbs[b];
+				bool hit;
+
+				switch (vppb->binding_status) {
+				case FMD_VPPB_BUSY:
+				case FMD_VPPB_BOUND_PBR:
+					hit = true;
+					break;
+				case FMD_VPPB_BOUND_PHYSICAL_PORT:
+					hit = vppb->bound_port_id == p[i].port;
+					break;
+				case FMD_VPPB_BOUND_LD:
+					hit = vppb->bound_port_id == p[i].port &&
+					      (p[i].ld_id == FMD_LD_NONE ||
+					       vppb->bound_ld_id == p[i].ld_id);
+					break;
+				default:
+					hit = false;
+				}
+				if (!hit)
+					continue;
+				fmd_warn(ctx, "%s: vPPB %d of VCS %d of %s reads %d "
+					 "(port %d, LD %d)%s: refused", what,
+					 vppb->vppb_id, vcs->vcs_id, sw->base.id,
+					 vppb->binding_status, vppb->bound_port_id,
+					 vppb->bound_ld_id, p[i].unplaced ?
+					 ", on a port whose head is not known" : "");
+				cover = p[i].unplaced &&
+					vppb->binding_status != FMD_VPPB_BUSY ?
+					COVER_INCOMPLETE : COVER_BOUND;
+				break;
+			}
+		}
+	}
+	fmd_topology_rdunlock(&ctx->topology);
+
+	if (cover == COVER_UNREAD)
+		fmd_warn(ctx, "%s: a VCS of a switch that can expose it could not "
+			 "be read: refused, nothing sent", what);
+	else if (cover == COVER_INCOMPLETE && partial)
+		fmd_warn(ctx, "%s: a switch that can expose it is not read whole "
+			 "(more than %d VCSs, or a VCS of more than %d vPPBs): "
+			 "refused, nothing sent", what, FMD_MAX_VCS, FMD_MAX_VPPB);
+	return cover;
+}
+
 /* Whether a Connection exposes @chunk: see ld_connected() */
 static bool chunk_connected(struct fmd_ctx *ctx, const struct fmd_mem_chunk *chunk)
 {
@@ -5161,7 +5399,8 @@ static int chunk_plan_type(const struct fmd_component *dev, const struct fmd_ld 
  *  -5 = CCI command failed
  *  -6 = the device cannot be given that size (allocation granularity,
  *       partition alignment, or no partitionable capacity)
- *  -7 = the chunk would change an LD or an SLD a Connection binds
+ *  -7 = the chunk would change an LD or an SLD a Connection binds, or a
+ *       vPPB as the switch reads now binds, or is Busy (binding_coverage())
  *  -8 = AddressRangeType is not PMEM or Volatile
  *  -9 = AddressRangeOffsetMiB is not an integer of RF_MIB_MAX or less, or
  *       the chunk would not lie within the domain at it
@@ -5182,10 +5421,15 @@ static int chunk_plan_type(const struct fmd_component *dev, const struct fmd_ld 
  *       none known (chunk_plan_type())
  * -16 = an AddressRangeType the device or LD has no memory of, and cannot
  *       be partitioned to
+ * -17 = a VCS of a switch that can expose the LD or SLD could not be read
+ *       just now (binding_coverage())
+ * -18 = a switch that can expose the LD or SLD is not read whole, or which
+ *       head of its Multi-Headed device a binding reaches cannot be told
+ *       (binding_coverage())
  * FMD_MCTP_RESTRICTED = a chunk that changes the partition of an SLD that
  *       Set Partition Info may not be sent to (mctp_refused())
- * Every one of -2, -6, -8 to -12, -15, -16 and FMD_MCTP_RESTRICTED is
- * answered before anything is changed or sent.
+ * Every one of -2, -6, -8 to -12, -15 to -18 and FMD_MCTP_RESTRICTED is
+ * answered before anything is changed or sent, as is -7.
  */
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
@@ -5243,9 +5487,20 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 * so that it answers as a device would, and before anything is
 	 * sent.
 	 */
-	if ((chassis->type != FMD_COMPONENT_SLD || chunk_repartitions(chassis, plan.type)) &&
-	    ld_connected(ctx, chassis, ld, "a new chunk"))
-		return -7;
+	if (chassis->type != FMD_COMPONENT_SLD || chunk_repartitions(chassis, plan.type)) {
+		switch (binding_coverage(ctx, chassis, ld, "a new chunk")) {
+		case COVER_BOUND:
+			return -7;
+		case COVER_UNREAD:
+			return -17;
+		case COVER_INCOMPLETE:
+			return -18;
+		case COVER_NONE:
+			break;
+		}
+		if (ld_connected(ctx, chassis, ld, "a new chunk"))
+			return -7;
+	}
 
 	/* Set Partition Info, where note 4 of Table 8-308 lets it go */
 	if (chunk_repartitions(chassis, plan.type) && mctp_refused(ctx, chassis, 0x4101))
@@ -5515,6 +5770,13 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
  *       of its Multi-Headed device is known; nothing was sent
  *  -7 = the chunk's LD has less allocated than the chunk; nothing was sent
  *  -8 = as -14 of fmd_redfish_post_memory_chunk(): the chunk is kept
+ *  -9 = a VCS of a switch that can expose the chunk could not be read just
+ *       now (binding_coverage()); nothing was sent
+ * -10 = a switch that can expose the chunk is not read whole, or which
+ *       head of its Multi-Headed device a binding reaches cannot be told
+ *       (binding_coverage()); nothing was sent
+ *  -5 is also a vPPB that exposes the chunk as the switch reads now, or
+ *       is Busy, whether or not its VCS has a host; nothing was sent
  *  FMD_MCTP_RESTRICTED = the chunk changes the partition of an SLD that
  *       Set Partition Info may not be sent to (mctp_refused()); nothing
  *       was sent or changed
@@ -5542,7 +5804,27 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 	if (!domain_parent || strcmp(domain_parent->id, chassis_id) != 0)
 		return -2;
 
-	/* a chunk a binding exposes stays while it does (see chunk_connected()) */
+	/*
+	 * a chunk a binding exposes stays while it does, as the switches
+	 * read now show it (binding_coverage()) and as the Connections do
+	 * (chunk_connected())
+	 */
+	{
+		char what[FMD_MAX_ID_LEN + 8];
+
+		snprintf(what, sizeof(what), "chunk %s", chunk->base.id);
+		switch (binding_coverage(ctx, domain_parent,
+					 fmd_chunk_ld(domain_parent, chunk), what)) {
+		case COVER_BOUND:
+			return -5;
+		case COVER_UNREAD:
+			return -9;
+		case COVER_INCOMPLETE:
+			return -10;
+		case COVER_NONE:
+			break;
+		}
+	}
 	if (chunk_connected(ctx, chunk))
 		return -5;
 

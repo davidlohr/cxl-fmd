@@ -10887,7 +10887,8 @@ out:
  * that LD, while the binding stands (cxl-fmd's choice: the specification
  * does not say whether Set LD Allocations may change a bound LD). Refused
  * before Get or Set LD Allocations is sent; after the unbind the DELETE
- * goes on to Set LD Allocations (5402h).
+ * goes on to Set LD Allocations (5402h). Each reads the switch's VCSs
+ * first (binding_coverage()).
  */
 static void test_chunk_guard(void)
 {
@@ -10935,10 +10936,14 @@ static void test_chunk_guard(void)
 	CHECK(rc == FMD_OP_STARTED, "POST of LD 0: %d", rc);
 	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld0", sw_id);
 
-	/* Starting: the chunk is already the Connection's */
+	/* Starting, the vPPB Busy: the chunk is already the Connection's */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
 	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
-	CHECK(rc == -5 && fmd_topology_find_chunk(&ctx->topology, chunk),
-	      "chunk DELETE while the bind is under way: %d", rc);
+	CHECK(rc == -5 && last_opcode(ep) == 0x5200 &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "chunk DELETE while the bind is under way: %d, last %04xh", rc,
+	      last_opcode(ep));
 
 	answer_bg_status(ep, false, 100, 0x5201, CXLMI_RET_SUCCESS);
 	answer_vcs(ep, 0, 0, port2, unbound);
@@ -10948,6 +10953,8 @@ static void test_chunk_guard(void)
 	      conn_state(ctx, cid), task_id);
 
 	/* bound: DELETE and POST on LD 0 are 409, with nothing sent */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
 	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
 	op = last_opcode(ep);
 	CHECK(rc == -5 && op != 0x5401 && op != 0x5402 &&
@@ -10956,6 +10963,8 @@ static void test_chunk_guard(void)
 	snprintf(body, sizeof(body),
 		 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
 		 "{\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}", dev, dev);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, ld0, unbound);
 	rc = fmd_redfish_post_memory_chunk(ctx, dev, dom, body, strlen(body), &resp);
 	op = last_opcode(ep);
 	CHECK(rc == -7 && !resp && op != 0x5401 && op != 0x5402,
@@ -10986,6 +10995,8 @@ static void test_chunk_guard(void)
 	answer(ep, 0x5401, alloc, sizeof(alloc));
 	set[0] = 1;				/* Number of LDs */
 	answer(ep, 0x5402, set, sizeof(set));
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, unbound, unbound);
 	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
 	CHECK(rc == 0 && last_opcode(ep) == 0x5402 &&
 	      !fmd_topology_find_chunk(&ctx->topology, chunk),
@@ -12525,8 +12536,9 @@ out:
  * Follow-up review item 2: the switch's VCSs as the chunk guard is to see
  * them. A VCS of more vPPBs, or a switch of more active VCSs, than cxl-fmd
  * keeps is a read of part of it: fmd_vcs_refresh() says so (-E2BIG), and
- * the switch is incomplete. The chunk DELETE halves are the guard's (XFAIL
- * until it reads the switch).
+ * the switch is incomplete. The chunk DELETE halves are the guard's: it
+ * reads the switch again, finds it incomplete again, and refuses with
+ * nothing sent (follow-up review item 2).
  */
 static const uint8_t w2_ld0[3] = { 0x03, 5, 0 };
 
@@ -12619,10 +12631,13 @@ static void test_w2_vppb_truncation(void)
 	CHECK(fmd_vcs_fresh(sw, 0) && !fmd_switch_complete(sw),
 	      "VCS 0 is not fresh, or the switch is complete");
 
+	answer_vcs(ep, 0, 0, port2, unbound);
+	w2_answer_vcs_wide(ep, 2, 1, 33);
 	w2_answer_delete(ep);
 	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
 	op = last_opcode(ep);
-	XFAIL(rc != 0 && op != 0x5402,
+	CHECK(rc == -10 && op == 0x5200 &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
 	      "chunk DELETE with vPPB 32 of VCS 2 unread: %d, last %04xh", rc, op);
 
 	/* the VCS shrinks to 32 vPPBs: read whole again */
@@ -12702,15 +12717,262 @@ static void test_w2_vcs_truncation(void)
 	      fmd_vcs_fresh(sw, 0));
 
 	cxlmi_mock_clear_responses(ep);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	for (int i = 1; i < 8; i++)
+		answer_vcs_state(ep, i, 0x00, 0, unbound, unbound);
 	w2_answer_delete(ep);
 	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
 	op = last_opcode(ep);
-	XFAIL(rc != 0 && op != 0x5402,
+	CHECK(rc == -10 && op == 0x5200 &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
 	      "chunk DELETE with VCS 8 unread: %d, last %04xh", rc, op);
 out:
 	fmd_ctx_free(ctx);
 	report("a switch of more than 8 active VCSs is read as incomplete", before);
 }
+
+/*
+ * A chunk POST or DELETE reads, just before it, the VCSs of the switch the
+ * chunk's LD is on (binding_coverage()), and looks at every vPPB as read,
+ * not only at the Connections as last read (follow-up review item 2). VCS
+ * 2 vPPB 1 is bound to port 5 LD 0 by another FM since discovery, which
+ * read it unbound.
+ *  @post: a chunk POST of 256 MiB on LD 0 instead of a DELETE of its chunk
+ *  @how: 0 the binding is read: 409, nothing sent, and the Connection is
+ *        there; 1 VCS 2 cannot be read: 503, nothing sent; 2 VCS 2 reads
+ *        unbound: the request goes on to Set LD Allocations
+ */
+static void test_w2_stale(bool post, int how)
+{
+	static const char *const what[2][3] = {
+		{ "a chunk DELETE reads the switch: an LD bound since",
+		  "a chunk DELETE with the switch unread is 503",
+		  "a chunk DELETE reads the switch: unbound, it goes on" },
+		{ "a chunk POST reads the switch: an LD bound since",
+		  "a chunk POST with the switch unread is 503",
+		  "a chunk POST reads the switch: unbound, it goes on" },
+	};
+	uint64_t serial = 0x5207 + (post ? 3 : 0) + how;
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, serial);
+	char sw_id[FMD_MAX_ID_LEN], dev[FMD_MAX_ID_LEN + 16], dom[FMD_MAX_ID_LEN + 32];
+	char chunk[FMD_MAX_ID_LEN + 32], cid[FMD_CONN_ID_LEN], body[512];
+	struct fmd_switch *sw;
+	json_t *resp = NULL;
+	unsigned int sent;
+	int before = failures, rc, want;
+	uint16_t op;
+
+	answer_ld_info(ep, (2ULL << 30) + (256ULL << 20), 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	w2_ids(serial, sw_id, dev, dom, chunk, cid);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw && fmd_topology_find_chunk(&ctx->topology, chunk) &&
+	      conn_state(ctx, cid) < 0, "setup: LD 0 unbound with a chunk");
+	if (!sw)
+		goto out;
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	if (how == 0)
+		answer_vcs(ep, 2, 1, w2_ld0, unbound);
+	else if (how == 1)
+		answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	else
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	if (post) {
+		answer_get_ld(ep, 0, 4);
+		answer_set_ld(ep, 0, 5);
+	} else {
+		w2_answer_delete(ep);
+	}
+	sent = commands_sent(ep);
+	if (post) {
+		snprintf(body, sizeof(body),
+			 "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": [{\"Memory\": "
+			 "{\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld0\"}}]}",
+			 dev, dev);
+		rc = fmd_redfish_post_memory_chunk(ctx, dev, dom, body, strlen(body),
+						   &resp);
+		json_decref(resp);
+		want = how == 0 ? -7 : how == 1 ? -17 : 0;
+	} else {
+		rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+		want = how == 0 ? -5 : how == 1 ? -9 : 0;
+	}
+	op = last_opcode(ep);
+	CHECK(rc == want && (how == 2 ? op == 0x5402 : op == 0x5200),
+	      "%s: %d (not %d), last %04xh after %u commands",
+	      post ? "POST" : "DELETE", rc, want, op, commands_sent(ep) - sent);
+	if (!post)
+		CHECK(!fmd_topology_find_chunk(&ctx->topology, chunk) == (how == 2),
+		      "the chunk is %s", how == 2 ? "kept" : "gone");
+	/* the read the request made is the switch's */
+	if (how == 0)
+		CHECK(conn_state(ctx, cid) == FMD_CONN_ENABLED, "%s: %d", cid,
+		      conn_state(ctx, cid));
+out:
+	fmd_ctx_free(ctx);
+	report(what[post][how], before);
+}
+
+/*
+ * A chunk of a pool LD of a Multi-Headed device, the device reached
+ * through switch port 5 as well, VCS 2 vPPB 1 bound to port 5 LD 0 (the
+ * fabric of test_m7_fmld_head()). Which head a binding there reaches must
+ * be told for the guard to say which pool LDs it holds (follow-up review
+ * items 2 and 7). @mode:
+ *  0  both heads present an MLD, so no head is placed on port 5: the
+ *     binding there is of a head that cannot be told. Before, it was an
+ *     Absent Connection and held nothing. 409 (incomplete), nothing sent
+ *     to the device.
+ *  1  the LD Map not read whole, so no head's presentation is known: 409
+ *     before the switch is read.
+ *  2  head 0, the one that presents an MLD, placed on port 5: LD 0's
+ *     chunk is held by the vPPB (409), and LD 63's, of head 1 on no
+ *     switch, goes; with VCS 2 not readable, LD 0's chunk is 503.
+ */
+static void test_w2_mhd(int mode)
+{
+	static const char *const what[] = {
+		"a binding on a switch port of no known head holds the MHD's chunks",
+		"no MHD chunk is changed while a head's presentation is not known",
+		"an MHD chunk is held by its head's vPPB, as the switch reads now",
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *pool = new_device(ctx), *sw;
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 66] = { 0 };
+	uint8_t heads[4 + 2 * 9] = { 0 };
+	int before = failures, nlds = mode == 2 ? 64 : 66, rc;
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16];
+	char chunk[FMD_MAX_ID_LEN + 32];
+	unsigned int sent_sw, sent_pool;
+
+	answer_identify(pool, 0x24d + mode, 0x03);
+	probe[0] = nlds;
+	probe[1] = 2;
+	probe[5] = 1;
+	answer(pool, 0x5500, probe, sizeof(probe));
+	info[0] = nlds;
+	info[1] = 2;
+	info[5] = mode == 1 ? 64 : nlds;
+	memset(info + 8, 0xff, nlds);
+	info[8 + 0] = 1;			/* head 0: LDs 0, 1 */
+	info[8 + 1] = 1;
+	info[8 + 63] = 2;			/* head 1: LD 63 (64, 65) */
+	if (mode != 2) {
+		info[8 + 64] = 2;
+		info[8 + 65] = 2;
+	}
+	answer(pool, 0x5500, info, 8 + info[5]);
+	for (int i = 0; i < 64; i++)
+		answer_memdev_identify(pool, 4, 4, 0);
+	heads[0] = 2;
+	heads[4] = 1;
+	heads[4 + 6] = 4;
+	heads[4 + 9] = 2;
+	heads[4 + 9 + 6] = 4;
+	answer(pool, 0x5501, heads, sizeof(heads));
+	fmd_discover(ctx);
+
+	sw = new_device(ctx);
+	answer_identify(sw, 0x5115 + mode, 0x00);
+	answer_switch_ports(sw, 6, 0x00, 0x00);
+	answer_vcs(sw, 0, 0, port2, unbound);
+	answer_vcs(sw, 2, 1, (const uint8_t[]){ 0x03, 5, 0 }, unbound);
+	answer_identify(sw, 0x24d + mode, 0x03);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x24d + mode);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	snprintf(chunk, sizeof(chunk), "%s_ld0_chunk", id);
+	CHECK(fmd_topology_find_chunk(&ctx->topology, chunk), "no chunk %s", chunk);
+
+	/* the switch reads as at discovery */
+	answer_vcs(sw, 0, 0, port2, unbound);
+	answer_vcs(sw, 2, 1, (const uint8_t[]){ 0x03, 5, 0 }, unbound);
+	answer_get_ld(pool, 0, 4);
+	answer_set_ld(pool, 0, 0);
+	sent_sw = commands_sent(sw);
+	sent_pool = commands_sent(pool);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+	CHECK(rc == (mode == 2 ? -5 : -10) && commands_sent(pool) == sent_pool &&
+	      commands_sent(sw) - sent_sw == (mode == 1 ? 0u : 2u) &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "DELETE of LD 0's chunk: %d, %u to the switch, %u to the device",
+	      rc, commands_sent(sw) - sent_sw, commands_sent(pool) - sent_pool);
+
+	if (mode == 2) {
+		/* VCS 2 not readable: 503 */
+		cxlmi_mock_clear_responses(sw);
+		cxlmi_mock_clear_responses(pool);
+		answer_vcs(sw, 0, 0, port2, unbound);
+		answer_rc(sw, 0x5200, CXLMI_RET_INTERNAL);
+		rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+		CHECK(rc == -9 && commands_sent(pool) == sent_pool,
+		      "DELETE of LD 0's chunk, VCS 2 unread: %d", rc);
+
+		/* LD 63 is head 1's, on no switch port */
+		snprintf(chunk, sizeof(chunk), "%s_ld63_chunk", id);
+		answer_vcs(sw, 0, 0, port2, unbound);
+		answer_vcs(sw, 2, 1, (const uint8_t[]){ 0x03, 5, 0 }, unbound);
+		answer_get_ld(pool, 63, 4);
+		answer_set_ld(pool, 63, 0);
+		rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, chunk);
+		CHECK(rc == 0 && last_opcode(pool) == 0x5402 &&
+		      !fmd_topology_find_chunk(&ctx->topology, chunk),
+		      "DELETE of LD 63's chunk: %d, last %04xh", rc,
+		      last_opcode(pool));
+	}
+	fmd_ctx_free(ctx);
+	report(what[mode], before);
+}
+
+/*
+ * VCS 2 is disabled at discovery, so it has no host, and none of its
+ * vPPBs is a Connection (build_view()). Another FM enables it and binds
+ * vPPB 1 to port 5 LD 0: the chunk DELETE reads it, and refuses on the
+ * vPPB though no Connection is made of it (follow-up review item 2, F2d).
+ */
+static void test_w2_hostless_vcs(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], dev[FMD_MAX_ID_LEN + 16], dom[FMD_MAX_ID_LEN + 32];
+	char chunk[FMD_MAX_ID_LEN + 32], cid[FMD_CONN_ID_LEN];
+	struct fmd_switch *sw;
+	int before = failures, rc;
+	uint16_t op;
+
+	answer_identify(ep, 0x520b, 0x00);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs_state(ep, 2, 0x00, 1, unbound, unbound);
+	answer_ld_info(ep, (2ULL << 30) + (256ULL << 20), 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	w2_ids(0x520b, sw_id, dev, dom, chunk, cid);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw && !vcs_host(ctx, sw_id, 2) &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "setup: VCS 2 with no host, and the chunk");
+	if (!sw)
+		goto out;
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, w2_ld0, unbound);
+	w2_answer_delete(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+	op = last_opcode(ep);
+	CHECK(rc == -5 && op == 0x5200 && conn_state(ctx, cid) < 0 &&
+	      fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "chunk DELETE of an LD bound in a VCS with no host: %d, last %04xh, "
+	      "Connection %d", rc, op, conn_state(ctx, cid));
+out:
+	fmd_ctx_free(ctx);
+	report("a binding in a VCS with no host holds the chunk", before);
+}
+
 
 /*
  * A VCS that could not be read is UNREAD, kept stale if it was read before;
@@ -13630,6 +13892,13 @@ int main(void)
 	test_conn_view_unresolved_mh_mld();
 	test_w2_vppb_truncation();
 	test_w2_vcs_truncation();
+	for (int how = 0; how < 3; how++) {
+		test_w2_stale(false, how);
+		test_w2_stale(true, how);
+	}
+	test_w2_hostless_vcs();
+	for (int mode = 0; mode < 3; mode++)
+		test_w2_mhd(mode);
 	test_vcs_check_unread_gone();
 	test_w1_delete_replaced_target();
 	test_vppb_unbind_target();

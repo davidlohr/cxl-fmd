@@ -447,6 +447,29 @@ static bool route_exists(struct fmd_ctx *ctx, const char *url);
 static void allow_header(struct fmd_ctx *ctx, const char *url, char *buf, size_t len);
 
 /* A bind or unbind that failed with @err: as its task monitor answers */
+/*
+ * A chunk POST or DELETE that a switch that can expose the chunk's LD or
+ * SLD was read for just before (binding_coverage() in handlers.c), and
+ * nothing was sent: a VCS could not be read (503), or the switch, or the
+ * heads of the Multi-Headed device, cannot be seen whole (409).
+ */
+static enum MHD_Result send_chunk_unread(struct MHD_Connection *conn)
+{
+	return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
+			  "A Virtual CXL Switch that could bind the logical device could not be read: nothing was sent; try again",
+			  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE, FMD_RES_UNREAD,
+					      NULL, 0));
+}
+
+static enum MHD_Result send_chunk_incomplete(struct MHD_Connection *conn)
+{
+	return send_error(conn, MHD_HTTP_CONFLICT,
+			  "Whether a binding exposes the logical device cannot be seen: a switch that could bind it is not read whole (more than 8 Virtual CXL Switches, or more than 32 vPPBs in one), or which head of the Multi-Headed device a binding reaches is not known; nothing was sent",
+			  RF_GENERAL("This service does not change memory a binding "
+				     "it cannot see may expose: manage this device "
+				     "otherwise."));
+}
+
 static enum MHD_Result send_vppb_failure(struct MHD_Connection *conn,
 					 enum fmd_task_kind kind, int err)
 {
@@ -1791,10 +1814,12 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -7)
 			return send_error(conn, MHD_HTTP_CONFLICT,
-					  "A Connection binds the logical device: delete the Connection first",
+					  "A binding exposes the logical device: a Connection, or a vPPB the switch reads bound to it, or Busy; nothing was sent",
 					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
 						"Delete the Connection that binds the logical "
-						"device, and resubmit the request.", NULL, 0));
+						"device, or wait for the switch's vPPB to be "
+						"unbound or no longer Busy, and resubmit the "
+						"request.", NULL, 0));
 		if (rc == -11)
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "Name exactly one LD of the device: InterleaveSets[0].Memory as the URI of its Memory, or Links.CXLLogicalDevices[0] as the URI of its CXLLogicalDevice",
@@ -1821,6 +1846,10 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again",
 					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
+		if (rc == -17)
+			return send_chunk_unread(conn);
+		if (rc == -18)
+			return send_chunk_incomplete(conn);
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create memory chunk", RF_GENERAL(FMD_RES_FAILED));
 	}
@@ -2197,11 +2226,12 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 					  RF_GENERAL(FMD_RES_UNSUPPORTED));
 		if (rc == -5)
 			return send_error(conn, MHD_HTTP_CONFLICT,
-					  "A Connection exposes the memory chunk: delete the Connection first",
+					  "A binding exposes the memory chunk: a Connection, or a vPPB the switch reads bound to its device, or Busy; nothing was sent",
 					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
 						"Delete the Connection that exposes the "
-						"memory chunk, and resubmit the request.",
-						NULL, 0));
+						"memory chunk, or wait for the switch's vPPB "
+						"to be unbound or no longer Busy, and resubmit "
+						"the request.", NULL, 0));
 		if (rc == -6)
 			return send_error(conn, MHD_HTTP_NOT_IMPLEMENTED,
 					  "cxl-fmd cannot give back the allocation of this memory chunk",
@@ -2214,6 +2244,10 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 					  "Outcome unknown: Set LD Allocations may or may not have been carried out, and the allocation could not be read back. The chunk is kept, and no chunk of the device is changed until the allocation is read: check the logical device before sending this again",
 					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
+		if (rc == -9)
+			return send_chunk_unread(conn);
+		if (rc == -10)
+			return send_chunk_incomplete(conn);
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete memory chunk", RF_GENERAL(FMD_RES_FAILED));
 	}

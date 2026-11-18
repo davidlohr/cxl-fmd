@@ -182,4 +182,4 @@ def test_bound_partitionable_sld_refuses_a_volatile_chunk(daemon):
     response = requests.post(base + SW_CHUNKS, json={
         "MemoryChunkSizeMiB": 1024, "AddressRangeType": "Volatile"}, timeout=30)
     assert response.status_code == 409
-    assert "A Connection binds" in response.json()["error"]["message"]
+    assert "A binding exposes the logical device" in response.json()["error"]["message"]

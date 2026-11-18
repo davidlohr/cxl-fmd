@@ -803,12 +803,12 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, whose `AccessState` is not `Optimized`, that has `VolumeInfo`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input, at once or at the end of the background operation (the task monitor); `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind`, at the request's read or at the read just before Unbind vPPB (nothing sent); on hardware, an extent a Prescriptive release or `MemoryExtent` `DELETE` names that the read of its host for the task's baseline no longer lists (nothing sent) |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB, or is not read whole (more than 32 vPPBs, or past the 8 VCSs read; nothing sent); a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk, or a pool LD of a head whose presentation is not known (see "MHD Memory Model"; nothing sent); without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB, or is not read whole (more than 32 vPPBs, or past the 8 VCSs read; nothing sent); a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it, or a vPPB the switch reads just before binds it or is Busy, or the switch is not read whole, or which head of a Multi-Headed device a binding there reaches cannot be told (see "Deleting Memory Chunks"; nothing sent); a Connection `POST` naming a staged chunk, or a pool LD of a head whose presentation is not known (see "MHD Memory Model"; nothing sent); without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
 | 412 Precondition Failed | A precondition cxl-fmd cannot check | A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match`, whatever its value, that would otherwise be carried out: nothing is done (see "Conditional Requests"); a request of any method, to any URI, with an `OData-Version` other than `4.0`: nothing is done (see "Headers") |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` with a return code other than Invalid Input, Unsupported, Busy or Retry Required, with none, or whose switch is gone ("Outcome unknown"), or of a Dynamic Capacity task whose device is gone ("Outcome unknown"); "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
 | 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported, at once or as the return code of the background operation (the task monitor) (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
-| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy (at once, or as the return code of the background operation: the task monitor), after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception), or whose vPPB reads 01h at the read just before Unbind vPPB with no unbind of that Connection's under way; a DELETE or `#Cxl.ForceUnbind` of a Connection whose VCS could not be read, at the request's read or at the one just before Unbind vPPB, and a Connection `POST` whose host's VCS could not be read, at the request's read or the one just before Bind vPPB (nothing sent); a Dynamic Capacity add, release or `MemoryExtent` `DELETE` on hardware whose host could not be read for the task's baseline (nothing sent) |
+| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy (at once, or as the return code of the background operation: the task monitor), after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception), or whose vPPB reads 01h at the read just before Unbind vPPB with no unbind of that Connection's under way; a DELETE or `#Cxl.ForceUnbind` of a Connection whose VCS could not be read, at the request's read or at the one just before Unbind vPPB, and a Connection `POST` whose host's VCS could not be read, at the request's read or the one just before Bind vPPB (nothing sent); a Dynamic Capacity add, release or `MemoryExtent` `DELETE` on hardware whose host could not be read for the task's baseline (nothing sent); a chunk `DELETE`, or a chunk `POST` that would send Set LD Allocations or Set Partition Info, when a VCS of a switch that can expose the chunk could not be read just before (nothing sent; see "Deleting Memory Chunks") |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
 specification sets it.
@@ -1401,6 +1401,32 @@ first. The CXL specification does not say whether an LD or SLD that is
 bound may be changed; refusing it is cxl-fmd's choice. Direct-attached
 Connections, which have no binding to undo, do not hold their chunks.
 
+Before either request sends anything, the VCSs of each switch that can
+expose the chunk are read again (Get Virtual CXL Switch Info, `0x5200h`):
+the switch an SLD or MLD is on, and for a pool LD of a Multi-Headed device
+the switch port its head is placed on and every switch port the device
+was found through with no head placed there. Every vPPB read is looked
+at, whether or not its VCS has a host and so a Connection (a VCS enabled
+since discovery has none until the next rescan). The request is refused,
+nothing sent:
+
+- `409` when a vPPB is bound to the device's port (`02h`), or to the port
+  and the chunk's LD (`03h`; for an MLD's chunk of no LD, or a head's
+  port, any LD), or when a vPPB of such a switch is Busy (`01h`) or bound
+  to a PBR ID (`04h`), which name no port (cxl-fmd's choice: such a vPPB
+  may be the device's);
+- `409` when the switch is not read whole (more than 8 active VCSs, or a
+  VCS of more than 32 vPPBs: see "When the switch is read"), when a
+  vPPB is bound to a switch port the Multi-Headed device was found
+  through whose head cannot be told, or when what a head of the device
+  presents is not known (see "MHD Memory Model");
+- `503` when a VCS of such a switch could not be read: what it held
+  before is not used. No `Retry-After` header is sent.
+
+A fresh read does not fence another FM, or software on another CCI: a
+binding made between the read and Set LD Allocations is not seen (see
+"Binding").
+
 The exception is a pool LD of a Multi-Headed device: no chunk of it is
 deleted or created while the head the LD Map maps it to (Table 7-61) has
 any Connection that is not Absent: a direct-attached host, or a vPPB
@@ -1719,6 +1745,9 @@ switch's VCSs (cxl-fmd's choice). They are read:
 - every VCS of the switch, before each `POST` and `DELETE` of a
   Connection and each `#Cxl.ForceUnbind`, as another FM, or a request
   through another CCI, may have changed one;
+- every VCS of each switch that can expose a memory chunk, before a chunk
+  `DELETE`, and before a chunk `POST` that would send Set LD Allocations
+  or Set Partition Info (see "Deleting Memory Chunks");
 - after a Binding Change (Virtual CXL Switch Event Record, Event Type 00h)
   that no task of cxl-fmd follows, once per poll of the switch's logs, all
   of its VCSs. The record's own binding fields are not taken as they are
@@ -2175,9 +2204,9 @@ standard:
 |----------|------------------------|------------------|
 | Is binding a port or LD that is already bound an error, and with which return code? | Bind vPPB lists its return codes with no conditions (CXL r4.0 Section 7.6.7.2.2) | cxl-fmd refuses it itself: a target bound in another VCS is 409; the same target in the host's VCS is answered with the Connection it has (200), and nothing is sent |
 | May one LD be bound to two vPPBs? | Not said. "For a DSP above an MLD, there is a vPPB for each LD" (Table 7-93) is about routing | Refused on `POST` (409). The Connection ID has the vPPB in it, so a switch that shows one LD on two vPPBs gives two Connections, and nothing collides |
-| Are Binding Change records made, and seen by this FM, for binds made by another FM, through another CCI, or at boot? | Not said | The switch's VCSs are read again after every Binding Change no task follows, the whole switch before each `POST`, `DELETE` and `#Cxl.ForceUnbind`; `--rescan` stays the backstop |
+| Are Binding Change records made, and seen by this FM, for binds made by another FM, through another CCI, or at boot? | Not said | The switch's VCSs are read again after every Binding Change no task follows, the whole switch before each `POST`, `DELETE` and `#Cxl.ForceUnbind` of a Connection, and each switch that can expose a chunk before a chunk `DELETE` or a chunk `POST` that would send a command; `--rescan` stays the backstop |
 | Who made a binding? | No field of Table 7-34 or Table 7-80 says | A `DELETE` unbinds whoever made it. `Oem.Cxl.Origin` is advisory and lost on restart. There is no option to protect bindings cxl-fmd did not make: with the record lost on restart, it would protect cxl-fmd's own bindings after one |
-| May Set LD Allocations, or Set Partition Info, change an LD or SLD that is bound? | Not said | 409 for a chunk `DELETE`, and for a chunk `POST` that would send either command, while a switch-attached Connection that is not `Absent` exposes it. A `POST` of a `"PMEM"` chunk of an SLD, or of a `"Volatile"` one of an SLD with no partitionable capacity, sends nothing and is not refused. Direct-attached Connections, and Dynamic Capacity extents, are not gated |
+| May Set LD Allocations, or Set Partition Info, change an LD or SLD that is bound? | Not said | 409 for a chunk `DELETE`, and for a chunk `POST` that would send either command, while a switch-attached Connection that is not `Absent` exposes it, or a vPPB read just before binds it (see "Deleting Memory Chunks"). A `POST` of a `"PMEM"` chunk of an SLD, or of a `"Volatile"` one of an SLD with no partitionable capacity, sends nothing and is not refused. Direct-attached Connections, and Dynamic Capacity extents, are not gated |
 | Which chunks does a binding expose? | A binding names a port and an LD-ID only (Table 7-35); what LD Allocation Ranges 1 and 2 (Table 7-49) mean to a host is not said | The chunks cxl-fmd records for the SLD, or for the LD |
 | Which pool LD is LD-ID `n` of a head that presents an MLD? | "The MH-MLD maps the LD-IDs received at a head to the device-wide LD index in the MH-MLD's LD pool" (Section 2.5.1), by no rule given | `POST` to such a head is 400. A binding found there is a Connection to the head's Endpoint, `Enabled` with `Health` `Warning`, and no chunks |
 | Which switch port, or host, is a head of a Multi-Headed device on? | No command maps a head's Port Number (Table 7-64) to either | Only a mock topology says. On hardware a Multi-Headed device has no Connections, and a `POST` to it is 400 |
@@ -2265,8 +2294,9 @@ In summary:
 3. A Connection is as old as the last read of its switch's VCSs: a `GET`
    sends no command. A binding made by another FM or through another CCI,
    of which the switch records no Binding Change this FM reads, is seen
-   only before the next `POST` or `DELETE` on that switch, or on the
-   `--rescan` timer (see "Binding").
+   only before the next `POST` or `DELETE` of a Connection on that switch,
+   or of a memory chunk of a device on it (see "Deleting Memory Chunks"),
+   or on the `--rescan` timer (see "Binding").
 4. On hardware, a Multi-Headed device has no Connections, and a `POST` to
    it is 400: no command maps a head's Port Number to a switch port or a
    host (a head that presents an MLD is placed on a switch port only when
@@ -2380,7 +2410,10 @@ In summary:
     switches and MLDs is cxl-fmd's reading of these sections, as are the
     lock file and its scope; keeping to one Fabric Manager per fabric is
     the deployment's job (see "Kubernetes MFM Deployment" in
-    [Usecases.md](Usecases.md)).
+    [Usecases.md](Usecases.md)). The reads cxl-fmd makes just before a
+    bind, an unbind or a chunk write narrow what it misses, and fence
+    nothing: a binding another FM makes between that read and the command
+    is not seen.
 
 ### Event logs and switch events
 
@@ -2682,7 +2715,7 @@ Changes from the fixes of the external design review (branch
 | Chunk `POST` on hardware on an LD whose allocation another FM changed | Set LD Allocations for the size discovery found plus the chunk, which took from the LD what the other FM gave it | Get LD Allocations first: the LD's allocation now plus the chunk; `500`, nothing set, if it cannot be read |
 | Chunk `DELETE` on hardware of a chunk whose LD another FM took the memory of | Set LD Allocations for the size discovery found less the chunk | Get LD Allocations first: `404` if the chunk went with the memory, nothing set; `500` if it cannot be read |
 | Chunk `POST` or `DELETE` on hardware of an MLD or MHD whose Set LD Allocations answers Internal Error (or another code that is not Invalid Input, Unsupported, Retry Required, Invalid Payload Length or Unsupported Mailbox or CCI), a response that cannot be read, or a Success for another LD | `500`, the new chunk removed (`POST`) or kept (`DELETE`) with nothing read | Get LD Allocations reads the LD back: `201` or `204` if it has what was asked, `500` with the chunk as it was if it has what it had, `500` with its chunks made what it has otherwise. If that read fails too: `500` "Outcome unknown", the chunk kept, and no chunk of the device changed until the LD is read again |
-| Chunk `POST` on a bound LD, or Volatile chunk `POST` on a bound SLD, when the domain has no room | `409` "Insufficient capacity" | `409` "A Connection binds the logical device": the binding is checked first, before anything is sent |
+| Chunk `POST` on a bound LD, or Volatile chunk `POST` on a bound SLD, when the domain has no room | `409` "Insufficient capacity" | `409` "A binding exposes the logical device": the binding is checked first, before anything is sent |
 | Chunk `POST` on hardware on a pool LD of a Multi-Headed device | Get and Set LD Allocations sent to the endpoint that answered Get Multi-Headed Info with no tunnel, through a tunnel to the LD Pool CCI (Target Type 1) | sent to that endpoint with no tunnel; `501`, with nothing sent, if no LD Pool CCI is known |
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
 | `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |
@@ -2848,6 +2881,11 @@ Changes from the fixes of the follow-up design review (branch
 | `GET` of the `PCIeDevice` of a Multi-Headed device whose LD Map could not be read whole, whose heads' Port Numbers could not be read, or with a head mapped to no LD | `DeviceClass` `MH_SLD` (a head of unknown count taken to present an SLD) | `MH_MLD` if a head is known to present an MLD; otherwise left out |
 | Endpoints of a switch port with a head whose presentation is not known (see "MHD Memory Model") | the pool LDs the partial map gave the head | none |
 | Connection `POST` to a pool LD of a head whose presentation is not known | `400` (on no switch port) or a bind of the head's port whole | `409`, nothing sent |
+| Chunk `DELETE`, or chunk `POST` that would send Set LD Allocations or Set Partition Info, of a device on a switch | no command to the switch: checked against the Connections as last read | the VCSs of each switch that can expose the chunk read first (one or more 5200h); `409` when a vPPB read binds the device's port (or its port and the chunk's LD), is Busy, or is bound to a PBR ID, whether or not its VCS has a host; nothing sent |
+| The same, with a VCS of such a switch that cannot be read | Set LD Allocations or Set Partition Info sent | `503`, nothing sent |
+| The `409` of a chunk `POST` or `DELETE` refused for a binding | "A Connection binds the logical device" / "A Connection exposes the memory chunk: delete the Connection first" | "A binding exposes the logical device" / "A binding exposes the memory chunk", naming a Connection or a vPPB read bound or Busy, which may have no Connection |
+| The same, on a switch of more than 8 active VCSs or a VCS of more than 32 vPPBs | Set LD Allocations or Set Partition Info sent, a binding past them not seen | `409`, nothing sent |
+| The same, for a pool LD of a Multi-Headed device a head of which has a presentation not known, or that is reached through a switch port with no head placed and a vPPB binds that port | sent (a binding to an unplaced head was an `Absent` Connection, holding nothing) | `409`, nothing sent |
 | Discovery of a Multi-Headed device whose LD Map was not read whole, and that is found again through a head's FM-owned LD on a switch port | the only head counted as presenting an MLD placed on that port (possibly the wrong head), its bindings taken for that head's | no head placed: the bindings there are `Absent` or `Unresolved` |
 | `--check` of such a device on hardware | `head N has 0 LDs mapped` and presentation errors for the heads cxl-fmd could not count | not reported; a head mapped to no LD on a map read whole still is |
 
