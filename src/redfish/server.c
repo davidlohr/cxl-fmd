@@ -1850,6 +1850,10 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_chunk_unread(conn);
 		if (rc == -18)
 			return send_chunk_incomplete(conn);
+		if (rc == -19)
+			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+					  "Outcome unknown: Set Partition Info may or may not have been carried out, and the partition could not be read back. The chunk is kept, staged, and no chunk that changes the partition is created or deleted until the partition is read: check the device's Memory before sending this again",
+					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to create memory chunk", RF_GENERAL(FMD_RES_FAILED));
 	}
@@ -2156,6 +2160,10 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The device has no partitionable capacity (Partition Alignment is 0)",
 					  RF_GENERAL(FMD_RES_UNSUPPORTED));
+		if (rc == -6)
+			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+					  "Outcome unknown: Set Partition Info may or may not have been carried out, and the partition could not be read back: read the Memory again before sending this again",
+					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "CCI command failed",
 				  RF_GENERAL(FMD_RES_FAILED));
 	}
@@ -2248,6 +2256,10 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 			return send_chunk_unread(conn);
 		if (rc == -10)
 			return send_chunk_incomplete(conn);
+		if (rc == -11)
+			return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+					  "Outcome unknown: Set Partition Info may or may not have been carried out, and the partition could not be read back. The chunk is kept as it was until the partition is read, and no chunk that changes the partition is created or deleted until then; that read deletes the chunk if the device has the partition this asked for",
+					  RF_GENERAL(FMD_RES_OUTCOME_UNKNOWN));
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to delete memory chunk", RF_GENERAL(FMD_RES_FAILED));
 	}

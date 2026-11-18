@@ -648,9 +648,16 @@ struct fmd_sld {
 	struct cxlmi_cmd_memdev_get_partition_info_rsp partition;
 	/*
 	 * @partition may not be what the device has: read 4100h again
-	 * (fmd_sld_partition_refresh()) before it is trusted
+	 * (fmd_sld_partition_refresh()) before it is trusted, and before any
+	 * chunk that changes it is created or deleted. @unknown_delete is the
+	 * chunk whose DELETE had that outcome, "" for none, and
+	 * @unknown_next the Next Volatile Capacity it asked for (units of
+	 * 256 MB): the read that finds it the device's carries the DELETE
+	 * out (fmd_sld_chunk_deleted()).
 	 */
 	bool partition_unknown;
+	char unknown_delete[FMD_MAX_ID_LEN];
+	uint64_t unknown_next;
 
 	/* Get Health Info (4200h) response, if health_valid */
 	struct cxlmi_cmd_memdev_get_health_info_rsp health;
@@ -2716,7 +2723,9 @@ uint64_t fmd_partition_next_volatile(const struct cxlmi_cmd_memdev_get_partition
  * For mock mode, updates local state only.
  * If immediate is true, change takes effect immediately; else at next reset.
  * Returns 0, -EINVAL if the device cannot be given that, -EOPNOTSUPP if it
- * cannot be partitioned or reached, other negative values on error.
+ * cannot be partitioned or reached, -EREMOTEIO if the outcome is not known
+ * (fmd_memdev_set_partition()), when @sld is made partition_unknown, other
+ * negative values on error.
  */
 int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 			  uint64_t volatile_bytes, bool immediate);

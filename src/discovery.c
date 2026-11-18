@@ -4285,6 +4285,38 @@ int fmd_partition_volatile(const struct cxlmi_cmd_memdev_identify_rsp *id,
 }
 
 /*
+ * Whether Set Partition Info answered with a return code that says the
+ * partition was not changed. Of its "Possible Command Return Codes"
+ * (CXL r4.0 Section 8.2.10.9.2.2), Unsupported, Invalid Input, Retry
+ * Required ("The command was not completed because of a temporary
+ * error"), Invalid Payload Length (checked "prior to processing any
+ * command"), Media Disabled ("The command could not be completed"), Busy
+ * ("Wait until background command completes and then retry the
+ * command") and Invalid Security State ("The command is invalid in the
+ * current security state"), Table 8-208; and Unsupported Mailbox or CCI,
+ * "not supported on the mailbox or CCI it was issued on", as for Set LD
+ * Allocations (set_ld_refused()). That these change nothing is cxl-fmd's
+ * reading. Internal Error, another code, or a response libcxlmi cannot
+ * read (-1, as for a message not sent or not answered) is read back.
+ */
+static bool set_partition_refused(int rc)
+{
+	switch (rc) {
+	case CXLMI_RET_UNSUPPORTED:
+	case CXLMI_RET_INPUT:
+	case CXLMI_RET_RETRY:
+	case CXLMI_RET_PAYLOADLEN:
+	case CXLMI_RET_MEDIADISABLED:
+	case CXLMI_RET_BUSY:
+	case CXLMI_RET_SECURITY:
+	case CXLMI_RET_MBUNSUPPORTED:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
  * Set Partition Info (4101h): have @next_volatile of volatile capacity in
  * all, in units of 256 MB, at the next reset, or at once if @immediate.
  * Sent on @ep through @ti; with no @ep (mock mode) only @part changes.
@@ -4293,8 +4325,9 @@ int fmd_partition_volatile(const struct cxlmi_cmd_memdev_identify_rsp *id,
  * change the size of the persistent capacity shall result in the loss of
  * data stored" (Section 8.2.10.9.2.2).
  *
- * Returns 0, -EOPNOTSUPP or -EINVAL as fmd_partition_volatile() does, or
- * -EIO if the command failed.
+ * Returns 0, -EOPNOTSUPP or -EINVAL as fmd_partition_volatile() does, -EIO
+ * if the command was not carried out, or -EREMOTEIO if whether it was is
+ * not known (see set_partition_refused()), *@part then as it was.
  */
 int fmd_memdev_set_partition(struct fmd_ctx *ctx, const char *name,
 			     struct cxlmi_endpoint *ep,
@@ -4319,9 +4352,38 @@ int fmd_memdev_set_partition(struct fmd_ctx *ctx, const char *name,
 		req.volatile_capacity = volatile_capacity;
 		req.flags = immediate ? 0x01 : 0x00;	/* Bit[0]: Immediate */
 		rc = cxlmi_cmd_memdev_set_partition_info(ep, ti, &req);
-		if (rc != 0) {
-			fmd_warn(ctx, "%s: set partition info failed: %d", name, rc);
+		if (set_partition_refused(rc)) {
+			fmd_warn(ctx, "%s: set partition info refused: %d", name, rc);
 			return -EIO;
+		}
+		if (rc != 0) {
+			struct cxlmi_cmd_memdev_get_partition_info_rsp back = { 0 };
+			uint64_t now;
+
+			/*
+			 * A 4101h that reached the device staged its change
+			 * (or made it) whether or not its answer came back:
+			 * what the device has is read back (cxl-fmd's choice,
+			 * as for Set LD Allocations).
+			 */
+			fmd_warn(ctx, "%s: set partition info: outcome not known (%d): "
+				 "read back", name, rc);
+			if (cxlmi_cmd_memdev_get_partition_info(ep, ti, &back)) {
+				fmd_err(ctx, "%s: partition not known: nothing that "
+					"changes it is sent until it is read", name);
+				return -EREMOTEIO;
+			}
+			*part = back;
+			now = fmd_partition_next_volatile(&back);
+			if (now != next_volatile) {
+				fmd_warn(ctx, "%s: partition not set: %" PRIu64 " MB "
+					 "volatile next, not %" PRIu64 " MB", name,
+					 now * 256, next_volatile * 256);
+				return -EIO;
+			}
+			fmd_info(ctx, "%s: partition set to volatile=%" PRIu64
+				 " MB, as read back", name, next_volatile * 256);
+			return 0;
 		}
 	}
 
@@ -4369,6 +4431,8 @@ uint64_t fmd_partition_next_volatile(const struct cxlmi_cmd_memdev_get_partition
 int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 			  uint64_t volatile_bytes, bool immediate)
 {
+	int rc;
+
 	if (!ctx || !sld)
 		return -1;
 
@@ -4379,11 +4443,17 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 		return -EINVAL;
 
 	/* without an endpoint (mock mode), local state only */
-	return fmd_memdev_set_partition(ctx, sld->base.id, sld->base.ep,
-					CXLMI_NO_TUNNEL, &sld->memdev,
-					&sld->partition,
-					volatile_bytes / CXL_CAPACITY_UNIT,
-					immediate);
+	rc = fmd_memdev_set_partition(ctx, sld->base.id, sld->base.ep,
+				      CXLMI_NO_TUNNEL, &sld->memdev,
+				      &sld->partition,
+				      volatile_bytes / CXL_CAPACITY_UNIT,
+				      immediate);
+	if (rc == -EREMOTEIO) {
+		fmd_topology_wrlock(&ctx->topology);
+		sld->partition_unknown = true;
+		fmd_topology_wrunlock(&ctx->topology);
+	}
+	return rc;
 }
 
 /* The first staged chunk of @sld, NULL if it has none */
@@ -4434,6 +4504,23 @@ int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 		fmd_warn(ctx, "%s: get partition info failed: %d: its staged "
 			 "chunks are kept", sld->base.id, rc);
 		return -EIO;
+	}
+
+	/*
+	 * A DELETE whose 4101h had an outcome not known: the device has what
+	 * it asked for, so it was carried out (the chunk staged after it or
+	 * active is as fmd_sld_chunk_deleted() leaves it), or it was not, and
+	 * the chunk is as it was. A chunk staged goes, as on a DELETE.
+	 */
+	if (sld->partition_unknown && sld->unknown_delete[0]) {
+		chunk = fmd_topology_find_chunk(&ctx->topology, sld->unknown_delete);
+		if (chunk && fmd_partition_next_volatile(&part) == sld->unknown_next) {
+			fmd_info(ctx, "%s: chunk %s was deleted after all",
+				 sld->base.id, chunk->base.id);
+			if (!fmd_sld_chunk_deleted(ctx, sld, chunk, sld->unknown_next))
+				fmd_chunk_remove(&ctx->topology, chunk);
+		}
+		sld->unknown_delete[0] = '\0';
 	}
 
 	fmd_topology_wrlock(&ctx->topology);

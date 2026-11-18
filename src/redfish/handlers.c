@@ -5427,6 +5427,10 @@ static int chunk_plan_type(const struct fmd_component *dev, const struct fmd_ld 
  * -18 = a switch that can expose the LD or SLD is not read whole, or which
  *       head of its Multi-Headed device a binding reaches cannot be told
  *       (binding_coverage())
+ * -19 = Set Partition Info had an outcome that could not be told, and the
+ *       partition could not be read back (fmd_memdev_set_partition()): the
+ *       chunk is kept, staged, and no chunk that changes the partition is
+ *       created or deleted until it is read (-5 while it cannot be)
  * FMD_MCTP_RESTRICTED = a chunk that changes the partition of an SLD that
  *       Set Partition Info may not be sent to (mctp_refused())
  * Every one of -2, -6, -8 to -12, -15 to -18 and FMD_MCTP_RESTRICTED is
@@ -5506,6 +5510,15 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	/* Set Partition Info, where note 4 of Table 8-308 lets it go */
 	if (chunk_repartitions(chassis, plan.type) && mctp_refused(ctx, chassis, 0x4101))
 		return FMD_MCTP_RESTRICTED;
+
+	/*
+	 * A partition not known (a 4101h whose outcome could not be told) is
+	 * read before it is changed again: nothing is sent while it cannot be
+	 */
+	if (chassis->type == FMD_COMPONENT_SLD && chunk_repartitions(chassis, plan.type) &&
+	    fmd_to_sld(chassis)->partition_unknown &&
+	    fmd_sld_partition_refresh(ctx, fmd_to_sld(chassis)))
+		return -5;
 
 	/*
 	 * The LD's allocation as it is now, which others than cxl-fmd may
@@ -5613,12 +5626,17 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				/*
 				 * The chunk is of the next configuration, not of
 				 * the active one, until a read-back shows it
-				 * active (fmd_sld_partition_refresh()).
+				 * active (fmd_sld_partition_refresh()). One whose
+				 * 4101h had an outcome not known is kept so too:
+				 * the read that makes the partition known again
+				 * judges it as any staged chunk.
 				 */
-				if (!rc) {
+				if (!rc || rc == -EREMOTEIO) {
 					chunk->staged = true;
 					chunk->staged_vmem = new_volatile / CXL_CAPACITY_UNIT;
 				}
+				if (rc == -EREMOTEIO)
+					return -19;
 			}
 		}
 
@@ -5771,6 +5789,8 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
  *       of its Multi-Headed device is known; nothing was sent
  *  -7 = the chunk's LD has less allocated than the chunk; nothing was sent
  *  -8 = as -14 of fmd_redfish_post_memory_chunk(): the chunk is kept
+ * -11 = as -19 of fmd_redfish_post_memory_chunk(): the chunk is kept as it
+ *       was, until a read of the partition shows whether it was deleted
  *  -9 = a VCS of a switch that can expose the chunk could not be read just
  *       now (binding_coverage()); nothing was sent
  * -10 = a switch that can expose the chunk is not read whole, or which
@@ -5844,6 +5864,22 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 		return FMD_MCTP_RESTRICTED;
 
 	/*
+	 * as for a POST, a partition not known is read first, which may
+	 * carry out an earlier DELETE of the chunk or find it gone
+	 */
+	if (domain_parent->type == FMD_COMPONENT_SLD &&
+	    chunk_repartitions(domain_parent, chunk->address_range_type) &&
+	    fmd_to_sld(domain_parent)->partition_unknown) {
+		if (fmd_sld_partition_refresh(ctx, fmd_to_sld(domain_parent)))
+			return -3;
+		chunk = fmd_topology_find_chunk(&ctx->topology, chunk_id);
+		if (!chunk)
+			return -1;
+		if (chunk->removing)
+			return 0;
+	}
+
+	/*
 	 * Issue CCI command for hardware mode before removing from topology.
 	 * For MLD or MHD: decrease LD allocation via Set LD Allocations (5402h)
 	 * For SLD: adjust partition via Set Partition Info (4101h)
@@ -5895,6 +5931,20 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				if (!rc && fmd_sld_chunk_deleted(ctx, sld, chunk,
 								 new_volatile / CXL_CAPACITY_UNIT))
 					return 0;
+				/*
+				 * Not known whether it was carried out: the
+				 * chunk is kept as it was, and the read that
+				 * makes the partition known carries the DELETE
+				 * out if the device has it
+				 * (fmd_sld_partition_refresh()).
+				 */
+				if (rc == -EREMOTEIO) {
+					snprintf(sld->unknown_delete,
+						 sizeof(sld->unknown_delete), "%s",
+						 chunk->base.id);
+					sld->unknown_next = new_volatile / CXL_CAPACITY_UNIT;
+					return -11;
+				}
 			}
 		} else {
 			/* nothing would be given back: refused, not 204 */
@@ -6330,6 +6380,15 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 		return -2;
 	if (rc == -EOPNOTSUPP)
 		return -5;
+	if (rc == -EREMOTEIO) {
+		/* read again on the next --rescan (fmd_sld_partition_refresh()) */
+		if (comp->type == FMD_COMPONENT_SLD) {
+			fmd_topology_wrlock(&ctx->topology);
+			fmd_to_sld(comp)->partition_unknown = true;
+			fmd_topology_wrunlock(&ctx->topology);
+		}
+		return -6;
+	}
 	return rc ? -3 : 0;
 }
 

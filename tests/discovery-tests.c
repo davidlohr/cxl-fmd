@@ -9161,6 +9161,179 @@ out:
 }
 
 /*
+ * A 4101h whose answer libcxlmi cannot read: 4101h has no output payload,
+ * and the mock answers -1 for one with 4 bytes, after counting it sent,
+ * as libcxlmi answers for a message not sent or not answered
+ */
+static void answer_4101_lost(struct cxlmi_endpoint *ep)
+{
+	uint8_t junk[4] = { 0 };
+
+	answer(ep, 0x4101, junk, sizeof(junk));
+}
+
+/* how many chunks @dom of the topology of @ctx has */
+static int domain_chunks(struct fmd_ctx *ctx, const char *dom)
+{
+	struct fmd_mem_domain *domain = fmd_topology_find_domain(&ctx->topology, dom);
+	struct fmd_component *c;
+	int n = 0;
+
+	if (domain)
+		fmd_for_each_child_type(&domain->base, c, FMD_COMPONENT_CHUNK)
+			n++;
+	return n;
+}
+
+/*
+ * Follow-up review item 5 (b): a Set Partition Info whose answer is lost
+ * was taken as failed, and the chunk POSTed removed, though "If cleared,
+ * the change in partitioning shall become the "next" configuration"
+ * (CXL r4.0 Table 8-311) whether or not the answer comes back. The
+ * partition is read back: what it shows decides, and if it cannot be
+ * read, the chunk is kept and the partition read before any chunk changes
+ * it again.
+ */
+static void test_sld_partition_lost(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], a[64], b[64];
+	struct fmd_sld *sld = sld_partitionable(ctx, &ep, 0x5b01, id, dom);
+	struct fmd_mem_chunk *ca;
+	unsigned int sent;
+	int before = failures, rc;
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+
+	/* the read back shows it staged: 201, the chunk staged */
+	answer_4101_lost(ep);
+	answer_partition(ep, 16, 48, 20, 44);
+	sent = commands_sent(ep);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	ca = fmd_topology_find_chunk(&ctx->topology, a);
+	CHECK(rc == 0 && commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100 &&
+	      ca && ca->staged && ca->staged_vmem == 20 && sld->partition.next_vmem == 20,
+	      "read back staged: %d, %u sent, chunk %s", rc, commands_sent(ep) - sent,
+	      ca ? (ca->staged ? "staged" : "active") : "gone");
+	fmd_ctx_free(ctx);
+
+	/* the read back shows nothing staged: not done, the chunk goes */
+	ctx = new_ctx();
+	sld = sld_partitionable(ctx, &ep, 0x5b02, id, dom);
+	if (!sld)
+		goto out;
+	answer_4101_lost(ep);
+	answer_partition(ep, 16, 48, 0, 0);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	CHECK(rc == -5 && domain_chunks(ctx, dom) == 0 && !sld->partition_unknown,
+	      "read back not staged: %d, %d chunks", rc, domain_chunks(ctx, dom));
+
+	/* a refusal is not read back */
+	answer_rc(ep, 0x4101, CXLMI_RET_BUSY);
+	sent = commands_sent(ep);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	CHECK(rc == -5 && commands_sent(ep) == sent + 1 && domain_chunks(ctx, dom) == 0,
+	      "Busy: %d, %u sent", rc, commands_sent(ep) - sent);
+	fmd_ctx_free(ctx);
+
+	/*
+	 * the read back fails: outcome unknown, the chunk kept staged, and
+	 * no chunk changes the partition until a read shows it
+	 */
+	ctx = new_ctx();
+	sld = sld_partitionable(ctx, &ep, 0x5b03, id, dom);
+	if (!sld)
+		goto out;
+	answer_4101_lost(ep);
+	answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	{
+		/* a 500 has no Id: the domain's one chunk */
+		struct fmd_component *c = fmd_first_child_type(
+			&fmd_topology_find_domain(&ctx->topology, dom)->base,
+			FMD_COMPONENT_CHUNK);
+
+		ca = c ? fmd_to_chunk(c) : NULL;
+	}
+	CHECK(rc == -19 && ca && ca->staged && ca->staged_vmem == 20 &&
+	      sld->partition_unknown,
+	      "read back failed: %d, chunk %s, unknown %d", rc, ca ? "kept" : "gone",
+	      sld->partition_unknown);
+	if (ca) {
+		answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+		sent = commands_sent(ep);
+		rc = sld_vol_post(ctx, id, dom, b, sizeof(b));
+		CHECK(rc == -5 && commands_sent(ep) == sent + 1 && last_opcode(ep) == 0x4100 &&
+		      domain_chunks(ctx, dom) == 1,
+		      "POST while not known: %d, %u sent, last %04xh", rc,
+		      commands_sent(ep) - sent, last_opcode(ep));
+		/* the next re-scan reads it: staged after all */
+		answer_partition(ep, 16, 48, 20, 44);
+		sent = commands_sent(ep);
+		fmd_rescan(ctx);
+		CHECK(commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100 &&
+		      !sld->partition_unknown && ca->staged && sld->partition.next_vmem == 20,
+		      "re-scan: %u sent, last %04xh, unknown %d", commands_sent(ep) - sent,
+		      last_opcode(ep), sld->partition_unknown);
+	}
+	fmd_ctx_free(ctx);
+
+	/*
+	 * a DELETE of an active chunk whose 4101h answer is lost and cannot be
+	 * read back: the chunk is kept as it was; the read that shows the
+	 * decrease staged carries the DELETE out, and one sent again then
+	 * sends nothing
+	 */
+	ctx = new_ctx();
+	sld = sld_partitionable(ctx, &ep, 0x5b04, id, dom);
+	ca = sld ? sld_active_chunk(ctx, ep, id, dom, 20, a, sizeof(a)) : NULL;
+	CHECK(ca, "no active chunk");
+	if (!ca)
+		goto out;
+	answer_4101_lost(ep);
+	answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	CHECK(rc == -11 && ca == fmd_topology_find_chunk(&ctx->topology, a) &&
+	      !ca->staged && sld->partition_unknown,
+	      "DELETE, read back failed: %d, chunk %s", rc,
+	      fmd_topology_find_chunk(&ctx->topology, a) ? "kept" : "gone");
+	answer_partition(ep, 20, 44, 16, 48);
+	fmd_rescan(ctx);
+	CHECK(ca->staged && ca->removing && !sld->partition_unknown,
+	      "after a read showing it staged: %s",
+	      ca->removing ? "removing" : "as it was");
+	sent = commands_sent(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	CHECK(rc == 0 && commands_sent(ep) == sent, "DELETE again: %d, %u sent", rc,
+	      commands_sent(ep) - sent);
+	fmd_ctx_free(ctx);
+
+	/* the same, and the read shows it was not carried out: as it was */
+	ctx = new_ctx();
+	sld = sld_partitionable(ctx, &ep, 0x5b05, id, dom);
+	ca = sld ? sld_active_chunk(ctx, ep, id, dom, 20, a, sizeof(a)) : NULL;
+	CHECK(ca, "no active chunk");
+	if (!ca)
+		goto out;
+	answer_4101_lost(ep);
+	answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	answer_partition(ep, 20, 44, 0, 0);
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	ca = fmd_topology_find_chunk(&ctx->topology, a);
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 16 && ca && ca->removing,
+	      "DELETE again after a read showing it not done: %d, %" PRId64, rc,
+	      last_volatile_capacity(ep));
+out:
+	fmd_ctx_free(ctx);
+	report("a Set Partition Info whose answer is lost is read back", before);
+}
+
+/*
  * Follow-up review item 5 (c-2): Get Partition Info was read again only
  * for an SLD with a staged chunk. A DELETE of an active Volatile chunk
  * stages a decrease, "the "next" configuration, to become active on the
@@ -14614,6 +14787,7 @@ int main(void)
 	test_staged_chunk_resets();
 	test_sld_partition_pending();
 	test_sld_staged_delete();
+	test_sld_partition_lost();
 	test_o4_gate();
 	test_ld_security();
 	test_security_cel();

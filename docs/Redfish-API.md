@@ -1418,6 +1418,34 @@ mock's partition.
   chunks"). A `"PMEM"` chunk, and a `"Volatile"` one of an SLD with
   no partitionable capacity, send no command.
 
+**An unclear Set Partition Info** (chunk `POST` and `DELETE` of an SLD,
+and a `PATCH` of its `Memory`). Of the command's "Possible Command Return
+Codes" (CXL r4.0 Section 8.2.10.9.2.2), Unsupported, Invalid Input,
+Retry Required, Invalid Payload Length, Media Disabled, Busy and Invalid
+Security State, and Unsupported Mailbox or CCI, are taken to mean the
+partition was not changed: `500` (`400` for a partition the device
+cannot be given, as before), and the chunk is as it was. Any other
+outcome (Internal Error, another code, or a response libcxlmi cannot
+read, which it reports as it reports a message not sent or not answered)
+does not say what the device has staged: with Immediate cleared "the
+change in partitioning shall become the "next" configuration" (Table
+8-311) whether or not the answer comes back, and Get Partition Info is
+sent to read it back (cxl-fmd's choice, as for Set LD Allocations). The
+volatile capacity it shows once what is staged takes effect decides: the
+total asked for is `201` (the chunk staged) or `204`; any other is `500`
+with the chunk as it was. If the read back fails as well the outcome is
+not known: `500` with a message that says so; a `POST`'s chunk is kept,
+staged, and a `DELETE`'s chunk is kept as it was. The SLD is fenced: the
+next `--rescan`, and the next chunk `POST` or `DELETE` that would send
+Set Partition Info (before anything else, and `500` with nothing sent
+while it cannot be read), read Get Partition Info again. The chunk kept
+is then judged as any staged chunk, and a `DELETE`'s chunk is deleted, as
+a `DELETE` with the answer would have (staged: gone; active: removing),
+when the device has the volatile capacity that `DELETE` asked for. A
+`PATCH` of `Memory` with that outcome is `500` "Outcome unknown", and
+its SLD is read again on the next `--rescan`. Fencing is kept in memory
+only.
+
 **While bound (409 Conflict):** a chunk that a switch-attached Connection
 exposes (one that is not Absent: Starting, Updating and Enabled ones
 included) is not deleted, and no chunk is created that would change the
@@ -2924,6 +2952,10 @@ Changes from the fixes of the follow-up design review (branch
 | Chunk `DELETE` of an active `"Volatile"` SLD chunk (Set Partition Info staged, active until the reset) | `204`, the chunk removed at once, its range free | `204`; the chunk kept until a read shows no change pending, `StandbyOffline`, in no Connection, with `Oem.Cxl.PendingPartition` (`Removal` `true`); every staged chunk waits for that much less; a `DELETE` of it again `204` with nothing sent |
 | `Oem.Cxl.PendingPartition` of a staged chunk | `NextVolatileCapacityBytes`, `ActivationResets` | also `Removal` (`false`, or `true` for a removing chunk) |
 | Connection `POST` naming a staged chunk, `409` | "The memory chunk is staged: its partition is active from the device's next reset" | "The memory chunk is staged: the partition change it waits for, its addition or its removal, takes effect at the device's next reset" (also for a removing chunk) |
+| Chunk `POST` of a `"Volatile"` SLD chunk whose Set Partition Info answer is lost, or Internal Error | `500` "Failed to create memory chunk", the chunk removed though the device may have staged it | Get Partition Info read back: `201` with the chunk staged if it shows the total asked for, `500` with the chunk removed if not; if that read fails too, `500` "Outcome unknown", the chunk kept staged |
+| Chunk `DELETE` of a `"Volatile"` SLD chunk with that outcome | `500` "Failed to delete memory chunk", the chunk kept as it was (and forgotten by the device if it had staged the decrease) | read back: `204` if it shows the total asked for, `500` with the chunk as it was if not; if that read fails too, `500` "Outcome unknown", the chunk kept as it was until a read shows whether the device has the decrease |
+| Chunk `POST` or `DELETE` that would send Set Partition Info to an SLD whose partition is not known after such an outcome | Set Partition Info sent from the partition as cached | Get Partition Info read first; `500` with nothing else sent while it cannot be read |
+| `PATCH` of an SLD's `Memory` whose Set Partition Info answer is lost | `500` "CCI command failed" | read back: `200`, or `500` "CCI command failed" if it shows another partition; if that read fails too, `500` "Outcome unknown", and the SLD read again on the next `--rescan` |
 | `--rescan` (or an SLD event log record) of a directly attached SLD with no staged chunk whose partition has a change pending (after a chunk `DELETE` or a `PATCH` of `Memory`) | Get Partition Info not read: after the reset, `Memory` served `VolatileSizeLimitMiB` and `CXL.Staged*SizeMiB` as before it, for good | Get Partition Info read again until no change is pending: `Memory` serves what the device has |
 
 ---
