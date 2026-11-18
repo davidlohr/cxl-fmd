@@ -1695,6 +1695,16 @@ switch's VCSs (cxl-fmd's choice). They are read:
   reads, the specification does not say;
 - in mock mode, when a background bind or unbind is over.
 
+cxl-fmd keeps at most 8 VCSs of a switch, and at most 32 vPPBs of each
+(cxl-fmd's limits; the specification allows more: Number of VCSs is a
+1-byte field of Identify Switch Device, Table 7-18, the Active VCS
+Bitmask has a bit for each of 256 VCS IDs, and Number of vPPBs is a
+1-byte field of Get Virtual CXL Switch Info, Table 7-34). A VCS with more
+than 32 vPPBs is read from vPPB 0 to 31 only, and an active VCS past the
+eighth is not read: a binding past those is not seen, so such a read is
+taken as incomplete, not as what the switch has, and a warning is
+logged.
+
 ### Creating Connections (POST)
 
 ```http
@@ -2329,6 +2339,9 @@ These are known gaps in what cxl-fmd does:
   be (see "One device on several CCIs"); such a head cannot be bound per
   LD anyway. A head that presents an SLD cannot be Identified through a
   switch (Section 7.6.7.3.1), so it is never placed.
+- At most 8 VCSs of a switch, and 32 vPPBs of each, are read (see "When
+  the switch is read"). A switch with more is read as incomplete; a
+  binding past those limits is not a Connection.
 - `Oem.Cxl.Origin` is lost on restart: after one, every binding is
   `"Discovered"`.
 - What a host has mapped of what is bound is not known: the FM has no

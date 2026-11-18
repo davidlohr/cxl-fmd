@@ -12332,6 +12332,239 @@ out:
 	report("an unclear Set LD Allocations is read back", before);
 }
 
+/*
+ * Follow-up review item 2: the switch's VCSs as the chunk guard is to see
+ * them. A VCS of more vPPBs, or a switch of more active VCSs, than cxl-fmd
+ * keeps is a read of part of it: fmd_vcs_refresh() says so (-E2BIG), and
+ * the switch is incomplete. The chunk DELETE halves are the guard's (XFAIL
+ * until it reads the switch).
+ */
+static const uint8_t w2_ld0[3] = { 0x03, 5, 0 };
+
+/* Get LD Allocations then Set LD Allocations of LD 0, for a chunk DELETE */
+static void w2_answer_delete(struct cxlmi_endpoint *ep)
+{
+	uint8_t alloc[4 + 16] = { 0 }, set[4 + 16] = { 0 };
+
+	alloc[0] = 2;				/* Number of LDs */
+	alloc[3] = 1;				/* LD Allocation List Length */
+	put64(alloc + 4, 4);			/* Range 1: 4 x 256 MB */
+	answer(ep, 0x5401, alloc, sizeof(alloc));
+	set[0] = 1;
+	answer(ep, 0x5402, set, sizeof(set));
+}
+
+static void w2_ids(uint64_t serial, char *sw_id, char *dev, char *dom,
+		   char *chunk, char *cid)
+{
+	device_id(sw_id, FMD_MAX_ID_LEN, serial);
+	snprintf(dev, FMD_MAX_ID_LEN + 16, "%.32s_port5_dev", sw_id);
+	snprintf(dom, FMD_MAX_ID_LEN + 32, "%s_domain0", dev);
+	snprintf(chunk, FMD_MAX_ID_LEN + 32, "%s_ld0_chunk", dev);
+	snprintf(cid, FMD_CONN_ID_LEN, "%s_vcs2_vppb1_p5_ld0", sw_id);
+}
+
+/*
+ * 5200h for an enabled VCS whose Number of vPPBs is @nvppbs: 32 entries
+ * (or @nvppbs if fewer), min(vPPB List Limit 32, Number of vPPBs) (Table
+ * 7-34), vPPB 0 bound to the USP and the others unbound.
+ */
+static void w2_answer_vcs_wide(struct cxlmi_endpoint *ep, uint8_t vcs_id,
+			       uint8_t usp, uint8_t nvppbs)
+{
+	uint8_t pl[4 + 4 + 32 * 4] = { 0 }, *b = pl + 4;
+	int entries = nvppbs < 32 ? nvppbs : 32;
+
+	pl[0] = 1;
+	b[0] = vcs_id;
+	b[1] = 0x01;
+	b[2] = usp;
+	b[3] = nvppbs;
+	b[4] = 0x02;
+	b[5] = usp;
+	b[6] = 0xff;
+	for (int i = 1; i < entries; i++)
+		b[4 + 4 * i + 2] = 0xff;
+	answer(ep, 0x5200, pl, 4 + 4 + entries * 4);
+}
+
+/* VCS 2 has 33 vPPBs; vPPB 32, which is not read, may bind port 5 LD 0 */
+static void test_w2_vppb_truncation(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], dev[FMD_MAX_ID_LEN + 16], dom[FMD_MAX_ID_LEN + 32];
+	char chunk[FMD_MAX_ID_LEN + 32], cid[FMD_CONN_ID_LEN];
+	struct fmd_switch *sw;
+	struct fmd_vcs *vcs;
+	uint8_t pl[16];
+	int before = failures, rc;
+	uint16_t op;
+
+	answer_identify(ep, 0x5209, 0x00);
+	answer_switch_ports(ep, 6, 0x00, 0x00);
+	answer_vcs(ep, 0, 0, port2, unbound);
+	w2_answer_vcs_wide(ep, 2, 1, 33);
+	answer_ld_info(ep, (2ULL << 30) + (256ULL << 20), 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	w2_ids(0x5209, sw_id, dev, dom, chunk, cid);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw && fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "setup: switch and chunk");
+	if (!sw)
+		goto out;
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	w2_answer_vcs_wide(ep, 2, 1, 33);
+	rc = fmd_vcs_refresh(ctx, sw);
+	last_payload(ep, &op, pl, sizeof(pl));
+	vcs = fmd_switch_find_vcs(sw, 2);
+	CHECK(rc == -E2BIG, "a VCS of 33 vPPBs read as 32 is a complete read: %d", rc);
+	CHECK(op == 0x5200 && pl[0] == 0 && pl[1] == 32,
+	      "not one read from vPPB 0 of at most 32: %04xh %u %u", op, pl[0], pl[1]);
+	CHECK(vcs && vcs->num_vppbs == 32 && vcs->truncated && !vcs->stale,
+	      "VCS 2 is not kept with its first 32 vPPBs, truncated");
+	CHECK(fmd_vcs_check(sw, 2) == FMD_VCS_TRUNCATED && !fmd_vcs_fresh(sw, 2),
+	      "VCS 2 is fresh: %d", fmd_vcs_check(sw, 2));
+	CHECK(fmd_vcs_fresh(sw, 0) && !fmd_switch_complete(sw),
+	      "VCS 0 is not fresh, or the switch is complete");
+
+	w2_answer_delete(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+	op = last_opcode(ep);
+	XFAIL(rc != 0 && op != 0x5402,
+	      "chunk DELETE with vPPB 32 of VCS 2 unread: %d, last %04xh", rc, op);
+
+	/* the VCS shrinks to 32 vPPBs: read whole again */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	w2_answer_vcs_wide(ep, 2, 1, 32);
+	rc = fmd_vcs_refresh(ctx, sw);
+	vcs = fmd_switch_find_vcs(sw, 2);
+	CHECK(rc == 0 && vcs && !vcs->truncated && fmd_vcs_fresh(sw, 2) &&
+	      fmd_switch_complete(sw), "a VCS of 32 vPPBs is not read whole: %d", rc);
+out:
+	fmd_ctx_free(ctx);
+	report("a VCS of more than 32 vPPBs is read as incomplete", before);
+}
+
+/* nine active VCSs; VCS 8, which is not read, binds port 5 LD 0 */
+static void test_w2_vcs_truncation(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	char sw_id[FMD_MAX_ID_LEN], dev[FMD_MAX_ID_LEN + 16], dom[FMD_MAX_ID_LEN + 32];
+	char chunk[FMD_MAX_ID_LEN + 32], cid[FMD_CONN_ID_LEN];
+	uint8_t id[0x49] = { 0 }, ports[4 + 6 * 16] = { 0 };
+	struct fmd_switch *sw;
+	unsigned int sent;
+	int before = failures, rc;
+	uint16_t op;
+
+	answer_identify(ep, 0x520a, 0x00);
+	/* answer_switch_ports(), with VCSs 0 to 8 active */
+	id[0x02] = 6;
+	id[0x03] = 9;				/* Number of VCSs */
+	id[0x04] = 0x3f;
+	id[0x24] = 0xff;			/* Active VCS Bitmask: 0 to 8 */
+	id[0x25] = 0x01;
+	put16(id + 0x44, 32);
+	put16(id + 0x46, 4);
+	id[0x48] = 2;
+	answer(ep, 0x5100, id, sizeof(id));
+	ports[0] = 6;
+	port_block(ports + 4 + 0 * 16, 0, 0x04, 0, 0x00, 0x04, 0x0004);
+	port_block(ports + 4 + 1 * 16, 1, 0x04, 0, 0x00, 0x04, 0x0004);
+	port_block(ports + 4 + 2 * 16, 2, 0x03, 0x02, 0x01, 0x04, 0x0004);
+	port_block(ports + 4 + 3 * 16, 3, 0x00, 0, 0x00, 0x00, 0x0004);
+	port_block(ports + 4 + 4 * 16, 4, 0x03, 0, 0x00, 0x00, 0x0000);
+	port_block(ports + 4 + 5 * 16, 5, 0x03, 0x02, 0x05, 0x04, 0x0004);
+	ports[4 + 5 * 16 + 0xf] = 1;
+	answer(ep, 0x5101, ports, sizeof(ports));
+	answer(ep, 0x5101, ports, sizeof(ports));
+	answer_vcs(ep, 0, 0, port2, unbound);
+	for (int i = 1; i < 8; i++)
+		answer_vcs_state(ep, i, 0x00, 0, unbound, unbound);
+	answer_ld_info(ep, (2ULL << 30) + (256ULL << 20), 2);
+	answer_ld_allocations(ep, 2, 0, 4);
+	fmd_discover(ctx);
+	w2_ids(0x520a, sw_id, dev, dom, chunk, cid);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw && fmd_topology_find_chunk(&ctx->topology, chunk),
+	      "setup: switch and chunk");
+	if (!sw)
+		goto out;
+
+	/* every active VCS would answer, VCS 8 with port 5 LD 0 bound */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	for (int i = 1; i < 8; i++)
+		answer_vcs_state(ep, i, 0x00, 0, unbound, unbound);
+	answer_vcs(ep, 8, 1, w2_ld0, unbound);
+	sent = commands_sent(ep);
+	rc = fmd_vcs_refresh(ctx, sw);
+	CHECK(rc == -E2BIG, "nine active VCSs read as eight is a complete read: %d", rc);
+	CHECK(commands_sent(ep) - sent == 8 && sw->num_vcs == 8 &&
+	      !fmd_switch_find_vcs(sw, 8), "%u 5200h, %d VCSs",
+	      commands_sent(ep) - sent, sw->num_vcs);
+	CHECK(sw->vcs_incomplete && !sw->vcs_unread && !fmd_switch_complete(sw),
+	      "the switch is not incomplete");
+	CHECK(fmd_vcs_check(sw, 8) == FMD_VCS_TRUNCATED && fmd_vcs_fresh(sw, 0),
+	      "VCS 8 is %d, VCS 0 fresh %d", fmd_vcs_check(sw, 8),
+	      fmd_vcs_fresh(sw, 0));
+
+	cxlmi_mock_clear_responses(ep);
+	w2_answer_delete(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, dev, dom, chunk);
+	op = last_opcode(ep);
+	XFAIL(rc != 0 && op != 0x5402,
+	      "chunk DELETE with VCS 8 unread: %d, last %04xh", rc, op);
+out:
+	fmd_ctx_free(ctx);
+	report("a switch of more than 8 active VCSs is read as incomplete", before);
+}
+
+/*
+ * A VCS that could not be read is UNREAD, kept stale if it was read before;
+ * one the switch calls invalid after a whole read is GONE.
+ */
+static void test_vcs_check_unread_gone(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, 0x520c);
+	char sw_id[FMD_MAX_ID_LEN];
+	struct fmd_switch *sw;
+	/* Number of VCSs 1; VCS 2, VCS State FFh: Invalid VCS ID */
+	uint8_t invalid[8] = { 1, 0, 0, 0, 2, 0xff };
+	int before = failures, rc;
+
+	fmd_discover(ctx);
+	device_id(sw_id, FMD_MAX_ID_LEN, 0x520c);
+	sw = fmd_topology_find_switch(&ctx->topology, sw_id);
+	CHECK(sw && fmd_vcs_fresh(sw, 2) && fmd_switch_complete(sw),
+	      "setup: VCS 2 fresh");
+	if (!sw)
+		goto out;
+
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	rc = fmd_vcs_refresh(ctx, sw);
+	CHECK(rc == -EIO && fmd_vcs_check(sw, 2) == FMD_VCS_UNREAD &&
+	      !fmd_switch_complete(sw), "VCS 2 unread: %d, %d", rc,
+	      fmd_vcs_check(sw, 2));
+
+	/* Invalid VCS ID (FFh): VCS 2 is not there */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer(ep, 0x5200, invalid, sizeof(invalid));
+	rc = fmd_vcs_refresh(ctx, sw);
+	CHECK(rc == 0 && fmd_vcs_check(sw, 2) == FMD_VCS_GONE &&
+	      fmd_switch_complete(sw) && sw->num_vcs == 1,
+	      "VCS 2 invalid: %d, %d, %d VCSs", rc, fmd_vcs_check(sw, 2),
+	      sw->num_vcs);
+out:
+	fmd_ctx_free(ctx);
+	report("a VCS not read, or not there", before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -12462,6 +12695,9 @@ int main(void)
 	test_conn_id_roundtrip_underscored_switch();
 	test_conn_view_absent();
 	test_conn_view_unresolved_mh_mld();
+	test_w2_vppb_truncation();
+	test_w2_vcs_truncation();
+	test_vcs_check_unread_gone();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

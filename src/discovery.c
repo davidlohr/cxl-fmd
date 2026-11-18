@@ -1318,7 +1318,9 @@ static void decode_vppb_binding(struct fmd_vppb *vppb,
 /*
  * Get Virtual CXL Switch Info (5200h) for one VCS, CXL r4.0 Tables 7-32 to
  * 7-34. Returns 0 with @vcs filled in, -ENOENT if the switch says the VCS ID
- * is invalid, -EIO if it could not be asked.
+ * is invalid, -EIO if it could not be asked, -E2BIG with @vcs filled in
+ * with its first FMD_MAX_VPPB vPPBs and truncated set if it has more: a
+ * binding past them is not seen.
  */
 static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 		     struct fmd_vcs *vcs)
@@ -1327,6 +1329,7 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 	struct cxlmi_cmd_fmapi_get_vcs_info_rsp *rsp;
 	struct cxlmi_cmd_fmapi_vcs_info_block *block;
 	int total = FMD_MAX_VPPB, got = 0, rc = 0;
+	bool truncated = false;
 
 	req = calloc(1, sizeof(*req) + 1);
 	rsp = calloc(1, sizeof(*rsp) + sizeof(*block) +
@@ -1373,12 +1376,15 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 			vcs->state = block->vcs_state;
 			vcs->upstream_port_id = block->usp_id;
 			vcs->hdm_decoders = sw->sw_identify.num_hdm_decoder_per_usp;
-			if (block->num_vppbs < total)
+			if (block->num_vppbs < total) {
 				total = block->num_vppbs;
-			else if (block->num_vppbs > total)
+			} else if (block->num_vppbs > total) {
 				fmd_warn(ctx, "%s: VCS %d has %d vPPBs, only the "
-					 "first %d are managed", sw->base.id,
+					 "first %d are managed: the switch is "
+					 "read as incomplete", sw->base.id,
 					 vcs_id, block->num_vppbs, total);
+				truncated = true;
+			}
 		}
 
 		count = total - got < want ? total - got : want;
@@ -1400,10 +1406,12 @@ static int query_vcs(struct fmd_ctx *ctx, struct fmd_switch *sw, uint8_t vcs_id,
 	if (rc)
 		return rc;
 
-	fmd_dbg(ctx, "%s: VCS %d state=%d USP=%d vPPBs=%d",
+	vcs->truncated = truncated;
+	fmd_dbg(ctx, "%s: VCS %d state=%d USP=%d vPPBs=%d%s",
 		sw->base.id, vcs->vcs_id, vcs->state,
-		vcs->upstream_port_id, vcs->num_vppbs);
-	return 0;
+		vcs->upstream_port_id, vcs->num_vppbs,
+		truncated ? " (truncated)" : "");
+	return truncated ? -E2BIG : 0;
 }
 
 struct fmd_vcs *fmd_switch_find_vcs(struct fmd_switch *sw, uint8_t vcs_id)
@@ -1435,12 +1443,19 @@ struct fmd_vppb *fmd_vcs_find_vppb(struct fmd_vcs *vcs, uint8_t vppb_id)
  * VCS ID: use fmd_switch_find_vcs(). Returns -EIO if a VCS could not be
  * read: what is kept of it, or its absence when nothing was, is not what the
  * switch has now.
+ *
+ * The table holds FMD_MAX_VCS VCSs of FMD_MAX_VPPB vPPBs (cxl-fmd's
+ * limits; Number of VCSs and Number of vPPBs are 1-byte fields, Tables
+ * 7-18 and 7-34). A VCS with more vPPBs is kept with the first ones and
+ * truncated set, and an active VCS past the table is left out: either way
+ * a binding may not be seen, so the switch is incomplete
+ * (fmd_switch_complete()) and the return is -E2BIG, unless -EIO.
  */
 int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 {
 	struct fmd_vcs *table;
-	bool unread = false;
-	int n = 0;
+	bool unread = false, incomplete = false;
+	int n = 0, ret;
 
 	if (!ctx || !sw)
 		return -EINVAL;
@@ -1454,6 +1469,7 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 	table = calloc(FMD_MAX_VCS, sizeof(*table));
 	if (!table)
 		return -ENOMEM;
+	sw->vcs_incomplete = false;
 
 	/* every bit of the Active VCS Bitmask is a VCS ID */
 	for (int id = 0; id < 256 && n < FMD_MAX_VCS; id++) {
@@ -1466,7 +1482,11 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 		rc = query_vcs(ctx, sw, id, &table[n]);
 		if (rc == -ENOENT)
 			continue;
-		if (rc) {
+		if (rc == -E2BIG) {
+			/* read, with only its first FMD_MAX_VPPB vPPBs */
+			incomplete = true;
+			table[n].stale = false;
+		} else if (rc) {
 			unread = true;
 			old = fmd_switch_find_vcs(sw, id);
 			if (!old)
@@ -1489,24 +1509,63 @@ int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw)
 			have |= table[i].vcs_id == id;
 		if (!have && n == FMD_MAX_VCS) {
 			fmd_warn(ctx, "%s: VCS %d is active and is not managed "
-				 "(at most %d VCSs are)", sw->base.id, id,
-				 FMD_MAX_VCS);
+				 "(at most %d VCSs are): the switch is read "
+				 "as incomplete", sw->base.id, id, FMD_MAX_VCS);
+			sw->vcs_incomplete = true;
 			break;
 		}
 	}
 
 	memcpy(sw->vcs, table, sizeof(sw->vcs));
 	sw->num_vcs = n;
+	sw->vcs_unread = unread;
 	free(table);
+	ret = unread ? -EIO : incomplete || sw->vcs_incomplete ? -E2BIG : 0;
 
 	/* the port and LD each bound vPPB points at */
 	fmd_switch_resolve_vppb_bindings(&ctx->topology, sw);
 	/* bindings this run made that the vPPBs no longer hold */
 	fmd_binding_marks_prune(ctx, sw->base.id);
-	/* tasks that lost track of their vPPB, and can see it again */
-	fmd_tasks_reconcile(ctx, sw, unread ? -EIO : 0);
+	/*
+	 * tasks that lost track of their vPPB, and can see it again: a VCS
+	 * left out is not taken as gone
+	 */
+	fmd_tasks_reconcile(ctx, sw, ret);
 
-	return unread ? -EIO : 0;
+	return ret;
+}
+
+enum fmd_vcs_view fmd_vcs_check(const struct fmd_switch *sw, uint8_t vcs_id)
+{
+	for (int i = 0; i < sw->num_vcs; i++) {
+		const struct fmd_vcs *vcs = &sw->vcs[i];
+
+		if (vcs->vcs_id != vcs_id)
+			continue;
+		if (vcs->stale)
+			return FMD_VCS_UNREAD;
+		return vcs->truncated ? FMD_VCS_TRUNCATED : FMD_VCS_FRESH;
+	}
+	/* not in the table: not read, left out, or not there */
+	if (sw->vcs_unread)
+		return FMD_VCS_UNREAD;
+	return sw->vcs_incomplete ? FMD_VCS_TRUNCATED : FMD_VCS_GONE;
+}
+
+bool fmd_vcs_fresh(const struct fmd_switch *sw, uint8_t vcs_id)
+{
+	return fmd_vcs_check(sw, vcs_id) == FMD_VCS_FRESH;
+}
+
+bool fmd_switch_complete(const struct fmd_switch *sw)
+{
+	if (sw->vcs_unread || sw->vcs_incomplete)
+		return false;
+	for (int i = 0; i < sw->num_vcs; i++) {
+		if (sw->vcs[i].stale || sw->vcs[i].truncated)
+			return false;
+	}
+	return true;
 }
 
 

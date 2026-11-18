@@ -454,6 +454,8 @@ struct fmd_vcs {
 	uint8_t upstream_port_id;    /* USP this VCS is bound to */
 	bool stale;                  /* the last fmd_vcs_refresh() could not
 					read it: this is what was known before */
+	bool truncated;              /* it has more than FMD_MAX_VPPB vPPBs:
+					only the first FMD_MAX_VPPB were read */
 
 	/* vPPB bindings for this VCS */
 	uint8_t num_vppbs;
@@ -490,6 +492,13 @@ struct fmd_switch {
 	uint8_t num_vcs;
 	uint8_t max_vcs;
 	struct fmd_vcs vcs[FMD_MAX_VCS];
+	/*
+	 * Of the last fmd_vcs_refresh(): an active VCS could not be read
+	 * (vcs_unread), or was passed over because more than FMD_MAX_VCS
+	 * are active (vcs_incomplete).
+	 */
+	bool vcs_unread;
+	bool vcs_incomplete;
 
 	/*
 	 * Mock only: how long the mock switch takes over a bind or unbind,
@@ -2477,12 +2486,37 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * Re-queries the switch for current VCS/vPPB state. Useful after bind/unbind
  * operations to update the local view of the switch configuration. A VCS
  * that could not be read keeps what was known of it, with stale set, and
- * one never read before is left out.
+ * one never read before is left out. At most FMD_MAX_VCS VCSs, and
+ * FMD_MAX_VPPB vPPBs of each, are kept: a VCS with more vPPBs is kept with
+ * the first FMD_MAX_VPPB and truncated set, and an active VCS past
+ * FMD_MAX_VCS is left out and sets sw->vcs_incomplete.
  *
- * Return: 0 when every active VCS was read, -EIO when one or more could not
- * be, another negative errno on failure
+ * Return: 0 when every active VCS was read whole, -EIO when one or more
+ * could not be read, else -E2BIG when one was truncated or left out,
+ * another negative errno on failure
  */
 int fmd_vcs_refresh(struct fmd_ctx *ctx, struct fmd_switch *sw);
+
+/*
+ * What the last fmd_vcs_refresh() of @sw knows of VCS @vcs_id.
+ *  FMD_VCS_FRESH: read whole.
+ *  FMD_VCS_UNREAD: it could not be read; what is kept of it, if anything,
+ *	is from before (a retry may read it).
+ *  FMD_VCS_TRUNCATED: it has more vPPBs than are kept, or more VCSs are
+ *	active than are kept and it is not among them (a retry reads the same).
+ *  FMD_VCS_GONE: every active VCS was read, and it is not one.
+ */
+enum fmd_vcs_view {
+	FMD_VCS_FRESH,
+	FMD_VCS_UNREAD,
+	FMD_VCS_TRUNCATED,
+	FMD_VCS_GONE,
+};
+enum fmd_vcs_view fmd_vcs_check(const struct fmd_switch *sw, uint8_t vcs_id);
+/* VCS @vcs_id was read whole by the last fmd_vcs_refresh() of @sw */
+bool fmd_vcs_fresh(const struct fmd_switch *sw, uint8_t vcs_id);
+/* every active VCS of @sw, and every vPPB of each, was read by the last one */
+bool fmd_switch_complete(const struct fmd_switch *sw);
 
 /*
  * Get device timestamp via CCI Get Timestamp (0300h)
