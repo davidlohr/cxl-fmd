@@ -742,10 +742,23 @@ unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
 		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_UNREAD,
 					   NULL, 0);
 		break;
-	default:
+	case -EREMOTEIO:	/* no response could be read */
+		status = 500;
+		msg = bind ? "Outcome unknown: no response to Bind vPPB could be read, and the switch may or may not have bound the vPPB" :
+			     "Outcome unknown: no response to Unbind vPPB could be read, and the switch may or may not have unbound the vPPB";
+		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+					   FMD_RES_OUTCOME_UNKNOWN, NULL, 0);
+		break;
+	case -EIO:		/* a return code of the switch's */
 		status = 500;
 		msg = bind ? "Failed to create connection" : "Failed to delete connection";
 		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_FAILED,
+					   NULL, 0);
+		break;
+	default:		/* cxl-fmd's own failure */
+		status = 500;
+		msg = bind ? "Failed to create connection" : "Failed to delete connection";
+		info = fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_INTERNAL,
 					   NULL, 0);
 		break;
 	}
@@ -7365,6 +7378,18 @@ static int post_existing(struct fmd_ctx *ctx, const char *id, json_t **response)
 }
 
 /*
+ * A bind or unbind whose response could not be read: the switch may or may
+ * not have carried it out (Tables 7-35 and 7-36 carry no request
+ * identifier, so only a read of the vPPB tells)
+ */
+#define BIND_OUTCOME_UNKNOWN "Outcome unknown: no response to Bind vPPB " \
+	"could be read, and the switch may or may not have bound the vPPB; " \
+	"the vPPB is read again until it settles"
+#define UNBIND_OUTCOME_UNKNOWN "Outcome unknown: no response to Unbind " \
+	"vPPB could be read, and the switch may or may not have unbound the " \
+	"vPPB; the vPPB is read again until it settles"
+
+/*
  * Bind port @port_id, LD @ld_id (FMD_LD_NONE for the whole port) of @sw to
  * a vPPB of @host's VCS: see fmd_redfish_post_connection().
  */
@@ -7495,20 +7520,26 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 	}
 
 	rc = fmd_vppb_bind(ctx, sw, key.vcs_id, key.vppb_id, port_id, ld_id);
-	if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED) {
+	if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED ||
+	    rc == -EREMOTEIO) {
 		/* answered with the task; the Connection is Starting meanwhile */
 		task = fmd_task_activate(ctx, task, 0);
 		/*
 		 * Success, and the vPPB not read bound after it: what the
 		 * switch did is shown by the next read of the VCS that sees
 		 * the vPPB settled (fmd_tasks_reconcile()), not taken from
-		 * its answer alone (cxl-fmd's choice).
+		 * its answer alone (cxl-fmd's choice). Likewise when no
+		 * answer could be read at all: the switch may have bound.
 		 */
 		if (task && rc == FMD_OP_UNCONFIRMED)
 			fmd_task_interrupt(ctx, task, "The switch answered Bind "
 					   "vPPB with Success, and the vPPB, read "
 					   "after it, does not show the bind; the "
 					   "vPPB is read again until it settles");
+		else if (task && rc == -EREMOTEIO)
+			fmd_task_interrupt(ctx, task, BIND_OUTCOME_UNKNOWN);
+		if (!task && rc == -EREMOTEIO)
+			return -29;
 		*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
 		return task ? FMD_OP_STARTED : -6;
 	}
@@ -7591,8 +7622,9 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * Returns:
  *   0 bound: *response is the Connection (201)
  *   FMD_OP_STARTED: the switch binds in the background, or was already, or
- *     answered Success and the vPPB was not read bound after it (the
- *     task Interrupted until a read settles it): *response is the Task (202)
+ *     answered Success and the vPPB was not read bound after it, or no
+ *     response to Bind vPPB could be read (the task Interrupted until a
+ *     read settles it): *response is the Task (202)
  *   FMD_CONN_EXISTS: *response is the Connection there already (200)
  *  -1 fabric not found
  *  -2 invalid request body
@@ -7627,6 +7659,8 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  *     past the FMD_MAX_VCS VCSs read
  * -28 the target is a pool LD of a head whose presentation is not known
  *     (FMD_HEAD_UNKNOWN)
+ * -29 no response to Bind vPPB could be read, and no task could be made to
+ *     follow it: whether the switch bound is not known
  * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -28.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
@@ -7869,10 +7903,13 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		op->lost = false;
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
 				     key.port_id, key.ld_id, option);
-		if (rc == 0 || rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED) {
+		if (rc == 0 || rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED ||
+		    rc == -EREMOTEIO) {
 			/* the task under way sees the vPPB unbound */
 			if (rc == FMD_OP_UNCONFIRMED)
 				fmd_task_interrupt(ctx, task, UNBIND_UNCONFIRMED);
+			else if (rc == -EREMOTEIO)
+				fmd_task_interrupt(ctx, task, UNBIND_OUTCOME_UNKNOWN);
 			op->unbind_option = option;
 			task->failed_polls = 0;
 			task->unobserved = 0;
@@ -7890,24 +7927,30 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		 */
 		task = fmd_task_alloc(ctx, FMD_TASK_UNBIND, sw, &key);
 		if (!task)
-			return -2;
+			return -9;
 		op = fmd_binding_op_add(ctx, &key, FMD_BIND_OP_UNBIND, option,
 					NULL, &task->before);
 		if (!op) {
 			fmd_task_discard(task);
-			return -2;
+			return -9;
 		}
 
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
 				     key.port_id, key.ld_id, option);
-		if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED) {
+		if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED ||
+		    rc == -EREMOTEIO) {
 			/*
 			 * it stands, Updating, until the vPPB is unbound; on
-			 * a Success not read back, until a read shows it
+			 * a Success not read back, or no response read, until
+			 * a read shows how the vPPB settled
 			 */
 			task = fmd_task_activate(ctx, task, option);
 			if (task && rc == FMD_OP_UNCONFIRMED)
 				fmd_task_interrupt(ctx, task, UNBIND_UNCONFIRMED);
+			else if (task && rc == -EREMOTEIO)
+				fmd_task_interrupt(ctx, task, UNBIND_OUTCOME_UNKNOWN);
+			if (!task && rc == -EREMOTEIO)
+				return -8;
 			*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
 			return task ? FMD_OP_STARTED : -2;
 		}
@@ -7945,14 +7988,21 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
  *
  * Returns:
  *   0 unbound (204)
- *   FMD_OP_STARTED: the switch unbinds in the background; *response is the Task
+ *   FMD_OP_STARTED: the switch unbinds in the background, or answered
+ *     Success and the vPPB was not read unbound after it, or no response to
+ *     Unbind vPPB could be read (the task Interrupted until a read settles
+ *     it); *response is the Task
  *  -1 not found, or no longer what the vPPB holds
- *  -2 the unbind failed
+ *  -2 the unbind failed: the switch answered with a return code, or no
+ *     task could be made once it had started
  *  -3 a bind or unbind of it is under way, or the switch is busy: try again
  *  -4 a direct-attached Connection: there is nothing to unbind
  *  -5 the switch answered Unsupported
  *  -6 the switch answered Invalid Input
  *  -7 the Connection's VCS could not be read: nothing is sent, try again
+ *  -8 no response to Unbind vPPB could be read, and no task could be made
+ *     to follow it: whether the switch unbound is not known
+ *  -9 no task could be made: nothing is sent
  */
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				  const char *connection_id, json_t **response)

@@ -2511,7 +2511,8 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
  *
  * Return: 0 once bound and read back, FMD_OP_STARTED, FMD_OP_UNCONFIRMED,
  * -ESTALE if the VCS could not be read, -E2BIG if it was not read whole,
- * another negative errno on failure (see src/discovery.c)
+ * -EREMOTEIO if no response could be read (whether the switch bound is not
+ * known), another negative errno on failure (see src/discovery.c)
  */
 /*
  * The errno fmd_vppb_bind() and fmd_vppb_unbind() return for the switch's
@@ -2540,9 +2541,10 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * The VCSs are read first, and nothing is sent unless the vPPB holds port
  * @port_id, LD @ld_id.
  *
- * Return: 0 on success, FMD_OP_STARTED, -ESTALE if the VCS could not be
- * read, -ENOENT if the vPPB holds anything else, another negative errno on
- * failure
+ * Return: 0 on success, FMD_OP_STARTED, FMD_OP_UNCONFIRMED, -ESTALE if the
+ * VCS could not be read, -ENOENT if the vPPB holds anything else,
+ * -EREMOTEIO if no response could be read (whether the switch unbound is
+ * not known), another negative errno on failure
  */
 int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		    uint8_t vcs_id, uint8_t vppb_id, uint8_t port_id,
@@ -3089,6 +3091,8 @@ json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg);
 	"and resubmit it."
 #define FMD_RES_FAILED "Read the resource to see what the device did before " \
 	"the request is resubmitted: the device failed the command."
+#define FMD_RES_INTERNAL "Read the resource to see its state before the " \
+	"request is resubmitted: the service could not carry the request out."
 #define FMD_RES_UNSUPPORTED "None: the device, or cxl-fmd's route to it, does " \
 	"not support this."
 #define FMD_RES_REFUSED "Read the switch's ports and Virtual CXL Switches, " \
@@ -3110,7 +3114,10 @@ json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg);
  * unbind (a DELETE of one) that failed with @err, as fmd_vppb_bind() and
  * fmd_vppb_unbind() return it (fmd_vppb_errno()), whether the switch
  * answered at once or a task followed it: the HTTP status, and the error
- * body in *@body (NULL if out of memory)
+ * body in *@body (NULL if out of memory). Only -EIO, a return code of the
+ * switch's, is answered as the device failing the command; -EREMOTEIO,
+ * no response read, is "Outcome unknown", and an errno of cxl-fmd's own
+ * (-ENOMEM) says the service could not carry it out.
  */
 unsigned int fmd_redfish_vppb_failure(enum fmd_task_kind kind, int err,
 				      json_t **body);

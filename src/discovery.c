@@ -3160,8 +3160,9 @@ int fmd_vppb_errno(uint16_t rc)
  * vPPB or LD that does not exist, -EALREADY if the vPPB is not unbound,
  * -EBUSY if the target is bound to a vPPB, -EAGAIN if the switch answered
  * Busy, or Retry Required twice, -EOPNOTSUPP if it answered Unsupported,
- * -EPROTO if Invalid Input, and -EIO if it refused otherwise.
- * fmd_vppb_unbind() returns the same.
+ * -EPROTO if Invalid Input, -EIO if it refused otherwise, and -EREMOTEIO
+ * if no response could be read (libcxlmi's rc < 0), so that whether the
+ * switch bound is not known. fmd_vppb_unbind() returns the same.
  */
 int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		  uint8_t vcs_id, uint8_t vppb_id,
@@ -3305,6 +3306,17 @@ int fmd_vppb_bind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		/* it runs one background command at a time */
 		fmd_warn(ctx, "%s: bind vPPB: the switch is busy", sw->base.id);
 		return -EAGAIN;
+	}
+	if (rc < 0) {
+		/*
+		 * Not sent, sent and not answered, or answered with a
+		 * response that could not be read: libcxlmi tells these
+		 * apart no more than the request can (it has no identifier,
+		 * Table 7-35). Whether the switch bound is not known.
+		 */
+		fmd_err(ctx, "%s: bind vPPB: no response could be read (%d): "
+			"whether the switch bound is not known", sw->base.id, rc);
+		return -EREMOTEIO;
 	}
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: bind vPPB failed: %d (%s)",
@@ -3481,6 +3493,12 @@ int fmd_vppb_unbind(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	if (rc == CXLMI_RET_BUSY) {
 		fmd_warn(ctx, "%s: unbind vPPB: the switch is busy", sw->base.id);
 		return -EAGAIN;
+	}
+	if (rc < 0) {
+		/* as for bind: whether the switch unbound is not known */
+		fmd_err(ctx, "%s: unbind vPPB: no response could be read (%d): "
+			"whether the switch unbound is not known", sw->base.id, rc);
+		return -EREMOTEIO;
 	}
 	if (rc && rc != CXLMI_RET_BACKGROUND) {
 		fmd_err(ctx, "%s: unbind vPPB failed: %d (%s)",

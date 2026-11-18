@@ -1905,6 +1905,10 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_BAD_REQUEST,
 					  "The switch refused the unbind as Invalid Input",
 					  RF_GENERAL(FMD_RES_REFUSED));
+		if (rc == -8)
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EREMOTEIO);
+		if (rc == -9)
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -ENOMEM);
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Failed to unbind the connection", RF_GENERAL(FMD_RES_FAILED));
 	}
@@ -2050,6 +2054,10 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The device or logical device is bound, or being bound, to another vPPB",
 					  RF_MSG(FMD_RF_RESOURCE_IN_USE));
+		if (rc == -29)
+			return send_vppb_failure(conn, FMD_TASK_BIND, -EREMOTEIO);
+		if (rc == -6)
+			return send_vppb_failure(conn, FMD_TASK_BIND, -ENOMEM);
 		return send_vppb_failure(conn, FMD_TASK_BIND, -EIO);
 	}
 
@@ -2300,6 +2308,10 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EOPNOTSUPP);
 		if (rc == -6)
 			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EPROTO);
+		if (rc == -8)
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EREMOTEIO);
+		if (rc == -9)
+			return send_vppb_failure(conn, FMD_TASK_UNBIND, -ENOMEM);
 		return send_vppb_failure(conn, FMD_TASK_UNBIND, -EIO);
 	}
 

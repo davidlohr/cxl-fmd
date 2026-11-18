@@ -10971,7 +10971,7 @@ static void test_task_before_command(void)
 	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
 	fmd_task_calloc = saved;
 	cxlmi_mock_get_stats(ep, NULL, &taken);
-	CHECK(rc == -2 && taken - then == 2 && last_opcode(ep) != 0x5202 &&
+	CHECK(rc == -9 && taken - then == 2 && last_opcode(ep) != 0x5202 &&
 	      !ops_count(ctx) && conn_state(ctx, cid) == FMD_CONN_ENABLED,
 	      "DELETE with no task to be had: %d, %u responses taken, last %04xh",
 	      rc, taken - then, last_opcode(ep));
@@ -14529,6 +14529,263 @@ out:
 }
 
 /*
+ * Follow-up review item 6 (F6b): a bind or unbind whose response cannot be
+ * read (libcxlmi's rc < 0: a 4-byte Success payload trips its length check)
+ * may or may not have been carried out. It is an Interrupted task that
+ * keeps its op, not a failure, and the next read of the VCS settles it.
+ */
+static const uint8_t r6_lost[4];
+
+/* a bind POST whose 5201h response is lost; @then: what the vPPB reads after */
+static void r6_post_bind_lost(uint64_t serial, const uint8_t *then)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, serial);
+	char sw_id[FMD_MAX_ID_LEN], body[512], cid[FMD_CONN_ID_LEN];
+	unsigned int s0, s1;
+	struct fmd_bind_key key;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	json_t *resp = NULL;
+	int rc;
+
+	sw = w1_setup(ctx, ep, serial, sw_id, &host);
+	CHECK(sw && host, "no switch or host");
+	if (!sw || !host)
+		goto out;
+	read_vppb1(ctx, ep, sw, unbound);
+	w1_post_body(body, sizeof(body), host, sw_id);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	key = bind_key(sw_id, 2, 1, 5, 1);
+
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
+	answer(ep, 0x5201, (void *)r6_lost, sizeof(r6_lost));
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	s1 = commands_sent(ep);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && resp && task && s1 - s0 == 5 &&
+	      last_opcode(ep) == 0x5201 && task->state == FMD_TASK_INTERRUPTED &&
+	      ops_count(ctx) == 1 && ctx->binding_ops->lost &&
+	      conn_state(ctx, cid) == FMD_CONN_STARTING &&
+	      !strncmp(task->message, "Outcome unknown", 15) &&
+	      !fmd_binding_mark_find(ctx, &key),
+	      "POST, 5201h lost: %d, %u sent, task %d, %d ops, Connection %d",
+	      rc, s1 - s0, task ? (int)task->state : -1, ops_count(ctx),
+	      conn_state(ctx, cid));
+	CHECK(resp && !strcmp(json_string_value(json_object_get(resp, "TaskState")),
+			      "Interrupted"), "the 202 is not of the Interrupted task");
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+
+	/* a blind retry, the vPPB at 01h: the same task, no second 5201h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	answer_rc(ep, 0x5201, CXLMI_RET_INPUT);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	s1 = commands_sent(ep);
+	CHECK(rc == FMD_OP_STARTED && s1 - s0 == 2 && last_opcode(ep) == 0x5200 &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1,
+	      "a retry at 01h: %d, %u sent, last %04xh", rc, s1 - s0,
+	      last_opcode(ep));
+	json_decref(resp);
+	resp = NULL;
+	/* the VCS unread: 503, no 5201h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	s1 = commands_sent(ep);
+	CHECK(rc == -26 && s1 - s0 == 2 && last_opcode(ep) == 0x5200 &&
+	      task->state == FMD_TASK_INTERRUPTED,
+	      "a retry while unread: %d, %u sent", rc, s1 - s0);
+	json_decref(resp);
+	resp = NULL;
+	cxlmi_mock_clear_responses(ep);
+
+	/* the next read settles it */
+	read_vppb1(ctx, ep, sw, then);
+	if (then == vppb_ld1)
+		CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+		      conn_state(ctx, cid) == FMD_CONN_ENABLED &&
+		      fmd_binding_mark_find(ctx, &key),
+		      "read bound: task %d (%s), %d ops", task->state,
+		      task->message, ops_count(ctx));
+	else
+		CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx) &&
+		      conn_state(ctx, cid) < 0 && !fmd_binding_mark_find(ctx, &key),
+		      "read unbound: task %d (%s), %d ops", task->state,
+		      task->message, ops_count(ctx));
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+}
+
+/*
+ * A DELETE (or, @force, #Cxl.ForceUnbind) whose 5202h response is lost;
+ * @then: what the vPPB reads after
+ */
+static void r6_unbind_lost(uint64_t serial, bool force, const uint8_t *then)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_switch(ctx, serial);
+	char sw_id[FMD_MAX_ID_LEN], cid[FMD_CONN_ID_LEN];
+	unsigned int s0, s1;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	json_t *resp = NULL;
+	int rc;
+
+	sw = w1_setup(ctx, ep, serial, sw_id, &host);
+	CHECK(sw, "no switch");
+	if (!sw)
+		goto out;
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	}
+	answer(ep, 0x5202, (void *)r6_lost, sizeof(r6_lost));
+	s0 = commands_sent(ep);
+	rc = force ? fmd_redfish_action_force_unbind(ctx, "CXL", cid, &resp) :
+		     fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	s1 = commands_sent(ep);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && resp && task && s1 - s0 == 5 &&
+	      last_opcode(ep) == 0x5202 && task->kind == FMD_TASK_UNBIND &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+	      ctx->binding_ops->lost && conn_state(ctx, cid) == FMD_CONN_UPDATING &&
+	      !strncmp(task->message, "Outcome unknown", 15),
+	      "%s, 5202h lost: %d, %u sent, task %d, %d ops, Connection %d",
+	      force ? "ForceUnbind" : "DELETE", rc, s1 - s0,
+	      task ? (int)task->state : -1, ops_count(ctx), conn_state(ctx, cid));
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+
+	/* a blind DELETE, the vPPB at 01h: 503, no second 5202h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	s1 = commands_sent(ep);
+	CHECK(rc == -3 && s1 - s0 == 2 && last_opcode(ep) == 0x5200 &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1,
+	      "a DELETE at 01h: %d, %u sent, last %04xh", rc, s1 - s0,
+	      last_opcode(ep));
+	/* the VCS unread: 503, no 5202h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_rc(ep, 0x5200, CXLMI_RET_INTERNAL);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	s1 = commands_sent(ep);
+	CHECK(rc == -7 && s1 - s0 == 2 && last_opcode(ep) == 0x5200 &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1,
+	      "a DELETE while unread: %d, %u sent", rc, s1 - s0);
+	cxlmi_mock_clear_responses(ep);
+
+	/* the next read settles it */
+	read_vppb1(ctx, ep, sw, then);
+	if (then == unbound) {
+		CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+		      conn_state(ctx, cid) < 0, "read unbound: task %d (%s)",
+		      task->state, task->message);
+	} else {
+		CHECK(task->state == FMD_TASK_EXCEPTION && !ops_count(ctx) &&
+		      conn_state(ctx, cid) == FMD_CONN_ENABLED,
+		      "read still bound: task %d (%s)", task->state, task->message);
+		/* settled: a DELETE is sent again */
+		for (int i = 0; i < 2; i++) {
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+		}
+		answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb_busy, unbound);
+		rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+		CHECK(rc == FMD_OP_STARTED && ctx->tasks != task,
+		      "a DELETE once settled: %d", rc);
+		json_decref(resp);
+		resp = NULL;
+	}
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+}
+
+/* the Resolution of fmd_redfish_vppb_failure()'s answer to @err */
+static const char *r6_resolution(enum fmd_task_kind kind, int err,
+				 unsigned int *st, json_t **body)
+{
+	*st = fmd_redfish_vppb_failure(kind, err, body);
+	return json_string_value(json_object_get(json_array_get(json_object_get(
+		json_object_get(*body, "error"), "@Message.ExtendedInfo"), 0),
+		"Resolution"));
+}
+
+static void test_r6_switch_lost_reply(void)
+{
+	int before = failures;
+	json_t *body = NULL;
+	const char *res;
+	unsigned int st;
+
+	r6_post_bind_lost(0x5f80, vppb_ld1);
+	r6_post_bind_lost(0x5f81, unbound);
+	r6_unbind_lost(0x5f82, false, unbound);
+	r6_unbind_lost(0x5f83, false, vppb_ld1);
+	r6_unbind_lost(0x5f84, true, unbound);
+
+	/* fmd_vppb_bind() itself: -EREMOTEIO, not -EIO */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_switch(ctx, 0x5f85);
+		char sw_id[FMD_MAX_ID_LEN];
+		struct fmd_switch *sw;
+		struct fmd_host *host;
+		int rc;
+
+		sw = w1_setup(ctx, ep, 0x5f85, sw_id, &host);
+		if (sw) {
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, unbound, unbound);
+			answer(ep, 0x5201, (void *)r6_lost, sizeof(r6_lost));
+			rc = fmd_vppb_bind(ctx, sw, 2, 1, 5, 1);
+			CHECK(rc == -EREMOTEIO, "fmd_vppb_bind, 5201h lost: %d", rc);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/* only a switch's return code is answered as the device failing */
+	res = r6_resolution(FMD_TASK_BIND, -EREMOTEIO, &st, &body);
+	CHECK(st == 500 && res && !strcmp(res, FMD_RES_OUTCOME_UNKNOWN),
+	      "-EREMOTEIO: %u %s", st, res ? res : "");
+	json_decref(body);
+	res = r6_resolution(FMD_TASK_UNBIND, -ENOMEM, &st, &body);
+	CHECK(st == 500 && res && !strstr(res, "the device failed"),
+	      "-ENOMEM: %u %s", st, res ? res : "");
+	json_decref(body);
+	res = r6_resolution(FMD_TASK_UNBIND, -EIO, &st, &body);
+	CHECK(st == 500 && res && !strcmp(res, FMD_RES_FAILED),
+	      "-EIO: %u %s", st, res ? res : "");
+	json_decref(body);
+	report("a bind or unbind whose response is lost is Interrupted, not failed",
+	       before);
+}
+
+/*
  * What a head of a Multi-Headed device presents is read from the whole LD
  * Map, and is not known without it (follow-up review item 7). "A head
  * with one LD mapped shall present itself as an SLD and a head with more
@@ -14969,6 +15226,7 @@ int main(void)
 	test_bind_gate_last_read();
 	test_w1_bind_success_refresh_fails();
 	test_unbind_success_refresh_fails();
+	test_r6_switch_lost_reply();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

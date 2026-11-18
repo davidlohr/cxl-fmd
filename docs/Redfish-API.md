@@ -823,7 +823,7 @@ All error responses follow the Redfish error format: an `error` object with a `c
 |--------|---------|-----------|
 | 200 OK | Success | GET requests returning data; actions; a `POST` of a Connection the host has already, switch-attached (bound, `Absent` included) or direct-attached, with the Connection and `Location`; `CXLReferenceDCMemory` or a `MemoryRegion` `PATCH` the device accepted whose state could not be read back after it, with an error object whose `code` is `Base.1.24.Success`, with `Base.1.24.Success` in its `@Message.ExtendedInfo`, and whose message says not to send it again (see [DCD-FM-API.md](DCD-FM-API.md), Comment 3); the task monitor of a `DynamicCapacityAdd` or `DynamicCapacityRelease` that is `Completed`, with such an object whose message says what the host accepted or released |
 | 201 Created | Resource created | POST to collections (MemoryChunks; a Connection whose bind the switch finished before answering, and the read after it shows); the task monitor of a bind once it has succeeded |
-| 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, or answered Success and the read of the VCS after it does not show it done (the `Task` `Interrupted`), with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs or is `Interrupted` (see "Binds and unbinds in the background"); `DynamicCapacityAdd`, `DynamicCapacityRelease` and a `MemoryExtent` `DELETE` the device accepted, with a `Task` that follows the host (see [Tasks of an add or a release](DCD-FM-API.md#tasks-of-an-add-or-a-release)) |
+| 202 Accepted | Started, not finished | POST and DELETE of a Connection, and `#Cxl.ForceUnbind`, when the switch binds or unbinds in the background, or answered Success and the read of the VCS after it does not show it done, or its response could not be read (the `Task` `Interrupted`), with a `Task` and its monitor in `Location`; a `POST` of a Connection that is being bound (`Starting`), with the task of that bind; the task monitor while the task runs or is `Interrupted` (see "Binds and unbinds in the background"); `DynamicCapacityAdd`, `DynamicCapacityRelease` and a `MemoryExtent` `DELETE` the device accepted, with a `Task` that follows the host (see [Tasks of an add or a release](DCD-FM-API.md#tasks-of-an-add-or-a-release)) |
 | 204 No Content | Success, no body | DELETE requests, and `#Cxl.ForceUnbind`, finished at once (for an unbind, read back unbound); the task monitor of an unbind, or of a `MemoryExtent` `DELETE`, once it has succeeded |
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, whose `AccessState` is not `Optimized`, that has `VolumeInfo`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input, at once or at the end of the background operation (the task monitor); `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind`, at the request's read or at the read just before Unbind vPPB (nothing sent); on hardware, an extent a Prescriptive release or `MemoryExtent` `DELETE` names that the read of its host for the task's baseline no longer lists, or, for the whole-tag `DELETE` of a tagged extent in a Sharable region, lists with another Tag, length or region (nothing sent) |
@@ -2126,6 +2126,22 @@ possible return code of Bind vPPB and of Unbind vPPB all the same; that
 Success with no read to show it is a task, not `201` or `204`, is
 cxl-fmd's choice.
 
+A bind or unbind whose response cannot be read is followed the same way.
+libcxlmi gives the same result for a request it did not send, one the
+switch did not answer, and an answer it could not read, and Bind vPPB and
+Unbind vPPB carry nothing that names the request (Tables 7-35 and 7-36):
+the switch may have carried it out, and only a read of the vPPB tells. The
+request is answered `202` with its task, `Interrupted` at once with a
+message that starts "Outcome unknown", and what was under way is kept: the
+Connection is `Starting` or `Updating`, a `DELETE` or `#Cxl.ForceUnbind`
+of it is `503` and sends nothing while the vPPB reads 01h or its VCS
+cannot be read, and a retried `POST` is answered as above. The first read
+that sees the vPPB settled ends the task, as for a lost one: `Completed` if
+it reads what was asked and did not before, `Exception` otherwise. Once it
+has ended a request is taken as any other: a `DELETE` of a Connection whose
+vPPB still reads bound sends Unbind vPPB again. If no task can be kept for
+it (no memory), the request is `500` "Outcome unknown".
+
 Which tasks become `Interrupted`, and that a read of the vPPB ends them,
 are cxl-fmd's choices. The specification sets no time limit on a bind or
 an unbind, and cxl-fmd does not abort one (see "Forcing an Unbind").
@@ -2173,7 +2189,10 @@ it, show the vPPB unbound, else (the VCS could not be read, or the vPPB
 does not read unbound) `202 Accepted` with a `Task`, `Interrupted`, and
 the Connection `Updating` until a read of the VCS settles it; Background
 Command Started, `202 Accepted` with a `Task`; Busy or Retry Required,
-`503`; Invalid Input, `400`; Unsupported, `501`; another code, `500`.
+`503`; Invalid Input, `400`; Unsupported, `501`; another code, `500`; no
+response that can be read, `202 Accepted` with a `Task`, `Interrupted`,
+"Outcome unknown", until a read of the VCS settles it (see "Binds and
+unbinds in the background").
 
 Option 0h, "Wait for port Link Down before unbinding", is never sent: the
 specification does not say how it applies to an LD, whose link "cannot be
@@ -2204,7 +2223,8 @@ cxl-fmd's (Connection_v1's `Actions` has an `Oem` container); it has no
 parameters, and a body, if any, is ignored.
 
 - `204 No Content` once unbound, `202 Accepted` with a `Task` when the
-  switch unbinds in the background, `404` for an ID whose vPPB no longer
+  switch unbinds in the background (or its answer is a Success not read
+  back, or cannot be read: the `Task` `Interrupted`), `404` for an ID whose vPPB no longer
   holds it, `501` if the switch answers Unsupported. The switch is read,
   and read again just before Unbind vPPB, as for a `DELETE`, with the
   same answers when the vPPB holds something else or its VCS cannot be
@@ -2968,6 +2988,8 @@ Changes from the fixes of the follow-up design review (branch
 | Connection `POST` whose host's VCS has more than 32 vPPBs, or is past the 8 VCSs read | Bind vPPB sent, a binding past vPPB 31 not seen | `409`, nothing sent |
 | Connection `POST` the switch answers Success, and the read of the VCS after it fails or does not show the vPPB bound | `500` "Failed to create connection" (the binding recorded as cxl-fmd's all the same); a retry sent Bind vPPB again | `202` with a `Task`, `Interrupted` until a read settles it; the Connection `Starting`; a retry is `503` with nothing sent while the VCS cannot be read, and is answered from the read that settles the task once it can |
 | `DELETE` or `#Cxl.ForceUnbind` the switch answers Success, and the read after it fails or does not show the vPPB unbound | `204`, and the Connection still served | `202` with a `Task`, `Interrupted` until a read settles it; the Connection `Updating` |
+| Connection `POST`, `DELETE` or `#Cxl.ForceUnbind` whose Bind vPPB or Unbind vPPB response cannot be read (libcxlmi's result below 0) | `500` "Failed to create connection" or "Failed to delete connection", with the Resolution "... the device failed the command."; nothing kept, so a retry sent the command again | `202` with a `Task`, `Interrupted`, its message "Outcome unknown: ..."; the Connection `Starting` or `Updating`; a `DELETE` is `503` with nothing sent while the vPPB reads 01h or its VCS cannot be read; the first read that sees the vPPB settled ends the task |
+| A bind or unbind `500` for a failure of cxl-fmd's own (no memory) | Resolution "... the device failed the command." | "Read the resource to see its state before the request is resubmitted: the service could not carry the request out." The Resolution that says the device failed is kept for a return code of the switch's |
 | `GET` of the `PCIeDevice` of a Multi-Headed device with more LDs mapped to a head than the first 64 entries of its LD Map showed (pool LDs past 63) | `DeviceClass` from the first 64 entries: `MH_SLD` for a head with 2 or more LDs only one of which was among them | read from the whole map (paged): `MH_MLD` |
 | `GET` of the `PCIeDevice` of a Multi-Headed device whose LD Map could not be read whole, whose heads' Port Numbers could not be read, or with a head mapped to no LD | `DeviceClass` `MH_SLD` (a head of unknown count taken to present an SLD) | `MH_MLD` if a head is known to present an MLD; otherwise left out |
 | Endpoints of a switch port with a head whose presentation is not known (see "MHD Memory Model") | the pool LDs the partial map gave the head | none |
