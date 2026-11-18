@@ -803,7 +803,7 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 400 Bad Request | Invalid request | Malformed JSON, missing required fields, invalid values; a Connection `POST` with other than one initiator and one target, whose host and device are not on the same switch, whose direct-attached host has no Connection to the device or head, whose chunk is not on the target, whose chunks are on more than one LD, whose MLD target names no LD (no chunk), whose `AccessCapabilities` are not `Read` and `Write`, whose `AccessState` is not `Optimized`, that has `VolumeInfo`, or whose target is, or is reached through, a head that presents an MLD; a chunk `POST` that does not name exactly one LD of its device by its URI, or asks for what an allocation cannot be (see "Creating Memory Chunks"); a bind or unbind the switch answered Invalid Input, at once or at the end of the background operation (the task monitor); `#Cxl.ForceUnbind` of a direct-attached Connection; `ResetPPB` on a port that is not a DSP |
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind`, at the request's read or at the read just before Unbind vPPB (nothing sent); on hardware, an extent a Prescriptive release or `MemoryExtent` `DELETE` names that the read of its host for the task's baseline no longer lists (nothing sent) |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent` and a switch-attached Connection. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
-| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB, or is not read whole (more than 32 vPPBs, or past the 8 VCSs read; nothing sent); a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk; without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
+| 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB, or is not read whole (more than 32 vPPBs, or past the 8 VCSs read; nothing sent); a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it; a Connection `POST` naming a staged chunk, or a pool LD of a head whose presentation is not known (see "MHD Memory Model"; nothing sent); without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
 | 412 Precondition Failed | A precondition cxl-fmd cannot check | A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match`, whatever its value, that would otherwise be carried out: nothing is done (see "Conditional Requests"); a request of any method, to any URI, with an `OData-Version` other than `4.0`: nothing is done (see "Headers") |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` with a return code other than Invalid Input, Unsupported, Busy or Retry Required, with none, or whose switch is gone ("Outcome unknown"), or of a Dynamic Capacity task whose device is gone ("Outcome unknown"); "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again) |
@@ -1486,6 +1486,38 @@ FM Redfish view: all pool LDs 0-5 visible as CXLLogicalDevices/0 through /5
 - A head with one pool LD on a switch port is bound whole; a head that
   presents an MLD is not bound (see "Memory Binding (Connections)")
 
+**What a head presents:** "A head with one LD mapped shall present itself
+as an SLD and a head with more than one LD mapped shall present itself as
+an MLD" (CXL r4.0 Section 2.5). cxl-fmd counts the LDs mapped to each head
+over the whole LD Map of `Get Multi-Headed Info (0x5500h)` ("Port number
+of the head to which each LD is assigned", Table 7-61), pool LDs past the
+64 it keeps included. A map of up to 255 entries does not fit the 256-byte
+response every CCI supports ("LD Map Length = Min (LD Map List Limit,
+(Number of LDs – Start LD ID))", Table 7-61), so it is read a page at a
+time from Start LD ID (Table 7-60). What a head presents is not known
+(cxl-fmd's rule) when a page of the map could not be read, when `Get Head
+Info (0x5501h)` did not give the head's Port Number, which is what the map
+names a head by, or when no LD is mapped to the head (a head "shall have at
+least one", Section 2.5). Then:
+
+- the device's `CXLDevice.DeviceClass` is `MH_MLD` if another head
+  presents an MLD, and is left out otherwise; it is `MH_SLD` only when
+  every head is known to present an SLD (and with a map not read whole,
+  or more heads than the 8 cxl-fmd keeps, it is never `MH_SLD`);
+- the head has no Endpoint of its own, nor are its pool LDs listed as the
+  Endpoints of a switch port;
+- the head is placed on no switch port, nor is any other head of the
+  device by inference (see below): a binding there is `Absent` or
+  `Unresolved` rather than taken for another head's;
+- a Connection `POST` naming one of its pool LDs is `409`, nothing sent;
+- `--check` and the validator do not hold the device to the 1-to-16 LDs
+  and presentation rules for that head, or for any head when the map was
+  not read whole: the gap is cxl-fmd's read, not the device. A head with
+  no LD mapped on a map read whole is still reported.
+
+The map and the heads are read once, when the device is discovered: a
+head whose presentation is not known stays so until cxl-fmd is restarted.
+
 **One device on several CCIs:** a device can answer on more than one CCI,
 and the serial number of Identify is the "unique identifier for this
 device" (Table 8-216). A Multi-Headed device's "LD Pool CCI may be exposed
@@ -1505,7 +1537,9 @@ inferences, as no command says what a CCI is):
   a CCI of the device whose role is not known. Neither is sent commands
   for the pool. A head's FM-owned LD is taken to be of the device's only
   head that presents an MLD, has its link up and is placed nowhere else;
-  with two or more such heads, it is of none. On a switch port, that head
+  with two or more such heads, it is of none, and so it is when what any
+  head presents is not known, or the device has more heads than the 8
+  cxl-fmd keeps (either could be another head that presents an MLD). On a switch port, that head
   is placed on the port, until the port is no longer a DSP or reports
   another kind of device, or none: the head is then on no port, and the
   route through the port is dropped.
@@ -1786,6 +1820,7 @@ Multi-Headed device must all be on one LD (400 otherwise). The target is:
 | An LD of an MLD on a switch port, or the MLD's ID with chunks of that LD | The port and the LD's LD-ID |
 | A pool LD of a Multi-Headed device, or the device's ID with chunks of that LD, when the LD is mapped to a head on a switch port that presents an SLD | That head's port, LD ID FFFFh: "A head with one LD mapped shall present itself as an SLD" (CXL r4.0 Section 2.5) |
 | A head that presents an MLD, its Endpoint, or a pool LD mapped to it | Nothing: 400. "The MH-MLD maps the LD-IDs received at a head to the device-wide LD index in the MH-MLD's LD pool" (Section 2.5.1) by no rule the FM is told |
+| A pool LD mapped to a head whose presentation is not known (see "MHD Memory Model") | Nothing: 409. Whether the head is bound whole or per LD-ID is not known |
 | A device on no switch port | Nothing: see "Direct-attached" below |
 
 A host on a switch reaches only the devices of that switch (400 for a
@@ -2809,6 +2844,12 @@ Changes from the fixes of the follow-up design review (branch
 | Connection `POST` whose host's VCS has more than 32 vPPBs, or is past the 8 VCSs read | Bind vPPB sent, a binding past vPPB 31 not seen | `409`, nothing sent |
 | Connection `POST` the switch answers Success, and the read of the VCS after it fails or does not show the vPPB bound | `500` "Failed to create connection" (the binding recorded as cxl-fmd's all the same); a retry sent Bind vPPB again | `202` with a `Task`, `Interrupted` until a read settles it; the Connection `Starting`; a retry is `503` with nothing sent while the VCS cannot be read, and is answered from the read that settles the task once it can |
 | `DELETE` or `#Cxl.ForceUnbind` the switch answers Success, and the read after it fails or does not show the vPPB unbound | `204`, and the Connection still served | `202` with a `Task`, `Interrupted` until a read settles it; the Connection `Updating` |
+| `GET` of the `PCIeDevice` of a Multi-Headed device with more LDs mapped to a head than the first 64 entries of its LD Map showed (pool LDs past 63) | `DeviceClass` from the first 64 entries: `MH_SLD` for a head with 2 or more LDs only one of which was among them | read from the whole map (paged): `MH_MLD` |
+| `GET` of the `PCIeDevice` of a Multi-Headed device whose LD Map could not be read whole, whose heads' Port Numbers could not be read, or with a head mapped to no LD | `DeviceClass` `MH_SLD` (a head of unknown count taken to present an SLD) | `MH_MLD` if a head is known to present an MLD; otherwise left out |
+| Endpoints of a switch port with a head whose presentation is not known (see "MHD Memory Model") | the pool LDs the partial map gave the head | none |
+| Connection `POST` to a pool LD of a head whose presentation is not known | `400` (on no switch port) or a bind of the head's port whole | `409`, nothing sent |
+| Discovery of a Multi-Headed device whose LD Map was not read whole, and that is found again through a head's FM-owned LD on a switch port | the only head counted as presenting an MLD placed on that port (possibly the wrong head), its bindings taken for that head's | no head placed: the bindings there are `Absent` or `Unresolved` |
+| `--check` of such a device on hardware | `head N has 0 LDs mapped` and presentation errors for the heads cxl-fmd could not count | not reported; a head mapped to no LD on a map read whole still is |
 
 ---
 

@@ -469,6 +469,12 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 	static const char rule[] = "Multi-Headed Devices, Section 2.5";
 	int per_head[FMD_MAX_HEADS] = { 0 };
 	bool have_head[FMD_MAX_HEADS] = { false };
+	/*
+	 * The LDs mapped to the head are known: it has a presentation, or
+	 * its Port Number, which the LD Map names it by, was read (a head
+	 * with none mapped has no presentation, and is the device's doing)
+	 */
+	bool head_known[FMD_MAX_HEADS] = { false };
 	bool all_heads = mhd->num_heads <= FMD_MAX_HEADS;
 	bool all_lds = mhd->total_lds <= FMD_MAX_LD_POOL;
 	struct fmd_component *child;
@@ -488,6 +494,8 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 			invalid(v, rule, "%s: two heads with ID %d", mhd->base.id,
 				head->head_id);
 		have_head[head->head_id] = true;
+		head_known[head->head_id] = head->presentation != FMD_HEAD_UNKNOWN ||
+					    head->port_number_valid;
 
 		/*
 		 * No command maps a head's Port Number (Table 7-64) to a
@@ -522,11 +530,18 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 		per_head[ld->binding_point_id]++;
 	}
 
-	/* with part of the pool, a head may have LDs that were not kept */
-	if (!all_lds)
+	/*
+	 * With part of the pool, a head may have LDs that were not kept; and
+	 * with part of the LD Map read, or a head's Port Number not, what is
+	 * mapped to the heads is not what cxl-fmd counted. Neither is the
+	 * device's doing.
+	 */
+	if (!all_lds || !mhd->ld_map_complete)
 		goto out;
 
 	for (int h = 0; h < FMD_MAX_HEADS; h++) {
+		if (have_head[h] && !head_known[h])
+			continue;
 		if (have_head[h] && (per_head[h] < 1 || per_head[h] > 16))
 			invalid(v, rule, "%s: head %d has %d LDs mapped: a head has "
 				"1 to 16", mhd->base.id, h, per_head[h]);
@@ -540,7 +555,7 @@ static void check_mhd(struct validation *v, struct fmd_mhd *mhd)
 		struct fmd_head *head = fmd_to_head(child);
 		int lds;
 
-		if (head->head_id >= FMD_MAX_HEADS)
+		if (head->head_id >= FMD_MAX_HEADS || !head_known[head->head_id])
 			continue;
 		lds = per_head[head->head_id];
 		if (lds == 1 && head->presentation != FMD_HEAD_SLD)
@@ -619,13 +634,15 @@ static void check_switch(struct validation *v, struct fmd_switch *sw)
 				invalid(v, port_rule, "%s: port %d has head %d of "
 					"%s and is not a DSP", sw->base.id,
 					port->port_number, head->head_id, mhd_id);
-			if (port->conn_dev_type != (head->presentation == FMD_HEAD_MLD ?
+			/* not known: no type to check against */
+			if (head->presentation != FMD_HEAD_UNKNOWN &&
+			    port->conn_dev_type != (head->presentation == FMD_HEAD_MLD ?
 						    FMD_CONN_MLD : FMD_CONN_SLD))
 				invalid(v, port_rule, "%s: port %d has head %d of "
 					"%s, which presents an %s, and Connected "
 					"Device Type %d", sw->base.id,
 					port->port_number, head->head_id, mhd_id,
-					head->presentation == FMD_HEAD_MLD ? "MLD" : "SLD",
+					fmd_head_presentation_name(head->presentation),
 					port->conn_dev_type);
 		}
 		if (!dev)

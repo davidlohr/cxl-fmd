@@ -1093,7 +1093,8 @@ static void append_device_endpoints(json_t *arr, struct fmd_component *dev)
 /*
  * The target Endpoints at the other end of switch port @port: the SLD on
  * it, each LD of the MLD on it, or for a head of a Multi-Headed device the
- * head if it presents an MLD, and otherwise the pool LDs mapped to it.
+ * head if it presents an MLD, the pool LDs mapped to it if it presents an
+ * SLD, and none if what it presents is not known.
  * Caller holds the topology read lock.
  */
 static void append_port_endpoints(json_t *arr, struct fmd_port *port)
@@ -1107,7 +1108,7 @@ static void append_port_endpoints(json_t *arr, struct fmd_port *port)
 	if (port->head && port->head->base.parent) {
 		if (port->head->presentation == FMD_HEAD_MLD) {
 			append_endpoint_once(arr, port->head->base.id);
-		} else {
+		} else if (port->head->presentation == FMD_HEAD_SLD) {
 			struct fmd_component *by_id[256] = { NULL };
 
 			fmd_for_each_child_type(port->head->base.parent, child,
@@ -3411,27 +3412,48 @@ json_t *fmd_redfish_pcie_device(struct fmd_ctx *ctx,
 		}
 	}
 
-	/* CXLDevice/DeviceClass (PCIeDevice v1.23): SLD, MLD, MH_SLD or MH_MLD */
+	/*
+	 * CXLDevice/DeviceClass (PCIeDevice v1.23): SLD, MLD, MH_SLD or
+	 * MH_MLD. A Multi-Headed device is an MH_MLD if one of its heads
+	 * presents an MLD, and an MH_SLD only if every head is known to
+	 * present an SLD, over the whole LD Map with every head kept: with
+	 * any of that not known, the property is left out (cxl-fmd's choice;
+	 * the CSDL does not make it required).
+	 */
 	{
 		enum rf_cxl_device_class dev_class = CXL_DEVICE_CLASS_SLD;
+		bool known = true;
 
 		if (comp->type == FMD_COMPONENT_MLD) {
 			dev_class = CXL_DEVICE_CLASS_MLD;
 		} else if (comp->type == FMD_COMPONENT_MHD) {
+			const struct fmd_mhd *mhd = fmd_to_mhd(comp);
 			struct fmd_component *child;
+			int heads = 0;
 
 			dev_class = CXL_DEVICE_CLASS_MH_SLD;
 			fmd_topology_rdlock(&ctx->topology);
+			known = mhd->ld_map_complete &&
+				mhd->num_heads <= FMD_MAX_HEADS;
 			fmd_for_each_child_type(comp, child, FMD_COMPONENT_HEAD) {
-				if (fmd_to_head(child)->presentation == FMD_HEAD_MLD) {
+				enum fmd_head_type p = fmd_to_head(child)->presentation;
+
+				heads++;
+				if (p == FMD_HEAD_MLD) {
 					dev_class = CXL_DEVICE_CLASS_MH_MLD;
+					known = true;
 					break;
 				}
+				if (p != FMD_HEAD_SLD)
+					known = false;
 			}
 			fmd_topology_rdunlock(&ctx->topology);
+			if (!heads)
+				known = false;
 		}
-		json_object_set_new(cxl_device, "DeviceClass",
-			json_string(rf_cxl_device_class_to_str(dev_class)));
+		if (known)
+			json_object_set_new(cxl_device, "DeviceClass",
+				json_string(rf_cxl_device_class_to_str(dev_class)));
 	}
 
 	/*
@@ -7245,7 +7267,9 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  * -26 the host's VCS could not be read: try again
  * -27 the host's VCS is not read whole: more vPPBs than FMD_MAX_VPPB, or
  *     past the FMD_MAX_VCS VCSs read
- * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -27.
+ * -28 the target is a pool LD of a head whose presentation is not known
+ *     (FMD_HEAD_UNKNOWN)
+ * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -28.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -7330,6 +7354,13 @@ int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 
 	if (dev->type == FMD_COMPONENT_MHD) {
 		head = fmd_ld_head(ld);
+		/*
+		 * Whether its head binds the LD whole or by an LD-ID of its
+		 * own depends on what the head presents (Section 2.5), which
+		 * is not known: nothing is bound
+		 */
+		if (head && head->presentation == FMD_HEAD_UNKNOWN)
+			return -28;
 		port = head ? head->port : NULL;
 	} else if (dev->parent && dev->parent->type == FMD_COMPONENT_PORT) {
 		port = fmd_to_port(dev->parent);

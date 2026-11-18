@@ -945,6 +945,8 @@ static struct fmd_mhd *parse_mhd(struct fmd_ctx *ctx, json_t *jdev,
 	mhd = fmd_mhd_create(dev_id);
 	if (!mhd)
 		return NULL;
+	/* a topology file maps each head's LDs, all of them (parse_head()) */
+	mhd->ld_map_complete = true;
 
 	/* Identify info */
 	mhd->identify.vendor_id = parse_hex16(json_object_get(jdev, "vendor_id"));

@@ -1242,13 +1242,15 @@ static void test_mhd(bool overcount)
  *
  * @heads: 9 heads, each with one LD; head 8 and its LD are not kept.
  * Otherwise: 2 heads and 70 LDs, LD 0 on head 0 and LDs 64 to 69 on head
- * 1; of the pool, LDs 0 to 63 are kept, so head 1 has none of its own.
+ * 1; of the pool, LDs 0 to 63 are kept, so head 1 has none of its own. The
+ * whole LD Map is read all the same (70 entries fit a response), and
+ * counts head 1's six: it presents an MLD (Section 2.5).
  */
 static void test_mhd_past_limits(bool heads)
 {
 	struct fmd_ctx *ctx = new_ctx();
 	struct cxlmi_endpoint *ep = new_device(ctx);
-	uint8_t probe[8 + 1] = { 0 }, info[8 + 64] = { 0 };
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 70] = { 0 };
 	uint8_t head_info[4 + 8 * 9] = { 0 };
 	int before = failures, nheads = heads ? 9 : 2, nlds = heads ? 9 : 70;
 	int kept_heads = heads ? 8 : 2, kept_lds = heads ? 9 : 64, invalid;
@@ -1264,9 +1266,9 @@ static void test_mhd_past_limits(bool heads)
 
 	info[0] = nlds;
 	info[1] = nheads;
-	info[5] = heads ? 9 : 64;		/* LD Map Length: 64 asked for */
-	for (int i = 0; i < 64; i++)
-		info[8 + i] = heads ? (i < 9 ? i + 1 : 0) : (i == 0 ? 1 : 0xff);
+	info[5] = nlds;				/* LD Map Length: 248 asked for */
+	for (int i = 0; i < nlds; i++)
+		info[8 + i] = heads ? i + 1 : i == 0 ? 1 : i >= 64 ? 2 : 0xff;
 	answer(ep, 0x5500, info, 8 + info[5]);
 
 	for (int i = 0; i < kept_lds; i++)
@@ -1297,6 +1299,17 @@ static void test_mhd_past_limits(bool heads)
 		      mhd->total_lds);
 		CHECK(h == kept_heads && l == kept_lds, "%d heads, %d LDs kept",
 		      h, l);
+		CHECK(mhd->ld_map_complete, "the LD Map is not read whole");
+		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+			const struct fmd_head *head = fmd_to_head(child);
+			int lds = heads || head->head_id == 0 ? 1 : 6;
+
+			CHECK(head->ld_count == lds && head->presentation ==
+			      (lds > 1 ? FMD_HEAD_MLD : FMD_HEAD_SLD),
+			      "head %d: %d LDs, presents %s", head->head_id,
+			      head->ld_count,
+			      fmd_head_presentation_name(head->presentation));
+		}
 	}
 
 	invalid = fmd_topology_validate(ctx);
@@ -13195,6 +13208,292 @@ out:
 	       before);
 }
 
+/*
+ * What a head of a Multi-Headed device presents is read from the whole LD
+ * Map, and is not known without it (follow-up review item 7). "A head
+ * with one LD mapped shall present itself as an SLD and a head with more
+ * than one LD mapped shall present itself as an MLD" (CXL r4.0 Section
+ * 2.5); "LD Map Length = Min (LD Map List Limit, (Number of LDs - Start LD
+ * ID))" (Table 7-61), so a map of more entries than fit a response is read
+ * from Start LD ID a page at a time (Table 7-60).
+ *
+ * Two heads, ports 1 and 2. @mode:
+ *  0  250 LDs: LD 0 on port 1, LDs 63, 248 and 249 on port 2. 248 entries
+ *     fit 256 bytes, so the map is two pages: head 1 has 3 LDs and
+ *     presents an MLD, of which LDs 248 and 249 are only on the second
+ *     page. Head 0 presents an SLD. The device is an MH_MLD.
+ *  1  the same, the second page failing: neither head's presentation is
+ *     known, DeviceClass is left out, and the device is not blamed.
+ *  2  4 LDs, LDs 0 and 1 on port 1, LD 2 on port 2, Get Head Info (5501h)
+ *     failing: no head's port is known, so no LD is placed, and neither
+ *     head's presentation is known; the device is not blamed.
+ *  3  4 LDs, all on port 1: head 1 has none, which "A head ... shall have
+ *     at least one" does not allow. Not known, and the device is blamed.
+ */
+static void test_m7_head_presentation(int mode)
+{
+	static const char *const what[] = {
+		"a head's presentation over an LD Map of two pages",
+		"a head's presentation with a page of the LD Map unread",
+		"a head's presentation with no head's port known",
+		"a head with no LD mapped",
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep = new_device(ctx);
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 248] = { 0 };
+	uint8_t head_info[4 + 2 * 9] = { 0 };
+	int before = failures, nlds = mode < 2 ? 250 : 4, kept = mode < 2 ? 64 : 4;
+	char id[FMD_MAX_ID_LEN];
+	struct fmd_component *child;
+	struct fmd_mhd *mhd;
+	int invalid;
+
+	answer_identify(ep, 0x77 + mode, 0x03);
+	probe[0] = nlds;			/* Number of LDs */
+	probe[1] = 2;				/* Number of Heads */
+	probe[5] = 1;				/* LD Map Length */
+	answer(ep, 0x5500, probe, sizeof(probe));
+
+	info[0] = nlds;
+	info[1] = 2;
+	if (mode < 2) {
+		/* LDs 0 to 247: 248 of 250 asked for */
+		info[5] = 248;
+		memset(info + 8, 0xff, 248);
+		info[8 + 0] = 1;		/* LD 0: head 0 */
+		info[8 + 63] = 2;		/* LD 63: head 1 */
+		answer(ep, 0x5500, info, 8 + 248);
+		if (mode == 0) {
+			/* LDs 248 and 249, from Start LD ID 248 */
+			memset(info + 8, 0, 248);
+			info[4] = 248;		/* Start LD ID */
+			info[5] = 2;
+			info[8 + 0] = 2;
+			info[8 + 1] = 2;
+			answer(ep, 0x5500, info, 8 + 2);
+		} else {
+			answer_rc(ep, 0x5500, CXLMI_RET_INTERNAL);
+		}
+	} else {
+		info[5] = 4;
+		info[8 + 0] = 1;
+		info[8 + 1] = 1;
+		info[8 + 2] = mode == 2 ? 2 : 1;
+		info[8 + 3] = mode == 2 ? 0xff : 1;
+		answer(ep, 0x5500, info, 8 + 4);
+	}
+	for (int i = 0; i < kept; i++)
+		answer_memdev_identify(ep, 4, 4, 0);
+
+	if (mode != 2) {
+		head_info[0] = 2;		/* Number of Heads */
+		head_info[4 + 0] = 1;		/* head 0: port 1, L0 */
+		head_info[4 + 6] = 0x04;
+		head_info[4 + 9] = 2;		/* head 1: port 2, L0 */
+		head_info[4 + 9 + 6] = 0x04;
+		answer(ep, 0x5501, head_info, sizeof(head_info));
+	} else {
+		answer_rc(ep, 0x5501, CXLMI_RET_INTERNAL);
+	}
+
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), 0x77 + mode);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	CHECK(mhd, "no MHD %s", id);
+	if (!mhd)
+		goto out;
+
+	CHECK(mhd->ld_map_complete == (mode != 1), "LD Map read whole: %d",
+	      mhd->ld_map_complete);
+	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+		struct fmd_head *h = fmd_to_head(child);
+		struct fmd_ld *w = fmd_head_whole_ld(h);
+		enum fmd_head_type want;
+
+		if (mode == 0)
+			want = h->head_id ? FMD_HEAD_MLD : FMD_HEAD_SLD;
+		else if (mode == 3)
+			want = h->head_id ? FMD_HEAD_UNKNOWN : FMD_HEAD_MLD;
+		else
+			want = FMD_HEAD_UNKNOWN;
+		CHECK(h->presentation == want, "head %d (%d LDs) presents %s",
+		      h->head_id, h->ld_count,
+		      fmd_head_presentation_name(h->presentation));
+		if (mode == 0)
+			CHECK(h->ld_count == (h->head_id ? 3 : 1),
+			      "head %d: %d LDs", h->head_id, h->ld_count);
+		/* the one LD of a head that presents an SLD, and no other */
+		if (mode == 0 && h->head_id == 0)
+			CHECK(w && w->ld_id == 0, "head 0's LD: %d", w ? w->ld_id : -1);
+		else
+			CHECK(!w, "head %d (%s) reaches pool LD %d whole",
+			      h->head_id,
+			      fmd_head_presentation_name(h->presentation), w->ld_id);
+	}
+
+	{
+		json_t *j = fmd_redfish_pcie_device(ctx, id, id);
+		json_t *c = j ? json_object_get(j, "CXLDevice") : NULL;
+		const char *dc = json_string_value(json_object_get(c, "DeviceClass"));
+
+		CHECK(c, "no CXLDevice");
+		if (mode == 0 || mode == 3)
+			CHECK(dc && !strcmp(dc, "MH_MLD"), "DeviceClass %s",
+			      dc ? dc : "(none)");
+		else
+			CHECK(!dc, "DeviceClass %s with no head's presentation "
+			      "known", dc);
+		json_decref(j);
+	}
+
+	/* the device is blamed only for what it reported */
+	invalid = fmd_topology_validate(ctx);
+	CHECK(invalid == (mode == 3), "%d rule(s) broken", invalid);
+out:
+	fmd_ctx_free(ctx);
+	report(what[mode], before);
+}
+
+/*
+ * The FM-owned LD of a head, found on a switch port by the Multi-Headed
+ * device's serial number, places on that port the one head that presents
+ * an MLD, if there is only one (fmld_route_head()). Two heads, ports 1
+ * and 2, and switch port 5 reaching an FM-owned LD, with vPPB 1 of VCS 2
+ * bound to port 5, LD 0. @mode:
+ *  0  66 LDs, LDs 0 and 1 on head 0, LDs 63 to 65 on head 1, the map read
+ *     whole: both heads present an MLD, so neither is placed. Before the
+ *     map was read whole, LDs 64 and 65 were not seen, head 1 was taken
+ *     for an SLD, and head 0 was placed on port 5: the binding there was
+ *     taken for head 0's, and the chunk guard protected head 0's LDs and
+ *     not head 1's.
+ *  1  the same, the map answered with only its first 64 entries: neither
+ *     head's presentation is known, so neither is placed. A Connection
+ *     POST to a pool LD of head 0 is refused, and nothing is sent.
+ *  2  64 LDs, LDs 0 and 1 on head 0, LD 63 on head 1, read whole: head 0
+ *     is the only one that presents an MLD, and is placed on port 5.
+ */
+static const struct fmd_head *m7_guard_head;
+
+static int m7_conn_head(const struct fmd_conn_view *v, void *arg)
+{
+	(void)arg;
+	if (v->state != FMD_CONN_ABSENT && v->head)
+		m7_guard_head = v->head;
+	return 0;
+}
+
+static void test_m7_fmld_head(int mode)
+{
+	static const char *const what[] = {
+		"no head placed with two that present an MLD",
+		"no head placed while a head's presentation is not known",
+		"the one head that presents an MLD placed on its switch port",
+	};
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *pool = new_device(ctx), *sw;
+	uint8_t probe[8 + 1] = { 0 }, info[8 + 66] = { 0 };
+	uint8_t heads[4 + 2 * 9] = { 0 };
+	int before = failures, nlds = mode == 2 ? 64 : 66;
+	char id[FMD_MAX_ID_LEN], sw_id[FMD_MAX_ID_LEN];
+	const struct fmd_head *placed;
+	struct fmd_port *port;
+	struct fmd_mhd *mhd;
+
+	answer_identify(pool, 0x14d + mode, 0x03);
+	probe[0] = nlds;
+	probe[1] = 2;
+	probe[5] = 1;
+	answer(pool, 0x5500, probe, sizeof(probe));
+	info[0] = nlds;
+	info[1] = 2;
+	info[5] = mode == 1 ? 64 : nlds;	/* 248 asked for */
+	memset(info + 8, 0xff, nlds);
+	info[8 + 0] = 1;			/* head 0: LDs 0, 1 */
+	info[8 + 1] = 1;
+	info[8 + 63] = 2;			/* head 1: LD 63 (64, 65) */
+	if (mode != 2) {
+		info[8 + 64] = 2;
+		info[8 + 65] = 2;
+	}
+	answer(pool, 0x5500, info, 8 + info[5]);
+	for (int i = 0; i < 64; i++)
+		answer_memdev_identify(pool, 4, 4, 0);
+	heads[0] = 2;
+	heads[4] = 1;
+	heads[4 + 6] = 4;
+	heads[4 + 9] = 2;
+	heads[4 + 9 + 6] = 4;
+	answer(pool, 0x5501, heads, sizeof(heads));
+	fmd_discover(ctx);
+
+	/* VCS 2 vPPB 1 bound to port 5, LD 0; port 5's tunnelled Identify */
+	sw = new_device(ctx);
+	answer_identify(sw, 0x5015 + mode, 0x00);
+	answer_switch_ports(sw, 6, 0x00, 0x00);
+	answer_vcs(sw, 0, 0, port2, unbound);
+	answer_vcs(sw, 2, 1, (const uint8_t[]){ 0x03, 5, 0 }, unbound);
+	answer_identify(sw, 0x14d + mode, 0x03);
+	fmd_discover(ctx);
+
+	device_id(id, sizeof(id), 0x14d + mode);
+	device_id(sw_id, sizeof(sw_id), 0x5015 + mode);
+	mhd = fmd_topology_find_mhd(&ctx->topology, id);
+	port = fmd_topology_find_port(&ctx->topology, sw_id, 5);
+	CHECK(mhd && port, "MHD %p, switch port 5 %p", (void *)mhd, (void *)port);
+	if (!mhd || !port)
+		goto out;
+
+	placed = port->head;
+	if (mode == 2)
+		CHECK(placed && placed->head_id == 0, "switch port 5 has head %d",
+		      placed ? placed->head_id : -1);
+	else
+		CHECK(!placed, "head %d placed on switch port 5", placed->head_id);
+
+	/* chunk_user_conn(): a pool LD is held by a Connection of its head */
+	if (mode != 2) {
+		struct fmd_ld *l0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+
+		m7_guard_head = NULL;
+		fmd_topology_rdlock(&ctx->topology);
+		fmd_conn_for_each(ctx, m7_conn_head, NULL);
+		fmd_topology_rdunlock(&ctx->topology);
+		CHECK(!l0 || !m7_guard_head || fmd_ld_head(l0) != m7_guard_head,
+		      "the binding on port 5 taken for head %d's",
+		      m7_guard_head->head_id);
+	}
+
+	if (mode == 1) {
+		struct fmd_host *host = vcs_host(ctx, sw_id, 2);
+		unsigned int sent_sw = commands_sent(sw);
+		unsigned int sent_pool = commands_sent(pool);
+		json_t *resp = NULL;
+		char body[512];
+		int rc;
+
+		CHECK(host, "no host of VCS 2");
+		if (!host)
+			goto out;
+		snprintf(body, sizeof(body),
+			 "{\"Links\": {\"InitiatorEndpoints\": [{\"@odata.id\": "
+			 "\"/redfish/v1/Fabrics/CXL/Endpoints/%s\"}], "
+			 "\"TargetEndpoints\": [{\"@odata.id\": "
+			 "\"/redfish/v1/Fabrics/CXL/Endpoints/%s_ld0\"}]}}",
+			 host->base.id, id);
+		rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body),
+						 &resp);
+		CHECK(rc == -28 && !resp, "POST to a pool LD of a head not known: %d",
+		      rc);
+		CHECK(commands_sent(sw) == sent_sw && commands_sent(pool) == sent_pool,
+		      "%u commands to the switch, %u to the device",
+		      commands_sent(sw) - sent_sw, commands_sent(pool) - sent_pool);
+		json_decref(resp);
+	}
+out:
+	fmd_ctx_free(ctx);
+	report(what[mode], before);
+}
+
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
@@ -13289,6 +13588,10 @@ int main(void)
 	test_mhd(true);
 	test_mhd_past_limits(true);
 	test_mhd_past_limits(false);
+	for (int mode = 0; mode < 4; mode++)
+		test_m7_head_presentation(mode);
+	for (int mode = 0; mode < 3; mode++)
+		test_m7_fmld_head(mode);
 	test_not_ready();
 	test_validate_usp_id();
 	test_bound_ld_sentinel();

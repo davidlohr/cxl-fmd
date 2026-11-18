@@ -43,7 +43,7 @@ struct fmd_ld *fmd_head_whole_ld(const struct fmd_head *head)
 	struct fmd_component *child;
 	struct fmd_ld *found = NULL;
 
-	if (!mhd || head->presentation == FMD_HEAD_MLD)
+	if (!mhd || head->presentation != FMD_HEAD_SLD)
 		return NULL;
 	fmd_for_each_child_type(mhd, child, FMD_COMPONENT_LD) {
 		if (fmd_to_ld(child)->binding_point_id != head->head_id)

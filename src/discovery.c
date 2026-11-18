@@ -735,6 +735,94 @@ static int discover_mld(struct fmd_ctx *ctx, struct fmd_mld *mld,
 }
 
 
+/* Head @idx of @mhd, or NULL */
+static struct fmd_head *mhd_head(struct fmd_mhd *mhd, int idx)
+{
+	struct fmd_component *child;
+
+	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+		if (fmd_to_head(child)->head_id == idx)
+			return fmd_to_head(child);
+	}
+	return NULL;
+}
+
+/*
+ * The LD Map of Get Multi-Headed Info (5500h) into @map, one entry for each
+ * pool LD: "Port number of the head to which each LD is assigned, starting
+ * at Start LD ID" (CXL r4.0 Table 7-61). @rsp is the device's answer to a
+ * request from LD 0 for @asked entries; the rest is asked for a page at a
+ * time from Start LD ID (Table 7-60), as many entries as fit a response:
+ * of the 255 LDs a pool can have, 248 fit the 256 bytes every CCI
+ * supports. "LD Map Length = Min (LD Map List Limit, (Number of LDs - Start
+ * LD ID))". Returns whether all Number of LDs entries were read, *@nread
+ * being how many were; a page that fails, starts elsewhere, is empty, or
+ * reports another Number of LDs ends the read.
+ */
+static bool read_ld_map(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
+			struct cxlmi_endpoint *ep,
+			struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp *rsp,
+			size_t rsp_size, unsigned int asked, uint8_t *map,
+			int *nread)
+{
+	struct cxlmi_cmd_fmapi_get_multiheaded_info_req req = { 0 };
+	int nlds = rsp->num_lds, got = 0;
+
+	for (;;) {
+		int len = rsp->ld_map_len;
+
+		if (rsp->start_ld_id != got) {
+			fmd_warn(ctx, "%s: LD Map from LD %d asked for, from LD %d "
+				 "returned", mhd->base.id, got, rsp->start_ld_id);
+			break;
+		}
+		if (len > (int)asked)
+			len = asked;
+		if (len > nlds - got)
+			len = nlds - got;
+		if (len <= 0 && got < nlds) {
+			fmd_warn(ctx, "%s: no LD Map entry from LD %d, of %d LDs",
+				 mhd->base.id, got, nlds);
+			break;
+		}
+		memcpy(map + got, rsp->ld_map, len);
+		got += len;
+		if (got >= nlds)
+			break;
+
+		asked = fmd_cci_list_fit(&mhd->base, 8, 1, nlds - got);
+		req.start_ld_id = got;
+		req.ld_map_list_limit = asked;
+		memset(rsp, 0, rsp_size);
+		if (cxlmi_cmd_fmapi_get_multiheaded_info(ep, CXLMI_NO_TUNNEL,
+							  &req, rsp)) {
+			fmd_warn(ctx, "%s: get multiheaded info from LD %d failed",
+				 mhd->base.id, got);
+			break;
+		}
+		if (rsp->num_lds != nlds) {
+			fmd_warn(ctx, "%s: %d LDs, then %d, while the LD Map was "
+				 "read", mhd->base.id, nlds, rsp->num_lds);
+			break;
+		}
+	}
+	*nread = got;
+	if (got < nlds)
+		fmd_warn(ctx, "%s: %d of the LD Map's %d entries read: what each "
+			 "head presents is not known", mhd->base.id, got, nlds);
+	return got >= nlds;
+}
+
+/* Index of the head of @nheads whose Port Number @port_num is, 0xFF if none */
+static uint8_t ld_map_head(const uint8_t *head_port, int nheads, uint8_t port_num)
+{
+	for (int h = 0; h < nheads; h++) {
+		if (head_port[h] == port_num)
+			return h;
+	}
+	return 0xFF;
+}
+
 /*
  * Discover MHD - Multi-Headed Device with multiple CXL upstream ports
  *
@@ -762,7 +850,10 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 	size_t mh_rsp_size;
 	size_t head_rsp_size;
 	uint8_t head_port[FMD_MAX_HEADS];	/* Port Number of each head */
-	int nhead_ports = 0;
+	uint8_t ld_map[FMD_CCI_LIST_MAX];	/* the LD Map, of up to 255 LDs */
+	int per_head[FMD_MAX_HEADS] = { 0 };	/* LDs the map gives each head */
+	int nhead_ports = 0, mapped = 0;
+	unsigned int asked;
 	int rc;
 	int i;
 
@@ -772,9 +863,13 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		return -1;
 	}
 
-	/* Get Multi-Headed Info (5500h) - query all LDs */
+	/*
+	 * Get Multi-Headed Info (5500h): the LD Map from LD 0, as much of it
+	 * as fits a response (read_ld_map() asks for the rest)
+	 */
+	asked = fmd_cci_list_fit(&mhd->base, 8, 1, FMD_CCI_LIST_MAX);
 	mh_req.start_ld_id = 0;
-	mh_req.ld_map_list_limit = FMD_MAX_LD_POOL;
+	mh_req.ld_map_list_limit = asked;
 
 	mh_rsp_size = sizeof(struct cxlmi_cmd_fmapi_get_multiheaded_info_rsp) +
 		      FMD_CCI_LIST_MAX;
@@ -843,12 +938,14 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		}
 	}
 
-	FMD_CCI_LIST_CLAMP(mh_rsp->ld_map_len, FMD_MAX_LD_POOL);
-
 	mhd->num_heads = mh_rsp->num_heads;
 	mhd->max_heads = mh_rsp->num_heads;  /* Assume current = max */
 	mhd->total_lds = mh_rsp->num_lds;
 	mhd->max_lds = mh_rsp->num_lds;
+
+	/* the whole map, kept LDs or not: what each head presents needs it */
+	mhd->ld_map_complete = read_ld_map(ctx, mhd, ep, mh_rsp, mh_rsp_size,
+					   asked, ld_map, &mapped);
 
 	fmd_info(ctx, "%s: MHD with %d heads, %d LDs in pool",
 		 mhd->base.id, mhd->num_heads, mhd->total_lds);
@@ -943,17 +1040,13 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 		 * in Get Head Info is the one: without the port numbers the
 		 * LD cannot be placed, and is left unassigned.
 		 */
-		if (i < mh_rsp->ld_map_len && mh_rsp->ld_map[i] != 0xFF) {
-			for (int h = 0; h < nhead_ports; h++) {
-				if (head_port[h] == mh_rsp->ld_map[i]) {
-					binding_point = h;
-					break;
-				}
-			}
+		if (i < mapped && ld_map[i] != 0xFF) {
+			binding_point = ld_map_head(head_port, nhead_ports,
+						    ld_map[i]);
 			if (binding_point == 0xFF)
 				fmd_warn(ctx, "%s: pool LD %d is on port %d, "
 					 "which is no head of the device",
-					 mhd->base.id, i, mh_rsp->ld_map[i]);
+					 mhd->base.id, i, ld_map[i]);
 		}
 
 		ld->binding_point_id = binding_point;
@@ -1000,39 +1093,40 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 	}
 
 	/*
-	 * Count LDs per head and determine head presentation type.
-	 * If head has >1 LD mapped, it presents as MLD; otherwise SLD.
+	 * What each head presents: "A head with one LD mapped shall present
+	 * itself as an SLD and a head with more than one LD mapped shall
+	 * present itself as an MLD" (CXL r4.0 Section 2.5). The LDs are
+	 * counted over the whole LD Map, those past the LDs kept included.
+	 * Without the whole map, or the head's Port Number, which is what the
+	 * map names it by, the count is not known, and neither is what the
+	 * head presents. "A head ... shall have at least one and no more than
+	 * 16 LDs mapped": one with none is not known either. An entry whose
+	 * port is no head's is of a head not kept, or of one whose Port
+	 * Number was not read, which is unknown already.
 	 */
-	for (i = 0; i < mhd->num_heads; i++) {
-		struct fmd_component *child;
-		struct fmd_head *head = NULL;
-		int ld_count = 0;
+	for (i = 0; i < mapped; i++) {
+		uint8_t h = ld_map[i] == 0xFF ? 0xFF :
+			    ld_map_head(head_port, nhead_ports, ld_map[i]);
 
-		/* Find the head */
-		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
-			struct fmd_head *h = fmd_to_head(child);
-			if (h->head_id == i) {
-				head = h;
-				break;
-			}
-		}
+		if (h != 0xFF)
+			per_head[h]++;
+	}
+	for (i = 0; i < mhd->num_heads && i < FMD_MAX_HEADS; i++) {
+		struct fmd_head *head = mhd_head(mhd, i);
 
 		if (!head)
 			continue;
-
-		/* Count LDs bound to this head */
-		fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_LD) {
-			struct fmd_ld *ld = fmd_to_ld(child);
-			if (ld->binding_point_id == i)
-				ld_count++;
-		}
-
-		head->ld_count = ld_count;
-		head->presentation = (ld_count > 1) ? FMD_HEAD_MLD : FMD_HEAD_SLD;
+		head->ld_count = per_head[i];
+		if (!mhd->ld_map_complete || !head->port_number_valid ||
+		    per_head[i] == 0)
+			head->presentation = FMD_HEAD_UNKNOWN;
+		else
+			head->presentation = per_head[i] > 1 ? FMD_HEAD_MLD :
+							       FMD_HEAD_SLD;
 
 		fmd_dbg(ctx, "%s: head %d has %d LDs, presents as %s",
-			mhd->base.id, i, ld_count,
-			head->presentation == FMD_HEAD_MLD ? "MLD" : "SLD");
+			mhd->base.id, i, per_head[i],
+			fmd_head_presentation_name(head->presentation));
 	}
 
 	free(mh_rsp);
@@ -1041,18 +1135,6 @@ static int discover_mhd(struct fmd_ctx *ctx, struct fmd_mhd *mhd,
 	return 0;
 }
 
-
-/* Head @idx of @mhd, or NULL */
-static struct fmd_head *mhd_head(struct fmd_mhd *mhd, int idx)
-{
-	struct fmd_component *child;
-
-	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
-		if (fmd_to_head(child)->head_id == idx)
-			return fmd_to_head(child);
-	}
-	return NULL;
-}
 
 /*
  * Which head of @mhd the FM-owned LD of a head is of, when one is found by
@@ -1063,15 +1145,23 @@ static struct fmd_head *mhd_head(struct fmd_mhd *mhd, int idx)
  * (Section 2.5), and an SLD has none, as Get LD Info "is prohibited for an
  * SLD" (Table 8-397). So it is taken to be the one head that presents an
  * MLD, has its link up, and is not placed on a switch port, if there is
- * only one (cxl-fmd's inference). With two or more, none is. Another
- * route to the same head does not take it: one head's FM-owned LD can be
- * reached on an endpoint of its own and through a switch.
+ * only one (cxl-fmd's inference). With two or more, none is, nor when
+ * what a head presents is not known (FMD_HEAD_UNKNOWN), or a head is not
+ * kept: that head could be another that presents an MLD. Another route to
+ * the same head does not take it: one head's FM-owned LD can be reached on
+ * an endpoint of its own and through a switch.
  */
 static int fmld_route_head(struct fmd_mhd *mhd)
 {
 	struct fmd_component *child;
 	int found = -1;
 
+	if (mhd->num_heads > FMD_MAX_HEADS)
+		return -1;
+	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
+		if (fmd_to_head(child)->presentation == FMD_HEAD_UNKNOWN)
+			return -1;
+	}
 	fmd_for_each_child_type(&mhd->base, child, FMD_COMPONENT_HEAD) {
 		struct fmd_head *head = fmd_to_head(child);
 
@@ -1752,10 +1842,12 @@ static void add_switch_port(struct fmd_ctx *ctx, struct fmd_switch *sw,
 	/*
 	 * A head of a Multi-Headed device placed on the port stays while the
 	 * port is a DSP that reports what the head presents (Section 2.5),
-	 * and is otherwise gone from it, as a device would be.
+	 * and is otherwise gone from it, as a device would be: one whose
+	 * presentation is not known matches nothing.
 	 */
 	if (port->head) {
 		if (port->state == FMD_PORT_DSP &&
+		    port->head->presentation != FMD_HEAD_UNKNOWN &&
 		    port->conn_dev_type == (port->head->presentation == FMD_HEAD_MLD ?
 					    FMD_CONN_MLD : FMD_CONN_SLD))
 			return;

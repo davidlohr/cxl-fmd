@@ -819,7 +819,19 @@ struct fmd_ld {
 enum fmd_head_type {
 	FMD_HEAD_SLD = 0,        /* Head presents as single-LD */
 	FMD_HEAD_MLD,            /* Head presents as multi-LD */
+	/*
+	 * Not known: the LD Map was not read whole, the head's Port Number
+	 * was not read, or no LD is mapped to it. What a head presents
+	 * follows from how many LDs are mapped to it (Section 2.5), which
+	 * only the whole map tells.
+	 */
+	FMD_HEAD_UNKNOWN,
 };
+
+static inline const char *fmd_head_presentation_name(enum fmd_head_type p)
+{
+	return p == FMD_HEAD_SLD ? "SLD" : p == FMD_HEAD_MLD ? "MLD" : "unknown";
+}
 
 /*
  * Head State
@@ -857,7 +869,11 @@ struct fmd_head {
 	enum fmd_head_type presentation;     /* How this head appears to host */
 	enum fmd_head_state state;
 
-	/* For MH-MLD presentation: count of LDs mapped to this head */
+	/*
+	 * LDs the LD Map maps to this head, over the whole map: pool LDs
+	 * past FMD_MAX_LD_POOL included, which are not kept as components.
+	 * Only a count if the map was read whole (ld_map_complete).
+	 */
 	uint8_t ld_count;                    /* Number of LDs assigned to head */
 
 	/* Link properties (from Get MHD Info) */
@@ -966,6 +982,12 @@ struct fmd_mhd {
 	uint8_t total_lds;                   /* Total LDs in pool */
 	uint8_t max_lds;                     /* Maximum pool size */
 	uint8_t memory_granularity;          /* 256MB units */
+	/*
+	 * The whole LD Map of Get Multi-Headed Info (5500h) was read, all
+	 * total_lds entries of it, though only FMD_MAX_LD_POOL LDs are
+	 * kept: each head's ld_count is then what the device maps to it.
+	 */
+	bool ld_map_complete;
 
 	/*
 	 * Get LD Info (5400h) Memory Size on the LD Pool CCI, as for an MLD
@@ -1788,8 +1810,9 @@ struct fmd_head *fmd_ld_head(const struct fmd_ld *ld);
 /*
  * The pool LD a head that presents an SLD reaches: the one LD mapped to
  * it ("In MH-SLDs, there is a 1:1 mapping between heads and LDs", Section
- * 2.5). NULL if the head presents an MLD, or is mapped to no LD or to more
- * than one.
+ * 2.5). NULL if the head presents an MLD, or what it presents is not
+ * known (FMD_HEAD_UNKNOWN), or it is mapped to no LD kept or to more than
+ * one.
  */
 struct fmd_ld *fmd_head_whole_ld(const struct fmd_head *head);
 
@@ -3038,6 +3061,9 @@ json_t *fmd_redfish_condition(enum fmd_rf_cond id, const char *arg);
 	"request was carried out before it is resubmitted: cxl-fmd does not know."
 #define FMD_RES_UNREAD "Resubmit the request: nothing was sent, as what " \
 	"the switch holds could not be read just before the command."
+#define FMD_RES_HEAD_UNKNOWN "Restart the service once the device answers: " \
+	"it reads a Multi-Headed device's LD Map and heads once, when it " \
+	"discovers the device."
 #define FMD_RES_INCOMPLETE "This service reads at most 8 Virtual CXL " \
 	"Switches of a switch and 32 vPPBs of each, and does not change a " \
 	"binding it cannot see whole: manage this switch otherwise."

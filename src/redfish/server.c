@@ -1948,6 +1948,10 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "This service does not read the host's Virtual CXL Switch whole (more than 32 vPPBs, or past the 8 VCSs it reads): a binding past them would not be seen",
 					  RF_GENERAL(FMD_RES_INCOMPLETE));
+		if (rc == -28)
+			return send_error(conn, MHD_HTTP_CONFLICT,
+					  "What the logical device's head presents, an SLD or an MLD, is not known: the device's LD Map, or its heads' port numbers, could not be read whole (CXL r4.0 Section 2.5)",
+					  RF_GENERAL(FMD_RES_HEAD_UNKNOWN));
 		if (rc == -12)
 			return send_error(conn, MHD_HTTP_CONFLICT,
 					  "The host's Virtual CXL Switch has no unbound vPPB",
