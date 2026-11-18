@@ -754,8 +754,8 @@ static struct fmd_head *mhd_head(struct fmd_mhd *mhd, int idx)
  * request from LD 0 for @asked entries; the rest is asked for a page at a
  * time from Start LD ID (Table 7-60), as many entries as fit a response:
  * of the 255 LDs a pool can have, 248 fit the 256 bytes every CCI
- * supports. "LD Map Length = Min (LD Map List Limit, (Number of LDs - Start
- * LD ID))". Returns whether all Number of LDs entries were read, *@nread
+ * supports. "LD Map Length = Min (LD Map List Limit, (Number of LDs – Start
+ * LD ID))." Returns whether all Number of LDs entries were read, *@nread
  * being how many were; a page that fails, starts elsewhere, is empty, or
  * reports another Number of LDs ends the read.
  */
