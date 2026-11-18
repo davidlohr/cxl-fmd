@@ -470,9 +470,10 @@ static void device_record_count(struct fmd_ctx *ctx, struct fmd_component *dev,
  * any of them is enough is cxl-fmd's choice.
  *
  * A record in any of the logs of an SLD, or an overflow, also has its
- * staged chunks looked at again (fmd_sld_staged_refresh(), one Get
- * Partition Info, only for an SLD that has one): the reset a staged
- * partition waits for may have come. No event record is defined to say
+ * partition looked at again (fmd_sld_partition_refresh(), one Get
+ * Partition Info, only for an SLD with a staged chunk or a change of
+ * partition pending): the reset a staged partition waits for may have
+ * come. No event record is defined to say
  * that a memory device was reset; that any record may mean so is
  * cxl-fmd's choice.
  */
@@ -516,7 +517,7 @@ static void device_logs(struct fmd_ctx *ctx, struct fmd_component *dev)
 	if (health)
 		fmd_refresh_health(ctx, dev);
 	if (any && dev->type == FMD_COMPONENT_SLD)
-		fmd_sld_staged_refresh(ctx, fmd_to_sld(dev));
+		fmd_sld_partition_refresh(ctx, fmd_to_sld(dev));
 }
 
 bool fmd_device_logs_read(struct fmd_ctx *ctx, struct fmd_component *dev)

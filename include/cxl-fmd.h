@@ -646,6 +646,11 @@ struct fmd_sld {
 
 	/* Get Partition Info (4100h) response */
 	struct cxlmi_cmd_memdev_get_partition_info_rsp partition;
+	/*
+	 * @partition may not be what the device has: read 4100h again
+	 * (fmd_sld_partition_refresh()) before it is trusted
+	 */
+	bool partition_unknown;
 
 	/* Get Health Info (4200h) response, if health_valid */
 	struct cxlmi_cmd_memdev_get_health_info_rsp health;
@@ -1072,7 +1077,7 @@ struct fmd_mem_chunk {
 	 * Table 8-311). Until Get Partition Info (4100h) shows it active it
 	 * is served StandbyOffline and is in no Connection, and it keeps its
 	 * range of the domain, so that no other chunk takes it (cxl-fmd's
-	 * choices): see fmd_sld_staged_refresh(). @staged_vmem is the Next
+	 * choices): see fmd_sld_partition_refresh(). @staged_vmem is the Next
 	 * Volatile Capacity it was staged with, in units of 256 MB. Which
 	 * resets the device says it waits for is its SLD's
 	 * set_partition_effect.
@@ -2711,14 +2716,16 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
 
 /*
  * Read Get Partition Info (4100h) of @sld again if it has a staged chunk
- * (struct fmd_mem_chunk), and nothing is sent if it has none. With no
- * change pending, a staged chunk the Active Volatile Capacity has reached
+ * (struct fmd_mem_chunk), if the partition last read or set has a change
+ * pending (a Next Volatile or Next Persistent Capacity that is not 0), or
+ * if it is partition_unknown; nothing is sent otherwise. With no change
+ * pending, a staged chunk the Active Volatile Capacity has reached
  * becomes an ordinary one, and one it has not is removed. A change still
  * pending, or a read that fails, leaves them as they are. Called by
  * fmd_rescan(), and when the SLD's event logs have a record or overflowed
  * (a reset may have come). Returns 0, or -EIO if 4100h was not answered.
  */
-int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld);
+int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld);
 
 
 

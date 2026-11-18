@@ -261,11 +261,15 @@ Partition Info shows it active (cxl-fmd's choices):
   and absent when the CEL could not be read or does not list 4101h. The
   names are cxl-fmd's (see "Oem schema").
 
-Get Partition Info of an SLD that has a staged chunk, and of no other, is
-read on each `--rescan`, and when a read of the SLD's event logs finds a
-record in any of them, or an overflow: no event record is defined to say
-that a memory device was reset, and taking any record as one that may is
-cxl-fmd's choice. An SLD whose logs are the host's (one on the kernel's
+Get Partition Info of an SLD that has a staged chunk, or whose partition
+as last read or set has a change pending (a Next Volatile or Next
+Persistent Capacity that is not 0: a chunk `DELETE`, or a `PATCH` of
+`Memory`, staged one), and of no other, is read on each `--rescan`, and
+when a read of the SLD's event logs finds a record in any of them, or an
+overflow. Only a read shows that a pending change has become active;
+until one does, `Memory` serves the partition as last read or set. No
+event record is defined to say that a memory device was reset, and
+taking any record as one that may is cxl-fmd's choice. An SLD whose logs are the host's (one on the kernel's
 mailbox) is read only on a `--rescan`. While Next Volatile or Next Persistent Capacity
 is not 0 ("If both this field and the Next Persistent Capacity field are
 0, there is no pending change to the partitioning", Table 8-310), it
@@ -2893,6 +2897,7 @@ Changes from the fixes of the follow-up design review (branch
 | `DynamicCapacityRelease`, `TagBased`, with a `Length` larger than what the host had of the Tag when the task began | the task `Running` for good once all of the host's capacity of the Tag was gone | `Completed` once what the host had of the Tag is gone |
 | On hardware, `DynamicCapacityAdd` of a non-zero Tag when the tag list (5608h) cannot be read, at the last read and at the one for the task's baseline | 5604h sent, as if the host had no add of the Tag outstanding | `503`, nothing sent |
 | The task of an add of a non-zero Tag, on a tick whose 5608h fails | `Completed` (`OK`, or `Warning` if less than asked) on capacity of the Tag in the host's 5603h, whether or not the host still had an add of it pending | `Running` (monitor `202`), "The tag list could not be read", until a read of the list completes |
+| `--rescan` (or an SLD event log record) of a directly attached SLD with no staged chunk whose partition has a change pending (after a chunk `DELETE` or a `PATCH` of `Memory`) | Get Partition Info not read: after the reset, `Memory` served `VolatileSizeLimitMiB` and `CXL.Staged*SizeMiB` as before it, for good | Get Partition Info read again until no change is pending: `Memory` serves what the device has |
 
 ---
 

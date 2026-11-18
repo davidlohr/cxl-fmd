@@ -5612,7 +5612,7 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				/*
 				 * The chunk is of the next configuration, not of
 				 * the active one, until a read-back shows it
-				 * active (fmd_sld_staged_refresh()).
+				 * active (fmd_sld_partition_refresh()).
 				 */
 				if (!rc) {
 					chunk->staged = true;

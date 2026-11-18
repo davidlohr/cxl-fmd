@@ -9004,6 +9004,130 @@ static void test_chunk_delete_partition_refused(void)
 	report("a chunk whose partition cannot be moved", before);
 }
 
+/* ---- Follow-up review item 5: staged SLD partitions ---- */
+
+#define SLD_VOL_CHUNK "{\"MemoryChunkSizeMiB\": 1024, \"AddressRangeType\": \"Volatile\"}"
+
+/* POST a 1 GiB Volatile chunk to @dom of @id; its Id in @out */
+static int sld_vol_post(struct fmd_ctx *ctx, const char *id, const char *dom,
+			char *out, size_t n)
+{
+	json_t *rsp = NULL;
+	int rc = fmd_redfish_post_memory_chunk(ctx, id, dom, SLD_VOL_CHUNK,
+					       strlen(SLD_VOL_CHUNK), &rsp);
+
+	snprintf(out, n, "%s", rsp ? json_string_value(json_object_get(rsp, "Id")) : "");
+	json_decref(rsp);
+	return rc;
+}
+
+/*
+ * A directly attached SLD of 16 GiB (64 units of 256 MB), all of it
+ * partitionable in steps of 1 GiB, with 4 GiB (16) volatile now, on which
+ * Set Partition Info may be sent. The chunk found at discovery (of no one
+ * type) is deleted, which sends nothing. Its ID in @id, its domain's in
+ * @dom.
+ */
+static struct fmd_sld *sld_partitionable(struct fmd_ctx *ctx, struct cxlmi_endpoint **ep,
+					 uint64_t serial, char *id, char *dom)
+{
+	struct fmd_sld *sld = direct_sld(ctx, ep, serial, 64, 0, 0, 4, 16);
+	struct fmd_component *d, *c;
+	unsigned int sent;
+	int rc;
+
+	ctx->config.allow_mctp_restricted = true;
+	if (!sld)
+		return NULL;
+	snprintf(id, FMD_MAX_ID_LEN, "%s", sld->base.id);
+	d = fmd_first_child_type(&sld->base, FMD_COMPONENT_DOMAIN);
+	c = d ? fmd_first_child_type(d, FMD_COMPONENT_CHUNK) : NULL;
+	if (!d || !c)
+		return NULL;
+	snprintf(dom, FMD_MAX_ID_LEN + 16, "%s", d->id);
+	sent = commands_sent(*ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, c->id);
+	if (rc || commands_sent(*ep) != sent)
+		return NULL;
+	return sld;
+}
+
+/*
+ * Follow-up review item 5 (c-2): Get Partition Info was read again only
+ * for an SLD with a staged chunk. A DELETE of an active Volatile chunk
+ * stages a decrease, "the "next" configuration, to become active on the
+ * next reset" (CXL r4.0 Table 8-311), with no staged chunk left: the
+ * partition was never read again, and Memory served the Next Volatile
+ * Capacity as staged after the reset had made it active. A change pending
+ * as last read or set is read again, as a staged chunk is.
+ */
+static void test_sld_partition_pending(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], a[64];
+	struct fmd_sld *sld = sld_partitionable(ctx, &ep, 0x5c01, id, dom);
+	struct fmd_mem_chunk *ca;
+	unsigned int sent;
+	int before = failures, rc;
+	json_t *m;
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+
+	/* a chunk staged, then made active by a reset: 5 GiB volatile */
+	answer(ep, 0x4101, NULL, 0);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	answer_partition(ep, 20, 44, 0, 0);
+	fmd_rescan(ctx);
+	ca = fmd_topology_find_chunk(&ctx->topology, a);
+	CHECK(rc == 0 && ca && !ca->staged && sld->partition.active_vmem == 20,
+	      "POST %d, chunk %s", rc, ca ? (ca->staged ? "staged" : "active") : "gone");
+
+	/* its DELETE stages the decrease: 4 GiB volatile from the next reset */
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	CHECK(rc == 0 && last_opcode(ep) == 0x4101 && sld->partition.next_vmem == 16,
+	      "DELETE %d, %04xh, next %" PRIu64, rc, last_opcode(ep),
+	      (uint64_t)sld->partition.next_vmem);
+
+	/* pending: the re-scan reads Get Health Info and Get Partition Info */
+	answer_partition(ep, 20, 44, 16, 48);
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100,
+	      "pending: %u sent, last %04xh", commands_sent(ep) - sent, last_opcode(ep));
+
+	/* the reset has come: read again, and served as it is */
+	cxlmi_mock_clear_responses(ep);
+	answer_partition(ep, 16, 48, 0, 0);
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100 &&
+	      sld->partition.active_vmem == 16 && !sld->partition.next_vmem,
+	      "after the reset: %u sent, last %04xh, active %" PRIu64 " next %" PRIu64,
+	      commands_sent(ep) - sent, last_opcode(ep),
+	      (uint64_t)sld->partition.active_vmem, (uint64_t)sld->partition.next_vmem);
+	m = fmd_redfish_memory(ctx, id, id);
+	CHECK(json_integer_value(json_object_get(m, "VolatileSizeLimitMiB")) == 4096 &&
+	      !json_object_get(m, "CXL"),
+	      "Memory: VolatileSizeLimitMiB %" JSON_INTEGER_FORMAT ", CXL %s",
+	      json_integer_value(json_object_get(m, "VolatileSizeLimitMiB")),
+	      json_object_get(m, "CXL") ? "served" : "absent");
+	json_decref(m);
+
+	/* nothing pending, nothing staged: Get Health Info alone, as before */
+	sent = commands_sent(ep);
+	fmd_rescan(ctx);
+	CHECK(commands_sent(ep) == sent + 1 && last_opcode(ep) == 0x4200,
+	      "nothing pending: %u sent, last %04xh", commands_sent(ep) - sent,
+	      last_opcode(ep));
+out:
+	fmd_ctx_free(ctx);
+	report("an SLD's partition read again while a change is pending", before);
+}
+
 static void test_mailbox_events_are_the_hosts(void)
 {
 	struct fmd_ctx *ctx = new_ctx();
@@ -14321,6 +14445,7 @@ int main(void)
 	test_switch_sld_placeholder();
 	test_set_partition();
 	test_staged_chunk_resets();
+	test_sld_partition_pending();
 	test_o4_gate();
 	test_ld_security();
 	test_security_cel();

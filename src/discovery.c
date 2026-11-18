@@ -2910,7 +2910,7 @@ int fmd_rescan(struct fmd_ctx *ctx)
 
 	/* partitions staged for a reset: whether it has come */
 	fmd_for_each_type(&ctx->topology, comp, FMD_COMPONENT_SLD)
-		fmd_sld_staged_refresh(ctx, fmd_to_sld(comp));
+		fmd_sld_partition_refresh(ctx, fmd_to_sld(comp));
 
 	added = ctx->topology.added - added;
 	removed = ctx->topology.removed - removed;
@@ -4410,14 +4410,23 @@ static struct fmd_mem_chunk *sld_staged_chunk(struct fmd_sld *sld)
  * again on each re-scan, and when the SLD's event logs have a record
  * (device_logs() in src/event_log.c). Caller holds fabric_lock.
  */
-int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
+int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 {
 	struct cxlmi_cmd_memdev_get_partition_info_rsp part = { 0 };
 	struct fmd_component *dom, *child;
 	struct fmd_mem_chunk *chunk;
 	int rc;
 
-	if (!sld_staged_chunk(sld) || !sld->base.ep)
+	if (!sld->base.ep)
+		return 0;
+	/*
+	 * A change pending as last read or set: "If both this field and the
+	 * Next Persistent Capacity field are 0, there is no pending change to
+	 * the partitioning" (Table 8-310). Only a read shows that it has
+	 * become active, whether or not a chunk waits for it.
+	 */
+	if (!sld_staged_chunk(sld) && !sld->partition.next_vmem &&
+	    !sld->partition.next_pmem && !sld->partition_unknown)
 		return 0;
 
 	rc = cxlmi_cmd_memdev_get_partition_info(sld->base.ep, CXLMI_NO_TUNNEL, &part);
@@ -4429,6 +4438,9 @@ int fmd_sld_staged_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 
 	fmd_topology_wrlock(&ctx->topology);
 	sld->partition = part;
+	if (sld->partition_unknown)
+		fmd_info(ctx, "%s: partition known again", sld->base.id);
+	sld->partition_unknown = false;
 	if (!part.next_vmem && !part.next_pmem) {
 		fmd_for_each_child_type(&sld->base, dom, FMD_COMPONENT_DOMAIN) {
 			fmd_for_each_child_type(dom, child, FMD_COMPONENT_CHUNK) {
