@@ -9052,6 +9052,114 @@ static struct fmd_sld *sld_partitionable(struct fmd_ctx *ctx, struct cxlmi_endpo
 	return sld;
 }
 
+/* A chunk of @sld made active: POSTed, then a reset to @active units */
+static struct fmd_mem_chunk *sld_active_chunk(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+					      const char *id, const char *dom,
+					      uint64_t active, char *out, size_t n)
+{
+	struct fmd_mem_chunk *c;
+
+	answer(ep, 0x4101, NULL, 0);
+	if (sld_vol_post(ctx, id, dom, out, n))
+		return NULL;
+	answer_partition(ep, active, 64 - active, 0, 0);
+	fmd_rescan(ctx);
+	c = fmd_topology_find_chunk(&ctx->topology, out);
+	return c && !c->staged ? c : NULL;
+}
+
+/* The Volatile Capacity of the last 4101h sent to @ep, -1 if it was not one */
+static int64_t last_volatile_capacity(struct cxlmi_endpoint *ep)
+{
+	uint8_t pl[16] = { 0 };
+	uint16_t op = 0;
+
+	if (last_payload(ep, &op, pl, sizeof(pl)) < 9 || op != 0x4101)
+		return -1;
+	return (int64_t)get64(pl);
+}
+
+/*
+ * Follow-up review item 5 (a): each staged chunk keeps the Next Volatile
+ * Capacity it was staged with, an absolute total, and a DELETE of a chunk
+ * staged before it left it waiting for more than the device would have.
+ * With 4 GiB active and A and B of 1 GiB staged (20 and 24, in units of
+ * 256 MB), a DELETE of A stages 20: the reset makes 5 GiB active, exactly
+ * the plan, and B, still waiting for 24, was removed. A DELETE lowers what
+ * the chunks staged after it wait for; one of an active chunk lowers what
+ * every staged chunk waits for.
+ */
+static void test_sld_staged_delete(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *ep;
+	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], a[64], b[64];
+	struct fmd_sld *sld = sld_partitionable(ctx, &ep, 0x5a01, id, dom);
+	struct fmd_mem_chunk *ca, *cb;
+	int before = failures, rc;
+	json_t *j;
+
+	CHECK(sld, "no SLD");
+	if (!sld)
+		goto out;
+	answer(ep, 0x4101, NULL, 0);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 20, "POST A: %d", rc);
+	answer(ep, 0x4101, NULL, 0);
+	rc = sld_vol_post(ctx, id, dom, b, sizeof(b));
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 24, "POST B: %d", rc);
+
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	ca = fmd_topology_find_chunk(&ctx->topology, a);
+	cb = fmd_topology_find_chunk(&ctx->topology, b);
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 20 && !ca && cb &&
+	      cb->staged && cb->staged_vmem == 20,
+	      "DELETE A: %d, A %s, B waits for %" PRIu64, rc, ca ? "kept" : "gone",
+	      cb ? cb->staged_vmem : 0);
+	j = fmd_redfish_memory_chunk(ctx, id, dom, b);
+	CHECK(json_integer_value(json_object_get(pending_partition(j),
+						 "NextVolatileCapacityBytes")) == 20LL << 28 &&
+	      json_is_false(json_object_get(pending_partition(j), "Removal")),
+	      "B served waiting for %" JSON_INTEGER_FORMAT,
+	      json_integer_value(json_object_get(pending_partition(j),
+						 "NextVolatileCapacityBytes")));
+	json_decref(j);
+
+	/* the reset makes the revised plan active: B is */
+	answer_partition(ep, 20, 44, 0, 0);
+	fmd_rescan(ctx);
+	cb = fmd_topology_find_chunk(&ctx->topology, b);
+	CHECK(cb && !cb->staged, "after the reset B is %s",
+	      cb ? "still staged" : "removed");
+	fmd_ctx_free(ctx);
+
+	/* an active chunk deleted after another was staged */
+	ctx = new_ctx();
+	sld = sld_partitionable(ctx, &ep, 0x5a02, id, dom);
+	ca = sld ? sld_active_chunk(ctx, ep, id, dom, 20, a, sizeof(a)) : NULL;
+	CHECK(ca, "no active chunk");
+	if (!ca)
+		goto out;
+	answer(ep, 0x4101, NULL, 0);
+	rc = sld_vol_post(ctx, id, dom, b, sizeof(b));
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 24, "POST B: %d", rc);
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	cb = fmd_topology_find_chunk(&ctx->topology, b);
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 20 && cb && cb->staged_vmem == 20,
+	      "DELETE of active A: %d, B waits for %" PRIu64, rc, cb ? cb->staged_vmem : 0);
+	answer_partition(ep, 20, 44, 0, 0);
+	fmd_rescan(ctx);
+	cb = fmd_topology_find_chunk(&ctx->topology, b);
+	CHECK(cb && !cb->staged && !fmd_topology_find_chunk(&ctx->topology, a),
+	      "after the reset: B %s, A %s", cb ? (cb->staged ? "staged" : "active") : "gone",
+	      fmd_topology_find_chunk(&ctx->topology, a) ? "kept" : "gone");
+out:
+	fmd_ctx_free(ctx);
+	report("a DELETE of a staged chunk moves those staged after it", before);
+}
+
 /*
  * Follow-up review item 5 (c-2): Get Partition Info was read again only
  * for an SLD with a staged chunk. A DELETE of an active Volatile chunk
@@ -9067,14 +9175,18 @@ static void test_sld_partition_pending(void)
 	struct cxlmi_endpoint *ep;
 	char id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], a[64];
 	struct fmd_sld *sld = sld_partitionable(ctx, &ep, 0x5c01, id, dom);
-	struct fmd_mem_chunk *ca;
+	struct direct_chunks d = { .dev = sld ? &sld->base : NULL };
+	char state[32], type[16], c[64];
+	struct fmd_mem_domain *domain;
+	struct fmd_mem_chunk *ca, *cc;
 	unsigned int sent;
 	int before = failures, rc;
-	json_t *m;
+	json_t *m, *j;
 
 	CHECK(sld, "no SLD");
 	if (!sld)
 		goto out;
+	domain = fmd_topology_find_domain(&ctx->topology, dom);
 
 	/* a chunk staged, then made active by a reset: 5 GiB volatile */
 	answer(ep, 0x4101, NULL, 0);
@@ -9085,18 +9197,46 @@ static void test_sld_partition_pending(void)
 	CHECK(rc == 0 && ca && !ca->staged && sld->partition.active_vmem == 20,
 	      "POST %d, chunk %s", rc, ca ? (ca->staged ? "staged" : "active") : "gone");
 
-	/* its DELETE stages the decrease: 4 GiB volatile from the next reset */
+	/*
+	 * its DELETE stages the decrease: 4 GiB volatile from the next reset.
+	 * Active until then, the chunk is kept, removing: StandbyOffline, in
+	 * no Connection, its range its own.
+	 */
 	answer(ep, 0x4101, NULL, 0);
 	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
 	CHECK(rc == 0 && last_opcode(ep) == 0x4101 && sld->partition.next_vmem == 16,
 	      "DELETE %d, %04xh, next %" PRIu64, rc, last_opcode(ep),
 	      (uint64_t)sld->partition.next_vmem);
+	ca = fmd_topology_find_chunk(&ctx->topology, a);
+	CHECK(ca && ca->staged && ca->removing && ca->staged_vmem == 16 &&
+	      domain->remaining == domain->capacity - (1024ULL << 20),
+	      "deleted active chunk %s, %" PRIu64 " MiB remaining",
+	      ca ? (ca->removing ? "removing" : "kept") : "gone", domain->remaining >> 20);
+	chunk_state(ctx, id, dom, a, state, sizeof(state), type, sizeof(type));
+	j = fmd_redfish_memory_chunk(ctx, id, dom, a);
+	CHECK(!strcmp(state, "StandbyOffline") &&
+	      json_is_true(json_object_get(pending_partition(j), "Removal")) &&
+	      json_integer_value(json_object_get(pending_partition(j),
+						 "NextVolatileCapacityBytes")) == 16LL << 28,
+	      "removing chunk served %s", state);
+	json_decref(j);
+	fmd_conn_for_each(ctx, direct_conn_chunks, &d);
+	CHECK(d.conns == 1 && d.chunks == 0, "%d direct Connections, %d chunks",
+	      d.conns, d.chunks);
+
+	/* a DELETE again sends nothing: the decrease is staged once */
+	sent = commands_sent(ep);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	CHECK(rc == 0 && commands_sent(ep) == sent &&
+	      fmd_topology_find_chunk(&ctx->topology, a),
+	      "DELETE again: %d, %u sent", rc, commands_sent(ep) - sent);
 
 	/* pending: the re-scan reads Get Health Info and Get Partition Info */
 	answer_partition(ep, 20, 44, 16, 48);
 	sent = commands_sent(ep);
 	fmd_rescan(ctx);
-	CHECK(commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100,
+	CHECK(commands_sent(ep) == sent + 2 && last_opcode(ep) == 0x4100 &&
+	      fmd_topology_find_chunk(&ctx->topology, a),
 	      "pending: %u sent, last %04xh", commands_sent(ep) - sent, last_opcode(ep));
 
 	/* the reset has come: read again, and served as it is */
@@ -9109,6 +9249,11 @@ static void test_sld_partition_pending(void)
 	      "after the reset: %u sent, last %04xh, active %" PRIu64 " next %" PRIu64,
 	      commands_sent(ep) - sent, last_opcode(ep),
 	      (uint64_t)sld->partition.active_vmem, (uint64_t)sld->partition.next_vmem);
+	CHECK(!fmd_topology_find_chunk(&ctx->topology, a) &&
+	      domain->remaining == domain->capacity,
+	      "after the reset the chunk is %s, %" PRIu64 " MiB remaining",
+	      fmd_topology_find_chunk(&ctx->topology, a) ? "kept" : "gone",
+	      domain->remaining >> 20);
 	m = fmd_redfish_memory(ctx, id, id);
 	CHECK(json_integer_value(json_object_get(m, "VolatileSizeLimitMiB")) == 4096 &&
 	      !json_object_get(m, "CXL"),
@@ -9123,6 +9268,28 @@ static void test_sld_partition_pending(void)
 	CHECK(commands_sent(ep) == sent + 1 && last_opcode(ep) == 0x4200,
 	      "nothing pending: %u sent, last %04xh", commands_sent(ep) - sent,
 	      last_opcode(ep));
+
+	/*
+	 * Net zero: an active chunk deleted (16), another staged after it
+	 * (20, as active is). With no change pending after the reset, the
+	 * one goes and the other is active.
+	 */
+	ca = sld_active_chunk(ctx, ep, id, dom, 20, a, sizeof(a));
+	CHECK(ca, "no active chunk");
+	if (!ca)
+		goto out;
+	answer(ep, 0x4101, NULL, 0);
+	rc = fmd_redfish_delete_memory_chunk(ctx, id, dom, a);
+	answer(ep, 0x4101, NULL, 0);
+	rc |= sld_vol_post(ctx, id, dom, c, sizeof(c));
+	CHECK(rc == 0 && last_volatile_capacity(ep) == 20, "DELETE and POST: %d", rc);
+	answer_partition(ep, 20, 44, 0, 0);
+	fmd_rescan(ctx);
+	cc = fmd_topology_find_chunk(&ctx->topology, c);
+	CHECK(!fmd_topology_find_chunk(&ctx->topology, a) && cc && !cc->staged,
+	      "net zero: the deleted one %s, the new one %s",
+	      fmd_topology_find_chunk(&ctx->topology, a) ? "kept" : "gone",
+	      cc ? (cc->staged ? "staged" : "active") : "gone");
 out:
 	fmd_ctx_free(ctx);
 	report("an SLD's partition read again while a change is pending", before);
@@ -14446,6 +14613,7 @@ int main(void)
 	test_set_partition();
 	test_staged_chunk_resets();
 	test_sld_partition_pending();
+	test_sld_staged_delete();
 	test_o4_gate();
 	test_ld_security();
 	test_security_cel();

@@ -4445,7 +4445,8 @@ int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 		fmd_for_each_child_type(&sld->base, dom, FMD_COMPONENT_DOMAIN) {
 			fmd_for_each_child_type(dom, child, FMD_COMPONENT_CHUNK) {
 				chunk = fmd_to_chunk(child);
-				if (!chunk->staged || part.active_vmem < chunk->staged_vmem)
+				if (!chunk->staged || chunk->removing ||
+				    part.active_vmem < chunk->staged_vmem)
 					continue;
 				fmd_info(ctx, "%s: chunk %s is active", sld->base.id,
 					 child->id);
@@ -4457,13 +4458,61 @@ int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 	if (part.next_vmem || part.next_pmem)
 		return 0;
 
-	/* what is left was not made active: it goes */
+	/*
+	 * What is left was not made active, or was removing: it goes. A
+	 * removing chunk goes whatever is active (cxl-fmd's choice): with no
+	 * change pending, the plan its DELETE was part of has been applied
+	 * or withdrawn, and Next Volatile Capacity, one total for the whole
+	 * plan, does not tell which of its chunks a withdrawn one kept.
+	 */
 	while ((chunk = sld_staged_chunk(sld))) {
-		fmd_warn(ctx, "%s: chunk %s was staged for %" PRIu64 " MB volatile, "
-			 "and %" PRIu64 " MB is active: removed", sld->base.id,
-			 chunk->base.id, (uint64_t)chunk->staged_vmem * 256,
-			 (uint64_t)part.active_vmem * 256);
+		if (!chunk->removing)
+			fmd_warn(ctx, "%s: chunk %s was staged for %" PRIu64 " MB "
+				 "volatile, and %" PRIu64 " MB is active: removed",
+				 sld->base.id, chunk->base.id,
+				 (uint64_t)chunk->staged_vmem * 256,
+				 (uint64_t)part.active_vmem * 256);
+		else if (part.active_vmem > chunk->staged_vmem)
+			fmd_warn(ctx, "%s: chunk %s was deleted for %" PRIu64 " MB "
+				 "volatile, and %" PRIu64 " MB is active: removed",
+				 sld->base.id, chunk->base.id,
+				 (uint64_t)chunk->staged_vmem * 256,
+				 (uint64_t)part.active_vmem * 256);
+		else
+			fmd_info(ctx, "%s: chunk %s is no longer active: removed",
+				 sld->base.id, chunk->base.id);
 		fmd_chunk_remove(&ctx->topology, chunk);
 	}
 	return 0;
+}
+
+bool fmd_sld_chunk_deleted(struct fmd_ctx *ctx, struct fmd_sld *sld,
+			   struct fmd_mem_chunk *chunk, uint64_t next_vmem)
+{
+	uint64_t units = chunk->size / CXL_CAPACITY_UNIT;
+	bool active = !chunk->staged;
+	struct fmd_component *dom, *child;
+
+	fmd_topology_wrlock(&ctx->topology);
+	fmd_for_each_child_type(&sld->base, dom, FMD_COMPONENT_DOMAIN) {
+		fmd_for_each_child_type(dom, child, FMD_COMPONENT_CHUNK) {
+			struct fmd_mem_chunk *other = fmd_to_chunk(child);
+
+			if (other == chunk || !other->staged || other->removing ||
+			    (!active && other->staged_vmem <= chunk->staged_vmem))
+				continue;
+			other->staged_vmem = other->staged_vmem > units ?
+					     other->staged_vmem - units : 0;
+			fmd_info(ctx, "%s: chunk %s now waits for %" PRIu64 " MB volatile",
+				 sld->base.id, child->id,
+				 (uint64_t)other->staged_vmem * 256);
+		}
+	}
+	if (active) {
+		chunk->staged = true;
+		chunk->removing = true;
+		chunk->staged_vmem = next_vmem;
+	}
+	fmd_topology_wrunlock(&ctx->topology);
+	return active;
 }

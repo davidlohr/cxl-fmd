@@ -2877,8 +2877,9 @@ static json_t *chunk_status(const struct fmd_status_rollup *r,
 static json_t *staged_chunk_oem(const struct fmd_sld *sld,
 				const struct fmd_mem_chunk *chunk)
 {
-	json_t *pending = json_pack("{s:I}", "NextVolatileCapacityBytes",
-				    (json_int_t)(chunk->staged_vmem * CXL_CAPACITY_UNIT));
+	json_t *pending = json_pack("{s:I, s:b}", "NextVolatileCapacityBytes",
+				    (json_int_t)(chunk->staged_vmem * CXL_CAPACITY_UNIT),
+				    "Removal", chunk->removing);
 
 	if (sld->set_partition_effect.known) {
 		uint16_t e = sld->set_partition_effect.effect;
@@ -5805,6 +5806,14 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 		return -2;
 
 	/*
+	 * Deleted already: its decrease is staged, and it goes at the reset
+	 * (fmd_sld_chunk_deleted()). Nothing is sent again, which would take
+	 * the chunk off the partition twice.
+	 */
+	if (chunk->removing)
+		return 0;
+
+	/*
 	 * a chunk a binding exposes stays while it does, as the switches
 	 * read now show it (binding_coverage()) and as the Connections do
 	 * (chunk_connected())
@@ -5878,6 +5887,14 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				if (cur > chunk->size)
 					new_volatile = cur - chunk->size;
 				rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
+				/*
+				 * The chunks staged after it wait for less; an
+				 * active one stays active until the reset, and
+				 * is kept as removing until a read shows it.
+				 */
+				if (!rc && fmd_sld_chunk_deleted(ctx, sld, chunk,
+								 new_volatile / CXL_CAPACITY_UNIT))
+					return 0;
 			}
 		} else {
 			/* nothing would be given back: refused, not 204 */

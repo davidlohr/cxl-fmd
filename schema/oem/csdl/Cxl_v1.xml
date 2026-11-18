@@ -157,7 +157,7 @@
       <ComplexType Name="MemoryChunk" BaseType="Resource.OemObject">
         <Annotation Term="OData.AdditionalProperties" Bool="false"/>
         <Annotation Term="OData.Description" String="cxl-fmd's properties of a memory chunk."/>
-        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a memory chunk of a single logical device whose Set Partition Info (4101h) was sent without Immediate, and which is staged until the device is reset."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a memory chunk of a single logical device whose Set Partition Info (4101h), for its creation or its deletion, was sent without Immediate, and which is staged until the device is reset."/>
         <Property Name="PendingPartition" Type="Cxl.v1_0_0.PendingPartition" Nullable="false">
           <Annotation Term="OData.Description" String="The partition the chunk waits for."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain the partition of the device the chunk is staged for, which CXL r4.0 Table 8-311 says shall 'become active on the next reset (as specified in the command effects)'.  It shall be present only while the chunk's Status.State is StandbyOffline for that reason."/>
@@ -171,8 +171,13 @@
         <Property Name="NextVolatileCapacityBytes" Type="Edm.Int64" Nullable="false">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
           <Annotation Term="OData.Description" String="The volatile capacity of the device in all once the partition is active, in bytes."/>
-          <Annotation Term="OData.LongDescription" String="This property shall contain, in bytes, the Volatile Capacity in all that the chunk was staged with, which Get Partition Info (4100h) reports as Next Volatile Capacity (CXL r4.0 Table 8-310) while the change is pending.  The chunk shall become enabled once Active Volatile Capacity reaches it with no change pending."/>
+          <Annotation Term="OData.LongDescription" String="This property shall contain, in bytes, the Volatile Capacity in all that the chunk was staged with, which Get Partition Info (4100h) reports as Next Volatile Capacity (CXL r4.0 Table 8-310) while the change is pending, less the size of any chunk staged before it and deleted since, or of any active chunk deleted since.  A chunk being added shall become enabled once Active Volatile Capacity reaches it with no change pending.  A chunk being removed shall be removed once no change is pending."/>
           <Annotation Term="Measures.Unit" String="By"/>
+        </Property>
+        <Property Name="Removal" Type="Edm.Boolean" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Whether the pending change removes the chunk."/>
+          <Annotation Term="OData.LongDescription" String="This property shall indicate whether the chunk was active and deleted, its capacity staged to be taken off the volatile capacity at the device's next reset and active until then (true), or was created and is staged to be added (false)."/>
         </Property>
         <Property Name="ActivationResets" Type="Collection(Cxl.v1_0_0.ResetType)" Nullable="false">
           <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>

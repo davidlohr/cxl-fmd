@@ -1081,8 +1081,15 @@ struct fmd_mem_chunk {
 	 * Volatile Capacity it was staged with, in units of 256 MB. Which
 	 * resets the device says it waits for is its SLD's
 	 * set_partition_effect.
+	 *
+	 * @removing is a staged chunk that was active, and whose DELETE
+	 * staged a decrease: the device keeps the capacity active until the
+	 * reset. It is served and kept as a staged one is, and goes once a
+	 * read shows no change pending (fmd_sld_chunk_deleted()); its
+	 * @staged_vmem is the Next Volatile Capacity of the decrease.
 	 */
 	bool staged;
+	bool removing;
 	uint64_t staged_vmem;
 };
 
@@ -2726,6 +2733,18 @@ int fmd_sld_set_partition(struct fmd_ctx *ctx, struct fmd_sld *sld,
  * (a reset may have come). Returns 0, or -EIO if 4100h was not answered.
  */
 int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld);
+
+/*
+ * The DELETE of @chunk of @sld had Set Partition Info (4101h) leave
+ * @next_vmem (units of 256 MB) staged. Each staged chunk waits for a Next
+ * Volatile Capacity that included @chunk's: a staged chunk staged after
+ * a staged @chunk, or any staged chunk if @chunk was active, has it
+ * lowered by @chunk's size. Returns true if @chunk was active and is now
+ * removing (struct fmd_mem_chunk), to be kept until the reset; false if
+ * it was staged, and goes now. Caller holds fabric_lock.
+ */
+bool fmd_sld_chunk_deleted(struct fmd_ctx *ctx, struct fmd_sld *sld,
+			   struct fmd_mem_chunk *chunk, uint64_t next_vmem);
 
 
 

@@ -2022,7 +2022,7 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 					  RF_GENERAL(FMD_RES_CORRECT));
 		if (rc == -23)
 			return send_error(conn, MHD_HTTP_CONFLICT,
-					  "The memory chunk is staged: its partition is active from the device's next reset",
+					  "The memory chunk is staged: the partition change it waits for, its addition or its removal, takes effect at the device's next reset",
 					  fmd_redfish_message(FMD_RF_RESOURCE_IN_USE,
 						"Resubmit the request once the device has been "
 						"reset.", NULL, 0));

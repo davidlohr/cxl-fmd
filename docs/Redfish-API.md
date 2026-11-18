@@ -243,7 +243,11 @@ Partition Info shows it active (cxl-fmd's choices):
   it is `409`;
 - its range of the domain stays its own: no other chunk is given it;
 - a `DELETE` of it sends Set Partition Info for the volatile capacity
-  staged less the chunk, as for any `"Volatile"` chunk;
+  staged less the chunk, as for any `"Volatile"` chunk, and removes it;
+  every chunk staged after it then waits for that much less (Next
+  Volatile Capacity is one total for the whole plan: without this a
+  chunk staged after a deleted one would wait for more than the device
+  will have, and be removed at the reset);
 - it has `Oem.Cxl.PendingPartition` (`#Cxl.v1_0_0.MemoryChunk`, in the
   `201` and on a `GET`): `NextVolatileCapacityBytes`, the volatile
   capacity in all it was staged with, and `ActivationResets`, the resets
@@ -259,7 +263,24 @@ Partition Info shows it active (cxl-fmd's choices):
   are needed, the table does not say, and cxl-fmd does not either.
   `ActivationResets` is empty when the CEL lists 4101h with none of them,
   and absent when the CEL could not be read or does not list 4101h. The
-  names are cxl-fmd's (see "Oem schema").
+  names are cxl-fmd's (see "Oem schema"). `Removal` is `false`.
+
+A `DELETE` of an active `"Volatile"` chunk stages a decrease the same
+way: the capacity stays active until the reset. The chunk is kept,
+removing, until a read shows no change pending, and is served and held
+as a staged one is (`StandbyOffline`, in no Connection, its range its
+own), with `Oem.Cxl.PendingPartition.Removal` `true` and
+`NextVolatileCapacityBytes` the volatile capacity in all the decrease was
+staged with. Every staged chunk then waits for that much less. A
+`DELETE` of a chunk that is removing sends nothing and is `204`. That
+`204` departs from RFC 9110 Section 9.3.5, under which the server
+"SHOULD send ... a 202 (Accepted) status code if the action will likely
+succeed but has not yet been enacted": a `202` here would carry no
+`Task` to follow, and the chunk's `StandbyOffline` and
+`PendingPartition` say what is pending (cxl-fmd's choice). Once
+no change is pending, a removing chunk goes, whatever is active (Next
+Volatile Capacity, one total, does not say which part of a plan that was
+withdrawn or replaced was kept); these are cxl-fmd's choices.
 
 Get Partition Info of an SLD that has a staged chunk, or whose partition
 as last read or set has a change pending (a Next Volatile or Next
@@ -781,7 +802,7 @@ derived from `Resource.OemObject`:
 | `Connection` | `#Cxl.v1_0_0.Connection` | `Origin` |
 | `PCIeDevice` of a DCD | `#Cxl.v1_0_0.PCIeDevice` | `DynamicCapacity` (sizes in bytes) and `DynamicCapacityTags` (with `LastRefreshed`; see [DCD-FM-API.md](DCD-FM-API.md)) |
 | `CXLLogicalDevice` of a DCD, once its host's regions or extents have been read | `#Cxl.v1_0_0.CXLLogicalDevice` | `DynamicCapacityRegionsLastRefreshed`, `DynamicCapacityExtentsLastRefreshed` |
-| `MemoryChunk` of an SLD staged for a reset (see "Staged chunks") | `#Cxl.v1_0_0.MemoryChunk` | `PendingPartition` (`NextVolatileCapacityBytes`, `ActivationResets`) |
+| `MemoryChunk` of an SLD staged for a reset, to be added or removed (see "Staged chunks") | `#Cxl.v1_0_0.MemoryChunk` | `PendingPartition` (`NextVolatileCapacityBytes`, `ActivationResets`, `Removal`) |
 | `MemoryRegion` of a DCD | `#Cxl.v1_0_0.MemoryRegion` | `RegionBaseOffsetBytes`, `RegionSizeBytes`, `BlockSizeBytes`, `LastRefreshed` |
 | `MemoryExtent` | `#Cxl.v1_0_0.MemoryExtent` | `ExtentOffsetBytes`, `ExtentSizeBytes`, `LastRefreshed` |
 
@@ -1392,7 +1413,9 @@ mock's partition.
   issues `Set Partition Info (0x4101h)` for the volatile capacity staged
   (or else active) less the chunk, staged for the next reset as on
   creation; a partition the device cannot be given is `400`, and the
-  chunk stays. A `"PMEM"` chunk, and a `"Volatile"` one of an SLD with
+  chunk stays. A staged chunk goes at once; an active one stays active
+  until the reset, and is kept, removing, until then (see "Staged
+  chunks"). A `"PMEM"` chunk, and a `"Volatile"` one of an SLD with
   no partitionable capacity, send no command.
 
 **While bound (409 Conflict):** a chunk that a switch-attached Connection
@@ -2897,6 +2920,10 @@ Changes from the fixes of the follow-up design review (branch
 | `DynamicCapacityRelease`, `TagBased`, with a `Length` larger than what the host had of the Tag when the task began | the task `Running` for good once all of the host's capacity of the Tag was gone | `Completed` once what the host had of the Tag is gone |
 | On hardware, `DynamicCapacityAdd` of a non-zero Tag when the tag list (5608h) cannot be read, at the last read and at the one for the task's baseline | 5604h sent, as if the host had no add of the Tag outstanding | `503`, nothing sent |
 | The task of an add of a non-zero Tag, on a tick whose 5608h fails | `Completed` (`OK`, or `Warning` if less than asked) on capacity of the Tag in the host's 5603h, whether or not the host still had an add of it pending | `Running` (monitor `202`), "The tag list could not be read", until a read of the list completes |
+| Chunk `DELETE` of a staged `"Volatile"` SLD chunk, with another chunk staged after it | the later chunk kept waiting for the Next Volatile Capacity it was staged with, more than the device would have: removed at the reset that made the revised plan active | the later chunk waits for that less the deleted chunk; active at that reset |
+| Chunk `DELETE` of an active `"Volatile"` SLD chunk (Set Partition Info staged, active until the reset) | `204`, the chunk removed at once, its range free | `204`; the chunk kept until a read shows no change pending, `StandbyOffline`, in no Connection, with `Oem.Cxl.PendingPartition` (`Removal` `true`); every staged chunk waits for that much less; a `DELETE` of it again `204` with nothing sent |
+| `Oem.Cxl.PendingPartition` of a staged chunk | `NextVolatileCapacityBytes`, `ActivationResets` | also `Removal` (`false`, or `true` for a removing chunk) |
+| Connection `POST` naming a staged chunk, `409` | "The memory chunk is staged: its partition is active from the device's next reset" | "The memory chunk is staged: the partition change it waits for, its addition or its removal, takes effect at the device's next reset" (also for a removing chunk) |
 | `--rescan` (or an SLD event log record) of a directly attached SLD with no staged chunk whose partition has a change pending (after a chunk `DELETE` or a `PATCH` of `Memory`) | Get Partition Info not read: after the reset, `Memory` served `VolatileSizeLimitMiB` and `CXL.Staged*SizeMiB` as before it, for good | Get Partition Info read again until no change is pending: `Memory` serves what the device has |
 
 ---
