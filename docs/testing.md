@@ -350,11 +350,11 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_redfish_validator.py` | Basic endpoint accessibility, and the DMTF validator runs | 32 |
 | `test_topology_inventory.py` | Device/switch/host/MHD discovery | 99 |
 | `test_orchestration.py` | Provisioning on the larger mock topologies | 15 |
-| `test_tasks.py` | Binds and unbinds in the background | 8 |
+| `test_tasks.py` | Binds and unbinds in the background | 10 |
 | `test_hot_removal.py` | Devices pulled out of a switch port | 3 |
 | `test_event_logs.py` | Event records as log entries | 8 |
 | `test_concurrency.py` | Requests served on several threads | 24 |
-| `test_memory_lifecycle.py` | Memory chunk CRUD operations | 67 |
+| `test_memory_lifecycle.py` | Memory chunk CRUD operations | 68 |
 | `test_connections.py` | Connection management | 54 |
 | `test_cxl_business_rules.py` | CXL-specific rules (VCS, LD limits, health) | 34 |
 | `test_error_handling.py` | Error responses (404, 400, 409) | 31 |
@@ -370,7 +370,19 @@ The pytest test suite provides comprehensive API testing against mock topologies
 | `test_conditions.py` | `Status.Conditions` from Get Health Info, and the `CxlHealth` registry | 20 |
 | `test_oem_schema.py` | Every `Oem.Cxl` object and Oem action against cxl-fmd's Oem schema `Cxl_v1.xml` | 7 |
 | `test_protocol_validator.py` | The DMTF Redfish-Protocol-Validator over every mock topology, and what fails a run of it | 24 |
-| **Total** | | **840** |
+| `test_protocol.py` | Query parameters, methods a resource does not take (`405`, `Allow`), conditional requests, and the request and response headers the Protocol Validator checks | 95 |
+| `test_ld_security.py` | The security actions of a `CXLLogicalDevice` | 15 |
+| `test_health.py` | Status from Get Health Info, the same in every view of a device | 14 |
+| `test_errors.py` | Error responses and their `@Message.ExtendedInfo` | 11 |
+| `test_docs.py` | What the docs must keep saying, the libcxlmi pin, `schema/dmtf/json-schema`, and this table against collection | 10 |
+| `test_range_type.py` | `AddressRangeType` of a `MemoryChunk`, the same in every view | 7 |
+| `test_mctp_restricted.py` | Commands not sent as MCTP messages unless `--allow-mctp-restricted` | 5 |
+| **Total** | | **1000** |
+
+The counts are those of `pytest --collect-only -q tests`: a module added
+without a row, a count that drifts or a Total that does not add up fails
+`test_docs.py::test_testing_md_counts_match_collection`, so a commit that
+adds or removes a test edits its row.
 
 ### Running Tests
 

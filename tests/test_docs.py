@@ -228,3 +228,44 @@ def test_json_schema_holds_only_json(tmp_path, capsys):
     # CSDL keeps every file not in the bundle, as before
     kept = mod.backup_custom_files(str(tmp_path), {"Chassis.v1_29_0.json"})
     assert sorted(kept) == ["Chassis_v1.xml", "Oem.v1_0_0.json"]
+
+
+def test_testing_md_counts_match_collection():
+    """The pytest table of docs/testing.md has a row for every
+    tests/test_*.py, with the number of tests pytest collects from it, and
+    its Total is what pytest collects in all (follow-up review K10,
+    decision 24): the table said 835 while 980 were collected, as seven
+    modules had no row."""
+    import os
+    import subprocess
+    import sys
+    # the API modules import requests: without it they cannot be collected
+    pytest.importorskip("requests")
+    tests = Path(__file__).resolve().parent
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    out = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                          "-p", "no:cacheprovider", "--rootdir", str(tests),
+                          str(tests)],
+                         cwd=tests, env=env, capture_output=True, text=True,
+                         timeout=120)
+    assert out.returncode == 0, out.stdout + out.stderr
+    collected = {}
+    for line in out.stdout.splitlines():
+        m = re.match(r"(?:.*/)?(test_\w+\.py)::", line)
+        if m:
+            collected[m.group(1)] = collected.get(m.group(1), 0) + 1
+    total = re.search(r"^(\d+) tests? collected", out.stdout, re.M)
+    assert total, out.stdout
+    assert int(total.group(1)) == sum(collected.values())
+
+    table = section((DOCS / "testing.md").read_text(), "### Test Files")
+    rows = dict(re.findall(r"^\| `(test_\w+\.py)` \|.*\| (\d+) \|$", table, re.M))
+    rows = {name: int(n) for name, n in rows.items()}
+    files = {p.name for p in tests.glob("test_*.py")}
+    assert sorted(files - set(rows)) == [], "modules with no row"
+    assert sorted(set(rows) - files) == [], "rows of no module"
+    wrong = {name: (rows[name], collected.get(name, 0))
+             for name in rows if rows[name] != collected.get(name, 0)}
+    assert wrong == {}, "(row, collected)"
+    shown = re.search(r"^\| \*\*Total\*\* \| \| \*\*(\d+)\*\* \|$", table, re.M)
+    assert shown and int(shown.group(1)) == int(total.group(1))
