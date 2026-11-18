@@ -11,6 +11,8 @@ Memory Model:
 - POST allocates from remaining capacity
 """
 
+import re
+
 import pytest
 
 
@@ -464,6 +466,10 @@ def post_chunk(api_client, chunks, mib=1024, memory=None):
     return data["@odata.id"], data["AddressRangeOffsetMiB"]
 
 
+# a chunk made with POST: {domain}_chunk{boot}-{N}
+CHUNK_ID = re.compile(r"(.+)_chunk([0-9a-f]{8})-([0-9]+)")
+
+
 def unique_members(api_client, chunks):
     status, data = api_client.get(chunks)
     assert status == 200
@@ -497,12 +503,16 @@ class TestChunkIdentity:
         assert api_client.get(c)[0] == 200
         assert api_client.get(b)[0] == 404
 
-    def test_first_ids_are_unchanged(self, api_client):
-        """On a fresh domain the Ids are _chunk0, _chunk1, ... as before."""
+    def test_first_ids(self, api_client):
+        """On a fresh domain the Ids are _chunk{boot}-0, -1, ..., {boot}
+        the same 8 hexadecimal characters for each."""
         assert api_client.delete(SLD_SHIPPED) == 204
         made = [post_chunk(api_client, SLD_CHUNKS)[0] for _ in range(3)]
-        assert [m.rsplit("/", 1)[1] for m in made] == [
-            "cxl_mem0_domain0_chunk0", "cxl_mem0_domain0_chunk1", "cxl_mem0_domain0_chunk2"]
+        ids = [CHUNK_ID.fullmatch(m.rsplit("/", 1)[1]) for m in made]
+        assert all(ids), made
+        assert [m.group(1) for m in ids] == ["cxl_mem0_domain0"] * 3
+        assert len({m.group(2) for m in ids}) == 1
+        assert [m.group(3) for m in ids] == ["0", "1", "2"]
 
 
 @pytest.mark.mock_topology("mock/mld-device.json")
@@ -515,7 +525,8 @@ class TestMLDChunkIdentity:
         assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld0_chunk") == 204
         a, _ = post_chunk(api_client, MLD_CHUNKS, memory=ld_memory("cxl_mld_0", 0))
         # numbered from the domain's own counter, not from its chunks
-        assert a == MLD_CHUNKS + "/cxl_mld_0_domain0_chunk0"
+        m = CHUNK_ID.fullmatch(a.rsplit("/", 1)[1])
+        assert m and m.group(1) == "cxl_mld_0_domain0" and m.group(3) == "0", a
         assert api_client.delete(MLD_CHUNKS + "/cxl_mld_0_ld1_chunk") == 204
         b, _ = post_chunk(api_client, MLD_CHUNKS, memory=ld_memory("cxl_mld_0", 1))
         assert a != b
@@ -772,3 +783,34 @@ def test_mhd_domain_is_pool_capacity(cxl_fmd_executable, tmp_path):
     finally:
         proc.terminate()
         assert proc.wait(timeout=10) == 0
+
+
+def test_chunk_uri_after_restart(cxl_fmd_executable):
+    """A chunk POSTed before a restart: its URI is 404 after it, and a chunk
+    POSTed then, of another size, is at another URI. The Id was
+    {domain}_chunk{N} with N from 0 at each start, so the URI a client kept
+    named the new allocation (follow-up review item 8, F10). In the mock
+    the device reloads from its JSON, so the run-1 chunk is gone."""
+    from conftest import PROJECT_ROOT
+
+    path = PROJECT_ROOT / "mock" / "mld-device.json"
+    ld3 = MLD_CHUNKS + "/cxl_mld_0_ld3_chunk"
+    body = {"MemoryChunkSizeMiB": 1024, "InterleaveSets": [{"Memory": ld_memory("cxl_mld_0", 3)}]}
+    made = []
+    for run, mib in enumerate((1024, 2048)):
+        proc, client = run_topology(cxl_fmd_executable, path)
+        try:
+            if made:
+                assert client.get(made[0])[0] == 404
+            assert client.delete(ld3) == 204
+            body["MemoryChunkSizeMiB"] = mib
+            status, data, location = client.post(MLD_CHUNKS, body)
+            assert status == 201, data
+            assert location == data["@odata.id"]
+            assert data["MemoryChunkSizeMiB"] == mib
+            made.append(location)
+        finally:
+            proc.terminate()
+            assert proc.wait(timeout=10) == 0
+    assert made[0] != made[1]
+    assert all(CHUNK_ID.fullmatch(m.rsplit("/", 1)[1]) for m in made), made

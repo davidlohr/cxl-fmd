@@ -11,6 +11,9 @@
 #include <pthread.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/random.h>
 
 #include "cxl-fmd.h"
 
@@ -141,6 +144,20 @@ void fmd_topology_wrunlock(struct fmd_topology *topo)
 }
 
 
+/*
+ * This run's boot id: 32 random bits as 8 hex characters. Should
+ * getrandom() fail, the time and the process ID stand in: what is asked of
+ * the id is that it differ from an earlier run's, not that it be secret.
+ */
+static void boot_id_draw(char *buf, size_t len)
+{
+	uint32_t v;
+
+	if (getrandom(&v, sizeof(v), GRND_NONBLOCK) != (ssize_t)sizeof(v))
+		v = (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16);
+	snprintf(buf, len, "%08" PRIx32, v);
+}
+
 int fmd_topology_init(struct fmd_topology *topo)
 {
 	if (!topo)
@@ -162,6 +179,7 @@ int fmd_topology_init(struct fmd_topology *topo)
 	hash_table_insert(&topo->components, &topo->root->base);
 
 	topo->generation = 1;
+	boot_id_draw(topo->boot_id, sizeof(topo->boot_id));
 
 	return 0;
 }
@@ -703,17 +721,20 @@ struct fmd_mem_chunk *fmd_chunk_create(const char *id)
 }
 
 /*
- * The Id of a new chunk of @domain: {domain}_chunk{N}, N from the domain's
- * own counter, which only goes up, so that an Id a chunk had is not given
- * to another while the daemon runs (cxl-fmd's choice: Ids are not kept
- * over a restart). An Id some component has already is skipped.
+ * The Id of a new chunk of @domain: {domain}_chunk{boot}-{N}, {boot} this
+ * run's boot id (struct fmd_topology) and N from the domain's own counter,
+ * which only goes up, so that an Id a chunk had is not given to another
+ * while the daemon runs, nor after a restart (cxl-fmd's choice: Ids are
+ * not kept over a restart, and an old one names nothing). An Id some
+ * component has already is skipped.
  * Takes the topology read lock: not to be called with it held.
  */
 static void generate_chunk_id(struct fmd_topology *topo, struct fmd_mem_domain *domain,
 			      char *buf, size_t len)
 {
 	do
-		snprintf(buf, len, "%s_chunk%u", domain->base.id, domain->next_chunk++);
+		snprintf(buf, len, "%s_chunk%s-%u", domain->base.id, topo->boot_id,
+			 domain->next_chunk++);
 	while (fmd_topology_find(topo, buf));
 }
 

@@ -538,7 +538,7 @@ json_t *fmd_redfish_tasks(struct fmd_ctx *ctx)
 	rf_collection_init(&coll, "/redfish/v1/TaskService/Tasks",
 			   "#TaskCollection.TaskCollection", "Task Collection");
 	for (task = ctx->tasks; task; task = task->next)
-		rf_collection_add(&coll, "/redfish/v1/TaskService/Tasks/%d", task->id);
+		rf_collection_add(&coll, "/redfish/v1/TaskService/Tasks/%s", task->id);
 
 	return rf_collection_finish(&coll);
 }
@@ -624,23 +624,23 @@ static json_t *dc_task(struct fmd_ctx *ctx, const struct fmd_task *task,
 }
 
 /* Task - /redfish/v1/TaskService/Tasks/{id} */
-json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id)
+json_t *fmd_redfish_task(struct fmd_ctx *ctx, const char *id)
 {
 	struct fmd_task *task = fmd_task_find(ctx, id);
-	char uri[64], monitor[64], start[32], conn_uri[256];
+	char uri[96], monitor[96], start[32], conn_uri[256];
 	json_t *result;
 
 	if (!task)
 		return NULL;
 	if (fmd_task_is_dc(task)) {
-		snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
-		snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
+		snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%s", task->id);
+		snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%s", task->id);
 		rf_date_time(task->start, start, sizeof(start));
 		return dc_task(ctx, task, uri, monitor, start);
 	}
 
-	snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%d", id);
-	snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%d", id);
+	snprintf(uri, sizeof(uri), "/redfish/v1/TaskService/Tasks/%s", task->id);
+	snprintf(monitor, sizeof(monitor), "/redfish/v1/TaskService/TaskMonitors/%s", task->id);
 	rf_date_time(task->start, start, sizeof(start));
 	task_connection_uri(task, conn_uri, sizeof(conn_uri));
 
@@ -821,7 +821,7 @@ static int dc_task_monitor(const struct fmd_task *task, json_t **response)
 	return 500;
 }
 
-int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
+int fmd_redfish_task_monitor(struct fmd_ctx *ctx, const char *id, json_t **response,
 			     char *location, size_t len)
 {
 	struct fmd_task *task = fmd_task_find(ctx, id);
@@ -834,7 +834,7 @@ int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
 	/* Interrupted is not complete either (Task_v1) */
 	if (task->state == FMD_TASK_RUNNING ||
 	    task->state == FMD_TASK_INTERRUPTED) {
-		snprintf(location, len, "/redfish/v1/TaskService/TaskMonitors/%d", id);
+		snprintf(location, len, "/redfish/v1/TaskService/TaskMonitors/%s", task->id);
 		*response = fmd_redfish_task(ctx, id);
 		return 202;
 	}
@@ -7432,9 +7432,10 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 	rc = fmd_conn_find_target(ctx, sw, host->vcs_id, port_id, ld_id, &v);
 	if (!rc) {
 		enum fmd_conn_state state = v.state;
-		int task_id = v.op ? atoi(v.op->task_id) : 0;
+		char task_id[FMD_TASK_ID_LEN];
 
 		snprintf(id, sizeof(id), "%s", v.id);
+		snprintf(task_id, sizeof(task_id), "%s", v.op ? v.op->task_id : "");
 		fmd_topology_rdunlock(&ctx->topology);
 
 		if (state == FMD_CONN_UPDATING)
@@ -7886,7 +7887,7 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		    option != FMD_UNBIND_SURPRISE_HOT_REMOVE ||
 		    op->unbind_option == FMD_UNBIND_SURPRISE_HOT_REMOVE)
 			return -3;
-		task = fmd_task_find(ctx, atoi(op->task_id));
+		task = fmd_task_find(ctx, op->task_id);
 		if (!task)
 			return -3;
 

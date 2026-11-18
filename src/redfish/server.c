@@ -1051,7 +1051,7 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 	}
 
 	if (match_route("/redfish/v1/TaskService/Tasks/{task}", norm_url, params, 8)) {
-		response = fmd_redfish_task(ctx, atoi(params[0]));
+		response = fmd_redfish_task(ctx, params[0]);
 		free_params(params, 8);
 		if (response)
 			goto ok;
@@ -1065,7 +1065,7 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 	if (match_route("/redfish/v1/TaskService/TaskMonitors/{task}", norm_url,
 			params, 8)) {
 		char location[256];
-		int status = fmd_redfish_task_monitor(ctx, atoi(params[0]), &response,
+		int status = fmd_redfish_task_monitor(ctx, params[0], &response,
 						      location, sizeof(location));
 
 		free_params(params, 8);

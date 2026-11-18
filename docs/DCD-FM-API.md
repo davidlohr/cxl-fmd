@@ -888,7 +888,9 @@ HTTP 202 Accepted status code and a Location header that contains a task
 monitor URI", and "If a response body is provided, it shall contain a
 representation of the Task resource that represents the state of the
 operation". The `Task` is at `/redfish/v1/TaskService/Tasks/{id}`, its
-monitor at `/redfish/v1/TaskService/TaskMonitors/{id}`. A request
+monitor at `/redfish/v1/TaskService/TaskMonitors/{id}`, `{id}` being
+`{boot}-{n}` (see "Binds and unbinds in the background" in
+Redfish-API.md): a URI of an earlier run is `404`. A request
 cxl-fmd or the device refuses is answered at once, with no task, as
 before; so is a command whose outcome is not known ("Outcome unknown",
 Comment 3).

@@ -113,13 +113,24 @@ struct fmd_task *fmd_dc_task_new(struct fmd_ctx *ctx, enum fmd_task_kind kind)
 	return task;
 }
 
+/*
+ * The next Task Id: "{boot}-{n}", n counting up from 1 in this run. With
+ * the boot id of each run drawn at random, a monitor URI of an earlier run
+ * answers 404 and is not given to another task (cxl-fmd's choice).
+ */
+static void task_name(struct fmd_ctx *ctx, struct fmd_task *task)
+{
+	snprintf(task->id, sizeof(task->id), "%s-%d", ctx->topology.boot_id,
+		 ++ctx->task_next_id);
+}
+
 void fmd_dc_task_list(struct fmd_ctx *ctx, struct fmd_task *task)
 {
-	task->id = ++ctx->task_next_id;
+	task_name(ctx, task);
 	task->start = time(NULL);
 	task->next = ctx->tasks;
 	ctx->tasks = task;
-	fmd_info(ctx, "Task %d: Dynamic Capacity %s for host %d of %s started",
+	fmd_info(ctx, "Task %s: Dynamic Capacity %s for host %d of %s started",
 		 task->id, task->kind == FMD_TASK_DC_ADD ? "add" : "release",
 		 task->dc->host_id, task->dc->dev_id);
 }
@@ -132,9 +143,9 @@ void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 	task->end = time(NULL);
 	snprintf(task->message, sizeof(task->message), "%s", message);
 	if (ok)
-		fmd_info(ctx, "Task %d: %s", task->id, message);
+		fmd_info(ctx, "Task %s: %s", task->id, message);
 	else
-		fmd_err(ctx, "Task %d: %s", task->id, message);
+		fmd_err(ctx, "Task %s: %s", task->id, message);
 }
 
 struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
@@ -165,16 +176,16 @@ struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
 		return NULL;
 	}
 
-	task->id = ++ctx->task_next_id;
+	task_name(ctx, task);
 	task->start = time(NULL);
-	snprintf(op->task_id, sizeof(op->task_id), "%d", task->id);
+	snprintf(op->task_id, sizeof(op->task_id), "%s", task->id);
 	op->lost = false;
 
 	task->next = ctx->tasks;
 	ctx->tasks = task;
 
 	if (task->before.read)
-		fmd_info(ctx, "Task %d: %s of vPPB %d in VCS %d of %s started "
+		fmd_info(ctx, "Task %s: %s of vPPB %d in VCS %d of %s started "
 			 "(connection %s); the vPPB read %02xh, port %d, LD %d "
 			 "before", task->id,
 			 task->kind == FMD_TASK_BIND ? "bind" : "unbind",
@@ -182,7 +193,7 @@ struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
 			 task->connection_id, task->before.status,
 			 task->before.port_id, task->before.ld_id);
 	else
-		fmd_info(ctx, "Task %d: %s of vPPB %d in VCS %d of %s started "
+		fmd_info(ctx, "Task %s: %s of vPPB %d in VCS %d of %s started "
 			 "(connection %s); the vPPB was not read before",
 			 task->id, task->kind == FMD_TASK_BIND ? "bind" : "unbind",
 			 task->vppb_id, task->vcs_id, task->switch_id,
@@ -211,39 +222,37 @@ void fmd_task_interrupt(struct fmd_ctx *ctx, struct fmd_task *task,
 			const char *message)
 {
 	struct fmd_binding_op *op;
-	char id[16];
 
 	task->state = FMD_TASK_INTERRUPTED;
 	snprintf(task->message, sizeof(task->message), "%s", message);
-	snprintf(id, sizeof(id), "%d", task->id);
 	for (op = ctx->binding_ops; op; op = op->next) {
-		if (!strcmp(op->task_id, id))
+		if (!strcmp(op->task_id, task->id))
 			op->lost = true;
 	}
-	fmd_warn(ctx, "Task %d: Interrupted: %s", task->id, message);
+	fmd_warn(ctx, "Task %s: Interrupted: %s", task->id, message);
 }
 
 /* The task is over: the op it followed goes, and the view reads the vPPB */
 static void task_drop_op(struct fmd_ctx *ctx, struct fmd_task *task)
 {
 	struct fmd_binding_op *op;
-	char id[16];
 
-	snprintf(id, sizeof(id), "%d", task->id);
 	for (op = ctx->binding_ops; op; op = op->next) {
-		if (!strcmp(op->task_id, id)) {
+		if (!strcmp(op->task_id, task->id)) {
 			fmd_binding_op_remove(ctx, op);
 			return;
 		}
 	}
 }
 
-struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id)
+struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, const char *id)
 {
 	struct fmd_task *task;
 
+	if (!id)
+		return NULL;
 	for (task = ctx->tasks; task; task = task->next) {
-		if (task->id == id)
+		if (!strcmp(task->id, id))
 			return task;
 	}
 	return NULL;
@@ -278,9 +287,9 @@ static void task_finish(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 	task_drop_op(ctx, task);
 
 	if (ok)
-		fmd_info(ctx, "Task %d: %s", task->id, message);
+		fmd_info(ctx, "Task %s: %s", task->id, message);
 	else
-		fmd_err(ctx, "Task %d: %s", task->id, message);
+		fmd_err(ctx, "Task %s: %s", task->id, message);
 }
 
 
@@ -312,7 +321,7 @@ static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
 static void task_unseen(struct fmd_ctx *ctx, struct fmd_task *task,
 			struct fmd_switch *sw, bool busy)
 {
-	fmd_warn(ctx, "Task %d: the switch says the %s is over, and vPPB %d of "
+	fmd_warn(ctx, "Task %s: the switch says the %s is over, and vPPB %d of "
 		 "VCS %d %s", task->id,
 		 task->kind == FMD_TASK_BIND ? "bind" : "unbind", task->vppb_id,
 		 task->vcs_id, busy ? "still reads 01h (bind or unbind in progress)" :
@@ -549,7 +558,7 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 			continue;
 
 		if (!record_fits(task, failed, status, port_id, ld_id)) {
-			fmd_info(ctx, "Task %d: a Binding Change of vPPB %d of "
+			fmd_info(ctx, "Task %s: a Binding Change of vPPB %d of "
 				 "VCS %d (%02xh, port %d, LD %d) that is not "
 				 "the end of its %s", task->id, vppb_id, vcs_id,
 				 status, port_id, ld_id,
@@ -562,7 +571,7 @@ bool fmd_task_binding_changed(struct fmd_ctx *ctx, struct fmd_switch *sw,
 		 * an earlier bind or unbind: the switch is asked instead.
 		 */
 		if (!failed && !task_changed_it(task)) {
-			fmd_info(ctx, "Task %d: a Binding Change of vPPB %d of "
+			fmd_info(ctx, "Task %s: a Binding Change of vPPB %d of "
 				 "VCS %d (%02xh, port %d, LD %d) that the vPPB "
 				 "%s before the %s: not taken as its end",
 				 task->id, vppb_id, vcs_id, status, port_id,
@@ -603,7 +612,6 @@ static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
 	struct fmd_binding_op *op;
 	struct fmd_vppb *vppb;
 	bool observed;
-	char id[16];
 
 	if (!sw) {
 		/* whether it bound or unbound before it went is not known */
@@ -621,12 +629,11 @@ static void task_lost(struct fmd_ctx *ctx, struct fmd_task *task,
 	task->state = FMD_TASK_INTERRUPTED;
 	snprintf(task->message, sizeof(task->message), "%s; the vPPB is read "
 		 "again until it settles", message);
-	snprintf(id, sizeof(id), "%d", task->id);
 	for (op = ctx->binding_ops; op; op = op->next) {
-		if (!strcmp(op->task_id, id))
+		if (!strcmp(op->task_id, task->id))
 			op->lost = true;
 	}
-	fmd_err(ctx, "Task %d: Interrupted: %s (the vPPB %s)", task->id,
+	fmd_err(ctx, "Task %s: Interrupted: %s (the vPPB %s)", task->id,
 		task->message, observed ? "reads 01h" : "could not be read");
 }
 

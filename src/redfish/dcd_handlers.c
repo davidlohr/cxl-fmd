@@ -868,7 +868,7 @@ static int whole_tag_members(struct fmd_component *dev, int host_id, const uint8
  */
 static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chassis_id,
 					  const char *dev_id, const char *ext_id,
-					  const char **msg, int *task_id)
+					  const char **msg, char *task_id)
 {
 	struct fmd_task *task = NULL;
 	uint8_t policy;
@@ -972,7 +972,7 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? 0 : n);
 	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
 		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
-		*task_id = task->id;
+		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		free(extents);
 		return FMD_OP_STARTED;
 	}
@@ -1252,7 +1252,7 @@ static int patch_dc_memory_region_locked(struct fmd_ctx *ctx, const char *chassi
 static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 				const char *dev_id, const char *ld_id,
 				const char *body, size_t body_size, const char **msg,
-				int *task_id)
+				char *task_id)
 {
 	struct fmd_task *task;
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
@@ -1389,7 +1389,7 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	free(extents);
 	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
 		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
-		*task_id = task->id;
+		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		return FMD_OP_STARTED;
 	}
 	fmd_task_discard(task);
@@ -1427,7 +1427,7 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 				    const char *dev_id, const char *ld_id,
 				    const char *body, size_t body_size, const char **msg,
-				    int *task_id)
+				    char *task_id)
 {
 	struct fmd_task *task;
 	struct fmd_component *dev = find_dcd_device(ctx, chassis_id, dev_id);
@@ -1552,7 +1552,7 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	free(extents);
 	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
 		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
-		*task_id = task->id;
+		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		return FMD_OP_STARTED;
 	}
 	fmd_task_discard(task);
@@ -1667,7 +1667,8 @@ json_t *fmd_redfish_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis_id
 }
 
 /* The Task of a request that started one, made once dcd_lock is let go */
-static int dc_started(struct fmd_ctx *ctx, int rc, int task_id, json_t **task)
+static int dc_started(struct fmd_ctx *ctx, int rc, const char *task_id,
+		      json_t **task)
 {
 	*task = NULL;
 	if (rc != FMD_OP_STARTED)
@@ -1680,10 +1681,11 @@ int fmd_redfish_delete_dc_memory_extent(struct fmd_ctx *ctx, const char *chassis
 					const char *dev_id, const char *ext_id,
 					const char **msg, json_t **task)
 {
-	int rc, id = 0;
+	char id[FMD_TASK_ID_LEN] = "";
+	int rc;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
-	rc = delete_dc_memory_extent_locked(ctx, chassis_id, dev_id, ext_id, msg, &id);
+	rc = delete_dc_memory_extent_locked(ctx, chassis_id, dev_id, ext_id, msg, id);
 	pthread_mutex_unlock(&ctx->dcd_lock);
 	return dc_started(ctx, rc, id, task);
 }
@@ -1730,11 +1732,12 @@ int fmd_redfish_action_dc_add(struct fmd_ctx *ctx, const char *chassis_id,
 			      const char *body, size_t body_size, const char **msg,
 			      json_t **task)
 {
-	int rc, id = 0;
+	char id[FMD_TASK_ID_LEN] = "";
+	int rc;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
 	rc = action_dc_add_locked(ctx, chassis_id, dev_id,
-			ld_id, body, body_size, msg, &id);
+			ld_id, body, body_size, msg, id);
 	pthread_mutex_unlock(&ctx->dcd_lock);
 	return dc_started(ctx, rc, id, task);
 }
@@ -1744,11 +1747,12 @@ int fmd_redfish_action_dc_release(struct fmd_ctx *ctx, const char *chassis_id,
 				  const char *body, size_t body_size, const char **msg,
 				  json_t **task)
 {
-	int rc, id = 0;
+	char id[FMD_TASK_ID_LEN] = "";
+	int rc;
 
 	pthread_mutex_lock(&ctx->dcd_lock);
 	rc = action_dc_release_locked(ctx, chassis_id, dev_id,
-			ld_id, body, body_size, msg, &id);
+			ld_id, body, body_size, msg, id);
 	pthread_mutex_unlock(&ctx->dcd_lock);
 	return dc_started(ctx, rc, id, task);
 }

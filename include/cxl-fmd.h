@@ -75,6 +75,14 @@ void fmd_log(struct fmd_ctx *ctx, enum fmd_log_level level,
  * String length limits
  */
 #define FMD_MAX_ID_LEN 64   /* Max length for component IDs */
+/*
+ * The boot id: 8 hex characters drawn at random when cxl-fmd starts
+ * (struct fmd_topology), in each Task's Id ("{boot}-{n}") and each POSTed
+ * chunk's ("{domain}_chunk{boot}-{n}"), so that an Id of an earlier run
+ * names nothing in this one (cxl-fmd's choice)
+ */
+#define FMD_BOOT_ID_LEN 9
+#define FMD_TASK_ID_LEN 24
 
 /*
  * CXL Component Types (matches identify.component_type)
@@ -1468,7 +1476,7 @@ struct fmd_binding_op {
 	 * vPPB before the first: it is the same unbind.
 	 */
 	struct fmd_vppb_seen before;
-	char task_id[FMD_MAX_ID_LEN];
+	char task_id[FMD_TASK_ID_LEN];
 	/*
 	 * Its task is Interrupted: the switch could not be asked how it went.
 	 * Kept until the vPPB, read again, no longer reads 01h
@@ -1562,6 +1570,9 @@ struct fmd_topology {
 
 	/* Generation counter for change tracking */
 	uint32_t generation;
+
+	/* this run's boot id (FMD_BOOT_ID_LEN), in Task and POSTed chunk Ids */
+	char boot_id[FMD_BOOT_ID_LEN];
 
 	/*
 	 * Switches, ports, devices, LDs and hosts added and removed since
@@ -2043,7 +2054,7 @@ struct fmd_dc_task {
 };
 
 struct fmd_task {
-	int id;
+	char id[FMD_TASK_ID_LEN];            /* "{boot}-{n}" */
 	enum fmd_task_kind kind;
 	enum fmd_task_state state;
 	int percent;                         /* Percentage Complete of 0002h */
@@ -2123,7 +2134,7 @@ void fmd_dc_task_list(struct fmd_ctx *ctx, struct fmd_task *task);
 /* @task is over: Completed if @ok, else Exception with @outcome */
 void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 		     enum fmd_task_outcome outcome, const char *message);
-struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, int id);
+struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, const char *id);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
 void fmd_tasks_free(struct fmd_ctx *ctx);
@@ -3204,8 +3215,8 @@ int fmd_redfish_action_force_unbind(struct fmd_ctx *ctx, const char *fabric_id,
 /* Tasks: a bind or unbind in the background (src/tasks.c) */
 json_t *fmd_redfish_task_service(struct fmd_ctx *ctx);
 json_t *fmd_redfish_tasks(struct fmd_ctx *ctx);
-json_t *fmd_redfish_task(struct fmd_ctx *ctx, int id);
-int fmd_redfish_task_monitor(struct fmd_ctx *ctx, int id, json_t **response,
+json_t *fmd_redfish_task(struct fmd_ctx *ctx, const char *id);
+int fmd_redfish_task_monitor(struct fmd_ctx *ctx, const char *id, json_t **response,
 			     char *location, size_t len);
 
 /* PATCH handlers */

@@ -1256,7 +1256,7 @@ On each `--rescan` the allocations of an MLD's or Multi-Headed device's LDs are 
 
 **Domain size of an MLD or Multi-Headed device:** the domain's `MemorySizeMiB` is the Memory Size of Get LD Info (5400h), "Total device memory capacity" (CXL r4.0 Table 7-46), and what is left for a `POST` is that less the allocations of the LDs (Get LD Allocations, 5401h). Table 7-46 gives the field no unit: cxl-fmd reads it as bytes. A Multi-Headed device is sent Get LD Info on its LD Pool CCI, which need not support it (only the Multi-Headed command set "is required on the LD Pool CCI", Section 7.6.7.5); if it does not answer, its domain is the sum of the allocations of its pool LDs, with nothing left (cxl-fmd's choice). A device that reports more allocated than its Memory Size has a domain as large as its allocations, with nothing left, and a warning is logged (cxl-fmd's choice). A device with nothing allocated has a domain, with no chunks; an LD with nothing allocated has no chunk. There is no property for what is left: a `POST` larger than it is `409`.
 
-**Allocations made elsewhere:** CXL has no notification of a change to an LD allocation, so cxl-fmd reads them again (cxl-fmd's choice of when): on the `--rescan` timer, Get LD Info and Get LD Allocations for every MLD and Multi-Headed device found before (a Memory Size that cannot be read is kept, and allocations that cannot be read change nothing); and before a chunk `POST` or `DELETE`, Get LD Allocations for the chunk's LD, whose Range 2 and the Memory Granularity the Set LD Allocations is then built from. Other LDs, and the Memory Size, are read on the timer only: a `POST` the domain has room for that the device has not is refused by the device, as Set LD Allocations "will fail if the device fails to allocate any of the allocations defined in the request" (CXL r4.0 Section 7.6.7.4.3), and is `500`. The chunks of each LD are then made to add up to its allocation (cxl-fmd's choice): what an LD gained is a chunk of its own, `{dev}_ld{N}_chunk` if no chunk has that ID or else `{domain}_chunk{M}`, at the lowest offset where it fits (in pieces if no free range is that large), and what it lost comes off its chunks, the newest first, a chunk left with nothing going. A `DELETE` of a chunk that went that way is `404`. A domain whose Memory Size is not known keeps the capacity it had, raised if the allocations are larger.
+**Allocations made elsewhere:** CXL has no notification of a change to an LD allocation, so cxl-fmd reads them again (cxl-fmd's choice of when): on the `--rescan` timer, Get LD Info and Get LD Allocations for every MLD and Multi-Headed device found before (a Memory Size that cannot be read is kept, and allocations that cannot be read change nothing); and before a chunk `POST` or `DELETE`, Get LD Allocations for the chunk's LD, whose Range 2 and the Memory Granularity the Set LD Allocations is then built from. Other LDs, and the Memory Size, are read on the timer only: a `POST` the domain has room for that the device has not is refused by the device, as Set LD Allocations "will fail if the device fails to allocate any of the allocations defined in the request" (CXL r4.0 Section 7.6.7.4.3), and is `500`. The chunks of each LD are then made to add up to its allocation (cxl-fmd's choice): what an LD gained is a chunk of its own, `{dev}_ld{N}_chunk` if no chunk has that ID or else `{domain}_chunk{boot}-{M}`, at the lowest offset where it fits (in pieces if no free range is that large), and what it lost comes off its chunks, the newest first, a chunk left with nothing going. A `DELETE` of a chunk that went that way is `404`. A domain whose Memory Size is not known keeps the capacity it had, raised if the allocations are larger.
 
 ### Creating Memory Chunks (POST)
 
@@ -1542,12 +1542,19 @@ Chunk IDs:
   `cxl_mld_0_ld0_chunk`), for an MLD and for a pool LD of a Multi-Headed
   device;
 - the chunk of an SLD, found at discovery: `{device}_chunk0`;
-- a chunk made with `POST`: `{domain_id}_chunk{N}`, N from a counter of
-  the domain that starts at 0 and only goes up: an ID a deleted chunk had
-  is not given to another while cxl-fmd runs, and a POST never takes an
-  ID some component has. It starts again at 0 when cxl-fmd starts, or
-  when the device is discovered again (cxl-fmd's choice: chunk IDs are
-  not kept);
+- a chunk made with `POST`: `{domain_id}_chunk{boot}-{N}`, {boot} the
+  boot id, 8 hexadecimal characters drawn at random each time cxl-fmd
+  starts, and N from a counter of the domain that starts at 0 and only
+  goes up: an ID a deleted chunk had is not given to another while
+  cxl-fmd runs, and a POST never takes an ID some component has. N
+  starts again at 0 when cxl-fmd starts, or when the device is
+  discovered again; the boot id does not, so the URI of a chunk POSTed
+  before a restart is `404` after it, and is not given to another
+  allocation (cxl-fmd's choice: chunk IDs are not kept, and an old one
+  names nothing; DSP0266 has "A resource tree should remain stable
+  across service restarts", a should that these IDs do not meet). The
+  IDs of chunks read back from the device, above, are the same after a
+  restart;
 - in the `{switch}_pool` domain of a switch's Chassis: `{device}_chunk` for
   an SLD on one of its ports, `{device}_ld{N}_chunk` for an LD of an MLD.
 
@@ -2005,7 +2012,14 @@ cxl-fmd does not wait:
 | Another bind or unbind while the switch is busy | `503 Service Unavailable` | Try again |
 | `GET /redfish/v1/TaskService/TaskMonitors/{id}` | `202` and the `Task` while it runs or is `Interrupted`; then `201` and the Connection for a bind, `204` for an unbind, or the error the request would have had (see below) | |
 
-The task is at `/redfish/v1/TaskService/Tasks/{id}`. Its `PercentComplete` is
+The task is at `/redfish/v1/TaskService/Tasks/{id}`, `{id}` being
+`{boot}-{n}`: the boot id (see "Chunk IDs") and a counter that starts at
+1 each time cxl-fmd starts. Tasks are not kept across a restart, and with
+a boot id drawn at random each time, a monitor or `Task` URI of an earlier
+run is `404`, not another operation's task: "If the operation has been
+completed and the service has already deleted the task, the service may
+return the HTTP 410 Gone or 404 Not Found" (DSP0266 1.25.0 Section 12.2).
+The format is cxl-fmd's choice. Its `PercentComplete` is
 the Percentage Complete of Background Operation Status (0002h), which the
 event loop reads until the operation is over, or a Binding Change for the
 vPPB ends it. A bind is `Completed` only when the vPPB, read again, is
@@ -2831,7 +2845,7 @@ Changes from the fixes of the external design review (branch
 | `GET` of a chunk made with `POST` on an MLD | `Links.CXLLogicalDevices` LD 0, and LD 0's `Status`, whatever its LD | its LD's |
 | `GET` of a `CXLLogicalDevice` of an MLD or MHD | no `Links.MemoryChunks` | `Links.MemoryChunks`, its chunks |
 | Chunk `POST` after a `DELETE` of a chunk of the domain | the ID of a chunk the domain still had, so that two chunks had one URI, a collection listed it twice, and a Connection's `MemoryChunkInfo` too | an ID that no chunk of the domain has had since cxl-fmd started, or discovered the device |
-| Chunk `POST` on a domain with chunks found at discovery (the `{device}_ld{N}_chunk` of an MLD or MHD) | `{domain}_chunk{N}`, N the number of chunks in the domain | `{domain}_chunk0` for the first, then 1, 2, ... |
+| Chunk `POST` on a domain with chunks found at discovery (the `{device}_ld{N}_chunk` of an MLD or MHD) | `{domain}_chunk{N}`, N the number of chunks in the domain | `{domain}_chunk0` for the first, then 1, 2, ... (now `{domain}_chunk{boot}-0`, ...: see "Requests after the follow-up review") |
 | Connection `POST` with a link that is not the URI the service serves the resource at, but ends in the ID of one (`/bogus/sld_0`, `/redfish/v1/Chassis/sld_1` as a target, a chunk of one device under another's Chassis, a relative URI) | `201`: the last segment was taken as the ID, whatever came before it | `400`, nothing bound |
 | Connection `POST` naming a chunk by its URI in a host's view, `/redfish/v1/Systems/{host}/MemoryDomains/{dom}/MemoryChunks/{chunk}` | taken, by its last segment | `400`: a chunk is named by its Chassis URI |
 | Connection `POST` with `InitiatorEndpointGroups` or `TargetEndpointGroups` | ignored: `201` from the Endpoints alone | `400`, nothing bound |
@@ -3016,6 +3030,9 @@ Changes from the fixes of the follow-up design review (branch
 | `PATCH` of an SLD's `Memory` whose Set Partition Info answer is lost | `500` "CCI command failed" | read back: `200`, or `500` "CCI command failed" if it shows another partition; if that read fails too, `500` "Outcome unknown", and the SLD read again on the next `--rescan` |
 | `--rescan` of an MLD or Multi-Headed device whose Get LD Allocations fails after its first page | the LDs read take what the device says, those not read keep what they had, and the next chunk `POST` or `DELETE` trusts them | the LDs not read are fenced: the next chunk `POST` or `DELETE` of the device reads each of them first (one more 5401h each), and is `500` with nothing else sent while one cannot be read |
 | `--rescan` (or an SLD event log record) of a directly attached SLD with no staged chunk whose partition has a change pending (after a chunk `DELETE` or a `PATCH` of `Memory`) | Get Partition Info not read: after the reset, `Memory` served `VolatileSizeLimitMiB` and `CXL.Staged*SizeMiB` as before it, for good | Get Partition Info read again until no change is pending: `Memory` serves what the device has |
+
+| Task `Id`, and the URIs of a `Task` and its monitor | `1`, `2`, ..., from 1 again at each start: after a restart `TaskMonitors/1` named another operation's task | `{boot}-{n}`, e.g. `3f09a1c2-1`, {boot} drawn at random at each start: an Id of an earlier run is `404` |
+| `Id` of a chunk made with `POST` | `{domain}_chunk{N}`, from 0 again at each start: after a restart a URI a client kept could name another allocation | `{domain}_chunk{boot}-{N}`, e.g. `cxl_mld_0_domain0_chunk3f09a1c2-0`: a URI of an earlier run is `404`. Chunks read back from a device keep their IDs (`{device}_ld{N}_chunk`, `{device}_chunk0`) |
 
 ---
 

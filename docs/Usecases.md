@@ -164,12 +164,13 @@ Content-Type: application/json
 ```
 
 Response (201 Created; a chunk made with `POST` is named
-`{domain}_chunk{N}`, N from a counter of the domain that starts at 0 and
-is not reused while cxl-fmd runs):
+`{domain}_chunk{boot}-{N}`, {boot} 8 hexadecimal characters drawn at
+random each time cxl-fmd starts and N from a counter of the domain that
+starts at 0 and is not reused while cxl-fmd runs):
 ```json
 {
-    "@odata.id": "/redfish/v1/Chassis/{device}/MemoryDomains/{dom}/MemoryChunks/{dom}_chunk0",
-    "Id": "{dom}_chunk0",
+    "@odata.id": "/redfish/v1/Chassis/{device}/MemoryDomains/{dom}/MemoryChunks/{dom}_chunk{boot}-0",
+    "Id": "{dom}_chunk{boot}-0",
     "MemoryChunkSizeMiB": 8192,
     "AddressRangeType": "PMEM",
     ...

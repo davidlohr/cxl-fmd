@@ -7129,7 +7129,7 @@ static const char *dc_task_state(json_t *task)
 }
 
 /* the task @id as it is served, and its monitor's status */
-static json_t *dc_task_now(struct fmd_ctx *ctx, int id, int *monitor)
+static json_t *dc_task_now(struct fmd_ctx *ctx, const char *id, int *monitor)
 {
 	char location[256];
 	json_t *resp = NULL;
@@ -7139,11 +7139,13 @@ static json_t *dc_task_now(struct fmd_ctx *ctx, int id, int *monitor)
 	return fmd_redfish_task(ctx, id);
 }
 
-static int dc_task_id(json_t *task)
+/* @task's Id into @buf (FMD_TASK_ID_LEN), "" if it has none */
+static const char *dc_task_id(json_t *task, char *buf)
 {
 	const char *id = json_string_value(json_object_get(task, "Id"));
 
-	return id ? atoi(id) : -1;
+	snprintf(buf, FMD_TASK_ID_LEN, "%s", id ? id : "");
+	return buf;
 }
 
 static json_t *dc_task_oem(json_t *task, const char *key)
@@ -7302,7 +7304,8 @@ static void dc_tasks_whole_tag_delete(void)
 		struct fmd_component *dev = dc_sharable_stale(ctx, ep, 0x2f0, id, sizeof(id));
 		const char *msg = NULL, *m;
 		json_t *task = NULL, *t;
-		int rc, tid = -1, monitor = 0;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int rc, monitor = 0;
 
 		if (dev) {
 			dc_sharable_regions(ep);
@@ -7315,12 +7318,12 @@ static void dc_tasks_whole_tag_delete(void)
 			answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
 			rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000",
 								 &msg, &task);
-			tid = dc_task_id(task);
-			CHECK(rc == FMD_OP_STARTED && tid > 0 &&
+			dc_task_id(task, tid);
+			CHECK(rc == FMD_OP_STARTED && tid[0] &&
 			      json_array_size(dc_task_oem(task, "BaselineExtents")) == 2 &&
 			      json_integer_value(dc_task_oem(task, "LengthBytes")) ==
 			      (json_int_t)(2 * mb256),
-			      "an accepted whole-tag DELETE: rc %d, task %d", rc, tid);
+			      "an accepted whole-tag DELETE: rc %d, task %s", rc, tid);
 			json_decref(task);
 
 			/* the next tick: the host gave back the first 256 MB only */
@@ -7371,7 +7374,8 @@ static void dc_tasks_whole_tag_delete(void)
 		char id[FMD_MAX_ID_LEN];
 		const char *msg = NULL;
 		json_t *task = NULL, *t;
-		int rc, tid, monitor = 0;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int rc, monitor = 0;
 
 		if (dev) {
 			device_id(id, sizeof(id), 0x2f1);
@@ -7379,7 +7383,7 @@ static void dc_tasks_whole_tag_delete(void)
 			answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
 			rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel),
 							   &msg, &task);
-			tid = dc_task_id(task);
+			dc_task_id(task, tid);
 			json_decref(task);
 			answer_dcd_host(ep, 3, NULL, 0, NULL, -1);
 			fmd_dcd_retry_stale(ctx);
@@ -7421,7 +7425,8 @@ static void test_dc_tasks_hw(void)
 		struct fmd_component *dev = hw_dcd(ctx, ep, 0x1a0 + c, 0x00);
 		char id[FMD_MAX_ID_LEN];
 		json_t *task = NULL, *t, *acc;
-		int rc, tid, monitor;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int rc, monitor;
 
 		if (!dev) {
 			fmd_ctx_free(ctx);
@@ -7431,7 +7436,7 @@ static void test_dc_tasks_hw(void)
 		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
 		answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
 		rc = dc_task_add(ctx, id, TAG_B, c == 1 ? 512 : 256, &task);
-		tid = dc_task_id(task);
+		dc_task_id(task, tid);
 		CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(task), "Running") &&
 		      json_array_size(dc_task_oem(task, "BaselineExtents")) == 1 &&
 		      json_integer_value(dc_task_oem(task, "BaselineGeneration")) == 0,
@@ -7510,14 +7515,15 @@ static void test_dc_tasks_hw(void)
 		uint8_t page[0x20 + 0x80] = { 0 };
 		char id[FMD_MAX_ID_LEN];
 		json_t *task = NULL, *t;
-		int tid, monitor;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int monitor;
 
 		if (dev) {
 			device_id(id, sizeof(id), 0x1a8);
 			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
 			answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
 			dc_task_add(ctx, id, TAG_B, 256, &task);
-			tid = dc_task_id(task);
+			dc_task_id(task, tid);
 			json_decref(task);
 			for (int k = 0; k < 3; k++) {
 				answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
@@ -7635,7 +7641,8 @@ static void test_dc_tasks_hw(void)
 		char id[FMD_MAX_ID_LEN];
 		const char *msg = NULL;
 		json_t *task = NULL, *t;
-		int rc, tid, monitor;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int rc, monitor;
 
 		if (dev) {
 			device_id(id, sizeof(id), 0x1ab);
@@ -7645,7 +7652,7 @@ static void test_dc_tasks_hw(void)
 			answer_dcd_host(ep, 2, two, 2, NULL, -1);
 			rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel),
 							   &msg, &task);
-			tid = dc_task_id(task);
+			dc_task_id(task, tid);
 			json_decref(task);
 			answer_dcd_host(ep, 3, &two[1], 1, NULL, -1);
 			fmd_dcd_retry_stale(ctx);
@@ -7790,7 +7797,8 @@ static void test_dc_pending_unread(void)
 		struct fmd_component *dev = hw_dcd(ctx, ep, 0x3a0 + c, 0x00);
 		char id[FMD_MAX_ID_LEN];
 		json_t *task = NULL, *t;
-		int rc, tid, monitor = 0;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int rc, monitor = 0;
 
 		if (!dev) {
 			fmd_ctx_free(ctx);
@@ -7800,7 +7808,7 @@ static void test_dc_pending_unread(void)
 		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
 		answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
 		rc = dc_task_add(ctx, id, TAG_B, c == 1 ? 512 : 256, &task);
-		tid = dc_task_id(task);
+		dc_task_id(task, tid);
 		json_decref(task);
 		answer_dcd_host_nt(ep, 3, with_b, 2);
 		if (c == 2)
@@ -7957,7 +7965,8 @@ static void test_dc_pending_unread(void)
 		char id[FMD_MAX_ID_LEN];
 		const char *msg = NULL;
 		json_t *task = NULL, *t;
-		int rc, tid, monitor = 0;
+		char tid[FMD_TASK_ID_LEN] = "";
+		int rc, monitor = 0;
 
 		if (!dev) {
 			fmd_ctx_free(ctx);
@@ -7978,7 +7987,7 @@ static void test_dc_pending_unread(void)
 			rc = dc_task_add(ctx, id, c == 0 ? "00000000-0000-0000-0000-000000000000" :
 					 TAG_B, 256, &task);
 		}
-		tid = dc_task_id(task);
+		dc_task_id(task, tid);
 		json_decref(task);
 		if (c == 2)
 			answer_dcd_host_nt(ep, 3, NULL, 0);
@@ -10654,7 +10663,7 @@ static void test_lost_task_interrupted(void)
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_redfish_action_force_unbind(ctx, "CXL", cid, &resp);
 	CHECK(rc == FMD_OP_STARTED && resp &&
-	      atoi(json_string_value(json_object_get(resp, "Id"))) == task->id &&
+	      !strcmp(json_string_value(json_object_get(resp, "Id")), task->id) &&
 	      task->state == FMD_TASK_RUNNING && ops_count(ctx) == 1 &&
 	      !ctx->binding_ops->lost && ctx->binding_ops->unbind_option == 2,
 	      "ForceUnbind of an Interrupted unbind: %d, task %d", rc, task->state);
@@ -11719,7 +11728,8 @@ static void test_post_delete_on_a_switch(void)
 	json_t *resp = NULL;
 	uint8_t pl[16];
 	uint16_t op;
-	int before = failures, rc, task_id;
+	char task_id[FMD_TASK_ID_LEN] = "";
+	int before = failures, rc;
 
 	answer_ld_info(ep, 2ULL * 4 << 28, 2);
 	answer_ld_allocations(ep, 2, 0, 4);
@@ -11748,7 +11758,7 @@ static void test_post_delete_on_a_switch(void)
 	POST_LD(0);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	CHECK(rc == FMD_OP_STARTED && resp, "POST of LD 0: %d", rc);
-	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
+	dc_task_id(resp, task_id);
 	json_decref(resp);
 	resp = NULL;
 	CHECK(ops_count(ctx) == 1 && ctx->binding_ops->key.vppb_id == 1 &&
@@ -11764,7 +11774,7 @@ static void test_post_delete_on_a_switch(void)
 	answer_vcs(ep, 2, 1, vppb_busy, unbound);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
 	CHECK(rc == FMD_OP_STARTED && resp &&
-	      atoi(json_string_value(json_object_get(resp, "Id"))) == task_id &&
+	      !strcmp(json_string_value(json_object_get(resp, "Id")), task_id) &&
 	      last_opcode(ep) != 0x5201 && ops_count(ctx) == 1,
 	      "POST of LD 0 again: %d, last %04xh", rc, last_opcode(ep));
 	json_decref(resp);
@@ -11871,7 +11881,8 @@ static void test_chunk_guard(void)
 	struct fmd_switch *sw;
 	struct fmd_host *host;
 	json_t *resp = NULL;
-	int before = failures, rc, task_id;
+	char task_id[FMD_TASK_ID_LEN] = "";
+	int before = failures, rc;
 	uint16_t op;
 
 	/* 2 x 1 GiB, of 2.25 GiB: room for a chunk of 256 MiB */
@@ -11900,7 +11911,7 @@ static void test_chunk_guard(void)
 		 "\"TargetEndpoints\": [{\"@odata.id\": \"/redfish/v1/Fabrics/CXL/Endpoints/%s_ld0\"}]}}",
 		 host->base.id, dev);
 	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
-	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
+	dc_task_id(resp, task_id);
 	json_decref(resp);
 	resp = NULL;
 	CHECK(rc == FMD_OP_STARTED, "POST of LD 0: %d", rc);
@@ -11919,7 +11930,7 @@ static void test_chunk_guard(void)
 	answer_vcs(ep, 0, 0, port2, unbound);
 	answer_vcs(ep, 2, 1, ld0, unbound);
 	fmd_tasks_poll(ctx);
-	CHECK(conn_state(ctx, cid) == FMD_CONN_ENABLED, "%s: %d (task %d)", cid,
+	CHECK(conn_state(ctx, cid) == FMD_CONN_ENABLED, "%s: %d (task %s)", cid,
 	      conn_state(ctx, cid), task_id);
 
 	/* bound: DELETE and POST on LD 0 are 409, with nothing sent */
@@ -12985,7 +12996,8 @@ static void test_force_unbind(void)
 	struct fmd_host *host;
 	struct fmd_task *task;
 	json_t *resp = NULL, *c;
-	int before = failures, rc, task_id;
+	char task_id[FMD_TASK_ID_LEN] = "";
+	int before = failures, rc;
 	uint8_t pl[16];
 	uint16_t op;
 
@@ -13073,7 +13085,7 @@ static void test_force_unbind(void)
 	READ_TWICE(ld0, unbound);
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_redfish_delete_connection(ctx, "CXL", c0, &resp);
-	task_id = resp ? atoi(json_string_value(json_object_get(resp, "Id"))) : -1;
+	dc_task_id(resp, task_id);
 	json_decref(resp);
 	resp = NULL;
 	CHECK(rc == FMD_OP_STARTED && conn_state(ctx, c0) == FMD_CONN_UPDATING &&
@@ -13099,7 +13111,7 @@ static void test_force_unbind(void)
 	answer_rc(ep, 0x5202, CXLMI_RET_BACKGROUND);
 	rc = fmd_redfish_action_force_unbind(ctx, "CXL", c0, &resp);
 	CHECK(rc == FMD_OP_STARTED && resp &&
-	      atoi(json_string_value(json_object_get(resp, "Id"))) == task_id &&
+	      !strcmp(json_string_value(json_object_get(resp, "Id")), task_id) &&
 	      ops_count(ctx) == 1 && ctx->binding_ops->unbind_option == 2,
 	      "ForceUnbind of a managed unbind: %d", rc);
 	json_decref(resp);
@@ -14786,6 +14798,57 @@ static void test_r6_switch_lost_reply(void)
 }
 
 /*
+ * Follow-up review items 6 (F6e) and 8 (F10): Task Ids are "{boot}-{n}",
+ * {boot} drawn at random when cxl-fmd starts, so that an Id, and a
+ * monitor URI, of an earlier run names nothing in this one; "1" is not a
+ * Task. Two contexts stand for two runs.
+ */
+static void test_task_ids_per_boot(void)
+{
+	struct fmd_ctx *a = new_ctx(), *b = new_ctx();
+	struct fmd_task *ta, *tb;
+	char loc[256], want[FMD_TASK_ID_LEN];
+	json_t *resp = NULL;
+	int before = failures, status;
+	size_t n;
+
+	n = strspn(a->topology.boot_id, "0123456789abcdef");
+	CHECK(n == 8 && strlen(a->topology.boot_id) == 8 &&
+	      strcmp(a->topology.boot_id, b->topology.boot_id),
+	      "boot ids %s, %s", a->topology.boot_id, b->topology.boot_id);
+	ta = fmd_dc_task_new(a, FMD_TASK_DC_ADD);
+	tb = fmd_dc_task_new(b, FMD_TASK_DC_ADD);
+	if (!ta || !tb) {
+		fmd_task_discard(ta);
+		fmd_task_discard(tb);
+		CHECK(0, "no task");
+		goto out;
+	}
+	fmd_dc_task_list(a, ta);
+	fmd_dc_task_list(b, tb);
+	snprintf(want, sizeof(want), "%s-1", a->topology.boot_id);
+	CHECK(!strcmp(ta->id, want) && strcmp(ta->id, tb->id),
+	      "Task Ids %s and %s", ta->id, tb->id);
+	CHECK(fmd_task_find(a, ta->id) == ta && !fmd_task_find(a, tb->id) &&
+	      !fmd_task_find(a, "1"), "a Task found by another run's Id");
+	resp = fmd_redfish_task(a, "1");
+	CHECK(!resp, "Task 1 served");
+	json_decref(resp);
+	resp = NULL;
+	status = fmd_redfish_task_monitor(a, tb->id, &resp, loc, sizeof(loc));
+	CHECK(status == 404, "another run's monitor: %d", status);
+	json_decref(resp);
+	resp = NULL;
+	status = fmd_redfish_task_monitor(a, ta->id, &resp, loc, sizeof(loc));
+	CHECK(status == 202 && strstr(loc, ta->id), "the monitor: %d %s", status, loc);
+	json_decref(resp);
+out:
+	fmd_ctx_free(a);
+	fmd_ctx_free(b);
+	report("a Task Id carries the boot id", before);
+}
+
+/*
  * What a head of a Multi-Headed device presents is read from the whole LD
  * Map, and is not known without it (follow-up review item 7). "A head
  * with one LD mapped shall present itself as an SLD and a head with more
@@ -15227,6 +15290,7 @@ int main(void)
 	test_w1_bind_success_refresh_fails();
 	test_unbind_success_refresh_fails();
 	test_r6_switch_lost_reply();
+	test_task_ids_per_boot();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

@@ -13,6 +13,8 @@ mock/background-bind.json has a switch that takes 1.5 s over each: long enough t
 while one runs is not late on a loaded machine, as under a sanitizer.
 """
 
+import re
+import subprocess
 import time
 
 import pytest
@@ -226,3 +228,53 @@ class TestImmediateBind:
         assert response.status_code == 201
         status, tasks = api_client.get("/redfish/v1/TaskService/Tasks")
         assert tasks["Members@odata.count"] == 0
+
+
+# a Task Id: {boot}-{n}
+TASK_ID = re.compile(r"([0-9a-f]{8})-([0-9]+)")
+DCD_LD0 = "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0/CXLLogicalDevices/0"
+
+
+def test_task_ids_after_restart(cxl_fmd_executable):
+    """A Task of a run before a restart: its monitor and Task URIs are 404
+    after it, and a Task made then has another Id. The Ids were 1, 2, ...
+    from 1 at each start, so the run-1 monitor answered for another
+    operation (follow-up review item 6, F6e). DSP0266 1.25.0 Section 12.2:
+    "If the operation has been completed and the service has already
+    deleted the task, the service may return the HTTP 410 Gone or 404 Not
+    Found"."""
+    from conftest import PROJECT_ROOT, _find_free_port, _wait_for_service
+
+    mock = PROJECT_ROOT / "mock" / "dcd-device.json"
+    port = _find_free_port()
+    base = f"http://localhost:{port}"
+    bodies = [
+        ("DynamicCapacityAdd", {"Policy": "Free", "RegionNumber": 0, "Length": 1024,
+                                "Tag": "6f1a2c3e-0000-4000-8000-0000000000aa"}),
+        ("DynamicCapacityRelease", {"Policy": "TagBased", "ForcedRemoval": False,
+                                    "SanitizeOnRelease": False, "Length": 4096,
+                                    "Tag": "6f1a2c3e-0000-4000-8000-000000000001"}),
+    ]
+    seen = []
+    for action, body in bodies:
+        proc = subprocess.Popen([str(cxl_fmd_executable), "--mock", str(mock),
+                                 "--port", str(port), "-e", "0", "-r", "0"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            assert _wait_for_service(base + "/redfish/v1")
+            for monitor, task in seen:
+                assert requests.get(base + monitor, timeout=30).status_code == 404
+                assert requests.get(base + task, timeout=30).status_code == 404
+            response = requests.post(f"{base}{DCD_LD0}/Actions/CXLLogicalDevice.{action}",
+                                     json=body, timeout=30)
+            assert response.status_code == 202, response.text
+            task = response.json()
+            assert TASK_ID.fullmatch(task["Id"]), task["Id"]
+            assert response.headers["Location"] == task["TaskMonitor"]
+            assert task["@odata.id"] == "/redfish/v1/TaskService/Tasks/" + task["Id"]
+            assert requests.get(base + task["@odata.id"], timeout=30).json()["Id"] == task["Id"]
+            seen.append((task["TaskMonitor"], task["@odata.id"]))
+        finally:
+            proc.terminate()
+            assert proc.wait(timeout=10) == 0
+    assert seen[0] != seen[1]
