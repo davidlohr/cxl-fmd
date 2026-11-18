@@ -750,5 +750,5 @@ python scripts/run_redfish_validator.py --output-dir ./logs
 curl -s http://localhost:8080/redfish/v1/Chassis | jq
 
 # Compare against schema
-cat schema/dmtf/json-schema/Chassis.v1_25_0.json | jq
+cat schema/dmtf/json-schema/Chassis.v1_29_0.json | jq
 ```

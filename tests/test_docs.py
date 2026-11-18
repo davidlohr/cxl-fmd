@@ -17,11 +17,15 @@ T6), and TLS, authentication and the listen address are deferred gaps
 maintainer, and the docs do not say they were raised (F12.8, DCD-T5b).
 
 The libcxlmi wrap names a commit, so every checkout builds the same
-libcxlmi (follow-up K10).
+libcxlmi (follow-up K10). schema/dmtf/json-schema holds the JSON schemas
+of the DMTF bundle and nothing else, and the update script keeps it so
+(follow-up H9).
 """
 
 import re
 from pathlib import Path
+
+import pytest
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
@@ -194,3 +198,33 @@ def test_libcxlmi_is_pinned():
     assert re.fullmatch(r"[0-9a-f]{40}", revs[0]), revs[0]
     text = (DOCS / "testing.md").read_text()
     assert "meson subprojects update --reset libcxlmi" in text
+
+
+def test_json_schema_holds_only_json(tmp_path, capsys):
+    """schema/dmtf/json-schema has only *.json (follow-up review H9): the
+    ten CSDL copies that came with the initial commit, older than those in
+    schema/dmtf/csdl, were kept as "custom" by every update. The update
+    script keeps only *.json there now, and names what it discards."""
+    import importlib.util
+    import sys
+    json_dir = DOCS.parent / "schema" / "dmtf" / "json-schema"
+    others = sorted(p.name for p in json_dir.iterdir() if p.suffix != ".json")
+    assert others == []
+    scripts = DOCS.parent / "scripts"
+    pytest.importorskip("requests")
+    sys.path.insert(0, str(scripts))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "update_schemas", scripts / "update_schemas.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.remove(str(scripts))
+    for name in ("Chassis.v1_29_0.json", "Oem.v1_0_0.json", "Chassis_v1.xml"):
+        (tmp_path / name).write_text(name)
+    kept = mod.backup_custom_files(str(tmp_path), {"Chassis.v1_29_0.json"}, ".json")
+    assert sorted(kept) == ["Oem.v1_0_0.json"]
+    assert "discarding Chassis_v1.xml" in capsys.readouterr().out
+    # CSDL keeps every file not in the bundle, as before
+    kept = mod.backup_custom_files(str(tmp_path), {"Chassis.v1_29_0.json"})
+    assert sorted(kept) == ["Chassis_v1.xml", "Oem.v1_0_0.json"]

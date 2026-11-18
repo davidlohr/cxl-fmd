@@ -7,7 +7,8 @@ This script downloads the official DMTF schema bundle and extracts
 the CSDL (XML) and JSON schema files. Existing installed symlinks
 are preserved across updates; if none exist, defaults are installed.
 
-Custom/OEM schemas (files not in the DMTF bundle) are preserved.
+Custom/OEM schemas (files not in the DMTF bundle) are preserved: in
+json-schema/ only *.json ones, any other file there is named and dropped.
 
 Usage:
     python3 scripts/update_schemas.py
@@ -92,9 +93,14 @@ SCHEMA_PATH = os.path.join(PROJECT_ROOT, "schema", "dmtf", "csdl")
 JSON_SCHEMA_PATH = os.path.join(PROJECT_ROOT, "schema", "dmtf", "json-schema")
 
 
-def backup_custom_files(directory, dmtf_filenames):
+def backup_custom_files(directory, dmtf_filenames, suffix=None):
     """
     Backup custom/OEM files that are not in the DMTF bundle.
+
+    With @suffix, only a file whose name ends with it is kept; any other
+    is named in a warning and discarded, as the directory is cleared
+    before the bundle is extracted (json-schema/ keeps only *.json: the
+    Initial-commit CSDL copies there outlived every update).
 
     Returns a dict of {filename: content} for files to restore.
     """
@@ -102,12 +108,17 @@ def backup_custom_files(directory, dmtf_filenames):
     if not os.path.exists(directory):
         return custom_files
 
-    for filename in os.listdir(directory):
+    for filename in sorted(os.listdir(directory)):
         filepath = os.path.join(directory, filename)
-        if os.path.isfile(filepath) and filename not in dmtf_filenames:
-            print(f"  Preserving custom schema: {filename}")
-            with open(filepath, "rb") as f:
-                custom_files[filename] = f.read()
+        if not os.path.isfile(filepath) or filename in dmtf_filenames:
+            continue
+        if suffix and not filename.endswith(suffix):
+            print(f"  WARNING: discarding {filename}: only *{suffix} is kept in "
+                  f"{os.path.relpath(directory, PROJECT_ROOT)}")
+            continue
+        print(f"  Preserving custom schema: {filename}")
+        with open(filepath, "rb") as f:
+            custom_files[filename] = f.read()
 
     return custom_files
 
@@ -228,7 +239,7 @@ def main():
         json_dmtf_set.update(versions)
 
     custom_csdl = backup_custom_files(SCHEMA_PATH, csdl_dmtf_set)
-    custom_json = backup_custom_files(JSON_SCHEMA_PATH, json_dmtf_set)
+    custom_json = backup_custom_files(JSON_SCHEMA_PATH, json_dmtf_set, ".json")
 
     # Clear and recreate schema directories
     if os.path.exists(SCHEMA_PATH):
