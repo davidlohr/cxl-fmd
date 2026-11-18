@@ -7722,6 +7722,284 @@ static void test_dc_tasks_hw(void)
 	report("Dynamic Capacity tasks follow the host", before);
 }
 
+/* answer_dcd_host() without its 5608h: the caller queues that */
+static void answer_dcd_host_nt(struct cxlmi_endpoint *ep, uint32_t gen,
+			       const struct dc_ext *e, int n)
+{
+	uint8_t regions[0x04 + 0x28 + 0x10] = { 0 };
+
+	regions[0x02] = 1;
+	regions[0x03] = 1;
+	put64(regions + 0x04, 1ULL << 30);
+	put64(regions + 0x0c, 4);
+	put64(regions + 0x14, 1ULL << 30);
+	put64(regions + 0x1c, 1ULL << 28);
+	put16(regions + 0x2c, 64);
+	put16(regions + 0x30, 63);
+	put16(regions + 0x34, 16);
+	put16(regions + 0x38, 15);
+	answer(ep, 0x5601, regions, sizeof(regions));
+	answer_dc_extents(ep, gen, 0, n, e, n);
+}
+
+static const char *dc_task_msg(json_t *t)
+{
+	const char *m = json_string_value(json_object_get(json_array_get(
+		json_object_get(t, "Messages"), 0), "Message"));
+
+	return m ? m : "";
+}
+
+/*
+ * Follow-up review item 3: a 5608h that fails leaves whether the host is
+ * in the tag's Pending Reference Bitmap unknown. That is not "not
+ * pending": it neither completes a tagged add nor lets another add of the
+ * tag through. hw_dcd()'s host 0 has 256 MB of dc_tag at 1 GiB.
+ */
+static void test_dc_pending_unread(void)
+{
+	static const uint8_t dc_tag_zero[16] = { 0 };
+	struct dc_ext seed = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct dc_ext with_b[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag_b, 0 },
+	};
+	struct dc_ext with_zero[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, dc_tag_zero, 0 },
+	};
+	struct dc_tag_row pend_b[2] = {
+		{ dc_tag, false, { 0 }, 1, { 0 }, 0 },
+		{ dc_tag_b, false, { 0 }, 0, { 0 }, 1 },
+	};
+	struct dc_tag_row answered_b[2] = {
+		{ dc_tag, false, { 0 }, 1, { 0 }, 0 },
+		{ dc_tag_b, false, { 0 }, 1, { 0 }, 0 },
+	};
+	int before = failures;
+
+	/*
+	 * A, B: an add of 256 or 512 MB the host is pending on; the tick
+	 * lists 256 MB of tag B, and 5608h fails: the task runs. A read of
+	 * the tag list then ends it. C: the tick's 5608h has Validity Bit[1]
+	 * clear, which is no bitmap at all: the delta ends it.
+	 */
+	for (int c = 0; c < 3; c++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x3a0 + c, 0x00);
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL, *t;
+		int rc, tid, monitor = 0;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		device_id(id, sizeof(id), 0x3a0 + c);
+		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+		answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
+		rc = dc_task_add(ctx, id, TAG_B, c == 1 ? 512 : 256, &task);
+		tid = dc_task_id(task);
+		json_decref(task);
+		answer_dcd_host_nt(ep, 3, with_b, 2);
+		if (c == 2)
+			answer_dc_tags(ep, 103, 2, 0x01, pend_b, 2);
+		else
+			answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+		fmd_dcd_retry_stale(ctx);
+		t = dc_task_now(ctx, tid, &monitor);
+		if (c < 2)
+			CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(t), "Running") &&
+			      monitor == 202 && strstr(dc_task_msg(t), "tag list could not be read"),
+			      "case %c: an add judged on an unread tag list: %d, %s, monitor %d, "
+			      "\"%s\"", 'A' + c, rc, dc_task_state(t), monitor, dc_task_msg(t));
+		else
+			CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(t), "Completed") &&
+			      monitor == 200,
+			      "an add on a tag list with Validity Bit[1] clear, its capacity "
+			      "listed: %d, %s, monitor %d", rc, dc_task_state(t), monitor);
+		json_decref(t);
+
+		if (c < 2) {
+			/* the tag list read: host 0 answered */
+			answer_dcd_host_nt(ep, 3, with_b, 2);
+			answer_dc_tags(ep, 104, 2, 0x03, answered_b, 2);
+			fmd_dcd_retry_stale(ctx);
+			fmd_dc_tasks_poll(ctx);
+			t = dc_task_now(ctx, tid, &monitor);
+			CHECK(!strcmp(dc_task_state(t), "Completed") && monitor == 200 &&
+			      !strcmp(json_string_value(json_object_get(t, "TaskStatus")),
+				      c ? "Warning" : "OK"),
+			      "case %c, the tag list read again: %s, monitor %d, %s", 'A' + c,
+			      dc_task_state(t), monitor,
+			      json_string_value(json_object_get(t, "TaskStatus")));
+			json_decref(t);
+		}
+
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * G: while an add of tag B runs on an unread tag list (case A), a
+	 * second add of tag B is refused, with nothing sent
+	 */
+	{
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x3a8, 0x00);
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL;
+		unsigned int sent;
+		int rc;
+
+		if (dev) {
+			device_id(id, sizeof(id), 0x3a8);
+			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
+			dc_task_add(ctx, id, TAG_B, 256, &task);
+			json_decref(task);
+			task = NULL;
+			answer_dcd_host_nt(ep, 3, with_b, 2);
+			answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+			fmd_dcd_retry_stale(ctx);
+			sent = commands_sent(ep);
+			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+			CHECK(rc == -EALREADY && commands_sent(ep) == sent,
+			      "G: a second add of tag B while the first's runs: %d, %u sent",
+			      rc, commands_sent(ep) - sent);
+			json_decref(task);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * D (control): the tag list read, host 0 pending on tag B: -EALREADY.
+	 * E: 5608h fails at the refresh and again in the prepare: -EAGAIN
+	 * after 5601h, 5603h and 5608h, no 5604h. Then a read showing host 0
+	 * pending: -EALREADY.
+	 * F: as E, after a 5604h whose reply could not be read
+	 */
+	for (int c = 0; c < 3; c++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x3b0 + c, 0x00);
+		char id[FMD_MAX_ID_LEN];
+		json_t *task = NULL;
+		unsigned int sent;
+		int rc;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		device_id(id, sizeof(id), 0x3b0 + c);
+		if (c == 2) {
+			answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
+			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+			CHECK(rc == -EREMOTEIO, "F: an unreadable 5604h reply: %d", rc);
+			json_decref(task);
+			task = NULL;
+		} else {
+			answer_dcd_host_nt(ep, 2, &seed, 1);
+			if (c == 0)
+				answer_dc_tags(ep, 102, 2, 0x03, pend_b, 2);
+			else
+				answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+			fmd_dcd_refresh(ctx, dev, 0);
+			CHECK(fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_OK, "host 0 not synced");
+		}
+		sent = commands_sent(ep);
+		if (c) {
+			answer_dcd_host_nt(ep, 2, &seed, 1);
+			answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+		}
+		rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+		json_decref(task);
+		task = NULL;
+		if (c == 0)
+			CHECK(rc == -EALREADY && commands_sent(ep) == sent,
+			      "D: an add of a tag the host is pending on: %d, %u sent", rc,
+			      commands_sent(ep) - sent);
+		else
+			CHECK(rc == -EAGAIN && commands_sent(ep) - sent == 3 &&
+			      last_opcode(ep) == 0x5608 && !ctx->tasks,
+			      "%c: an add of a tag whose pending state is not known: %d, "
+			      "%u sent, last %04xh", 'D' + c, rc, commands_sent(ep) - sent,
+			      last_opcode(ep));
+		if (c) {
+			sent = commands_sent(ep);
+			answer_dcd_host_nt(ep, 2, &seed, 1);
+			answer_dc_tags(ep, 105, 2, 0x03, pend_b, 2);
+			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+			json_decref(task);
+			CHECK(rc == -EALREADY && commands_sent(ep) - sent == 3 &&
+			      last_opcode(ep) == 0x5608,
+			      "%c, then the tag list read with host 0 pending: %d, %u sent",
+			      'D' + c, rc, commands_sent(ep) - sent);
+		}
+		fmd_ctx_free(ctx);
+	}
+
+	/*
+	 * No evidence to wait for: an add of no tag (all zeros) with 5608h
+	 * failing, and an add on a device that answers 5608h Unsupported,
+	 * end on the delta. A release is judged while the tag list fails.
+	 */
+	for (int c = 0; c < 3; c++) {
+		struct fmd_ctx *ctx = new_ctx();
+		struct cxlmi_endpoint *ep = new_device(ctx);
+		struct fmd_component *dev = hw_dcd(ctx, ep, 0x3c0 + c, 0x00);
+		static const char *rel =
+			"{\"Policy\": \"TagBased\", \"ForcedRemoval\": false, "
+			"\"SanitizeOnRelease\": false, \"Length\": 256, "
+			"\"Tag\": \"6f1a2c3e-0000-4000-8000-000000000001\"}";
+		char id[FMD_MAX_ID_LEN];
+		const char *msg = NULL;
+		json_t *task = NULL, *t;
+		int rc, tid, monitor = 0;
+
+		if (!dev) {
+			fmd_ctx_free(ctx);
+			continue;
+		}
+		device_id(id, sizeof(id), 0x3c0 + c);
+		if (c == 2) {
+			answer_rc(ep, 0x5605, CXLMI_RET_SUCCESS);
+			answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
+			rc = fmd_redfish_action_dc_release(ctx, id, id, "0", rel, strlen(rel),
+							   &msg, &task);
+		} else {
+			answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+			if (c == 0)
+				answer_dcd_host(ep, 2, &seed, 1, pend_b, 2);
+			else
+				answer_dcd_host(ep, 2, &seed, 1, NULL, -1);
+			rc = dc_task_add(ctx, id, c == 0 ? "00000000-0000-0000-0000-000000000000" :
+					 TAG_B, 256, &task);
+		}
+		tid = dc_task_id(task);
+		json_decref(task);
+		if (c == 2)
+			answer_dcd_host_nt(ep, 3, NULL, 0);
+		else
+			answer_dcd_host_nt(ep, 3, c == 0 ? with_zero : with_b, 2);
+		answer_rc(ep, 0x5608, c == 1 ? CXLMI_RET_UNSUPPORTED : CXLMI_RET_INTERNAL);
+		fmd_dcd_retry_stale(ctx);
+		fmd_dc_tasks_poll(ctx);
+		t = dc_task_now(ctx, tid, &monitor);
+		CHECK(rc == FMD_OP_STARTED && !strcmp(dc_task_state(t), "Completed"),
+		      "%s: %d, %s, monitor %d, \"%s\"",
+		      c == 0 ? "an add of no tag, the tag list failing" :
+		      c == 1 ? "an add, 5608h Unsupported" :
+		      "a release, the tag list failing", rc, dc_task_state(t), monitor,
+		      dc_task_msg(t));
+		json_decref(t);
+		fmd_ctx_free(ctx);
+	}
+	report("an unread Pending Reference Bitmap is not \"not pending\"", before);
+}
+
 /*
  * The review's reproduction (F06): Initiate Dynamic Capacity Add (5604h)
  * "shall complete when the device initiates the Add Capacity procedure"
@@ -14025,6 +14303,7 @@ int main(void)
 	test_dc_last_refreshed();
 	test_dc_accepted_stale();
 	test_dc_tasks_hw();
+	test_dc_pending_unread();
 	test_rescan_reads_new_logs();
 	test_notification_route();
 	test_chunk_delete_partition_refused();

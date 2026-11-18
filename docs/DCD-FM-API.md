@@ -288,10 +288,21 @@ shown only in the tag view, as `PendingLDs` (Comment 4). Why:
   `TagsKnown` is `false`, `Tags` is left out, and the `MemoryRegion`s of
   the device and its `MemoryExtent`s with a tag have `Status.Health`
   `Warning`. The listed extents stay `Pending` `false`, which does not
-  depend on the tag list. A device that answers Unsupported (5608h is
-  "DCO", "Optional for DCDs", in Table 8-397) has no tag list to fail:
-  `TagsKnown` `false`, no `Tags`, and no `Warning`; on it an add a host
-  has not answered cannot be seen at all.
+  depend on the tag list. That is not "no add outstanding": on hardware,
+  a task of an add with a tag is not judged while the list cannot be
+  read, and an add of a tag is not sent (`503`, see
+  [Tasks of an add or a release](#tasks-of-an-add-or-a-release)). A
+  device that answers Unsupported (5608h is "DCO", "Optional for DCDs",
+  in Table 8-397) has no tag list to fail: `TagsKnown` `false`, no
+  `Tags`, and no `Warning`; on it an add a host has not answered cannot
+  be seen at all.
+- A tag list whose Validity Bitmap has Bit[1] clear has no Pending
+  Reference Bitmaps: "This bit shall be 0 for GFDs and 1 for all other
+  device types" (Table 7-77), and the field "is reserved if the Pending
+  Reference Bitmaps Valid bit is not set" (Table 7-78). cxl-fmd manages
+  DCDs, not GFDs, and treats such a DCD as one that answers 5608h
+  Unsupported for what is pending (cxl-fmd's choice): an add is judged
+  on its extent list alone, not held for a bitmap it will never have.
 - 5604h and 5605h complete when the device initiates the procedure; the
   host answers after, which the FM may learn from a DC event record, an
   Add Capacity Response (04h) or a Capacity Released (05h). The
@@ -912,11 +923,24 @@ host and Tag to end"). Both are cxl-fmd's choices.
 
 **How a task ends** (cxl-fmd's rules; the specification gives none). A
 task is judged on a read of its host that completed, 5603h and then
-5608h; a read that fails changes nothing.
+5608h; a read that fails changes nothing. A 5608h that fails is such a
+read for an add with a tag, on hardware: whether the host is in the
+tag's Pending Reference Bitmap is not known, and capacity of the tag in
+its 5603h may be another add's, so the task stays `Running`, its message
+saying the tag list could not be read, until a read of the list
+completes. A release, and an add of no tag (all zeros) or on a device
+with no Pending Reference Bitmap (5608h Unsupported, or Validity Bit[1]
+clear), are judged on the 5603h alone, as the list has nothing to add.
+
+An add of a tag on hardware is not sent while the tag list cannot be
+read: the list is read again first (with the host, as for a host whose
+read failed), and if it still cannot be, the answer is `503` and
+nothing is sent, as whether the host has an add of the tag it has not
+answered cannot be told (cxl-fmd's choice).
 
 | Task | `Running` while | `Completed` when | `Exception` when |
 |------|-----------------|------------------|------------------|
-| Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host) |
+| Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered, or (a non-zero Tag, on hardware) the tag list could not be read at the last read | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host) |
 | Release | any of what it named is still in the host's 5603h; the message says how much has gone | all of it is gone: the extents of a Prescriptive list, or for a Tag-based one `Length` bytes of the Tag, or what `BaselineExtents` has of the Tag when that is less and not none (a `DELETE` is one of these) | never on what the host does: nothing says a host refuses a release |
 | Either | | | the device is gone: what its host did is not known (`500` "Outcome unknown") |
 

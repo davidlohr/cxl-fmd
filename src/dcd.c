@@ -3214,6 +3214,11 @@ void fmd_dcd_retry_pending(struct fmd_ctx *ctx)
  *   baseline when that is less. What has gone so far is reported while it
  *   runs. Nothing says a host refuses a release, so none is an Exception
  *   for that.
+ * - An add of a tag is not judged while the tag list cannot be read: a
+ *   delta may be another add's of the tag, and whether the host answered
+ *   is not known (dc_pend()). A device with no Pending Reference Bitmap
+ *   (5608h Unsupported, Validity Bitmap Bit[1] clear) and an add of no tag
+ *   give no such evidence, and are judged on the extent list alone.
  * - A task whose device is gone is an Exception whose outcome is unknown.
  *   No time limit ends one, and no read that fails moves one; nothing here
  *   sends a command or frees capacity.
@@ -3343,20 +3348,42 @@ static bool dc_task_has_tag(const struct fmd_dc_task *dc, enum fmd_task_kind kin
 	return !memcmp(dc->tag, tag, FMD_DC_TAG_LEN);
 }
 
-/* Whether the tag list says @host has an add of @tag it has not answered */
-static bool dc_pending_known(struct fmd_component *dev, const uint8_t *tag)
+/*
+ * What the tag list says of whether @host_id has an add of @tag it has
+ * not answered:
+ * - DC_PEND_YES, DC_PEND_NO: the Pending Reference Bitmap was read, and
+ *   has the host's LD or not;
+ * - DC_PEND_UNKNOWN: the tag list could not be read (a 5608h that failed
+ *   or kept changing), so it may say either;
+ * - DC_PEND_NO_EVIDENCE: there is no bitmap to read: the tag is all zeros
+ *   (no tag, so no row), the device answers 5608h Unsupported, or its
+ *   Validity Bitmap Bit[1] is 0. "This bit shall be 0 for GFDs and 1 for
+ *   all other device types" (Table 7-77): a DCD that clears it is taken
+ *   as one without the bitmap (cxl-fmd's choice), not as a failed read,
+ *   which would hold its adds for good.
+ */
+enum fmd_dc_pend {
+	DC_PEND_NO,
+	DC_PEND_YES,
+	DC_PEND_UNKNOWN,
+	DC_PEND_NO_EVIDENCE,
+};
+
+static enum fmd_dc_pend dc_pend(struct fmd_component *dev, int host_id,
+				const uint8_t *tag)
 {
 	struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+	const struct fmd_dc_tag *t;
 
+	if (dc_tag_is_zero(tag) || dcd->tags.unsupported)
+		return DC_PEND_NO_EVIDENCE;
+	if (fmd_dc_tags_failed(&dcd->tags))
+		return DC_PEND_UNKNOWN;
 	/* Validity Bitmap Bit[1]: the Pending Reference Bitmap is valid (Table 7-77) */
-	return !dc_tag_is_zero(tag) && dcd->tags.known && (dcd->tags.validity & 0x02);
-}
-
-static bool dc_pending(struct fmd_component *dev, int host_id, const uint8_t *tag)
-{
-	const struct fmd_dc_tag *t = fmd_dc_tag_find(dev, tag);
-
-	return dc_pending_known(dev, tag) && t && fmd_dc_bm_test(t->pend, host_id);
+	if (!(dcd->tags.validity & 0x02))
+		return DC_PEND_NO_EVIDENCE;
+	t = fmd_dc_tag_find(dev, tag);
+	return t && fmd_dc_bm_test(t->pend, host_id) ? DC_PEND_YES : DC_PEND_NO;
 }
 
 static void dc_task_done(struct fmd_dc_task *dc, struct fmd_dc_range *v, int n,
@@ -3374,6 +3401,7 @@ static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 	struct fmd_dc_task *dc = task->dc;
 	struct fmd_dc_range *cur, *added;
 	char got[32], asked[32], msg[sizeof(task->message)];
+	enum fmd_dc_pend pend;
 	uint64_t bytes;
 	int n, m;
 
@@ -3387,7 +3415,19 @@ static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return;
 	dc_task_done(dc, added, m, bytes);
 
-	if (dc_pending(dev, dc->host_id, dc->tag)) {
+	/*
+	 * A tag list that could not be read: whether the host has answered
+	 * is not known, and a delta may be another add's of the tag
+	 */
+	pend = dc_pend(dev, dc->host_id, dc->tag);
+	if (pend == DC_PEND_UNKNOWN && dev_is_hw(dev)) {
+		snprintf(task->message, sizeof(task->message), "The tag list could "
+			 "not be read: whether the host has answered the add is not "
+			 "known; it is read again on the next --event-poll tick");
+		return;
+	}
+
+	if (pend == DC_PEND_YES) {
 		dc->pend_seen = true;
 		snprintf(task->message, sizeof(task->message), "The host has not "
 			 "answered the add: its LD is in the Pending Reference "
@@ -3412,7 +3452,7 @@ static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return;
 	}
 
-	if (dc->none_record || (dc_pending_known(dev, dc->tag) && dc->pend_seen)) {
+	if (dc->none_record || (pend == DC_PEND_NO && dc->pend_seen)) {
 		snprintf(msg, sizeof(msg), "The host accepted none of the capacity "
 			 "added: %s", dc->none_record ?
 			 "an Add Capacity Response record named it with no capacity" :
@@ -3611,8 +3651,21 @@ int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 		}
 	}
 
+	/*
+	 * An add of a tag whose bitmap is still not read: whether the host
+	 * has an add of it it has not answered is not known
+	 */
+	if (task->kind == FMD_TASK_DC_ADD && dev_is_hw(dev) &&
+	    dc_pend(dev, dc->host_id, dc->tag) == DC_PEND_UNKNOWN) {
+		*msg = "The tag list could not be read before the request, so whether "
+		       "the host has an add of this Tag it has not answered is not "
+		       "known: nothing was sent. Resubmit the request later";
+		return -EAGAIN;
+	}
+
 	/* an add of the tag the host has not answered: which is which? */
-	if (task->kind == FMD_TASK_DC_ADD && dc_pending(dev, dc->host_id, dc->tag)) {
+	if (task->kind == FMD_TASK_DC_ADD &&
+	    dc_pend(dev, dc->host_id, dc->tag) == DC_PEND_YES) {
 		*msg = "The host has an add of this Tag it has not answered (its LD is in "
 		       "the tag's PendingLDs): nothing was sent. Resubmit once it has";
 		return -EALREADY;
@@ -3643,7 +3696,8 @@ void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
 		return;
 	}
 	/* what the read after the command saw; the task is judged from the next */
-	if (task->kind == FMD_TASK_DC_ADD && dc_pending(dev, dc->host_id, dc->tag))
+	if (task->kind == FMD_TASK_DC_ADD &&
+	    dc_pend(dev, dc->host_id, dc->tag) == DC_PEND_YES)
 		dc->pend_seen = true;
 	snprintf(task->message, sizeof(task->message), "The device accepted the "
 		 "request: waiting for the host");
