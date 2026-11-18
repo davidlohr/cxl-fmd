@@ -2048,6 +2048,15 @@ struct fmd_dc_task {
 						   no capacity was taken to be this
 						   add's (or the mock host refused it) */
 	bool partial;				/* Completed with less than asked */
+	/*
+	 * No response to the command could be read: the device may or may
+	 * not have carried it out. The task follows the host as for one it
+	 * accepted, and ends in Exception, "Outcome unknown", after
+	 * FMD_DC_QUIET_READS complete reads of the host that show nothing
+	 * of it (quiet_reads), or on a DELETE of its monitor.
+	 */
+	bool unknown_send;
+	int quiet_reads;
 	struct fmd_dc_range *done;		/* added, or released, as last observed */
 	int n_done;
 	uint64_t done_bytes;
@@ -2135,6 +2144,13 @@ void fmd_dc_task_list(struct fmd_ctx *ctx, struct fmd_task *task);
 void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 		     enum fmd_task_outcome outcome, const char *message);
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, const char *id);
+/*
+ * Whether a DELETE of @task's monitor ends it: a DC task, Running, whose
+ * command had no response that could be read (dc->unknown_send)
+ */
+bool fmd_task_cancellable(const struct fmd_task *task);
+/* unlist @task and free it; fabric_lock held exclusively, and dcd_lock */
+void fmd_task_remove(struct fmd_ctx *ctx, struct fmd_task *task);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
 void fmd_tasks_free(struct fmd_ctx *ctx);
@@ -2906,7 +2922,10 @@ void fmd_dcd_retry_pending(struct fmd_ctx *ctx);
  */
 int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 			struct fmd_task *task, const char **msg);
-/* the device accepted the command of @task; @stale: the read after it failed */
+/*
+ * The device accepted the command of @task, or (task->dc->unknown_send) no
+ * response to it could be read; @stale: the read after it failed
+ */
 void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
 		       struct fmd_task *task, bool stale);
 /* from fmd_tasks_poll(): DC tasks whose device is gone, and the mock's hosts */
@@ -3218,6 +3237,12 @@ json_t *fmd_redfish_tasks(struct fmd_ctx *ctx);
 json_t *fmd_redfish_task(struct fmd_ctx *ctx, const char *id);
 int fmd_redfish_task_monitor(struct fmd_ctx *ctx, const char *id, json_t **response,
 			     char *location, size_t len);
+/*
+ * DELETE of the monitor of Task @id: 204 once the task, one
+ * fmd_task_cancellable() takes, is ended and gone; 404 if there is no such
+ * task; 405 if it cannot be cancelled
+ */
+int fmd_redfish_task_monitor_delete(struct fmd_ctx *ctx, const char *id);
 
 /* PATCH handlers */
 int fmd_redfish_patch_pcie_device(struct fmd_ctx *ctx, const char *chassis_id,

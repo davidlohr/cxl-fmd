@@ -970,8 +970,10 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? length : 0, tag,
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? NULL : extents,
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? 0 : n);
-	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
-		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
+	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE || rc == -EREMOTEIO) {
+		/* a response not read: the task follows it all the same */
+		task->dc->unknown_send = rc == -EREMOTEIO;
+		fmd_dc_task_start(ctx, dev, task, rc != 0);
 		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		free(extents);
 		return FMD_OP_STARTED;
@@ -1387,8 +1389,13 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	rc = fmd_dc_add(ctx, dev, host_id, (uint8_t)policy, (uint8_t)(region < 0 ? 0 : region),
 			length, tag, extents, ext_count);
 	free(extents);
-	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
-		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
+	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE || rc == -EREMOTEIO) {
+		/*
+		 * A response not read: the device may have the command, so
+		 * the task, and its hold on the host and Tag, stay
+		 */
+		task->dc->unknown_send = rc == -EREMOTEIO;
+		fmd_dc_task_start(ctx, dev, task, rc != 0);
 		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		return FMD_OP_STARTED;
 	}
@@ -1550,8 +1557,13 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 	rc = fmd_dc_release(ctx, dev, host_id, (uint8_t)policy, forced, sanitize,
 			    length, tag, extents, ext_count);
 	free(extents);
-	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE) {
-		fmd_dc_task_start(ctx, dev, task, rc == FMD_DC_ACCEPTED_STALE);
+	if (rc == 0 || rc == FMD_DC_ACCEPTED_STALE || rc == -EREMOTEIO) {
+		/*
+		 * A response not read: the device may have the command, so
+		 * the task, and its hold on the host and Tag, stay
+		 */
+		task->dc->unknown_send = rc == -EREMOTEIO;
+		fmd_dc_task_start(ctx, dev, task, rc != 0);
 		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		return FMD_OP_STARTED;
 	}

@@ -179,10 +179,13 @@ command, its return code decides it: Invalid Input, Invalid Extent List and
 Invalid Physical Address are `400`, Resources Exhausted is `409`, Retry
 Required and Busy are `503` (with no `Retry-After`), Unsupported from 5602h
 is `409`; any other return code is `500`. A command libcxlmi could not
-carry, or whose response it could not read, is `500` with a message that
-starts "Outcome unknown": libcxlmi gives the same result for a request not
-sent, one not answered, and a response it could not read, so the device
-may have carried it out; the host (every host for 5602h, the tag list for
+carry, or whose response it could not read, may have been carried out:
+libcxlmi gives the same result for a request not sent, one not answered,
+and a response it could not read. For 5604h and 5605h (an add, a release
+or a `MemoryExtent` `DELETE`) the answer is `202` with the request's
+`Task`, kept as for a command the device accepted (see "Tasks of an add
+or a release"); for the others it is `500` with a message that starts
+"Outcome unknown". The host (every host for 5602h, the tag list for
 5606h and 5607h) is read again on the next `--event-poll` tick, and the
 client is to check before sending it again.
 
@@ -892,8 +895,10 @@ monitor at `/redfish/v1/TaskService/TaskMonitors/{id}`, `{id}` being
 `{boot}-{n}` (see "Binds and unbinds in the background" in
 Redfish-API.md): a URI of an earlier run is `404`. A request
 cxl-fmd or the device refuses is answered at once, with no task, as
-before; so is a command whose outcome is not known ("Outcome unknown",
-Comment 3).
+before. A command whose response could not be read (Comment 3) is
+answered `202` with its task too, its message starting "Outcome
+unknown": the device may have it, so the task, and the hold below, stay
+(see "A response that could not be read").
 
 **Recorded before the command is sent.** The task is made, and the
 request recorded in it, before 5604h or 5605h is sent; if it cannot be
@@ -923,6 +928,36 @@ Pending Reference Bitmap already has the host's LD is refused likewise
 (`ResourceInUse`, "Wait for the Dynamic Capacity task that follows this
 host and Tag to end"). Both are cxl-fmd's choices.
 
+**A response that could not be read.** 5604h "shall complete when the
+device initiates the Add Capacity procedure" (Section 7.6.7.6.5), and
+5605h "when the device initiates the Remove Capacity procedure"
+(Section 7.6.7.6.6); "The Extent List does not contain extents that are
+still pending acceptance from the host via the Add Dynamic Capacity
+Response command" (Section 9.13.3), so a list that shows nothing new
+cannot show that the device never had the add. When no response to 5604h
+or 5605h can be read, the task is kept, `Running`, and the request is
+answered `202` with it, as for one the device accepted (cxl-fmd's
+choice; it was `500` "Outcome unknown" with no task, and a retry was
+sent). The task holds its host and Tag as above, and a release whose
+response was lost holds every release of its host, whatever the tag
+(what leaves the host's list could be either's). It ends as the table
+below says, on capacity of it in the host's list, or on the pending bit
+seen and then cleared; and, as none of these may ever come for a command
+the device did not have, in `Exception` "Outcome unknown: nothing
+observed" (its monitor `500`) after 3 reads of the host that complete
+and show nothing of it: no capacity added or gone, no pending bit, with
+the tag list read or giving no evidence (5608h Unsupported, Validity
+Bit[1] clear, or no tag). A read whose tag list fails does not count, nor
+start the count again. The number is cxl-fmd's choice, to be revisited
+once how long hosts take to answer an offer is known. The operator can
+also end it: a `DELETE` of its monitor (whose `GET` then has `Allow: GET,
+DELETE`) is `204`, sends nothing (no command cancels an add or a
+release), and deletes the task, so that the host and Tag are free and the
+monitor and `Task` are `404`, as "When the task finally completes
+cancellation, operations on the task monitor URI and Task resources shall
+return the HTTP 404 Not Found status code" (DSP0266 1.25.0 Section 12.2).
+A `DELETE` of any other monitor is `405`.
+
 **How a task ends** (cxl-fmd's rules; the specification gives none). A
 task is judged on a read of its host that completed, 5603h and then
 5608h; a read that fails changes nothing. A 5608h that fails is such a
@@ -944,13 +979,14 @@ answered cannot be told (cxl-fmd's choice).
 |------|-----------------|------------------|------------------|
 | Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered, or (a non-zero Tag, on hardware) the tag list could not be read at the last read | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host) |
 | Release | any of what it named is still in the host's 5603h; the message says how much has gone | all of it is gone: the extents of a Prescriptive list, or for a Tag-based one `Length` bytes of the Tag, or what `BaselineExtents` has of the Tag when that is less and not none (a `DELETE` is one of these) | never on what the host does: nothing says a host refuses a release |
-| Either | | | the device is gone: what its host did is not known (`500` "Outcome unknown") |
+| Either | | | the device is gone: what its host did is not known (`500` "Outcome unknown"); or, for a command whose response could not be read, 3 complete reads of the host show nothing of it (`500` "Outcome unknown: nothing observed") |
 
 The capacity seen is in the task as `AcceptedExtents` or
 `ReleasedExtents` (DPA, length and Tag of each part), and an add's
 `Links/CreatedResources` links the `MemoryExtent`s it is in that are
 still there. There is no `PercentComplete`: what share a host has done is
-not known. No time limit ends a task, and nothing in a task sends a
+not known. No time limit ends a task (but for the rule for a lost response
+above), and nothing in a task sends a
 command or frees capacity: a host that never answers leaves its task
 `Running`, the capacity where it is, and its tag refused for that host
 (by the rule above) until the host answers or the device goes. That a
@@ -975,11 +1011,11 @@ body shall contain an error response" (DSP0266 1.25.0 Section 12.2): an
 action `200 OK` with an error object whose `code` is `Base.1.24.Success`
 and whose `message` says what the host accepted or released, a `DELETE`
 `204`; a host that accepted none `409` (`GeneralError`); a device that is
-gone `500` "Outcome unknown". The statuses are cxl-fmd's choices. Nothing
-cancels a task (DSP0266: "If a service supports cancellation of a task,
-the Allow header shall contain DELETE for the task monitor"; cxl-fmd does
-not), tasks are not kept across a restart, and of the tasks that are over
-the newest 64 are kept.
+gone `500` "Outcome unknown". The statuses are cxl-fmd's choices. Only
+the task of a command whose response could not be read can be cancelled
+(DSP0266: "If a service supports cancellation of a task, the Allow header
+shall contain DELETE for the task monitor"), as above; tasks are not kept
+across a restart, and of the tasks that are over the newest 64 are kept.
 
 ### Dynamic Capacity Add Reference (5606h) / Remove Reference (5607h)
 

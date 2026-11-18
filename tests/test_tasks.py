@@ -278,3 +278,24 @@ def test_task_ids_after_restart(cxl_fmd_executable):
             proc.terminate()
             assert proc.wait(timeout=10) == 0
     assert seen[0] != seen[1]
+
+
+@pytest.mark.mock_topology("mock/dcd-device.json")
+def test_monitor_delete_refused(api_client):
+    """Only the task of a Dynamic Capacity request whose response could not
+    be read is cancelled by a DELETE of its monitor (follow-up review item
+    6): the mock's device always answers, so its tasks are not; and a
+    monitor of no task is 404."""
+    base = api_client.base_url
+    response = requests.post(f"{base}{DCD_LD0}/Actions/CXLLogicalDevice.DynamicCapacityAdd",
+                             json={"Policy": "Free", "RegionNumber": 0, "Length": 1024,
+                                   "Tag": "6f1a2c3e-0000-4000-8000-0000000000aa"},
+                             timeout=30)
+    assert response.status_code == 202, response.text
+    monitor = response.headers["Location"]
+    gone = requests.delete(base + monitor, timeout=30)
+    assert gone.status_code == 405
+    assert gone.headers["Allow"] == "GET"
+    assert requests.get(base + monitor, timeout=30).status_code in (200, 202, 409)
+    assert requests.delete(base + "/redfish/v1/TaskService/TaskMonitors/00000000-1",
+                           timeout=30).status_code == 404

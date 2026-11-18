@@ -7905,9 +7905,13 @@ static void test_dc_pending_unread(void)
 		if (c == 2) {
 			answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
 			rc = dc_task_add(ctx, id, TAG_B, 256, &task);
-			CHECK(rc == -EREMOTEIO, "F: an unreadable 5604h reply: %d", rc);
+			CHECK(rc == FMD_OP_STARTED && ctx->tasks,
+			      "F: an unreadable 5604h reply: %d", rc);
 			json_decref(task);
 			task = NULL;
+			/* its task holds the tag; ended, the tag list decides */
+			if (ctx->tasks)
+				fmd_redfish_task_monitor_delete(ctx, ctx->tasks->id);
 		} else {
 			answer_dcd_host_nt(ep, 2, &seed, 1);
 			if (c == 0)
@@ -8218,13 +8222,24 @@ static void test_dc_accepted_stale(void)
 			CHECK(rc == -EAGAIN && msg && strstr(msg, "try again"),
 			      "5604h Retry Required: %d", rc);
 
-			/* not known: the outcome, and the host is read again */
+			/*
+			 * not known: the outcome; a task follows it, and the
+			 * host is read again (follow-up review item 6)
+			 */
 			answer(ep, 0x5604, (uint8_t[4]){ 0 }, 4);
 			rc = dc_accepted_case(ctx, ep, id, 0, &cmds, &msg, &task);
-			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
+			CHECK(rc == FMD_OP_STARTED && task && ctx->tasks &&
+			      ctx->tasks->dc->unknown_send &&
+			      strstr(ctx->tasks->message, "Outcome unknown") &&
 			      cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY,
 			      "5604h with a response that cannot be read: %d, %u commands, "
 			      "host 0 %d", rc, cmds, fmd_dc_host_sync(dev, 0));
+			json_decref(task);
+			task = NULL;
+			/* the operator ends it */
+			if (ctx->tasks)
+				CHECK(fmd_redfish_task_monitor_delete(ctx, ctx->tasks->id) == 204 &&
+				      !ctx->tasks, "the monitor DELETE");
 
 			/* 5605h likewise */
 			cxlmi_mock_clear_responses(ep);
@@ -8234,10 +8249,13 @@ static void test_dc_accepted_stale(void)
 			fmd_dcd_retry_stale(ctx);
 			answer(ep, 0x5605, (uint8_t[4]){ 0 }, 4);
 			rc = dc_accepted_case(ctx, ep, id, 1, &cmds, &msg, &task);
-			CHECK(rc == -EREMOTEIO && msg && strstr(msg, "Outcome unknown") &&
+			CHECK(rc == FMD_OP_STARTED && ctx->tasks &&
+			      ctx->tasks->dc->unknown_send &&
 			      cmds == 1 && fmd_dc_host_sync(dev, 0) == FMD_DC_SYNC_DIRTY,
 			      "5605h with a response that cannot be read: %d, %u commands, "
 			      "host 0 %d", rc, cmds, fmd_dc_host_sync(dev, 0));
+			json_decref(task);
+			task = NULL;
 
 			/* 5606h: the tag list is read again */
 			fmd_memdev_dcd(dev)->tags.unsupported = false;
@@ -14849,6 +14867,301 @@ out:
 }
 
 /*
+ * Follow-up review item 6 (F6a): a DC add, release or MemoryExtent DELETE
+ * whose response cannot be read (a 4-byte Success payload trips libcxlmi's
+ * length check) may or may not have been carried out. Its Task, and with
+ * it the hold on the host and Tag, is kept: 202, a retry refused with
+ * nothing sent, and the task ends on what the host shows, after
+ * FMD_DC_QUIET_READS reads that show nothing, or on a DELETE of its monitor.
+ */
+static const char *const r6_tag_add =
+	"{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": 256, "
+	"\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000bb\"}";
+static const char *const r6_rel =
+	"{\"Policy\": \"TagBased\", \"ForcedRemoval\": false, "
+	"\"SanitizeOnRelease\": false, \"Length\": 256, "
+	"\"Tag\": \"6f1a2c3e-0000-4000-8000-000000000001\"}";
+static const uint8_t r6_tag_bb[16] = {
+	0x6f, 0x1a, 0x2c, 0x3e, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0xbb,
+};
+
+static int r6_dc_tasks(struct fmd_ctx *ctx, enum fmd_task_kind kind)
+{
+	int n = 0;
+
+	for (struct fmd_task *t = ctx->tasks; t; t = t->next)
+		n += fmd_task_is_dc(t) && t->kind == kind;
+	return n;
+}
+
+/* a lost 5604h of r6_tag_add on hw_dcd(@serial, 08h): its task */
+static struct fmd_task *r6_lost_add(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+				    const char *id)
+{
+	const char *msg = NULL;
+	json_t *task = NULL;
+	unsigned int sent;
+	int rc;
+
+	cxlmi_mock_clear_responses(ep);
+	answer(ep, 0x5604, (void *)r6_lost, sizeof(r6_lost));
+	sent = commands_sent(ep);
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_tag_add,
+				       strlen(r6_tag_add), &msg, &task);
+	CHECK(rc == FMD_OP_STARTED && task && commands_sent(ep) - sent == 1 &&
+	      last_opcode(ep) == 0x5604 && r6_dc_tasks(ctx, FMD_TASK_DC_ADD) == 1 &&
+	      ctx->tasks->dc->unknown_send && ctx->tasks->state == FMD_TASK_RUNNING &&
+	      !strncmp(dc_task_msg(task), "Outcome unknown", 15),
+	      "A1, 5604h lost: %d, %u sent, %d add tasks", rc,
+	      commands_sent(ep) - sent, r6_dc_tasks(ctx, FMD_TASK_DC_ADD));
+	json_decref(task);
+	return rc == FMD_OP_STARTED ? ctx->tasks : NULL;
+}
+
+static void test_r6_dc_lost_reply(void)
+{
+	struct dc_ext seed = { 1ULL << 30, 1ULL << 28, dc_tag, 0 };
+	struct dc_ext with_bb[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, r6_tag_bb, 0 },
+	};
+	char id[FMD_MAX_ID_LEN], tid[FMD_TASK_ID_LEN];
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev;
+	struct fmd_task *t;
+	struct fmd_ctx *ctx;
+	const char *msg = NULL;
+	json_t *task = NULL;
+	unsigned int sent;
+	int before = failures, rc;
+
+	/* A1, A2: the same add again is refused, nothing sent */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xf6, 0x08);
+	device_id(id, sizeof(id), 0xf6);
+	t = dev ? r6_lost_add(ctx, ep, id) : NULL;
+	if (t) {
+		answer_dc_refresh(ep, 0x08);
+		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+		answer_dc_refresh(ep, 0x08);
+		sent = commands_sent(ep);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_tag_add,
+					       strlen(r6_tag_add), &msg, &task);
+		CHECK(rc == -EALREADY && commands_sent(ep) == sent &&
+		      r6_dc_tasks(ctx, FMD_TASK_DC_ADD) == 1,
+		      "A2, the add again: %d, %u sent", rc, commands_sent(ep) - sent);
+		json_decref(task);
+		task = NULL;
+
+		/*
+		 * F1: the host's list gains 256 MB of the tag: the one task
+		 * completes on it, and no second add was sent to take it
+		 */
+		cxlmi_mock_clear_responses(ep);
+		answer_dcd_host_nt(ep, 3, with_bb, 2);
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+		fmd_dcd_retry_stale(ctx);
+		CHECK(t->state == FMD_TASK_COMPLETED && r6_dc_tasks(ctx, FMD_TASK_DC_ADD) == 1,
+		      "F1, the capacity listed: task %d (%s)", t->state, t->message);
+	}
+	fmd_ctx_free(ctx);
+
+	/* nothing observed: three reads, and the task ends; the hold with it */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xf7, 0x08);
+	device_id(id, sizeof(id), 0xf7);
+	t = dev ? r6_lost_add(ctx, ep, id) : NULL;
+	if (t) {
+		int monitor;
+		json_t *v;
+
+		snprintf(tid, sizeof(tid), "%s", t->id);
+		for (int i = 1; i <= 3; i++) {
+			answer_dc_refresh(ep, 0x08);
+			CHECK(fmd_dcd_retry_stale(ctx) == 1, "tick %d read nothing", i);
+			if (i < 3)
+				CHECK(t->state == FMD_TASK_RUNNING && t->dc->quiet_reads == i,
+				      "after %d quiet reads: task %d, %d", i, t->state,
+				      t->dc->quiet_reads);
+		}
+		CHECK(t->state == FMD_TASK_EXCEPTION && t->outcome == FMD_TASK_UNKNOWN &&
+		      strstr(t->message, "nothing observed"),
+		      "after 3 quiet reads: task %d (%s)", t->state, t->message);
+		v = dc_task_now(ctx, tid, &monitor);
+		CHECK(monitor == 500, "the monitor of an add that ended unobserved: %d",
+		      monitor);
+		json_decref(v);
+		{
+			char loc[256];
+			const char *m, *again;
+
+			v = NULL;
+			fmd_redfish_task_monitor(ctx, tid, &v, loc, sizeof(loc));
+			m = json_string_value(json_object_get(json_object_get(v, "error"),
+							      "message"));
+			again = m ? strstr(m, "Outcome unknown") : NULL;
+			CHECK(again && !strstr(again + 1, "Outcome unknown"),
+			      "the monitor's message: %s", m ? m : "(none)");
+			json_decref(v);
+		}
+		CHECK(fmd_redfish_task_monitor_delete(ctx, tid) == 405,
+		      "a DELETE of the monitor of an ended task");
+		/* the hold is gone: the add is sent again */
+		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+		answer_dc_refresh(ep, 0x08);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_tag_add,
+					       strlen(r6_tag_add), &msg, &task);
+		CHECK(rc == FMD_OP_STARTED && commands_sent(ep) > 0 &&
+		      ctx->tasks != t && !ctx->tasks->dc->unknown_send,
+		      "the add after the task ended: %d, last %04xh", rc,
+		      last_opcode(ep));
+		json_decref(task);
+		task = NULL;
+		/* a task the device accepted is not cancelled */
+		CHECK(fmd_redfish_task_monitor_delete(ctx, ctx->tasks->id) == 405 &&
+		      fmd_redfish_task_monitor_delete(ctx, "1") == 404,
+		      "a DELETE of the monitor of an accepted add, or of no task");
+	}
+	fmd_ctx_free(ctx);
+
+	/* the operator ends it with a DELETE of its monitor */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xf8, 0x08);
+	device_id(id, sizeof(id), 0xf8);
+	t = dev ? r6_lost_add(ctx, ep, id) : NULL;
+	if (t) {
+		snprintf(tid, sizeof(tid), "%s", t->id);
+		CHECK(fmd_redfish_task_monitor_delete(ctx, tid) == 204 &&
+		      !fmd_task_find(ctx, tid) && !ctx->tasks,
+		      "a DELETE of the monitor of an add whose response was lost");
+		answer_dc_refresh(ep, 0x08);
+		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+		answer_dc_refresh(ep, 0x08);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_tag_add,
+					       strlen(r6_tag_add), &msg, &task);
+		CHECK(rc == FMD_OP_STARTED, "the add after the DELETE: %d", rc);
+		json_decref(task);
+		task = NULL;
+	}
+	fmd_ctx_free(ctx);
+
+	/* R1, R2: a release; the same again, and one of another tag, refused */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xf9, 0x08);
+	device_id(id, sizeof(id), 0xf9);
+	if (dev) {
+		static const char *other =
+			"{\"Policy\": \"TagBased\", \"ForcedRemoval\": false, "
+			"\"SanitizeOnRelease\": false, \"Length\": 256, "
+			"\"Tag\": \"6f1a2c3e-0000-4000-8000-0000000000cc\"}";
+
+		cxlmi_mock_clear_responses(ep);
+		answer(ep, 0x5605, (void *)r6_lost, sizeof(r6_lost));
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", r6_rel,
+						   strlen(r6_rel), &msg, &task);
+		CHECK(rc == FMD_OP_STARTED && task &&
+		      r6_dc_tasks(ctx, FMD_TASK_DC_RELEASE) == 1 &&
+		      ctx->tasks->dc->unknown_send, "R1, 5605h lost: %d", rc);
+		json_decref(task);
+		task = NULL;
+		answer_dc_refresh(ep, 0x08);
+		answer_rc(ep, 0x5605, CXLMI_RET_SUCCESS);
+		answer_dc_refresh(ep, 0x08);
+		sent = commands_sent(ep);
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", r6_rel,
+						   strlen(r6_rel), &msg, &task);
+		CHECK(rc == -EALREADY && commands_sent(ep) == sent,
+		      "R2, the release again: %d, %u sent", rc, commands_sent(ep) - sent);
+		json_decref(task);
+		task = NULL;
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", other,
+						   strlen(other), &msg, &task);
+		CHECK(rc == -EALREADY && commands_sent(ep) == sent &&
+		      r6_dc_tasks(ctx, FMD_TASK_DC_RELEASE) == 1,
+		      "a release of another tag of the host: %d", rc);
+		json_decref(task);
+		task = NULL;
+	}
+	fmd_ctx_free(ctx);
+
+	/* D1: the DELETE of an extent */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xfa, 0x08);
+	device_id(id, sizeof(id), 0xfa);
+	if (dev) {
+		cxlmi_mock_clear_responses(ep);
+		answer(ep, 0x5605, (void *)r6_lost, sizeof(r6_lost));
+		rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000",
+							 &msg, &task);
+		CHECK(rc == FMD_OP_STARTED && task &&
+		      r6_dc_tasks(ctx, FMD_TASK_DC_RELEASE) == 1 &&
+		      ctx->tasks->dc->unknown_send, "D1, 5605h lost: %d", rc);
+		json_decref(task);
+		task = NULL;
+		sent = commands_sent(ep);
+		rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000",
+							 &msg, &task);
+		CHECK(rc == -EALREADY && commands_sent(ep) == sent,
+		      "D1, the DELETE again: %d", rc);
+		json_decref(task);
+		task = NULL;
+		/* the extent leaves the host's list: released */
+		cxlmi_mock_clear_responses(ep);
+		answer_dcd_host_nt(ep, 3, NULL, 0);
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+		fmd_dcd_retry_stale(ctx);
+		CHECK(ctx->tasks && ctx->tasks->state == FMD_TASK_COMPLETED,
+		      "D1, the extent gone: %d", ctx->tasks ? (int)ctx->tasks->state : -1);
+	}
+	fmd_ctx_free(ctx);
+
+	/*
+	 * A read whose tag list (5608h) fails does not count: on a device with
+	 * a tag list, the add of tag B lost, one tick with 5608h failing, then
+	 * three with it read and host 0 not pending
+	 */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xfb, 0x00);
+	device_id(id, sizeof(id), 0xfb);
+	if (dev) {
+		struct dc_tag_row none[1] = { { dc_tag, false, { 0 }, 1, { 0 }, 0 } };
+
+		cxlmi_mock_clear_responses(ep);
+		answer(ep, 0x5604, (void *)r6_lost, sizeof(r6_lost));
+		rc = dc_task_add(ctx, id, TAG_B, 256, &task);
+		json_decref(task);
+		task = NULL;
+		t = ctx->tasks;
+		CHECK(rc == FMD_OP_STARTED && t && t->dc->unknown_send,
+		      "an add of tag B, 5604h lost: %d", rc);
+		if (t) {
+			answer_dcd_host_nt(ep, 2, &seed, 1);
+			answer_rc(ep, 0x5608, CXLMI_RET_INTERNAL);
+			fmd_dcd_retry_stale(ctx);
+			CHECK(t->state == FMD_TASK_RUNNING && t->dc->quiet_reads == 0,
+			      "a read with the tag list failing: %d, %d", t->state,
+			      t->dc->quiet_reads);
+			for (int i = 0; i < 3; i++) {
+				answer_dcd_host_nt(ep, 2, &seed, 1);
+				answer_dc_tags(ep, 110 + i, 1, 0x03, none, 1);
+				fmd_dcd_retry_stale(ctx);
+			}
+			CHECK(t->state == FMD_TASK_EXCEPTION && t->dc->quiet_reads == 3,
+			      "three reads with the tag list read: %d, %d", t->state,
+			      t->dc->quiet_reads);
+		}
+	}
+	fmd_ctx_free(ctx);
+	report("a DC request whose response is lost keeps its task and hold", before);
+}
+
+/*
  * What a head of a Multi-Headed device presents is read from the whole LD
  * Map, and is not known without it (follow-up review item 7). "A head
  * with one LD mapped shall present itself as an SLD and a head with more
@@ -15291,6 +15604,7 @@ int main(void)
 	test_unbind_success_refresh_fails();
 	test_r6_switch_lost_reply();
 	test_task_ids_per_boot();
+	test_r6_dc_lost_reply();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

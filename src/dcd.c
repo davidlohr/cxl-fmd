@@ -3395,6 +3395,46 @@ static void dc_task_done(struct fmd_dc_task *dc, struct fmd_dc_range *v, int n,
 	dc->done_bytes = bytes;
 }
 
+/*
+ * Complete reads of its host, showing nothing of it, after which a task
+ * whose command had no response that could be read ends (cxl-fmd's
+ * choice, decision 11 of the follow-up review; to be revisited once how
+ * long hosts take to answer an offer is known)
+ */
+#define FMD_DC_QUIET_READS 3
+
+/*
+ * @task, whose command had no response that could be read
+ * (dc->unknown_send), and of which a complete read of its host has just
+ * shown nothing: no capacity added or gone, no pending bit, with a tag
+ * list that was read (or gives no evidence). After FMD_DC_QUIET_READS such
+ * reads it ends in Exception: the device may never have had the command,
+ * or the host's answer was not seen, and a hold that only an observation
+ * could end would last for good. A read whose tag list failed does not
+ * count, nor reset the count: it says nothing either way.
+ */
+static bool dc_quiet_read(struct fmd_ctx *ctx, struct fmd_task *task)
+{
+	struct fmd_dc_task *dc = task->dc;
+	char msg[sizeof(task->message)];
+
+	if (!dc->unknown_send)
+		return false;
+	if (++dc->quiet_reads < FMD_DC_QUIET_READS) {
+		snprintf(task->message, sizeof(task->message), "Outcome unknown: "
+			 "no response to the command could be read, and %d read(s) "
+			 "of the host show nothing of it so far; the task ends after "
+			 "%d", dc->quiet_reads, FMD_DC_QUIET_READS);
+		return true;
+	}
+	snprintf(msg, sizeof(msg), "Outcome unknown: nothing observed. No response "
+		 "to the command could be read, and %d reads of the host after it "
+		 "showed nothing of it: the device may not have had it, or the "
+		 "host's answer was not seen", dc->quiet_reads);
+	fmd_dc_task_end(ctx, task, false, FMD_TASK_UNKNOWN, msg);
+	return true;
+}
+
 static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 			 struct fmd_task *task)
 {
@@ -3461,6 +3501,9 @@ static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 		fmd_dc_task_end(ctx, task, false, FMD_TASK_DC_REFUSED, msg);
 		return;
 	}
+	/* a pending bit seen is the device's word that it had the add */
+	if (!dc->pend_seen && dc_quiet_read(ctx, task))
+		return;
 	snprintf(task->message, sizeof(task->message), "Waiting for the host: "
 		 "none of the capacity added is in its extent list yet");
 }
@@ -3513,12 +3556,21 @@ static void dc_judge_release(struct fmd_ctx *ctx, struct fmd_component *dev,
 		fmd_dc_task_end(ctx, task, true, FMD_TASK_OBSERVED, msg);
 		return;
 	}
-	if (bytes)
+	if (bytes) {
+		/* some is gone: the device had the release */
+		dc->unknown_send = false;
 		snprintf(task->message, sizeof(task->message), "The host has "
 			 "released %s of the %s so far", got, asked);
-	else
-		snprintf(task->message, sizeof(task->message), "Waiting for the "
-			 "host: none of the capacity is gone from its extent list yet");
+		return;
+	}
+	/* a tag list that could not be read: the read does not count */
+	if (dc->unknown_send && dev_is_hw(dev) &&
+	    fmd_dc_tags_failed(&fmd_memdev_dcd(dev)->tags))
+		return;
+	if (dc_quiet_read(ctx, task))
+		return;
+	snprintf(task->message, sizeof(task->message), "Waiting for the "
+		 "host: none of the capacity is gone from its extent list yet");
 }
 
 static void dc_task_judge(struct fmd_ctx *ctx, struct fmd_component *dev,
@@ -3628,6 +3680,14 @@ int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 		} else {
 			meet = dc_task_has_tag(t->dc, t->kind, dc->tag);
 		}
+		/*
+		 * A release whose response was lost may be under way: what
+		 * leaves the host's list could be either's, whatever its tag
+		 * (cxl-fmd's choice)
+		 */
+		if (task->kind == FMD_TASK_DC_RELEASE &&
+		    t->kind == FMD_TASK_DC_RELEASE && t->dc->unknown_send)
+			meet = true;
 		if (meet) {
 			*msg = "Another Dynamic Capacity task is following this host "
 			       "and Tag: nothing was sent. Resubmit once it is over";
@@ -3689,6 +3749,14 @@ void fmd_dc_task_start(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 	fmd_dc_task_list(ctx, task);
 	dc->stale_after = stale;
+	if (dc->unknown_send) {
+		snprintf(task->message, sizeof(task->message), "Outcome unknown: no "
+			 "response to the command could be read, and the device may "
+			 "or may not have carried it out; the host is read on each "
+			 "--event-poll tick, and the task ends on what it shows, or "
+			 "after %d reads that show nothing of it", FMD_DC_QUIET_READS);
+		return;
+	}
 	if (stale) {
 		snprintf(task->message, sizeof(task->message), "The device accepted "
 			 "the request, but the host could not be read back after it: "

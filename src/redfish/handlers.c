@@ -814,11 +814,49 @@ static int dc_task_monitor(const struct fmd_task *task, json_t **response)
 				"if it still applies.", NULL, 0));
 		return 409;
 	}
-	snprintf(msg, sizeof(msg), "Outcome unknown: %s", task->message);
+	/* a task that ended with nothing observed says so already */
+	if (!strncmp(task->message, "Outcome unknown", 15))
+		snprintf(msg, sizeof(msg), "%s", task->message);
+	else
+		snprintf(msg, sizeof(msg), "Outcome unknown: %s", task->message);
 	*response = fmd_redfish_error_body(msg,
 		fmd_redfish_message(FMD_RF_GENERAL_ERROR, FMD_RES_OUTCOME_UNKNOWN,
 				    NULL, 0));
 	return 500;
+}
+
+/*
+ * "If a service supports cancellation of a task, the Allow header shall
+ * contain DELETE for the task monitor. To cancel the operation, the client
+ * may perform a DELETE request on the task monitor URI. The service
+ * determines when to delete the associated Task resource" (DSP0266 1.25.0
+ * Section 12.2). Only a DC task whose command had no response that could
+ * be read takes it (cxl-fmd's choice): nothing is sent to the device, which
+ * has no command to cancel an add or a release; the task stops following
+ * the host and is deleted at once, so its hold on the host and Tag ends,
+ * and "When the task finally completes cancellation, operations on the
+ * task monitor URI and Task resources shall return the HTTP 404 Not Found
+ * status code" (ibid.).
+ */
+int fmd_redfish_task_monitor_delete(struct fmd_ctx *ctx, const char *id)
+{
+	struct fmd_task *task;
+	int status;
+
+	pthread_mutex_lock(&ctx->dcd_lock);
+	task = fmd_task_find(ctx, id);
+	if (!task) {
+		status = 404;
+	} else if (!fmd_task_cancellable(task)) {
+		status = 405;
+	} else {
+		fmd_warn(ctx, "Task %s: ended by a DELETE of its monitor, its outcome "
+			 "not known: %s", task->id, task->message);
+		fmd_task_remove(ctx, task);
+		status = 204;
+	}
+	pthread_mutex_unlock(&ctx->dcd_lock);
+	return status;
 }
 
 int fmd_redfish_task_monitor(struct fmd_ctx *ctx, const char *id, json_t **response,

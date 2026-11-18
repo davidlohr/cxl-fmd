@@ -445,6 +445,7 @@ static void describedby_of_text(const char *data, size_t n, char *buf, size_t le
 
 static bool route_exists(struct fmd_ctx *ctx, const char *url);
 static void allow_header(struct fmd_ctx *ctx, const char *url, char *buf, size_t len);
+static bool deletable(struct fmd_ctx *ctx, const char *url);
 
 /* A bind or unbind that failed with @err: as its task monitor answers */
 /*
@@ -1081,6 +1082,17 @@ static enum MHD_Result route_get(struct fmd_ctx *ctx,
 			return send_no_content(conn);
 		if (status >= 400)
 			return send_error_body(conn, status, response, NULL);
+		if (location[0] && deletable(ctx, location)) {
+			/*
+			 * "If a service supports cancellation of a task, the
+			 * Allow header shall contain DELETE for the task
+			 * monitor" (DSP0266 1.25.0 Section 12.2)
+			 */
+			const char *const hdrs[] = { "Location", location,
+						     "Allow", "GET, DELETE", NULL };
+
+			return send_json_headers(conn, status, response, hdrs);
+		}
 		if (location[0])
 			return send_json_response_with_location(conn, status,
 								response, location);
@@ -1396,6 +1408,7 @@ static const char *const delete_routes[] = {
 	"/redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}",
 	"/redfish/v1/Fabrics/{id}/Connections/{conn}",
 	"/redfish/v1/Chassis/{id}/PCIeDevices/{dev}/MemoryExtents/{ext}",
+	"/redfish/v1/TaskService/TaskMonitors/{task}",
 };
 
 #define ROUTES(a) (sizeof(a) / sizeof((a)[0]))
@@ -1413,13 +1426,23 @@ static bool matches_any(const char *const *routes, size_t n, const char *url)
 	return false;
 }
 
-/* A switch-attached Connection: one a DELETE unbinds */
+/*
+ * A switch-attached Connection: one a DELETE unbinds; a task monitor: one
+ * of a task a DELETE cancels (fmd_task_cancellable())
+ */
 static bool deletable(struct fmd_ctx *ctx, const char *url)
 {
 	const char *params[8] = {0};
 	json_t *conn;
 	bool ok;
 
+	if (match_route("/redfish/v1/TaskService/TaskMonitors/{task}", url, params, 8)) {
+		pthread_mutex_lock(&ctx->dcd_lock);
+		ok = fmd_task_cancellable(fmd_task_find(ctx, params[0]));
+		pthread_mutex_unlock(&ctx->dcd_lock);
+		free_params(params, 8);
+		return ok;
+	}
 	if (!match_route("/redfish/v1/Fabrics/{id}/Connections/{conn}", url, params, 8))
 		return true;
 	conn = fmd_redfish_connection(ctx, params[0], params[1]);
@@ -2216,6 +2239,24 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 		return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
 				  "Memory allocation failed",
 				  RF_MSG(FMD_RF_INTERNAL_ERROR));
+
+	/*
+	 * DELETE of a task monitor: cancels a task whose command had no
+	 * response that could be read (fmd_redfish_task_monitor_delete())
+	 */
+	if (match_route("/redfish/v1/TaskService/TaskMonitors/{task}", norm_url,
+			params, 8)) {
+		rc = fmd_redfish_task_monitor_delete(ctx, params[0]);
+		free_params(params, 8);
+		free(norm_url);
+		if (rc == 204)
+			return send_no_content(conn);
+		if (rc == 404)
+			return send_not_found(conn, url, "Task not found");
+		return send_error_allow(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+					"Only the task of a Dynamic Capacity request whose response could not be read can be cancelled",
+					"GET");
+	}
 
 	/* DELETE /redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk} */
 	if (match_route("/redfish/v1/Chassis/{id}/MemoryDomains/{dom}/MemoryChunks/{chunk}",

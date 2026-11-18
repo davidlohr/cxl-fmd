@@ -258,6 +258,25 @@ struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, const char *id)
 	return NULL;
 }
 
+bool fmd_task_cancellable(const struct fmd_task *task)
+{
+	return task && fmd_task_is_dc(task) && task->state == FMD_TASK_RUNNING &&
+	       task->dc->unknown_send;
+}
+
+void fmd_task_remove(struct fmd_ctx *ctx, struct fmd_task *task)
+{
+	struct fmd_task **pp;
+
+	for (pp = &ctx->tasks; *pp; pp = &(*pp)->next) {
+		if (*pp == task) {
+			*pp = task->next;
+			task_free(task);
+			return;
+		}
+	}
+}
+
 bool fmd_tasks_running(struct fmd_ctx *ctx)
 {
 	struct fmd_task *task;
