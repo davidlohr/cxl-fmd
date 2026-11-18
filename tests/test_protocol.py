@@ -169,22 +169,36 @@ class TestDirectConnection:
         assert allowed(requests.delete(api_client.base_url + chunk, timeout=30)) == {"GET"}
 
 
-# Conditional requests (review F18 claim 4)
+# Conditional requests (review F18 claim 4; follow-up review item 9,
+# decision 22): evaluated as RFC 9110 Sections 13.1.1, 13.1.2 and 13.2.2
+# have them. cxl-fmd returns no ETags, so no entity tag matches.
 DCD = "/redfish/v1/Chassis/cxl_dcd0/PCIeDevices/cxl_dcd0"
 REGION = DCD + "/CXLLogicalDevices/0/MemoryRegions/0"
 EXTENT = DCD + "/MemoryExtents/ext_0_400000000"
+RELEASE = DCD + "/CXLLogicalDevices/0/Actions/CXLLogicalDevice.DynamicCapacityRelease"
 SLD_CHUNKS = "/redfish/v1/Chassis/cxl_mem0/MemoryDomains/cxl_mem0_domain0/MemoryChunks"
-PRECONDITIONS = [{"If-Match": '"stale-etag-from-earlier-read"'},
-                 {"If-Match": "*"},
-                 {"If-None-Match": "*"},
-                 {"If-None-Match": '"x"'}]
+# conditions that are false on a resource that is there
+REFUSED = [{"If-Match": '"stale-etag-from-earlier-read"'},
+           {"If-Match": '"x", W/"y"'},
+           {"If-Match": '*, "x"'},
+           {"If-None-Match": "*"},
+           {"If-Match": "*", "If-None-Match": "*"},
+           {"If-Match": '"x"', "If-None-Match": '"y"'}]
+# conditions that are true on it: "If the field value is "*", the
+# condition is true if the origin server has a current representation for
+# the target resource" (If-Match); "If the field value is a list of entity
+# tags, the condition is false if one of the listed tags matches ...
+# Otherwise, the condition is true" (If-None-Match)
+PROCEEDS = [{"If-Match": "*"},
+            {"If-None-Match": '"x"'},
+            {"If-None-Match": 'W/"x", "y"'},
+            {"If-Match": "*", "If-None-Match": '"x"'}]
 
 
 def precondition_failed(response):
     """
     412: "Precondition check, such as check of the OData-Version, If-Match,
-    or If-None-Match header, failed." (DSP0266 1.25.0 Table 14). cxl-fmd
-    returns no ETags, and cannot compare one.
+    or If-None-Match header, failed." (DSP0266 1.25.0 Table 14).
     """
     assert response.status_code == 412, response.text
     info = response.json()["error"]["@Message.ExtendedInfo"]
@@ -192,11 +206,33 @@ def precondition_failed(response):
     assert "If-Match" in info[0]["Resolution"]
 
 
+def raw_request(client, method, path, headers, body=None):
+    """@method of @path with @headers, a list of (name, value) field lines
+    that may repeat a name (which requests cannot send)."""
+    import http.client
+    from urllib.parse import urlsplit
+    url = urlsplit(client.base_url)
+    conn = http.client.HTTPConnection(url.hostname, url.port, timeout=30)
+    try:
+        conn.putrequest(method, path)
+        for name, value in headers:
+            conn.putheader(name, value)
+        data = body.encode() if body is not None else b""
+        if body is not None:
+            conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(len(data)))
+        conn.endheaders(data)
+        r = conn.getresponse()
+        return r.status, r.read()
+    finally:
+        conn.close()
+
+
 @pytest.mark.mock_topology("mock/dcd-device.json")
 class TestPreconditionsDCD:
 
-    @pytest.mark.parametrize("headers", PRECONDITIONS)
-    def test_patch_with_precondition_changes_nothing(self, api_client, headers):
+    @pytest.mark.parametrize("headers", REFUSED)
+    def test_patch_with_false_condition_changes_nothing(self, api_client, headers):
         """It was 200, and Set DC Region Configuration sent, whatever the
         ETag asked for (there are none)."""
         assert dc_delete(api_client, EXTENT) == 204
@@ -212,56 +248,120 @@ class TestPreconditionsDCD:
         assert response.status_code == 200
         assert api_client.get(REGION)[1]["BlockSizeMiB"] == 512
 
-    def test_delete_with_precondition_changes_nothing(self, api_client):
+    @pytest.mark.parametrize("headers", PROCEEDS)
+    def test_patch_with_true_condition_is_carried_out(self, api_client, headers):
+        """It was 412: If-Match: * on a resource that is there is true
+        (RFC 9110 Section 13.1.1, step 1), and so is an If-None-Match list
+        that no ETag can match (Section 13.1.2, step 3)."""
+        assert dc_delete(api_client, EXTENT) == 204
+        response = requests.patch(api_client.base_url + REGION,
+                                  json={"BlockSizeMiB": 512},
+                                  headers=headers, timeout=30)
+        assert response.status_code == 200, response.text
+        assert api_client.get(REGION)[1]["BlockSizeMiB"] == 512
+
+    def test_delete_with_false_condition_changes_nothing(self, api_client):
         response = requests.delete(api_client.base_url + EXTENT,
-                                   headers={"If-Match": "*"}, timeout=30)
+                                   headers={"If-Match": '"x"'}, timeout=30)
         precondition_failed(response)
         assert api_client.get(EXTENT)[0] == 200
 
+    def test_delete_with_if_match_star(self, api_client):
+        """It was 412"""
+        response = requests.delete(api_client.base_url + EXTENT,
+                                   headers={"If-Match": "*"}, timeout=30)
+        assert response.status_code == 202, response.text
+        assert response.headers["Location"] == response.json()["TaskMonitor"]
+
     def test_action_with_precondition(self, api_client):
-        response = requests.post(
-            api_client.base_url + DCD + "/CXLLogicalDevices/0/Actions/"
-            "CXLLogicalDevice.DynamicCapacityRelease",
-            json={"Policy": "Free", "ForcedRemoval": False,
-                  "SanitizeOnRelease": False},
-            headers={"If-Match": '"x"'}, timeout=30)
-        precondition_failed(response)
-        assert api_client.get(EXTENT)[0] == 200
+        """An action URI has no current representation (a GET of it is
+        404): If-Match: * is false there, and If-None-Match: * true."""
+        body = {"Policy": "Free", "ForcedRemoval": False, "SanitizeOnRelease": False}
+        base = api_client.base_url
+        assert requests.get(base + RELEASE, timeout=30).status_code == 404
+        for h in ({"If-Match": '"x"'}, {"If-Match": "*"}):
+            precondition_failed(requests.post(base + RELEASE, json=body,
+                                              headers=h, timeout=30))
+            assert api_client.get(EXTENT)[0] == 200
+        # true: the action is carried out (here refused for what it asks)
+        response = requests.post(base + RELEASE, json=body,
+                                 headers={"If-None-Match": "*"}, timeout=30)
+        assert response.status_code != 412, response.text
+        plain = requests.post(base + RELEASE, json=body, timeout=30)
+        assert response.status_code == plain.status_code
+
+    def test_repeated_field_lines(self, api_client):
+        """Field lines of one name are one list (RFC 9110 Section 5.3):
+        "*" then "x" is not "*", so the condition is false. Names are
+        compared without case (Section 5.1)."""
+        assert dc_delete(api_client, EXTENT) == 204
+        body = '{"BlockSizeMiB": 512}'
+        status, _ = raw_request(api_client, "PATCH", REGION,
+                                [("If-Match", "*"), ("If-Match", '"x"')], body)
+        assert status == 412
+        status, _ = raw_request(api_client, "PATCH", REGION,
+                                [("If-None-Match", '"x"'), ("If-None-Match", "*")],
+                                body)
+        assert status == 200
+        assert api_client.get(REGION)[1]["BlockSizeMiB"] == 512
+        status, _ = raw_request(api_client, "PATCH", REGION,
+                                [("if-none-match", "*")], '{"BlockSizeMiB": 256}')
+        assert status == 412
+        status, _ = raw_request(api_client, "PATCH", REGION,
+                                [("if-match", " *\t"), ("If-Match", "")],
+                                '{"BlockSizeMiB": 256}')
+        assert status == 200
+        assert api_client.get(REGION)[1]["BlockSizeMiB"] == 256
 
     def test_get_with_precondition_is_a_get(self, api_client):
         """A conditional GET is "If supported by the service" (Section
         7.2.1): cxl-fmd answers it as one without."""
-        response = requests.get(api_client.base_url + REGION,
-                                headers={"If-None-Match": '"x"'}, timeout=30)
-        assert response.status_code == 200
+        for h in ({"If-None-Match": '"x"'}, {"If-None-Match": "*"},
+                  {"If-Match": '"x"'}):
+            response = requests.get(api_client.base_url + REGION,
+                                    headers=h, timeout=30)
+            assert response.status_code == 200
 
 
 @pytest.mark.mock_topology("mock/single-sld.json")
 class TestPreconditionsSLD:
 
-    def test_post_with_precondition_makes_nothing(self, api_client):
+    def test_post_with_false_condition_makes_nothing(self, api_client):
         status, before = api_client.get(SLD_CHUNKS)
-        response = requests.post(api_client.base_url + SLD_CHUNKS,
-                                 json={"MemoryChunkSizeMiB": 256},
-                                 headers={"If-None-Match": "*"}, timeout=30)
-        precondition_failed(response)
-        assert api_client.get(SLD_CHUNKS)[1]["Members"] == before["Members"]
+        for h in ({"If-None-Match": "*"}, {"If-Match": '"x"'}):
+            response = requests.post(api_client.base_url + SLD_CHUNKS,
+                                     json={"MemoryChunkSizeMiB": 256},
+                                     headers=h, timeout=30)
+            precondition_failed(response)
+            assert api_client.get(SLD_CHUNKS)[1]["Members"] == before["Members"]
+
+    def test_chunk_delete_and_post_with_if_match_star(self, api_client):
+        """It was 412 for both: the chunk and its collection are there"""
+        base, h = api_client.base_url, {"If-Match": "*"}
+        chunk = api_client.get(SLD_CHUNKS)[1]["Members"][0]["@odata.id"]
+        response = requests.delete(base + chunk, headers=h, timeout=30)
+        assert response.status_code == 204, response.text
+        assert api_client.get(chunk)[0] == 404
+        response = requests.post(base + SLD_CHUNKS, json={"MemoryChunkSizeMiB": 256},
+                                 headers=h, timeout=30)
+        assert response.status_code == 201, response.text
+        assert api_client.get(response.headers["Location"])[0] == 200
 
     def test_not_found_and_not_allowed_win(self, api_client):
         """'A server MUST ignore all received preconditions if its response
         to the same request without those conditions ... would have been a
         status code other than a 2xx (Successful) or 412' (RFC 9110 Section
         13.2.1)"""
-        h = {"If-Match": "*"}
         base = api_client.base_url
-        assert requests.patch(base + "/redfish/v1/Chassis/nonexistent", json={},
-                              headers=h, timeout=30).status_code == 404
-        assert requests.delete(base + SLD_CHUNKS + "/nonexistent",
-                               headers=h, timeout=30).status_code == 404
-        assert requests.put(base + CHASSIS, json={}, headers=h,
-                            timeout=30).status_code == 405
-        assert requests.post(base + CHASSIS, json={}, headers=h,
-                             timeout=30).status_code == 405
+        for h in ({"If-Match": '"x"'}, {"If-None-Match": "*"}):
+            assert requests.patch(base + "/redfish/v1/Chassis/nonexistent", json={},
+                                  headers=h, timeout=30).status_code == 404
+            assert requests.delete(base + SLD_CHUNKS + "/nonexistent",
+                                   headers=h, timeout=30).status_code == 404
+            assert requests.put(base + CHASSIS, json={}, headers=h,
+                                timeout=30).status_code == 405
+            assert requests.post(base + CHASSIS, json={}, headers=h,
+                                 timeout=30).status_code == 405
 
 
 # Response headers every response has (review F18.6, the DMTF
@@ -303,7 +403,7 @@ class TestCacheControlSLD:
                                 headers={"Content-Type": "application/json"}),
                   requests.put(base + CHASSIS, json={}, timeout=30),
                   requests.post(base + SLD_CHUNKS, json={"MemoryChunkSizeMiB": 256},
-                                headers={"If-Match": "*"}, timeout=30)]:
+                                headers={"If-Match": '"x"'}, timeout=30)]:
             assert r.status_code in (400, 405, 412)
             cache_control(r)
 
@@ -533,7 +633,7 @@ class TestPostToMembers:
         assert api_client.delete(chunk) == 204
         for uri in (SLD_CHUNKS + "/Members", SLD_CHUNKS + "/Members/"):
             precondition_failed(requests.post(base + uri, json={"MemoryChunkSizeMiB": 256},
-                                              headers={"If-Match": "*"}, timeout=30))
+                                              headers={"If-Match": '"x"'}, timeout=30))
         assert api_client.get(SLD_CHUNKS)[1]["Members"] == []
         created = requests.post(base + SLD_CHUNKS + "/Members",
                                 json={"MemoryChunkSizeMiB": 256}, timeout=30)

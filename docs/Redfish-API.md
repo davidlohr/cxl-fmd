@@ -830,7 +830,7 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 404 Not Found | Resource not found | Invalid resource ID or path; the initiator, target or chunk a Connection `POST` names; a Connection whose vPPB no longer holds what its ID names (a stale ID), on GET, DELETE and `#Cxl.ForceUnbind`, at the request's read or at the read just before Unbind vPPB (nothing sent); on hardware, an extent a Prescriptive release or `MemoryExtent` `DELETE` names that the read of its host for the task's baseline no longer lists, or, for the whole-tag `DELETE` of a tagged extent in a Sharable region, lists with another Tag, length or region (nothing sent) |
 | 405 Method Not Allowed | Method not supported, with an `Allow` header | A method a resource does not take (`PUT` of any, `PATCH` of a Chassis, `POST` to a collection that takes none, `DELETE` of a Chassis, `HEAD`, `OPTIONS`), "If the resource exists but does not support the requested operation" (DSP0266 Section 7.5.3); `Allow` lists the methods it takes: `GET`, and `POST` for the `MemoryChunks` of a Chassis and the Connections, `PATCH` for a `PCIeDevice`, a `Memory` and a DCD `MemoryRegion`, `DELETE` for a Chassis chunk, a DCD `MemoryExtent`, a switch-attached Connection, and the monitor of a Dynamic Capacity task whose response could not be read. `PATCH` of a Connection (`Allow: GET, DELETE`, `GET` for a direct-attached one); `DELETE` of a direct-attached Connection (`Allow: GET`); `DELETE` of a task monitor but that of a Dynamic Capacity task whose response could not be read, while it runs (`Allow: GET`). A URI that is not a resource is `404` whatever the method |
 | 409 Conflict | Resource conflict | Capacity exceeded, invalid state transition; a chunk `DELETE` or `POST` on a pool LD whose head has a Connection; a chunk `DELETE` of a chunk larger than its LD's allocation; a Connection to a port or LD bound, or being bound or unbound, for another vPPB (another host's VCS, or the whole port while an LD of it is, or the reverse); for a host whose VCS has no unbound vPPB, or is not read whole (more than 32 vPPBs, or past the 8 VCSs read; nothing sent); a `POST` of a Connection the host has that is being unbound (`Updating`); a chunk `DELETE`, or a chunk `POST` that would change a bound LD or SLD, while a switch-attached Connection exposes it, or a vPPB the switch reads just before binds it or is Busy, or the switch is not read whole, or which head of a Multi-Headed device a binding there reaches cannot be told (see "Deleting Memory Chunks"; nothing sent); a Connection `POST` naming a staged chunk, or a pool LD of a head whose presentation is not known (see "MHD Memory Model"; nothing sent); without `--allow-mctp-restricted`, a request that would send a command Table 8-308 marks O4 for MCTP as an MCTP message (see "Commands restricted on MCTP"); a security action the device answered Invalid Security State; a Dynamic Capacity add, release or `MemoryExtent` `DELETE` for a host and Tag a `Task` already follows, or an add of a Tag whose `PendingLDs` has the host (`ResourceInUse`, nothing sent); the task monitor of an add the host was seen to accept none of |
-| 412 Precondition Failed | A precondition cxl-fmd cannot check | A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match`, whatever its value, that would otherwise be carried out: nothing is done (see "Conditional Requests"); a request of any method, to any URI, with an `OData-Version` other than `4.0`: nothing is done (see "Headers") |
+| 412 Precondition Failed | A precondition that is false | A `POST`, `PATCH` or `DELETE`, that would otherwise be carried out, with an `If-Match` other than `*`, `If-Match: *` on an action, or `If-None-Match: *` on a resource or collection that is there: nothing is done (see "Conditional Requests"); a request of any method, to any URI, with an `OData-Version` other than `4.0`: nothing is done (see "Headers") |
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` with a return code other than Invalid Input, Unsupported, Busy or Retry Required, with none, or whose switch is gone ("Outcome unknown"), or of a Dynamic Capacity task whose device is gone, or that ended with nothing of its command observed ("Outcome unknown"); "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again), but for Bind vPPB, Unbind vPPB, 5604h and 5605h, whose requests are answered `202` with a task |
 | 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported, at once or as the return code of the background operation (the task monitor) (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
@@ -841,35 +841,72 @@ specification sets it.
 
 ### Conditional Requests
 
-cxl-fmd returns no `ETag` header and no `@odata.etag`, so it cannot compare
-an entity tag a client sends with a resource's. A `POST`, `PATCH` or
-`DELETE` with an `If-Match` or `If-None-Match` header, whatever its value
-(`*` included), is answered `412 Precondition Failed`, and nothing is done
-or sent: "412 Precondition Failed: Precondition check, such as check of the
+cxl-fmd returns no `ETag` header and no `@odata.etag`, so no entity tag a
+client sends matches one of a resource's. A `POST`, `PATCH` or `DELETE`
+with `If-Match` or `If-None-Match` has the condition evaluated before it
+is carried out, as RFC 9110 has it ("the origin server MUST evaluate the
+If-Match condition per Section 13.2 prior to performing the method",
+Section 13.1.1, and the same of If-None-Match, Section 13.1.2), If-Match
+first, then If-None-Match (Section 13.2.2):
+
+- `If-Match`: "1. If the field value is "*", the condition is true if the
+  origin server has a current representation for the target resource. 2.
+  If the field value is a list of entity tags, the condition is true if
+  any of the listed tags match the entity tag of the selected
+  representation. 3. Otherwise, the condition is false." (Section
+  13.1.1). So `If-Match: *` is true on a resource or collection that is
+  there, whose `GET` answers `200`, and the request is carried out; it is
+  false on an action, which has no representation (a `GET` of it is
+  `404`). A list of entity tags is false, and so is any other value
+  (`*, "x"`).
+- `If-None-Match`: "1. If the field value is "*", the condition is false
+  if the origin server has a current representation for the target
+  resource. 2. If the field value is a list of entity tags, the condition
+  is false if one of the listed tags matches the entity tag of the
+  selected representation. 3. Otherwise, the condition is true." (Section
+  13.1.2). So `If-None-Match: *` is false on a resource or collection that
+  is there, and true on an action; a list of entity tags, which nothing
+  matches, is true, and so is any other value.
+
+A condition that is false is answered `412 Precondition Failed`, and
+nothing is done or sent: "An origin server that evaluates an If-Match
+condition MUST NOT perform the requested method if the condition evaluates
+to false" (Section 13.1.1); for If-None-Match, "the 412 (Precondition
+Failed) status code for all other request methods" (Section 13.1.2); "412
+Precondition Failed: Precondition check, such as check of the
 OData-Version, If-Match, or If-None-Match header, failed." (DSP0266 1.25.0
-Table 14). Before, the header was ignored, and the request carried out as
-if it had none: a `PATCH` of a `MemoryRegion` with a stale `If-Match` sent
-Set DC Region Configuration. DSP0266 asks for `If-Match` only of a service
-that returns ETags ("PUT and PATCH requests for resources for which a
-service returns ETags shall support If-Match", Table 6), so refusing every
-precondition, so that a client that asks for one never gets a write it did
-not condition, is cxl-fmd's choice. The error's
-`@Message.ExtendedInfo` is `GeneralError` with the Resolution "Resubmit
-the request without If-Match or If-None-Match: cxl-fmd returns no ETags.":
-Base `PreconditionFailed` is for deep operations only ("The use of this
-message shall only be used in responses for deep operations, since HTTP
-status code 412 is typically used for this", Base.1.24.0.json).
+Table 14). Section 13.1.1 lets an origin server answer `2xx` instead when
+the change "appears to have already been applied"; cxl-fmd does not (its
+choice). Several field lines of one of these headers are one value, "by
+appending each subsequent field line value to the initial field line value
+in order, separated by a comma" (Section 5.3): `If-Match: *` on one line
+and `If-Match: "x"` on another is `*, "x"`, which is false; an empty line
+adds nothing. The `If-Unmodified-Since` and `If-Modified-Since` headers
+are not evaluated: cxl-fmd keeps no modification dates. DSP0266 asks for
+`If-Match` only of a service that returns ETags ("PUT and PATCH requests
+for resources for which a service returns ETags shall support If-Match",
+Table 6). The error's `@Message.ExtendedInfo` is `GeneralError`, its
+message naming the condition that is false: Base `PreconditionFailed` is
+for deep operations only ("The use of this message shall only be used in
+responses for deep operations, since HTTP status code 412 is typically
+used for this", Base.1.24.0.json).
+
+Before follow-up review item 9 (decision 22), every such request was `412`
+whatever the value of the header (review F18 claim 4, disposition F18.4a,
+`*` included); before that, the header was ignored. A client that sent
+`If-Match: *` to keep a write from being carried out now has it carried
+out on a resource that is there.
 
 A request answered `404` or `405` without the header is answered so with
 it: "A server MUST ignore all received preconditions if its response to
 the same request without those conditions, prior to processing the request
 content, would have been a status code other than a 2xx (Successful) or
 412 (Precondition Failed)" (RFC 9110 Section 13.2.1). An action is judged
-by its resource only: a `POST` to an action that a resource that is there
-does not have is `412` with the header, and `404` without (cxl-fmd's
-simplification). A `GET` is answered
-as one without the header: a conditional GET is "If supported by the
-service" (DSP0266 Section 7.2.1), and cxl-fmd does not support it.
+there by its resource only: a `POST` with `If-Match` to an action that a
+resource that is there does not have is `412`, and `404` without
+(cxl-fmd's simplification). A `GET` is answered as one without the
+header: a conditional GET is "If supported by the service" (DSP0266
+Section 7.2.1), and cxl-fmd does not support it.
 
 An `OData-Version` other than `4.0` is checked before any of this, and is
 `412` whatever the method and URI (see "Headers").
@@ -3003,7 +3040,7 @@ Changes from the fixes of the external design review (branch
 | The same, ended with Unsupported, or Busy or Retry Required | `500` | `501`, or `503`, as at once |
 | The same, ended with another return code (Internal Error) | `500`, `message` the task's | `500`, `message` "Failed to create connection" or "Failed to delete connection", as at once |
 | The task monitor of a task whose switch is gone | `500`, "The switch is gone" | `500`, "Outcome unknown: The switch is gone, and whether it bound (unbound) the vPPB before it went is not known" |
-| A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match` (a `PATCH` of a `MemoryRegion` with a stale `If-Match`) | the header ignored, the request carried out (Set DC Region Configuration sent) | `412`, nothing done; a `404` or `405` stays so (but for an action a resource that is there does not have, which is `412`); a `GET` is unchanged |
+| A `POST`, `PATCH` or `DELETE` with `If-Match` or `If-None-Match` (a `PATCH` of a `MemoryRegion` with a stale `If-Match`) | the header ignored, the request carried out (Set DC Region Configuration sent) | `412`, nothing done; a `404` or `405` stays so (but for an action a resource that is there does not have, which is `412`); a `GET` is unchanged (now evaluated: see "Requests after the follow-up review") |
 | `GET` of a `Chassis`, `PCIeDevice`, `CXLLogicalDevice`, `Memory`, `MemoryDomain` or `MemoryChunk` of a device whose Get Health Info has a Health Status bit set, or a Media Status other than 00h or 01h | no `Status.Conditions` | `Status.Conditions`, one per bit and per Media Status, with MessageIds `CxlHealth.1.0.<Key>` (see "Status from Get Health Info"); a switch's `Chassis` those of its devices |
 | `GET` of the `Memory` of a device or LD whose Additional Status has Bit[4] or Bit[5] set | no `Status.Conditions`; the value was read and not used | `CorrectedVolatileErrorCount`, `CorrectedPersistentErrorCount` Conditions; `Health` unchanged |
 | `GET /redfish/v1`, `/redfish/v1/odata`, `/redfish/v1/$metadata` | no `Registries` | `Registries`, `/redfish/v1/Registries`, with cxl-fmd's `CxlHealth` registry at `/redfish/v1/Registries/CxlHealth.1.0.0.json` |
@@ -3133,6 +3170,9 @@ Changes from the fixes of the follow-up design review (branch
 | The URI of a `Task` (and its monitor) of a bind, unbind or DC request under way when cxl-fmd stopped, after the restart | `404`: the task, its hold on the vPPB or on the host and Tag, and its baseline lost; a retry sent the command again | with the journal, the same `Task` under its Id, `TaskState` `Interrupted` and `Oem.Cxl.OperatorDecision` `Required` until a read of the switch or host shows how it went (monitor `202`), its Connection `Starting` or `Updating` and its hold kept; a `DELETE` of its monitor ends it (`204`) (review F06.6a, declined then, reversed by the maintainer's decision 13 of the follow-up review) |
 | Chunk `POST` or `DELETE` (or `PATCH` of `Memory`) whose Set Partition Info or Set LD Allocations was under way when cxl-fmd stopped | the device read at discovery, the chunk `POST`ed lost though the device has it staged | with the journal, the SLD's partition or the LD's allocation read again at the start, nothing changed until it is; a staged chunk made again under its Id |
 | `Task` Ids | numbered as tasks were listed | numbered as tasks are made, before the command is sent: a request refused before or by the device leaves its number unused |
+| A `POST`, `PATCH` or `DELETE` of a resource or collection that is there with `If-Match: *`, or with an `If-None-Match` list of entity tags (`If-None-Match: "x"`) | `412`, nothing done | carried out, as without the header (RFC 9110 Sections 13.1.1 and 13.1.2; see "Conditional Requests") |
+| The same with `If-None-Match: *`, an `If-Match` list of entity tags, or `If-Match: *` on an action | `412` | `412`, the message naming the condition that is false; with `If-None-Match: *`, an action carried out |
+| `If-Match` or `If-None-Match` sent on several field lines | the first line only looked at (`412` whatever it was) | the lines taken as one comma-separated value: `*` and `"x"` is `412` |
 
 ---
 

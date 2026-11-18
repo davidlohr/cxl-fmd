@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdint.h>
 #include <errno.h>
 #include <microhttpd.h>
@@ -1541,30 +1542,110 @@ static bool takes_method(struct fmd_ctx *ctx, const char *method,
 	return takes;
 }
 
+/* The field lines of one precondition header of a request */
+struct precondition {
+	const char *name;	/* "If-Match" or "If-None-Match" */
+	unsigned int lines;	/* field lines of it, empty ones too */
+	unsigned int values;	/* those that are not empty */
+	bool star;		/* the one that is not empty is "*" */
+};
+
+static bool ows(char c)
+{
+	return c == ' ' || c == '\t';
+}
+
 /*
- * A request that changes something, with If-Match or If-None-Match:
- * cxl-fmd returns no ETag, so it cannot compare the one asked for with
- * the resource's, and would otherwise carry the request out as if it had
- * none. It is answered 412, nothing done: "412 Precondition Failed:
- * Precondition check, such as check of the OData-Version, If-Match, or
- * If-None-Match header, failed." (DSP0266 1.25.0 Table 14). DSP0266 asks
- * If-Match only of services that return ETags ("PUT and PATCH requests for
- * resources for which a service returns ETags shall support If-Match",
- * Table 6), so a 412 for any precondition, whatever its value, is
- * cxl-fmd's choice: a client that asks for one never gets a write it did
- * not condition. A request answered 404 or 405 without the header is
- * answered so with it ("A server MUST ignore all received preconditions if
- * its response to the same request without those conditions, prior to
- * processing the request content, would have been a status code other
- * than a 2xx (Successful) or 412 (Precondition Failed)", RFC 9110 Section
- * 13.2.1); an action is judged by its resource only, so an action a
- * resource that is there does not have is 412 with the header, and 404
- * without (cxl-fmd's simplification). A GET is not checked: a conditional GET is "If supported by the
- * service" (DSP0266 Section 7.2.1), and cxl-fmd answers it as one without.
- * Base PreconditionFailed is not used: "The use of this message shall
- * only be used in responses for deep operations, since HTTP status code
- * 412 is typically used for this" (Base.1.24.0.json). Returns true, the
- * answer sent and *@result what sending it gave, if the request is
+ * One header field line: the field name compared without case (RFC 9110
+ * Section 5.1, "Field names are case-insensitive"), its value without
+ * OWS around it. Nothing allocated.
+ */
+static enum MHD_Result count_precondition(void *cls, enum MHD_ValueKind kind,
+					  const char *key, const char *value)
+{
+	struct precondition *p = cls;
+	size_t len;
+
+	(void)kind;
+	if (!key || strcasecmp(key, p->name))
+		return MHD_YES;
+	p->lines++;
+	if (!value)
+		return MHD_YES;
+	while (ows(*value))
+		value++;
+	len = strlen(value);
+	while (len && ows(value[len - 1]))
+		len--;
+	if (!len)
+		return MHD_YES;
+	p->values++;
+	p->star = len == 1 && value[0] == '*';
+	return MHD_YES;
+}
+
+/*
+ * Whether the field value of @p, all its field lines taken as one (RFC
+ * 9110 Section 5.3, "by appending each subsequent field line value to the
+ * initial field line value in order, separated by a comma"), is exactly
+ * "*": one line that is not empty, and that is "*". An empty line adds
+ * only an empty list element ("A recipient MUST parse and ignore a
+ * reasonable number of empty list elements", Section 5.6.1.2).
+ */
+static bool precondition_star(const struct precondition *p)
+{
+	return p->values == 1 && p->star;
+}
+
+/*
+ * A POST, PATCH or DELETE with If-Match or If-None-Match is carried out
+ * or answered 412, nothing done, as RFC 9110 has the conditions evaluated
+ * ("the origin server MUST evaluate the If-Match condition per Section
+ * 13.2 prior to performing the method", Section 13.1.1, and the same of
+ * If-None-Match, Section 13.1.2), in the order of Section 13.2.2: If-Match
+ * first, then If-None-Match; If-Unmodified-Since and the others are not
+ * evaluated (cxl-fmd keeps no modification dates). cxl-fmd returns no
+ * ETag header and no @odata.etag, so no entity tag a client sends can
+ * match the one of a representation:
+ *
+ * - If-Match: "1. If the field value is "*", the condition is true if the
+ *   origin server has a current representation for the target resource.
+ *   2. If the field value is a list of entity tags, the condition is true
+ *   if any of the listed tags match the entity tag of the selected
+ *   representation. 3. Otherwise, the condition is false." So "*" is true
+ *   on a resource or collection there is (a GET of it answers 200), and
+ *   false on an action, which has no representation (a GET of it is 404);
+ *   a list of entity tags is false, and so is anything else.
+ * - If-None-Match: "1. If the field value is "*", the condition is false
+ *   if the origin server has a current representation for the target
+ *   resource. 2. If the field value is a list of entity tags, the
+ *   condition is false if one of the listed tags matches the entity tag
+ *   of the selected representation. 3. Otherwise, the condition is true."
+ *   So "*" is false on a resource or collection there is, and true on an
+ *   action; anything else is true.
+ *
+ * A condition that is false: "An origin server that evaluates an If-Match
+ * condition MUST NOT perform the requested method if the condition
+ * evaluates to false" (Section 13.1.1), and for If-None-Match "the 412
+ * (Precondition Failed) status code for all other request methods"
+ * (Section 13.1.2). cxl-fmd answers 412 for both: the "MAY respond with a
+ * 2xx" of a change already made is not taken (cxl-fmd's choice). A
+ * request answered 404 or 405 without the headers is answered so with
+ * them, nothing evaluated ("A server MUST ignore all received
+ * preconditions if its response to the same request without those
+ * conditions, prior to processing the request content, would have been a
+ * status code other than a 2xx (Successful) or 412 (Precondition
+ * Failed)", Section 13.2.1); takes_method() takes an action as there when
+ * its resource is, so a POST to an action a resource that is there does
+ * not have, with If-Match, is 412, and 404 without (cxl-fmd's
+ * simplification). A GET is not checked: a conditional GET is "If
+ * supported by the service" (DSP0266 1.25.0 Section 7.2.1), and cxl-fmd
+ * answers it as one without. The 412 is "Precondition check, such as
+ * check of the OData-Version, If-Match, or If-None-Match header, failed."
+ * (DSP0266 Table 14), its message GeneralError: Base PreconditionFailed
+ * "shall only be used in responses for deep operations, since HTTP status
+ * code 412 is typically used for this" (Base.1.24.0.json). Returns true,
+ * the answer sent and *@result what sending it gave, if the request is
  * answered so.
  */
 static bool send_precondition_failed(struct fmd_ctx *ctx,
@@ -1572,16 +1653,35 @@ static bool send_precondition_failed(struct fmd_ctx *ctx,
 				     const char *method, const char *url,
 				     enum MHD_Result *result)
 {
-	if (!MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "If-Match") &&
-	    !MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "If-None-Match"))
+	struct precondition match = { .name = "If-Match" };
+	struct precondition none = { .name = "If-None-Match" };
+	const char *msg;
+	bool exists;
+
+	MHD_get_connection_values(conn, MHD_HEADER_KIND, count_precondition, &match);
+	MHD_get_connection_values(conn, MHD_HEADER_KIND, count_precondition, &none);
+	if (!match.lines && !none.lines)
 		return false;
 	if (!takes_method(ctx, method, url))
 		return false;
-	*result = send_error(conn, MHD_HTTP_PRECONDITION_FAILED,
-			     "If-Match and If-None-Match are not supported: cxl-fmd "
-			     "returns no ETags, and cannot compare one. Nothing was done",
-			     RF_GENERAL("Resubmit the request without If-Match or "
-					"If-None-Match: cxl-fmd returns no ETags."));
+	/* what has a current representation: not an action */
+	exists = !strstr(url, "/Actions/");
+	if (match.lines && !(precondition_star(&match) && exists))
+		msg = exists ?
+			"The If-Match condition is false: cxl-fmd returns no ETags, "
+			"so no entity tag matches. Nothing was done" :
+			"The If-Match condition is false: an action has no current "
+			"representation. Nothing was done";
+	else if (none.lines && precondition_star(&none) && exists)
+		msg = "The If-None-Match condition is false: the resource has a "
+		      "current representation. Nothing was done";
+	else
+		return false;
+	*result = send_error(conn, MHD_HTTP_PRECONDITION_FAILED, msg,
+			     RF_GENERAL("Resubmit the request without the If-Match or "
+					"If-None-Match condition that is false: cxl-fmd "
+					"returns no ETags, and If-Match: * holds only "
+					"for a resource that is there."));
 	return true;
 }
 
