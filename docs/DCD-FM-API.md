@@ -926,7 +926,29 @@ the same host with the same Tag (all zeros is a tag here; a Prescriptive
 release has the tags of its extents), and an add of a tag whose
 Pending Reference Bitmap already has the host's LD is refused likewise
 (`ResourceInUse`, "Wait for the Dynamic Capacity task that follows this
-host and Tag to end"). Both are cxl-fmd's choices.
+host and Tag to end"). An add of no Tag (all zeros) is refused likewise
+while any other add is followed on the host, so that a record of no Tag
+has one add it can answer (below). These are cxl-fmd's choices.
+
+**Which add a record answers.** An Add Capacity Response record says
+"the Dynamic Capacity Extent field in this structure specifies the
+capacity accepted by the host" (Table 8-229) and names no request, and an
+Event Record Handle is "The event log unique handle for this event record" (Table 8-221), with
+no order defined. So a zero-length record is taken as an add's answer
+only where it can be no other's (cxl-fmd's choices): not when it was read
+before the add was sent and could not be cleared then (its handle is kept
+with the add, and the record, read again, is passed over); by its Tag
+when it has one; and, with no Tag, only when one add is followed on the
+host and no task there follows a command whose response could not be
+read. Otherwise the adds it could answer stay `Running`, their message
+saying an ambiguous Add Capacity Response was read, and end on the
+host's extent list or the tag's Pending Reference Bitmap as before. The
+log is not read and cleared before each 5604h (that would be one more
+command per add, and race another reader of the log), so a record the
+device logged before the add and cxl-fmd has not read yet is not told
+apart; nor is a late one of an add of the same Tag that has already
+ended. Whether a device sends a zero-length record at all when a host
+accepts nothing is cxl-fmd's reading, to be checked on hardware.
 
 **A response that could not be read.** 5604h "shall complete when the
 device initiates the Add Capacity procedure" (Section 7.6.7.6.5), and
@@ -977,7 +999,7 @@ answered cannot be told (cxl-fmd's choice).
 
 | Task | `Running` while | `Completed` when | `Exception` when |
 |------|-----------------|------------------|------------------|
-| Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered, or (a non-zero Tag, on hardware) the tag list could not be read at the last read | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host) |
+| Add | the host's LD is in the tag's Pending Reference Bitmap, "an LD for which the tagged capacity has been added with no host response yet" (Table 7-78), or nothing says the host answered, or (a non-zero Tag, on hardware) the tag list could not be read at the last read | capacity of the add is in the host's 5603h (the parts of its extents with the add's Tag, in its region, that `BaselineExtents` does not have) and the LD is not pending. With less than a Free or Contiguous `Length`, `TaskStatus` is `Warning` and the message says how much | the LD was seen in the Pending Reference Bitmap after the command and is no longer, with none of the add listed; or an Add Capacity Response record, whose extent "specifies the capacity accepted by the host" (Table 8-229), names the host with a `Length` of 0 (taken to be this add's when its Tag is the add's, or, when it is all zeros, when this is the only add followed on that host and no task there follows a command whose response could not be read; never when the record was read, and not cleared, before the add was sent: see "Which add a record answers") |
 | Release | any of what it named is still in the host's 5603h; the message says how much has gone | all of it is gone: the extents of a Prescriptive list, or for a Tag-based one `Length` bytes of the Tag, or what `BaselineExtents` has of the Tag when that is less and not none (a `DELETE` is one of these) | never on what the host does: nothing says a host refuses a release |
 | Either | | | the device is gone: what its host did is not known (`500` "Outcome unknown"); or, for a command whose response could not be read, 3 complete reads of the host show nothing of it (`500` "Outcome unknown: nothing observed") |
 

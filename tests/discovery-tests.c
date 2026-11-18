@@ -15162,6 +15162,174 @@ static void test_r6_dc_lost_reply(void)
 }
 
 /*
+ * Follow-up review item 6 (page 12): an Add Capacity Response record names
+ * no request (Table 8-229), so a zero-length one is taken as an add's
+ * answer only where it can be no other's. hw_dcd(.., 08h) answers 5608h
+ * Unsupported.
+ */
+static const char *const r6_zero_add =
+	"{\"Policy\": \"Free\", \"RegionNumber\": 0, \"Length\": 256, "
+	"\"Tag\": \"00000000-0000-0000-0000-000000000000\"}";
+
+/* a page of one zero-length Add Capacity Response of host 0, Tag @tag */
+static void r6_answer_record(struct cxlmi_endpoint *ep, uint16_t handle,
+			     const uint8_t *tag)
+{
+	uint8_t page[0x20 + 0x80] = { 0 };
+
+	put16(page + 0x14, 1);			/* Event Record Count */
+	put_dc_record(page + 0x20, handle, 0x04, 0, 0, 0, 0);
+	if (tag)
+		memcpy(page + 0x20 + 0x48, tag, 16);	/* the extent's Tag */
+	answer(ep, 0x0100, page, sizeof(page));
+}
+
+/* a drain of that record: cleared (@cleared) or not, then host 0 read */
+static void r6_drain(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep, uint16_t handle,
+		     const uint8_t *tag, bool cleared)
+{
+	r6_answer_record(ep, handle, tag);
+	answer_rc(ep, 0x0101, cleared ? CXLMI_RET_SUCCESS : CXLMI_RET_INTERNAL);
+	if (cleared)
+		answer_no_events(ep, false);
+	answer_dc_refresh(ep, 0x08);
+	fmd_dcd_poll_events(ctx);
+}
+
+/* an add of @body, the device accepting it: its task */
+static struct fmd_task *r6_add(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep,
+			       const char *id, const char *body)
+{
+	const char *msg = NULL;
+	json_t *task = NULL;
+	int rc;
+
+	answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+	answer_dc_refresh(ep, 0x08);
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "0", body, strlen(body), &msg, &task);
+	json_decref(task);
+	CHECK(rc == FMD_OP_STARTED && ctx->tasks, "the add: %d (%s)", rc, msg ? msg : "");
+	return rc == FMD_OP_STARTED ? ctx->tasks : NULL;
+}
+
+static void test_r6_add_response_attribution(void)
+{
+	char id[FMD_MAX_ID_LEN];
+	struct cxlmi_endpoint *ep;
+	struct fmd_component *dev;
+	struct fmd_task *t;
+	struct fmd_ctx *ctx;
+	const char *msg = NULL;
+	json_t *task = NULL;
+	unsigned int sent;
+	int before = failures, rc;
+
+	/*
+	 * E3: a zero-length, zero-Tag record read before the add and not
+	 * cleared, read again after it: not the add's answer. One read after
+	 * it, of another handle, is.
+	 */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xe1, 0x08);
+	device_id(id, sizeof(id), 0xe1);
+	if (dev) {
+		cxlmi_mock_clear_responses(ep);
+		r6_drain(ctx, ep, 0x91, NULL, false);
+		CHECK(fmd_memdev_dcd(dev)->n_dc_uncleared == 1 &&
+		      fmd_memdev_dcd(dev)->dc_uncleared[0] == 0x91,
+		      "the record not cleared is not kept: %d",
+		      fmd_memdev_dcd(dev)->n_dc_uncleared);
+		t = r6_add(ctx, ep, id, r6_zero_add);
+		if (t) {
+			CHECK(t->dc->n_pre_handles == 1 && t->dc->pre_handles[0] == 0x91,
+			      "the add did not keep the record read before it");
+			r6_drain(ctx, ep, 0x91, NULL, true);
+			CHECK(t->state == FMD_TASK_RUNNING && !t->dc->none_record &&
+			      !fmd_memdev_dcd(dev)->n_dc_uncleared,
+			      "E3, the record from before the add: task %d, none_record %d",
+			      t->state, t->dc->none_record);
+			r6_drain(ctx, ep, 0x92, NULL, true);
+			CHECK(t->state == FMD_TASK_EXCEPTION && t->dc->none_record,
+			      "a record after the add: task %d (%s)", t->state, t->message);
+		}
+	}
+	fmd_ctx_free(ctx);
+
+	/* the same with a Tag */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xe2, 0x08);
+	device_id(id, sizeof(id), 0xe2);
+	if (dev) {
+		cxlmi_mock_clear_responses(ep);
+		r6_drain(ctx, ep, 0x93, r6_tag_bb, false);
+		t = r6_add(ctx, ep, id, r6_tag_add);
+		if (t) {
+			r6_drain(ctx, ep, 0x93, r6_tag_bb, true);
+			CHECK(t->state == FMD_TASK_RUNNING && !t->dc->none_record,
+			      "a tagged record from before the add: task %d", t->state);
+			r6_drain(ctx, ep, 0x94, r6_tag_bb, true);
+			CHECK(t->state == FMD_TASK_EXCEPTION && t->dc->none_record,
+			      "a tagged record after the add: task %d", t->state);
+		}
+	}
+	fmd_ctx_free(ctx);
+
+	/*
+	 * A zero-length, zero-Tag record while a release whose response was
+	 * lost is followed on the host: it may be the answer to something
+	 * else; the add runs on, saying so
+	 */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xe3, 0x08);
+	device_id(id, sizeof(id), 0xe3);
+	if (dev) {
+		cxlmi_mock_clear_responses(ep);
+		answer(ep, 0x5605, (void *)r6_lost, sizeof(r6_lost));
+		rc = fmd_redfish_action_dc_release(ctx, id, id, "0", r6_rel,
+						   strlen(r6_rel), &msg, &task);
+		json_decref(task);
+		task = NULL;
+		CHECK(rc == FMD_OP_STARTED, "the release, 5605h lost: %d", rc);
+		answer_dc_refresh(ep, 0x08);	/* the host, owed a read */
+		t = r6_add(ctx, ep, id, r6_zero_add);
+		if (t) {
+			r6_drain(ctx, ep, 0x95, NULL, true);
+			CHECK(t->state == FMD_TASK_RUNNING && !t->dc->none_record &&
+			      strstr(t->message, "ambiguous"),
+			      "a zero-Tag record beside a lost release: task %d (%s)",
+			      t->state, t->message);
+		}
+	}
+	fmd_ctx_free(ctx);
+
+	/* an add of no Tag is not sent while another add is followed there */
+	ctx = new_ctx();
+	ep = new_device(ctx);
+	dev = hw_dcd(ctx, ep, 0xe4, 0x08);
+	device_id(id, sizeof(id), 0xe4);
+	if (dev) {
+		cxlmi_mock_clear_responses(ep);
+		t = r6_add(ctx, ep, id, r6_tag_add);
+		if (t) {
+			sent = commands_sent(ep);
+			rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_zero_add,
+						       strlen(r6_zero_add), &msg, &task);
+			json_decref(task);
+			task = NULL;
+			CHECK(rc == -EALREADY && commands_sent(ep) == sent,
+			      "an add of no Tag beside another add: %d, %u sent", rc,
+			      commands_sent(ep) - sent);
+		}
+	}
+	fmd_ctx_free(ctx);
+	report("an Add Capacity Response is not taken for an add sent after it",
+	       before);
+}
+
+/*
  * What a head of a Multi-Headed device presents is read from the whole LD
  * Map, and is not known without it (follow-up review item 7). "A head
  * with one LD mapped shall present itself as an SLD and a head with more
@@ -15605,6 +15773,7 @@ int main(void)
 	test_r6_switch_lost_reply();
 	test_task_ids_per_boot();
 	test_r6_dc_lost_reply();
+	test_r6_add_response_attribution();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

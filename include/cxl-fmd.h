@@ -1253,6 +1253,9 @@ struct fmd_dc_mock_offer {
  * fmd_mhd when the device supports dynamic capacity. Redfish exposes it as
  * PCIeDevice.CXLDevice/DynamicCapacity.
  */
+/* DC event record handles kept read and not cleared: a page of them */
+#define FMD_DC_UNCLEARED_MAX 20
+
 struct fmd_dcd_info {
 	uint8_t  num_hosts;
 	uint8_t  num_regions;               /* Supported DC regions (1..8) */
@@ -1277,6 +1280,14 @@ struct fmd_dcd_info {
 
 	/* Dynamic Capacity List Tags (5608h); the mock builds its own */
 	struct fmd_dc_tags tags;
+
+	/*
+	 * Hardware: the handles of the DC event records read and not yet
+	 * cleared (a Clear Event Records that failed): they are read again,
+	 * and are not the answer to an add sent after them
+	 */
+	uint16_t dc_uncleared[FMD_DC_UNCLEARED_MAX];
+	int n_dc_uncleared;
 
 	/* Mock only: FM-referenced capacity no host holds */
 	struct fmd_dc_mock_hold *mock_orphans;
@@ -2057,6 +2068,11 @@ struct fmd_dc_task {
 	 */
 	bool unknown_send;
 	int quiet_reads;
+	/* an add's: the DC event records read and not cleared before it */
+	uint16_t pre_handles[FMD_DC_UNCLEARED_MAX];
+	int n_pre_handles;
+	bool ambiguous_record;			/* a zero-length, zero-Tag record
+						   it or another add may own */
 	struct fmd_dc_range *done;		/* added, or released, as last observed */
 	int n_done;
 	uint64_t done_bytes;

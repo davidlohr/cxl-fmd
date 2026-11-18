@@ -3035,6 +3035,9 @@ Changes from the fixes of the follow-up design review (branch
 | `Id` of a chunk made with `POST` | `{domain}_chunk{N}`, from 0 again at each start: after a restart a URI a client kept could name another allocation | `{domain}_chunk{boot}-{N}`, e.g. `cxl_mld_0_domain0_chunk3f09a1c2-0`: a URI of an earlier run is `404`. Chunks read back from a device keep their IDs (`{device}_ld{N}_chunk`, `{device}_chunk0`) |
 | `DynamicCapacityAdd`, `DynamicCapacityRelease` or a `MemoryExtent` `DELETE`, on hardware, whose 5604h or 5605h response cannot be read | `500` "Outcome unknown", no task; a retry of the same request was admitted and sent the command again | `202` with a `Task`, `Running`, its message "Outcome unknown: ..."; a request of the same host and Tag (for a release, any release of the host) `409` with nothing sent while it runs; it ends on what the host shows, or in `Exception` "Outcome unknown: nothing observed" (monitor `500`) after 3 complete reads of the host that show nothing of it |
 | `DELETE` of a task monitor | `405` | `204` for the task of a DC request whose response could not be read, while it runs: the task is deleted (nothing is sent) and its host and Tag freed; its monitor `GET` has `Allow: GET, DELETE`. `405` for any other |
+| On hardware, a zero-length Add Capacity Response record that was read, and could not be cleared, before an add was sent | taken as the add's answer when read again: the add `Exception`, "The host accepted none of the capacity added" | passed over for that add |
+| A zero-length Add Capacity Response record of no Tag while a task follows a command of the host whose response could not be read, or more than one add | the only add ended in `Exception` | the adds it may answer stay `Running`, the message saying an ambiguous Add Capacity Response was read |
+| `DynamicCapacityAdd` of no Tag (all zeros) while another add is followed on the host | sent | `409`, nothing sent |
 
 ---
 

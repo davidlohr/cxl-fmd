@@ -1640,7 +1640,7 @@ static void dc_tasks_judge(struct fmd_ctx *ctx, struct fmd_component *dev, int h
 static bool dc_task_host_open(struct fmd_ctx *ctx, struct fmd_component *dev,
 			      int host_id);
 static void dc_tasks_add_response(struct fmd_ctx *ctx, struct fmd_component *dev,
-				  int host_id, const uint8_t *d);
+				  int host_id, uint16_t handle, const uint8_t *d);
 
 /* Host IDs a device exposes: SLD 0, MLD and MHD each LD */
 static int dc_hosts(struct fmd_component *dev, int *hosts, int max)
@@ -2493,6 +2493,42 @@ static void dc_event_counts(struct fmd_component *dev, int host_id, const uint8_
 }
 
 /*
+ * The DC event records @r (@n of them), just read, were cleared
+ * (!@failed) or not: what @dcd keeps as read and not cleared. A record not
+ * cleared is read again, and must not be taken as the answer to an add
+ * made since (fmd_dc_task_prepare()). An Event Record Handle is "The event
+ * log unique handle for this event record" (Table 8-221), with no order
+ * defined, so the handles themselves are kept, not a mark.
+ */
+static void dc_uncleared_note(struct fmd_dcd_info *dcd,
+			      const struct cxlmi_event_record *r, int n, bool failed)
+{
+	int k = 0;
+
+	/* those of this page that were kept go, whatever the clear did */
+	for (int i = 0; i < dcd->n_dc_uncleared; i++) {
+		bool here = false;
+
+		for (int j = 0; j < n && !here; j++)
+			here = dcd->dc_uncleared[i] == r[j].handle;
+		if (!here)
+			dcd->dc_uncleared[k++] = dcd->dc_uncleared[i];
+	}
+	dcd->n_dc_uncleared = k;
+	if (!failed)
+		return;
+	for (int j = 0; j < n; j++) {
+		/* the oldest makes room: a page is what one drain leaves */
+		if (dcd->n_dc_uncleared == FMD_DC_UNCLEARED_MAX) {
+			memmove(dcd->dc_uncleared, dcd->dc_uncleared + 1,
+				(FMD_DC_UNCLEARED_MAX - 1) * sizeof(uint16_t));
+			dcd->n_dc_uncleared--;
+		}
+		dcd->dc_uncleared[dcd->n_dc_uncleared++] = r[j].handle;
+	}
+}
+
+/*
  * Read and clear the FM-side DC event log of one device, then refresh every
  * host that an Add Capacity Response or Capacity Released record names,
  * and the tag list once. The Host ID is "the LD-ID of the host interface
@@ -2580,7 +2616,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 			hosts[host / 8] |= 1 << (host % 8);
 			named = true;
 			if (type == DC_EVENT_ADD_RESPONSE)
-				dc_tasks_add_response(ctx, dev, host, rec->data);
+				dc_tasks_add_response(ctx, dev, host, rec->handle,
+						      rec->data);
 			/* before the clear: the record will not name it again */
 			dc_host_dirty(dev, host);
 			dc_event_counts(dev, host, rec->data);
@@ -2589,6 +2626,8 @@ static int drain_dc_events(struct fmd_ctx *ctx, struct fmd_component *dev)
 		clr->event_log = DC_EVENT_LOG;
 		clr->nr_recs = rsp->record_count;
 		rc = cxlmi_cmd_clear_event_records(ep, ti, clr);
+		dc_uncleared_note(fmd_memdev_dcd(dev), rsp->records,
+				  rsp->record_count, rc != 0);
 		if (rc) {
 			err = rc;
 			rc = 0;
@@ -3403,6 +3442,13 @@ static void dc_task_done(struct fmd_dc_task *dc, struct fmd_dc_range *v, int n,
  */
 #define FMD_DC_QUIET_READS 3
 
+/* an add a zero-length, zero-Tag Add Capacity Response may answer */
+#define DC_AMBIGUOUS_MSG "An ambiguous Add Capacity Response, with no " \
+	"capacity and no Tag, was read: it may answer this add or another; " \
+	"waiting for the host's extent list or the tag's Pending Reference " \
+	"Bitmap to decide"
+
+
 /*
  * @task, whose command had no response that could be read
  * (dc->unknown_send), and of which a complete read of its host has just
@@ -3504,8 +3550,11 @@ static void dc_judge_add(struct fmd_ctx *ctx, struct fmd_component *dev,
 	/* a pending bit seen is the device's word that it had the add */
 	if (!dc->pend_seen && dc_quiet_read(ctx, task))
 		return;
-	snprintf(task->message, sizeof(task->message), "Waiting for the host: "
-		 "none of the capacity added is in its extent list yet");
+	if (dc->ambiguous_record)
+		snprintf(task->message, sizeof(task->message), "%s", DC_AMBIGUOUS_MSG);
+	else
+		snprintf(task->message, sizeof(task->message), "Waiting for the "
+			 "host: none of the capacity added is in its extent list yet");
 }
 
 static void dc_judge_release(struct fmd_ctx *ctx, struct fmd_component *dev,
@@ -3619,20 +3668,41 @@ static bool dc_task_host_open(struct fmd_ctx *ctx, struct fmd_component *dev,
 	return false;
 }
 
+/* Whether the record of @handle was read, and not cleared, before @dc's add */
+static bool dc_record_before(const struct fmd_dc_task *dc, uint16_t handle)
+{
+	for (int i = 0; i < dc->n_pre_handles; i++) {
+		if (dc->pre_handles[i] == handle)
+			return true;
+	}
+	return false;
+}
+
 /*
- * An Add Capacity Response record of @host_id; @d is the record from 30h,
- * its Dynamic Capacity Extent at 38h (Table 8-230: Starting DPA, Length,
- * Tag at 10h). One with a Length of 0 is the host accepting none (cxl-fmd's
- * reading: what a device sends when the host accepts nothing is not said).
- * It is taken to be the answer to the add of the record's Tag, or when the
- * Tag is all zeros, to the add if one alone is followed on that host.
+ * An Add Capacity Response record of @host_id, of Event Record Handle
+ * @handle; @d is the record from 30h, its Dynamic Capacity Extent at 38h
+ * (Table 8-230: Starting DPA, Length, Tag at 10h). One with a Length of 0
+ * is the host accepting none (cxl-fmd's reading: what a device sends when
+ * the host accepts nothing is not said). The record names no request, "the
+ * Dynamic Capacity Extent field in this structure specifies the capacity
+ * accepted by the host" (Table 8-229), so which add it answers is cxl-fmd's
+ * guess, made only where no other is possible:
+ * - a record read, and not cleared, before the add was sent is not its
+ *   answer (the handles fmd_dc_task_prepare() kept);
+ * - one with a Tag is the answer to the add of that Tag;
+ * - one whose Tag is all zeros, to the add if it alone is followed on that
+ *   host and no task there follows a command whose response could not be
+ *   read (dc->unknown_send), which may be what the host answered.
+ *   Otherwise the adds it could be are left Running, with a message that
+ *   says so, and are judged on the host's lists as before.
  * One with capacity changes nothing: the extent list says what the host has.
  */
 static void dc_tasks_add_response(struct fmd_ctx *ctx, struct fmd_component *dev,
-				  int host_id, const uint8_t *d)
+				  int host_id, uint16_t handle, const uint8_t *d)
 {
 	const uint8_t *ext = d + 0x08, *tag = ext + 0x10;
 	struct fmd_task *task;
+	bool unknown = false;
 	uint64_t len = 0;
 	int adds = 0;
 
@@ -3640,14 +3710,27 @@ static void dc_tasks_add_response(struct fmd_ctx *ctx, struct fmd_component *dev
 		len = len << 8 | ext[8 + i];
 	if (len)
 		return;
-	for (task = ctx->tasks; task; task = task->next)
-		adds += dc_task_of(task, dev, host_id) && task->kind == FMD_TASK_DC_ADD;
 	for (task = ctx->tasks; task; task = task->next) {
-		if (!dc_task_of(task, dev, host_id) || task->kind != FMD_TASK_DC_ADD)
+		if (!dc_task_of(task, dev, host_id))
 			continue;
-		if (dc_tag_is_zero(tag) ? adds == 1 :
-		    !memcmp(tag, task->dc->tag, FMD_DC_TAG_LEN))
+		unknown |= task->dc->unknown_send;
+		adds += task->kind == FMD_TASK_DC_ADD &&
+			!dc_record_before(task->dc, handle);
+	}
+	for (task = ctx->tasks; task; task = task->next) {
+		if (!dc_task_of(task, dev, host_id) || task->kind != FMD_TASK_DC_ADD ||
+		    dc_record_before(task->dc, handle))
+			continue;
+		if (!dc_tag_is_zero(tag)) {
+			if (!memcmp(tag, task->dc->tag, FMD_DC_TAG_LEN))
+				task->dc->none_record = true;
+		} else if (adds == 1 && !unknown) {
 			task->dc->none_record = true;
+		} else {
+			task->dc->ambiguous_record = true;
+			snprintf(task->message, sizeof(task->message), "%s",
+				 DC_AMBIGUOUS_MSG);
+		}
 	}
 }
 
@@ -3687,6 +3770,15 @@ int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 		 */
 		if (task->kind == FMD_TASK_DC_RELEASE &&
 		    t->kind == FMD_TASK_DC_RELEASE && t->dc->unknown_send)
+			meet = true;
+		/*
+		 * A zero-length Add Capacity Response of no Tag names no add:
+		 * an add of no Tag goes only when no other add is followed on
+		 * the host, so that such a record has one add to answer
+		 * (cxl-fmd's choice)
+		 */
+		if (task->kind == FMD_TASK_DC_ADD && t->kind == FMD_TASK_DC_ADD &&
+		    dc_tag_is_zero(dc->tag))
 			meet = true;
 		if (meet) {
 			*msg = "Another Dynamic Capacity task is following this host "
@@ -3735,6 +3827,14 @@ int fmd_dc_task_prepare(struct fmd_ctx *ctx, struct fmd_component *dev,
 	if (n < 0) {
 		*msg = "No memory for the task: nothing was sent";
 		return -ENOMEM;
+	}
+	/* the records read before the add, and still to be read again */
+	if (task->kind == FMD_TASK_DC_ADD && dev_is_hw(dev)) {
+		const struct fmd_dcd_info *dcd = fmd_memdev_dcd(dev);
+
+		memcpy(dc->pre_handles, dcd->dc_uncleared,
+		       dcd->n_dc_uncleared * sizeof(dcd->dc_uncleared[0]));
+		dc->n_pre_handles = dcd->n_dc_uncleared;
 	}
 	dc->n_base = n;
 	dc_host_sync_ptrs(dev, dc->host_id, &gen, &sync, &err, &read);
@@ -3858,7 +3958,7 @@ static void mock_offer_answer(struct fmd_ctx *ctx, struct fmd_component *dev,
 
 		/* the extent at 38h: Length 0, the Tag at 10h of it */
 		memcpy(d + 0x08 + 0x10, o->tag, FMD_DC_TAG_LEN);
-		dc_tasks_add_response(ctx, dev, o->host_id, d);
+		dc_tasks_add_response(ctx, dev, o->host_id, 0, d);
 	}
 }
 
