@@ -3038,6 +3038,7 @@ Changes from the fixes of the follow-up design review (branch
 | On hardware, a zero-length Add Capacity Response record that was read, and could not be cleared, before an add was sent | taken as the add's answer when read again: the add `Exception`, "The host accepted none of the capacity added" | passed over for that add |
 | A zero-length Add Capacity Response record of no Tag while a task follows a command of the host whose response could not be read, or more than one add | the only add ended in `Exception` | the adds it may answer stay `Running`, the message saying an ambiguous Add Capacity Response was read |
 | `DynamicCapacityAdd` of no Tag (all zeros) while another add is followed on the host | sent | `409`, nothing sent |
+| On hardware with more than 64 Dynamic Capacity devices: the `--event-poll` tick's read of DC hosts that are stale, owed a read or followed by a task, and the drain of the DC event logs | at most 64 devices a tick, the same ones each time: the others' hosts served as last read for good, their event logs not drained, and a task on one of their hosts not read on the tick | every device, each tick (more commands a tick on a large fabric) |
 
 ---
 

@@ -15330,6 +15330,116 @@ static void test_r6_add_response_attribution(void)
 }
 
 /*
+ * Follow-up review item 8: the DC event drain and the DC retry reach every
+ * DCD. They picked at most 64, with no cursor, so on 65 the same one was
+ * left out of every tick: its hosts stayed stale, its event log undrained,
+ * and a task on one of its hosts was not read on the tick. 65 hardware DCD
+ * MLDs of 2 hosts (the verifier's reproduction, d8-repro.diff).
+ */
+#define D8_NDEV 65
+static void test_d8_dc_device_ceiling(void)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	struct cxlmi_endpoint *eps[D8_NDEV];
+	struct fmd_component *devs[D8_NDEV];
+	unsigned int sent[D8_NDEV];
+	char id[FMD_MAX_ID_LEN];
+	int before = failures;
+
+	for (int i = 0; i < D8_NDEV; i++) {
+		devs[i] = hw_dcd_mld(ctx, &eps[i], 0xd8000 + i, 2);
+		if (!devs[i]) {
+			CHECK(0, "device %d not made", i);
+			goto out;
+		}
+	}
+
+	/* every device's host 1 stale: one tick sends to each of them */
+	for (int tick = 0; tick < 2; tick++) {
+		int touched = 0, missed = -1;
+
+		for (int i = 0; i < D8_NDEV; i++) {
+			device_id(id, sizeof(id), 0xd8000 + i);
+			fmd_topology_find_ld(&ctx->topology, id, 1)->dc_sync = FMD_DC_SYNC_STALE;
+			cxlmi_mock_clear_responses(eps[i]);
+			answer_rc(eps[i], 0x5601, CXLMI_RET_RETRY);
+			answer_rc(eps[i], 0x5601, CXLMI_RET_RETRY);
+			answer_rc(eps[i], 0x5608, CXLMI_RET_UNSUPPORTED);
+			sent[i] = commands_sent(eps[i]);
+		}
+		fmd_dcd_retry_stale(ctx);
+		for (int i = 0; i < D8_NDEV; i++) {
+			if (commands_sent(eps[i]) != sent[i])
+				touched++;
+			else
+				missed = i;
+		}
+		CHECK(touched == D8_NDEV, "retry tick %d reached %d of %d stale DCDs "
+		      "(device %d missed)", tick, touched, D8_NDEV, missed);
+	}
+
+	/* every device's DC event log read on one drain */
+	for (int tick = 0; tick < 2; tick++) {
+		int touched = 0, rc;
+
+		for (int i = 0; i < D8_NDEV; i++) {
+			cxlmi_mock_clear_responses(eps[i]);
+			answer_no_events(eps[i], false);
+			sent[i] = commands_sent(eps[i]);
+		}
+		rc = fmd_dcd_poll_events(ctx);
+		for (int i = 0; i < D8_NDEV; i++)
+			touched += commands_sent(eps[i]) != sent[i];
+		CHECK(rc == 0 && touched == D8_NDEV, "drain tick %d read %d of %d DC "
+		      "event logs: %d", tick, touched, D8_NDEV, rc);
+	}
+
+	/* only device 63 stale: it is read */
+	for (int i = 0; i < D8_NDEV; i++) {
+		device_id(id, sizeof(id), 0xd8000 + i);
+		for (int h = 0; h < 2; h++)
+			fmd_topology_find_ld(&ctx->topology, id, h)->dc_sync = FMD_DC_SYNC_OK;
+		fmd_memdev_dcd(devs[i])->tags.unsupported = true;
+		cxlmi_mock_clear_responses(eps[i]);
+	}
+	device_id(id, sizeof(id), 0xd8000 + 63);
+	fmd_topology_find_ld(&ctx->topology, id, 1)->dc_sync = FMD_DC_SYNC_STALE;
+	answer_rc(eps[63], 0x5601, CXLMI_RET_RETRY);
+	answer_rc(eps[63], 0x5601, CXLMI_RET_RETRY);
+	sent[63] = commands_sent(eps[63]);
+	CHECK(fmd_dcd_retry_stale(ctx) != 0 && commands_sent(eps[63]) != sent[63],
+	      "the only stale DCD, device 63, was not retried");
+	cxlmi_mock_clear_responses(eps[63]);
+	fmd_topology_find_ld(&ctx->topology, id, 1)->dc_sync = FMD_DC_SYNC_OK;
+
+	/*
+	 * a DC task on host 1 of device 63, the one left out, nothing stale:
+	 * that host is read on the tick
+	 */
+	{
+		struct fmd_task *t = fmd_dc_task_new(ctx, FMD_TASK_DC_ADD);
+
+		CHECK(t, "no task");
+		if (t) {
+			device_id(id, sizeof(id), 0xd8000 + 63);
+			snprintf(t->dc->dev_id, sizeof(t->dc->dev_id), "%s", id);
+			t->dc->host_id = 1;
+			fmd_dc_task_list(ctx, t);
+			answer_rc(eps[63], 0x5601, CXLMI_RET_RETRY);
+			answer_rc(eps[63], 0x5601, CXLMI_RET_RETRY);
+			sent[63] = commands_sent(eps[63]);
+			fmd_dcd_retry_stale(ctx);
+			CHECK(commands_sent(eps[63]) != sent[63],
+			      "the host of the DC task on device 63 was not read on the tick: %u sent, last %04xh",
+			      commands_sent(eps[63]) - sent[63], last_opcode(eps[63]));
+		}
+	}
+out:
+	fmd_ctx_free(ctx);
+	report("every DCD's hosts are retried and every DC event log drained", before);
+}
+
+/*
  * What a head of a Multi-Headed device presents is read from the whole LD
  * Map, and is not known without it (follow-up review item 7). "A head
  * with one LD mapped shall present itself as an SLD and a head with more
@@ -15774,6 +15884,7 @@ int main(void)
 	test_task_ids_per_boot();
 	test_r6_dc_lost_reply();
 	test_r6_add_response_attribution();
+	test_d8_dc_device_ceiling();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

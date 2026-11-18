@@ -38,7 +38,6 @@
 #define EVENT_FLAG_OVERFLOW	(1 << 0)
 #define EVENT_FLAG_MORE		(1 << 1)
 #define DC_EVENT_MAX_PAGES	16
-#define DC_EVENT_MAX_DEVS	64
 
 static const uint8_t dc_event_uuid[0x10] = {
 	0xca, 0x95, 0xaf, 0xa7, 0xf1, 0x83, 0x40, 0x18,
@@ -2674,8 +2673,8 @@ int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 	static const enum fmd_component_type types[] = {
 		FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
 	};
-	struct fmd_component *devs[DC_EVENT_MAX_DEVS], *comp;
-	int n = 0, rc = 0;
+	struct fmd_component **devs, *comp;
+	int n = 0, max = 0, rc = 0;
 
 	/*
 	 * A drain sends commands and replaces a device's regions and extents:
@@ -2683,19 +2682,32 @@ int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 	 */
 	pthread_rwlock_wrlock(&ctx->fabric_lock);
 
-	/* Collect under the read lock; each drain then runs under dcd_lock */
+	/*
+	 * Collect under the read lock, every device: as many as there are, no
+	 * fixed bound, so that none is left out of every tick (follow-up
+	 * review item 8). Each drain then runs under dcd_lock.
+	 */
 	fmd_topology_rdlock(&ctx->topology);
 	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, types[t])
+			max++;
+	}
+	devs = calloc(max ? max : 1, sizeof(*devs));
+	for (size_t t = 0; devs && t < sizeof(types) / sizeof(types[0]); t++) {
 		fmd_for_each_type(&ctx->topology, comp, types[t]) {
 			/* a log that is the host's is not drained */
 			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) &&
 			    fmd_endpoint_owns_events(ctx, comp->ep) &&
-			    fmd_component_on_ep(comp, ep) &&
-			    n < DC_EVENT_MAX_DEVS)
+			    fmd_component_on_ep(comp, ep) && n < max)
 				devs[n++] = comp;
 		}
 	}
 	fmd_topology_rdunlock(&ctx->topology);
+	if (!devs) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		fmd_err(ctx, "no memory to drain the DC event logs");
+		return -1;
+	}
 
 	for (int i = 0; i < n; i++) {
 		int r = drain_dc_events(ctx, devs[i]);
@@ -2704,6 +2716,7 @@ int fmd_dcd_poll_events_ep(struct fmd_ctx *ctx, struct cxlmi_endpoint *ep)
 			rc = r;
 	}
 	pthread_rwlock_unlock(&ctx->fabric_lock);
+	free(devs);
 	return rc ? -1 : n;
 }
 
@@ -2728,17 +2741,30 @@ static const enum fmd_component_type dc_retry_types[] = {
 	FMD_COMPONENT_SLD, FMD_COMPONENT_MLD, FMD_COMPONENT_MHD,
 };
 
-/* The hardware DCDs, at most @max; fabric_lock held, either way */
-static int dc_retry_devs(struct fmd_ctx *ctx, struct fmd_component **devs, int max)
+/*
+ * The hardware DCDs, every one, in *@devs, which the caller frees: how
+ * many, or -ENOMEM. fabric_lock held, either way; the array is sized under
+ * the topology lock each time, as the devices can change between two calls.
+ */
+static int dc_retry_devs(struct fmd_ctx *ctx, struct fmd_component ***devs)
 {
 	struct fmd_component *comp;
-	int n = 0;
+	int n = 0, max = 0;
 
 	fmd_topology_rdlock(&ctx->topology);
 	for (size_t t = 0; t < sizeof(dc_retry_types) / sizeof(dc_retry_types[0]); t++) {
+		fmd_for_each_type(&ctx->topology, comp, dc_retry_types[t])
+			max++;
+	}
+	*devs = calloc(max ? max : 1, sizeof(**devs));
+	if (!*devs) {
+		fmd_topology_rdunlock(&ctx->topology);
+		return -ENOMEM;
+	}
+	for (size_t t = 0; t < sizeof(dc_retry_types) / sizeof(dc_retry_types[0]); t++) {
 		fmd_for_each_type(&ctx->topology, comp, dc_retry_types[t]) {
 			if (likely(dev_is_hw(comp)) && fmd_memdev_dcd(comp) && n < max)
-				devs[n++] = comp;
+				(*devs)[n++] = comp;
 		}
 	}
 	fmd_topology_rdunlock(&ctx->topology);
@@ -2770,7 +2796,7 @@ static bool dc_retry_any(struct fmd_ctx *ctx, struct fmd_component **devs, int n
 
 int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
 {
-	struct fmd_component *devs[DC_EVENT_MAX_DEVS];
+	struct fmd_component **devs;
 	int n, read = 0, rc = 0;
 	bool any;
 
@@ -2778,16 +2804,27 @@ int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
 	 * Most ticks have nothing to read again: that is found under the
 	 * shared lock, which a GET holds too, and the exclusive one is taken
 	 * only to read. What changes between the two is looked at again below.
+	 * Every DCD is looked at, with no fixed bound (follow-up review
+	 * item 8).
 	 */
 	pthread_rwlock_rdlock(&ctx->fabric_lock);
-	n = dc_retry_devs(ctx, devs, DC_EVENT_MAX_DEVS);
-	any = dc_retry_any(ctx, devs, n);
+	n = dc_retry_devs(ctx, &devs);
+	any = n > 0 && dc_retry_any(ctx, devs, n);
 	pthread_rwlock_unlock(&ctx->fabric_lock);
+	if (n >= 0)
+		free(devs);
+	if (n < 0)
+		fmd_err(ctx, "no memory to read the DC hosts again");
 	if (!any)
-		return 0;
+		return n < 0 ? -1 : 0;
 
 	pthread_rwlock_wrlock(&ctx->fabric_lock);
-	n = dc_retry_devs(ctx, devs, DC_EVENT_MAX_DEVS);
+	n = dc_retry_devs(ctx, &devs);
+	if (n < 0) {
+		pthread_rwlock_unlock(&ctx->fabric_lock);
+		fmd_err(ctx, "no memory to read the DC hosts again");
+		return -1;
+	}
 
 	for (int i = 0; i < n; i++) {
 		struct fmd_component *dev = devs[i];
@@ -2826,6 +2863,7 @@ int fmd_dcd_retry_stale(struct fmd_ctx *ctx)
 	}
 
 	pthread_rwlock_unlock(&ctx->fabric_lock);
+	free(devs);
 	return rc ? -1 : read;
 }
 
