@@ -114,6 +114,26 @@ if pytest_available
     )
 endif
 
+# Operations under way survive a restart: the journal (--state-dir)
+if pytest_available and requests_available
+    test(
+        'journal',
+        python,
+        args: [
+            '-m', 'pytest',
+            '-v',
+            '--tb=short',
+            meson.current_source_dir() / 'test_journal.py',
+        ],
+        env: {
+            'MESON_BUILD_ROOT': meson.project_build_root(),
+            'MESON_SOURCE_ROOT': meson.project_source_root(),
+        },
+        timeout: 120,
+        suite: 'unit',
+    )
+endif
+
 # What the docs say of deployment, the DCD contracts and the trust boundary
 if pytest_available
     test(

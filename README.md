@@ -85,6 +85,7 @@ See [docs/mock-topology.md](docs/mock-topology.md) for available topologies and 
 | `--threads N` | `-N` | Serve requests on N threads, 1 to 256 (default: 8). Requests that only read run together; a change runs alone |
 | `--allow-mctp-restricted` | | Send Set Partition Info, Scan Media and the security commands as MCTP messages, tunnelled ones too. Without it they are refused (409): CXL r4.0 Table 8-308 note 4. Only when no host drives the devices (see [docs/Redfish-API.md](docs/Redfish-API.md#commands-restricted-on-mctp)) |
 | `--lock-file PATH` | | Exit if another cxl-fmd holds PATH, else hold it while running (default: `cxl-fmd.lock` in `$RUNTIME_DIRECTORY`, or in `/run/cxl-fmd`; none with `--mock` unless given). This fences one host only (see [docs/Redfish-API.md](docs/Redfish-API.md#known-gaps), item 15) |
+| `--state-dir DIR` | | Keep the operation journal in DIR, so that a bind, unbind, memory chunk change or Dynamic Capacity add or release under way when cxl-fmd stops is taken up again when it starts (default: `$STATE_DIRECTORY`, or `/var/lib/cxl-fmd`; none with `--mock` unless given). Each such command waits for one sync of the journal; if it cannot be written, the request is `503` and nothing is sent (see [docs/Redfish-API.md](docs/Redfish-API.md#operations-under-way-across-a-restart)) |
 | `--verbose` | `-v` | Increase verbosity (repeatable) |
 | `--help` | `-h` | Show help message |
 | `--version` | `-V` | Show version |

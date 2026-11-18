@@ -805,6 +805,7 @@ derived from `Resource.OemObject`:
 | `MemoryChunk` of an SLD staged for a reset, to be added or removed (see "Staged chunks") | `#Cxl.v1_0_0.MemoryChunk` | `PendingPartition` (`NextVolatileCapacityBytes`, `ActivationResets`, `Removal`) |
 | `MemoryRegion` of a DCD | `#Cxl.v1_0_0.MemoryRegion` | `RegionBaseOffsetBytes`, `RegionSizeBytes`, `BlockSizeBytes`, `LastRefreshed` |
 | `MemoryExtent` | `#Cxl.v1_0_0.MemoryExtent` | `ExtentOffsetBytes`, `ExtentSizeBytes`, `LastRefreshed` |
+| `Task` of a Dynamic Capacity add or release, or one taken up again after a restart (see "Operations under way across a restart") | `#Cxl.v1_0_0.Task` | `DynamicCapacity`, for a DC task; `OperatorDecision` (`Required`), while a task taken up again has not ended |
 
 The action `#Cxl.ForceUnbind` of a switch-attached `Connection` is the
 `ForceUnbind` action of the `Cxl` namespace, bound to
@@ -833,7 +834,7 @@ All error responses follow the Redfish error format: an `error` object with a `c
 | 413 Payload Too Large | Request body too large | Body exceeds 64KB limit |
 | 500 Internal Server Error | The operation failed | A bind or unbind the switch failed (Internal Error, or another code), or another failure; the task monitor of a task that ended in `Exception` with a return code other than Invalid Input, Unsupported, Busy or Retry Required, with none, or whose switch is gone ("Outcome unknown"), or of a Dynamic Capacity task whose device is gone, or that ended with nothing of its command observed ("Outcome unknown"); "Outcome unknown" when a command's response could not be read, so whether the device carried it out is not known (check before sending it again), but for Bind vPPB, Unbind vPPB, 5604h and 5605h, whose requests are answered `202` with a task |
 | 501 Not Implemented | Feature not implemented | A query parameter that starts with `$` (`$filter`, `$top`, `$skip`, `$select`, `$expand`, ...), on any method, with an `@Message.ExtendedInfo` entry `Base.1.24.QueryParameterUnsupported` naming each (DSP0266 Section 7.3.1; cxl-fmd supports none, and the service root has no `ProtocolFeaturesSupported`; other query parameters, such as `only` and `excerpt`, are ignored); a chunk `DELETE` whose allocation cxl-fmd cannot give back; a chunk `POST` on a Multi-Headed device whose LD Pool CCI is not known; a bind or unbind the switch answered Unsupported, at once or as the return code of the background operation (the task monitor) (Bind vPPB and Unbind vPPB are optional, "O" in CXL r4.0 Table 7-31); a security action whose command the LD's Command Effects Log does not list, that the device answered Unsupported, or on a pool LD of a Multi-Headed device (see "Security actions") |
-| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy (at once, or as the return code of the background operation: the task monitor), after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception), or whose vPPB reads 01h at the read just before Unbind vPPB with no unbind of that Connection's under way; a DELETE or `#Cxl.ForceUnbind` of a Connection whose VCS could not be read, at the request's read or at the one just before Unbind vPPB, and a Connection `POST` whose host's VCS could not be read, at the request's read or the one just before Bind vPPB (nothing sent); a Dynamic Capacity add, release or `MemoryExtent` `DELETE` on hardware whose host could not be read for the task's baseline, and an add of a non-zero Tag whose device's tag list (5608h) could not be read then (nothing sent); a chunk `DELETE`, or a chunk `POST` that would send Set LD Allocations or Set Partition Info, when a VCS of a switch that can expose the chunk could not be read just before (nothing sent; see "Deleting Memory Chunks") |
+| 503 Service Unavailable | Try again (no `Retry-After` header is sent) | A bind or unbind while the switch is Busy (at once, or as the return code of the background operation: the task monitor), after it answered Retry Required twice, or when the vPPB chosen was bound meanwhile; a DELETE or `#Cxl.ForceUnbind` of a Connection whose bind or unbind is under way (see "Forcing an Unbind" for the one exception), or whose vPPB reads 01h at the read just before Unbind vPPB with no unbind of that Connection's under way; a DELETE or `#Cxl.ForceUnbind` of a Connection whose VCS could not be read, at the request's read or at the one just before Unbind vPPB, and a Connection `POST` whose host's VCS could not be read, at the request's read or the one just before Bind vPPB (nothing sent); a Dynamic Capacity add, release or `MemoryExtent` `DELETE` on hardware whose host could not be read for the task's baseline, and an add of a non-zero Tag whose device's tag list (5608h) could not be read then (nothing sent); a chunk `DELETE`, or a chunk `POST` that would send Set LD Allocations or Set Partition Info, when a VCS of a switch that can expose the chunk could not be read just before (nothing sent; see "Deleting Memory Chunks"); with the operation journal, any request that would send Bind vPPB, Unbind vPPB, Set LD Allocations, Set Partition Info or Initiate Dynamic Capacity Add or Release whose record could not be written and synced, and every such request after one could not be synced (nothing sent; see "Operations under way across a restart") |
 
 Which status each case gets is cxl-fmd's choice; neither DSP0288 nor the CXL
 specification sets it.
@@ -2014,12 +2015,15 @@ cxl-fmd does not wait:
 
 The task is at `/redfish/v1/TaskService/Tasks/{id}`, `{id}` being
 `{boot}-{n}`: the boot id (see "Chunk IDs") and a counter that starts at
-1 each time cxl-fmd starts. Tasks are not kept across a restart, and with
-a boot id drawn at random each time, a monitor or `Task` URI of an earlier
+1 each time cxl-fmd starts, taken when the task is made, before the
+command is sent (a request refused then leaves its number unused). With a
+boot id drawn at random each time, a monitor or `Task` URI of an earlier
 run is `404`, not another operation's task: "If the operation has been
 completed and the service has already deleted the task, the service may
 return the HTTP 410 Gone or 404 Not Found" (DSP0266 1.25.0 Section 12.2).
-The format is cxl-fmd's choice. Its `PercentComplete` is
+The one exception is a task whose operation was under way when cxl-fmd
+stopped: with the operation journal, it is served again under its Id (see
+"Operations under way across a restart"). The format is cxl-fmd's choice. Its `PercentComplete` is
 the Percentage Complete of Background Operation Status (0002h), which the
 event loop reads until the operation is over, or a Binding Change for the
 vPPB ends it. A bind is `Completed` only when the vPPB, read again, is
@@ -2159,6 +2163,77 @@ it (no memory), the request is `500` "Outcome unknown".
 Which tasks become `Interrupted`, and that a read of the vPPB ends them,
 are cxl-fmd's choices. The specification sets no time limit on a bind or
 an unbind, and cxl-fmd does not abort one (see "Forcing an Unbind").
+
+### Operations under way across a restart
+
+With `--state-dir` (on hardware, by default `$STATE_DIRECTORY` or
+`/var/lib/cxl-fmd`; with `--mock`, only when given), cxl-fmd keeps an
+operation journal, `journal.jsonl` in that directory. None of Bind vPPB
+(5201h), Unbind vPPB (5202h), Set LD Allocations (5402h), Set Partition
+Info (4101h), Initiate Dynamic Capacity Add (5604h) or Release (5605h)
+carries an identifier the device reports back (Tables 7-35, 7-36, 7-72,
+7-73), and discovery reads what the devices have, not what was asked of
+them nor under which `Task`; so the record is cxl-fmd's own. The journal,
+its format and every rule below are cxl-fmd's choices; DSP0266 does not
+require a task to outlive a restart.
+
+- Before one of those commands is sent, a record of it is written and
+  synced (`fdatasync`): the `Task` Id (or an Id of the same form for a
+  chunk change, which has no task), the device by its Id and serial
+  number, what is asked, the baseline it is judged against (the vPPB, the
+  LD's allocation, the partition, the host's extents) and what it holds.
+  If the record cannot be written and synced, nothing is sent: the request
+  is `503`, and so is every later one that would send such a command,
+  until cxl-fmd is restarted (a sync that failed once says nothing of what
+  reached the disk).
+- When the operation is over (the device refused it, its task ended, a
+  read showed what it did), a second record says so. It is not synced: if
+  it is lost, the next start looks again at an operation that is over, and
+  ends it on what the device shows.
+- At start-up, after discovery and before any request is taken, each
+  operation with no second record is taken up again:
+  - a bind or unbind is its `Task` again, under its Id, `Interrupted`, with
+    `Oem.Cxl.OperatorDecision` `Required`; its Connection is `Starting` or
+    `Updating`, and its vPPB held, as for a task whose switch stopped
+    answering (above). The switch's VCSs are read at once, and the first
+    read that shows the vPPB settled ends it, judged against the vPPB as
+    recorded before the command;
+  - a `DynamicCapacityAdd`, `DynamicCapacityRelease` or `MemoryExtent`
+    `DELETE` is its `Task` again, under its Id, with its request, baseline
+    and hold on the host and Tag, followed as one whose response could not
+    be read (see [Tasks of an add or a release](DCD-FM-API.md#tasks-of-an-add-or-a-release)):
+    served `Interrupted` with `Oem.Cxl.OperatorDecision` while it runs,
+    it ends on what the host's lists show, or after 3 reads that show
+    nothing of it. 5603h and 5608h cannot tell an add that was never sent
+    from one the host has not answered;
+  - the LD of a Set LD Allocations is read (5401h); while it cannot be,
+    no chunk of its device changes, as after a response that was lost;
+  - the SLD of a Set Partition Info is read (4100h); while it cannot be,
+    no chunk that changes its partition is made or deleted. A chunk
+    `POST`ed is made again, staged, under its Id, if the device has the
+    Next Volatile Capacity it asked for; a chunk `DELETE`d is deleted if
+    the device has the decrease.
+- A `DELETE` of the monitor of a task taken up again ends it while no read
+  has (`204`; its monitor `GET` has `Allow: GET, DELETE`), and frees what
+  it held: nothing is sent. A task whose switch or device is not found at
+  the start keeps its hold until it is found, or until that `DELETE`; so
+  does an LD or SLD record, until a later start finds its device. A device
+  whose serial number is 0 is named after its endpoint, which need not be
+  the same device after a restart: it is taken as not found.
+- The journal is written again with only the records not ended at each
+  start, and when it grows past 1 MiB. A last line a crash cut short is
+  left out, with a warning; a journal of another version, or with a line
+  before its last that cannot be read, stops cxl-fmd from starting (move
+  it away to start without it). The state directory is locked
+  (`journal.lock`), so that two cxl-fmd with different `--lock-file` cannot
+  share it.
+- Cost: each such command waits for one sync of the state directory's file
+  system, while the request holds the fabric, so requests that change the
+  fabric wait for it in turn; a full or read-only file system refuses
+  every one of them (`503`).
+
+In the mock, a topology is loaded again from its file at each start: only
+the tasks and their holds carry over, not what the mock device did.
 
 ### Deleting Connections (DELETE)
 
@@ -2385,7 +2460,10 @@ In summary:
    only in `Oem/Cxl/DynamicCapacityTags` (`PendingLDs`) of the
    `PCIeDevice`, a property of cxl-fmd's Oem schema, not DMTF's. An add
    or a release is a `Task` that ends only on what is seen of the host:
-   nothing cancels one, no time limit ends one, and while one runs its
+   no time limit ends one, and only a `DELETE` of its monitor ends one
+   whose response could not be read, or that was taken up again after a
+   restart (it sends nothing; nothing cancels an add or a release the
+   device has); while one runs its
    host and Tag take no other request; on a device with no tag list an
    add the host refuses ends only on an Add Capacity Response record of
    no capacity (see "Tasks of an add or a release" in DCD-FM-API.md). A
@@ -2539,6 +2617,17 @@ In summary:
     and an allocation that waits for a reset served `StandbyOffline`, as
     a staged SLD chunk is; that needs a means to tell that the reset has
     come, which 5401h cannot give.
+17. The operation journal (see "Operations under way across a restart")
+    covers Bind vPPB, Unbind vPPB, Set LD Allocations, Set Partition Info
+    and Initiate Dynamic Capacity Add and Release only. A task taken up
+    again after a restart cannot tell, from 5603h and 5608h, a DC add that
+    was never sent from one the host has not answered: it ends after 3
+    reads that show nothing, or on an operator's `DELETE` of its monitor.
+    A record of an LD or SLD whose device is not found at the start is
+    kept until a later start finds it, and fences nothing meanwhile. What
+    the device did between the last record and the restart is read, not
+    replayed: the journal holds what was asked, and the device what was
+    done.
 
 ### Event logs and switch events
 
@@ -3039,6 +3128,11 @@ Changes from the fixes of the follow-up design review (branch
 | A zero-length Add Capacity Response record of no Tag while a task follows a command of the host whose response could not be read, or more than one add | the only add ended in `Exception` | the adds it may answer stay `Running`, the message saying an ambiguous Add Capacity Response was read |
 | `DynamicCapacityAdd` of no Tag (all zeros) while another add is followed on the host | sent | `409`, nothing sent |
 | On hardware with more than 64 Dynamic Capacity devices: the `--event-poll` tick's read of DC hosts that are stale, owed a read or followed by a task, and the drain of the DC event logs | at most 64 devices a tick, the same ones each time: the others' hosts served as last read for good, their event logs not drained, and a task on one of their hosts not read on the tick | every device, each tick (more commands a tick on a large fabric) |
+| Starting cxl-fmd on hardware | no state kept | the operation journal in `$STATE_DIRECTORY` or `/var/lib/cxl-fmd` (`--state-dir DIR` names another; with `--mock`, none unless given; none with `--check`), made if it is not there; start-up fails (exit 1) if it cannot be made or locked, if another cxl-fmd uses it, or if its journal is of another version or has a line before its last that cannot be read (see "Operations under way across a restart") |
+| A Connection `POST`, `DELETE` or `#Cxl.ForceUnbind`, a chunk `POST` or `DELETE` that changes an LD's allocation or an SLD's partition, a `PATCH` of `Memory`, `DynamicCapacityAdd`, `DynamicCapacityRelease` or a `MemoryExtent` `DELETE`, when the journal's record of its command cannot be written and synced | the command sent | `503`, nothing sent; and so every such request until cxl-fmd is restarted |
+| The URI of a `Task` (and its monitor) of a bind, unbind or DC request under way when cxl-fmd stopped, after the restart | `404`: the task, its hold on the vPPB or on the host and Tag, and its baseline lost; a retry sent the command again | with the journal, the same `Task` under its Id, `TaskState` `Interrupted` and `Oem.Cxl.OperatorDecision` `Required` until a read of the switch or host shows how it went (monitor `202`), its Connection `Starting` or `Updating` and its hold kept; a `DELETE` of its monitor ends it (`204`) (review F06.6a, declined then, reversed by the maintainer's decision 13 of the follow-up review) |
+| Chunk `POST` or `DELETE` (or `PATCH` of `Memory`) whose Set Partition Info or Set LD Allocations was under way when cxl-fmd stopped | the device read at discovery, the chunk `POST`ed lost though the device has it staged | with the journal, the SLD's partition or the LD's allocation read again at the start, nothing changed until it is; a staged chunk made again under its Id |
+| `Task` Ids | numbered as tasks were listed | numbered as tasks are made, before the command is sent: a request refused before or by the device leaves its number unused |
 
 ---
 

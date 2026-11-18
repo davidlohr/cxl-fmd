@@ -341,6 +341,10 @@ static bool dc_task_extents_again(struct fmd_component *dev,
 	return true;
 }
 
+#define JOURNAL_MSG \
+	"The operation journal could not be written: nothing was sent. Resubmit " \
+	"the request once the state directory can be written"
+
 #define EXTENT_GONE_MSG \
 	"An extent the request names is no longer the host's, as read before it: " \
 	"nothing was sent"
@@ -966,6 +970,12 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 			goto nomem;
 	}
 
+	/* on the disk before it is sent (src/journal.c) */
+	if (fmd_journal_dc(ctx, task)) {
+		*msg = JOURNAL_MSG;
+		rc = FMD_JOURNAL_UNAVAILABLE;
+		goto out;
+	}
 	rc = fmd_dc_release(ctx, dev, host_id, policy, false, sanitize,
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? length : 0, tag,
 			    policy == FMD_DC_REL_POLICY_TAG_BASED ? NULL : extents,
@@ -978,6 +988,7 @@ static int delete_dc_memory_extent_locked(struct fmd_ctx *ctx, const char *chass
 		free(extents);
 		return FMD_OP_STARTED;
 	}
+	fmd_journal_end(ctx, task->id, "Failed");
 	*msg = dc_common_msg(rc);
 	if (!*msg)
 		*msg = "Dynamic capacity release failed";
@@ -1386,6 +1397,13 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		return rc;
 	}
 
+	/* on the disk before it is sent (src/journal.c) */
+	if (fmd_journal_dc(ctx, task)) {
+		fmd_task_discard(task);
+		free(extents);
+		*msg = JOURNAL_MSG;
+		return FMD_JOURNAL_UNAVAILABLE;
+	}
 	rc = fmd_dc_add(ctx, dev, host_id, (uint8_t)policy, (uint8_t)(region < 0 ? 0 : region),
 			length, tag, extents, ext_count);
 	free(extents);
@@ -1399,6 +1417,7 @@ static int action_dc_add_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		return FMD_OP_STARTED;
 	}
+	fmd_journal_end(ctx, task->id, "Failed");
 	fmd_task_discard(task);
 
 	if (dc_common_msg(rc)) {
@@ -1554,6 +1573,12 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		return -ENOENT;
 	}
 
+	if (fmd_journal_dc(ctx, task)) {
+		fmd_task_discard(task);
+		free(extents);
+		*msg = JOURNAL_MSG;
+		return FMD_JOURNAL_UNAVAILABLE;
+	}
 	rc = fmd_dc_release(ctx, dev, host_id, (uint8_t)policy, forced, sanitize,
 			    length, tag, extents, ext_count);
 	free(extents);
@@ -1567,6 +1592,7 @@ static int action_dc_release_locked(struct fmd_ctx *ctx, const char *chassis_id,
 		snprintf(task_id, FMD_TASK_ID_LEN, "%s", task->id);
 		return FMD_OP_STARTED;
 	}
+	fmd_journal_end(ctx, task->id, "Failed");
 	fmd_task_discard(task);
 
 	if (dc_common_msg(rc)) {

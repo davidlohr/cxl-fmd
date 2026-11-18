@@ -313,12 +313,23 @@
       <ComplexType Name="Task" BaseType="Resource.OemObject">
         <Annotation Term="OData.AdditionalProperties" Bool="false"/>
         <Annotation Term="OData.Description" String="cxl-fmd's properties of a task."/>
-        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a task that follows a dynamic capacity add or release."/>
+        <Annotation Term="OData.LongDescription" String="This type shall contain the cxl-fmd properties of a task that follows a dynamic capacity add or release, or that the service made again from its operation journal after a restart."/>
         <Property Name="DynamicCapacity" Type="Cxl.v1_0_0.DynamicCapacityTask" Nullable="false">
           <Annotation Term="OData.Description" String="The dynamic capacity request the task follows, and what has been seen of the host."/>
           <Annotation Term="OData.LongDescription" String="This property shall contain the request of Initiate Dynamic Capacity Add (5604h) or Initiate Dynamic Capacity Release (5605h) the task follows, as recorded before it was sent, the host's extents before it, and the extents seen added to or released from the host since."/>
         </Property>
+        <Property Name="OperatorDecision" Type="Cxl.v1_0_0.OperatorDecision" Nullable="false">
+          <Annotation Term="OData.Permissions" EnumMember="OData.Permission/Read"/>
+          <Annotation Term="OData.Description" String="Whether an operator has to decide what becomes of the task."/>
+          <Annotation Term="OData.LongDescription" String="This property shall be present while a task that the service made again from its operation journal after a restart has not ended, and absent otherwise.  The outcome of its command is not known: a read of the device ends the task when it shows the outcome, and a DELETE of the task monitor ends it."/>
+        </Property>
       </ComplexType>
+
+      <EnumType Name="OperatorDecision">
+        <Member Name="Required">
+          <Annotation Term="OData.Description" String="The outcome of the task's command is not known, and the service holds what the command was to change until a read shows it or an operator ends the task."/>
+        </Member>
+      </EnumType>
 
       <ComplexType Name="DynamicCapacityTask">
         <Annotation Term="OData.AdditionalProperties" Bool="false"/>

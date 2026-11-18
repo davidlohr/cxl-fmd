@@ -568,6 +568,34 @@ static void dc_task_target(const struct fmd_task *task, char *buf, size_t len)
 }
 
 /*
+ * A task made again from the journal after a restart (src/journal.c), not
+ * ended: what its command did is not known, and an operator may have to
+ * decide (end it with a DELETE of its monitor, or wait for a read to settle
+ * it). Said in Oem.Cxl.OperatorDecision (cxl-fmd's Oem property). The
+ * task's TaskState is Interrupted meanwhile: "the task has been interrupted
+ * but is expected to restart and is therefore not complete" (Task_v1).
+ */
+static void task_operator_decision(const struct fmd_task *task, json_t *result)
+{
+	json_t *oem, *cxl;
+
+	if (!task->recovered || (task->state != FMD_TASK_RUNNING &&
+				 task->state != FMD_TASK_INTERRUPTED))
+		return;
+	oem = json_object_get(result, "Oem");
+	if (!oem) {
+		oem = json_object();
+		json_object_set_new(result, "Oem", oem);
+	}
+	cxl = json_object_get(oem, "Cxl");
+	if (!cxl) {
+		cxl = json_pack("{s:s}", "@odata.type", "#Cxl.v1_0_0.Task");
+		json_object_set_new(oem, "Cxl", cxl);
+	}
+	json_object_set_new(cxl, "OperatorDecision", json_string("Required"));
+}
+
+/*
  * A Dynamic Capacity task: Payload is the request as it came (TargetUri,
  * HttpOperation, and JsonBody, "the JSON payload to use in the execution
  * of this task", Task_v1). There is no PercentComplete: what share of the
@@ -595,12 +623,14 @@ static json_t *dc_task(struct fmd_ctx *ctx, const struct fmd_task *task,
 		"Id", uri + strlen("/redfish/v1/TaskService/Tasks/"),
 		"Name", task->kind == FMD_TASK_DC_ADD ? "Dynamic Capacity Add" :
 			"Dynamic Capacity Release",
-		"TaskState", task->state == FMD_TASK_RUNNING ? "Running" :
+		"TaskState", task->state == FMD_TASK_RUNNING ?
+				(task->recovered ? "Interrupted" : "Running") :
 			     task->state == FMD_TASK_COMPLETED ? "Completed" : "Exception",
 		"StartTime", start,
 		"TaskMonitor", monitor,
 		"Payload", payload,
 		"Oem", fmd_redfish_dc_task_oem(ctx, task));
+	task_operator_decision(task, result);
 
 	status = task->state == FMD_TASK_EXCEPTION ? "Critical" :
 		 dc->partial ? "Warning" : "OK";
@@ -699,6 +729,7 @@ json_t *fmd_redfish_task(struct fmd_ctx *ctx, const char *id)
 		json_object_set_new(result, "Links",
 			json_pack("{s:[{s:s}]}", "CreatedResources",
 				  "@odata.id", conn_uri));
+	task_operator_decision(task, result);
 
 	return result;
 }
@@ -5484,9 +5515,78 @@ static int chunk_plan_type(const struct fmd_component *dev, const struct fmd_ld 
  *       created or deleted until it is read (-5 while it cannot be)
  * FMD_MCTP_RESTRICTED = a chunk that changes the partition of an SLD that
  *       Set Partition Info may not be sent to (mctp_refused())
+ * FMD_JOURNAL_UNAVAILABLE = the journal's record of the command could not
+ *       be written (src/journal.c): nothing was sent or changed
  * Every one of -2, -6, -8 to -12, -15 to -18 and FMD_MCTP_RESTRICTED is
  * answered before anything is changed or sent, as is -7.
  */
+/*
+ * The journal's record of a Set LD Allocations (5402h) of @ld of @dev, from
+ * @old to @new bytes, for @chunk, written before it is sent (src/journal.c):
+ * its Id in @id ("" with no journal). -EIO if it could not be written.
+ */
+static int journal_ld_alloc(struct fmd_ctx *ctx, char *id,
+			    struct fmd_component *dev, struct fmd_ld *ld,
+			    uint64_t old, uint64_t new,
+			    const struct fmd_mem_chunk *chunk)
+{
+	id[0] = '\0';
+	if (!ctx->journal)
+		return 0;
+	fmd_op_id(ctx, id, FMD_TASK_ID_LEN);
+	return fmd_journal_ld_alloc(ctx, id, dev, ld, old, new, chunk->base.id);
+}
+
+/*
+ * The command of record @id returned @rc: over, or (-EREMOTEIO, @ld not
+ * known) the record stays until @ld is read (fmd_ld_alloc_refresh_ld())
+ */
+static void journal_ld_alloc_done(struct fmd_ctx *ctx, const char *id,
+				  struct fmd_ld *ld, int rc)
+{
+	if (!id[0])
+		return;
+	if (rc == -EREMOTEIO && ld->alloc_unknown) {
+		if (ld->journal_id[0])
+			fmd_journal_end(ctx, ld->journal_id, "Superseded");
+		snprintf(ld->journal_id, sizeof(ld->journal_id), "%s", id);
+		return;
+	}
+	fmd_journal_end(ctx, id, rc ? "Failed" : "Completed");
+}
+
+/*
+ * The same for a Set Partition Info (4101h) of @dev (@ld of an MLD, else
+ * NULL) to @next volatile, in 256 MB units, for @what of @chunk
+ */
+static int journal_partition(struct fmd_ctx *ctx, char *id,
+			     struct fmd_component *dev, struct fmd_ld *ld,
+			     const char *what, const struct fmd_mem_chunk *chunk,
+			     uint64_t next,
+			     const struct cxlmi_cmd_memdev_get_partition_info_rsp *before)
+{
+	id[0] = '\0';
+	if (!ctx->journal)
+		return 0;
+	fmd_op_id(ctx, id, FMD_TASK_ID_LEN);
+	return fmd_journal_partition(ctx, id, dev, ld, what, chunk, next, before);
+}
+
+/* ... and the record stays while @sld is partition_unknown */
+static void journal_partition_done(struct fmd_ctx *ctx, const char *id,
+				   struct fmd_sld *sld, int rc)
+{
+	if (!id[0])
+		return;
+	if (rc == -EREMOTEIO && sld && sld->partition_unknown) {
+		if (sld->journal_id[0])
+			fmd_journal_end(ctx, sld->journal_id, "Superseded");
+		snprintf(sld->journal_id, sizeof(sld->journal_id), "%s", id);
+		return;
+	}
+	fmd_journal_end(ctx, id, rc ? "Failed" : "Completed");
+}
+
 int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 				  const char *chassis_id,
 				  const char *domain_id,
@@ -5625,12 +5725,20 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 	 */
 	{
 		uint64_t old = ld ? ld->memory_size : 0;
+		char jid[FMD_TASK_ID_LEN];
 
 		rc = 0;
 		if (chassis->type == FMD_COMPONENT_MLD ||
 		    chassis->type == FMD_COMPONENT_MHD) {
+			/* on the disk before it is sent (src/journal.c) */
+			if (journal_ld_alloc(ctx, jid, chassis, ld, old,
+					     old + chunk->size, chunk)) {
+				fmd_chunk_remove(&ctx->topology, chunk);
+				return FMD_JOURNAL_UNAVAILABLE;
+			}
 			/* the LD grows by the chunk (checked above) */
 			rc = fmd_ld_alloc_set(ctx, chassis, ld, old + chunk->size);
+			journal_ld_alloc_done(ctx, jid, ld, rc);
 			if (rc == -EREMOTEIO) {
 				/*
 				 * Not known whether the LD grew: the chunk
@@ -5670,10 +5778,18 @@ int fmd_redfish_post_memory_chunk(struct fmd_ctx *ctx,
 
 				if (__builtin_add_overflow(CXL_TO_BYTES(
 						fmd_partition_next_volatile(&sld->partition)),
-						chunk->size, &new_volatile))
+						chunk->size, &new_volatile)) {
 					rc = -EINVAL;
-				else
+				} else {
+					if (journal_partition(ctx, jid, chassis, NULL, "POST",
+							      chunk, new_volatile / CXL_CAPACITY_UNIT,
+							      &sld->partition)) {
+						fmd_chunk_remove(&ctx->topology, chunk);
+						return FMD_JOURNAL_UNAVAILABLE;
+					}
 					rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
+					journal_partition_done(ctx, jid, sld, rc);
+				}
 				/*
 				 * The chunk is of the next configuration, not of
 				 * the active one, until a read-back shows it
@@ -5778,6 +5894,7 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
 {
 	struct fmd_ld *ld = (struct fmd_ld *)fmd_chunk_ld(dev, chunk);
 	struct fmd_mem_domain *domain = fmd_to_domain(chunk->base.parent);
+	char jid[FMD_TASK_ID_LEN];
 	uint64_t before, freed;
 	int rc;
 
@@ -5790,7 +5907,10 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
 			 chunk->base.id);
 		return -7;
 	}
+	if (journal_ld_alloc(ctx, jid, dev, ld, before, before - chunk->size, chunk))
+		return FMD_JOURNAL_UNAVAILABLE;
 	rc = fmd_ld_alloc_set(ctx, dev, ld, before - chunk->size);
+	journal_ld_alloc_done(ctx, jid, ld, rc);
 	if (rc == -EOPNOTSUPP && dev->type == FMD_COMPONENT_MHD)
 		return -6;		/* no LD Pool CCI known: nothing sent */
 	if (rc == -EINVAL || rc == -EOPNOTSUPP)
@@ -5852,6 +5972,8 @@ static int chunk_give_back(struct fmd_ctx *ctx, struct fmd_component *dev,
  *  FMD_MCTP_RESTRICTED = the chunk changes the partition of an SLD that
  *       Set Partition Info may not be sent to (mctp_refused()); nothing
  *       was sent or changed
+ *  FMD_JOURNAL_UNAVAILABLE = the journal's record of the command could not
+ *       be written (src/journal.c); nothing was sent or changed
  */
 int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				    const char *chassis_id,
@@ -5971,9 +6093,17 @@ int fmd_redfish_delete_memory_chunk(struct fmd_ctx *ctx,
 				uint64_t cur = CXL_TO_BYTES(
 					fmd_partition_next_volatile(&sld->partition));
 				uint64_t new_volatile = 0;
+				char jid[FMD_TASK_ID_LEN];
+
 				if (cur > chunk->size)
 					new_volatile = cur - chunk->size;
+				if (journal_partition(ctx, jid, domain_parent, NULL,
+						      "DELETE", chunk,
+						      new_volatile / CXL_CAPACITY_UNIT,
+						      &sld->partition))
+					return FMD_JOURNAL_UNAVAILABLE;
 				rc = fmd_sld_set_partition(ctx, sld, new_volatile, false);
+				journal_partition_done(ctx, jid, sld, rc);
 				/*
 				 * The chunks staged after it wait for less; an
 				 * active one stays active until the reset, and
@@ -6309,6 +6439,8 @@ static int memory_action_check(struct fmd_ctx *ctx, const char *chassis_id,
  *  -5 if the device cannot be partitioned (Partition Alignment 0)
  *  FMD_MCTP_RESTRICTED if Set Partition Info may not be sent to it
  *  (mctp_refused()), before the body is read
+ *  FMD_JOURNAL_UNAVAILABLE if the journal's record of it could not be
+ *  written (src/journal.c): nothing sent
  */
 int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 			     const char *chassis_id,
@@ -6321,6 +6453,8 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 	json_error_t error;
 	const struct cxlmi_cmd_memdev_identify_rsp *memdev = NULL;
 	struct cxlmi_cmd_memdev_get_partition_info_rsp *partition = NULL;
+	struct fmd_ld *target_ld = NULL;
+	char jid[FMD_TASK_ID_LEN];
 	uint64_t total, next_volatile;
 	int rc;
 
@@ -6346,7 +6480,6 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 
 		struct fmd_mld *mld = fmd_to_mld(comp);
 		struct fmd_component *child;
-		struct fmd_ld *target_ld = NULL;
 
 		fmd_topology_rdlock(&ctx->topology);
 		fmd_for_each_child(&mld->base, child) {
@@ -6425,21 +6558,25 @@ int fmd_redfish_patch_memory(struct fmd_ctx *ctx,
 			return -1;
 	}
 
+	if (journal_partition(ctx, jid, comp, target_ld, "PATCH", NULL,
+			      next_volatile, partition))
+		return FMD_JOURNAL_UNAVAILABLE;
 	rc = fmd_memdev_set_partition(ctx, mem_id, ep, ti, memdev, partition,
 				      next_volatile, false);
+	if (rc == -EREMOTEIO && comp->type == FMD_COMPONENT_SLD) {
+		/* read again on the next --rescan (fmd_sld_partition_refresh()) */
+		fmd_topology_wrlock(&ctx->topology);
+		fmd_to_sld(comp)->partition_unknown = true;
+		fmd_topology_wrunlock(&ctx->topology);
+	}
+	journal_partition_done(ctx, jid, comp->type == FMD_COMPONENT_SLD ?
+			       fmd_to_sld(comp) : NULL, rc);
 	if (rc == -EINVAL)
 		return -2;
 	if (rc == -EOPNOTSUPP)
 		return -5;
-	if (rc == -EREMOTEIO) {
-		/* read again on the next --rescan (fmd_sld_partition_refresh()) */
-		if (comp->type == FMD_COMPONENT_SLD) {
-			fmd_topology_wrlock(&ctx->topology);
-			fmd_to_sld(comp)->partition_unknown = true;
-			fmd_topology_wrunlock(&ctx->topology);
-		}
+	if (rc == -EREMOTEIO)
 		return -6;
-	}
 	return rc ? -3 : 0;
 }
 
@@ -7557,6 +7694,12 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 		fmd_task_discard(task);
 		return -6;
 	}
+	/* on the disk before the switch is asked (src/journal.c) */
+	if (fmd_journal_vppb(ctx, task, 0)) {
+		fmd_task_discard(task);
+		fmd_binding_op_remove(ctx, op);
+		return FMD_JOURNAL_UNAVAILABLE;
+	}
 
 	rc = fmd_vppb_bind(ctx, sw, key.vcs_id, key.vppb_id, port_id, ld_id);
 	if (rc == FMD_OP_STARTED || rc == FMD_OP_UNCONFIRMED ||
@@ -7582,6 +7725,7 @@ static int post_bind(struct fmd_ctx *ctx, struct fmd_host *host,
 		*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
 		return task ? FMD_OP_STARTED : -6;
 	}
+	fmd_journal_end(ctx, task->id, rc == 0 ? "Completed" : "Failed");
 	fmd_task_discard(task);
 	fmd_binding_op_remove(ctx, op);
 
@@ -7700,7 +7844,10 @@ static int direct_match(const struct fmd_conn_view *v, void *arg)
  *     (FMD_HEAD_UNKNOWN)
  * -29 no response to Bind vPPB could be read, and no task could be made to
  *     follow it: whether the switch bound is not known
- * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -28.
+ * FMD_JOURNAL_UNAVAILABLE the journal's record of the bind could not be
+ *     written (src/journal.c)
+ * Nothing is sent, nor changed, for any of -1 to -5 and -8 to -28, nor for
+ * FMD_JOURNAL_UNAVAILABLE.
  */
 int fmd_redfish_post_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				const char *body, size_t body_size,
@@ -7936,6 +8083,12 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 		 * of the VCSs around the command must not end it, and free
 		 * its op, under this one.
 		 */
+		/*
+		 * a second Unbind vPPB of the same operation: its record, of
+		 * the same Id, says so before it is sent
+		 */
+		if (fmd_journal_vppb(ctx, task, option))
+			return FMD_JOURNAL_UNAVAILABLE;
 		was = task->state;
 		lost = op->lost;
 		task->state = FMD_TASK_RUNNING;
@@ -7973,6 +8126,11 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 			fmd_task_discard(task);
 			return -9;
 		}
+		if (fmd_journal_vppb(ctx, task, option)) {
+			fmd_task_discard(task);
+			fmd_binding_op_remove(ctx, op);
+			return FMD_JOURNAL_UNAVAILABLE;
+		}
 
 		rc = fmd_vppb_unbind(ctx, sw, key.vcs_id, key.vppb_id,
 				     key.port_id, key.ld_id, option);
@@ -7993,6 +8151,7 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
 			*response = task ? fmd_redfish_task(ctx, task->id) : NULL;
 			return task ? FMD_OP_STARTED : -2;
 		}
+		fmd_journal_end(ctx, task->id, rc == 0 ? "Completed" : "Failed");
 		fmd_task_discard(task);
 		fmd_binding_op_remove(ctx, op);
 	}
@@ -8042,6 +8201,8 @@ static int unbind_connection(struct fmd_ctx *ctx, const char *connection_id,
  *  -8 no response to Unbind vPPB could be read, and no task could be made
  *     to follow it: whether the switch unbound is not known
  *  -9 no task could be made: nothing is sent
+ *  FMD_JOURNAL_UNAVAILABLE the journal's record of the unbind could not be
+ *     written (src/journal.c): nothing is sent
  */
 int fmd_redfish_delete_connection(struct fmd_ctx *ctx, const char *fabric_id,
 				  const char *connection_id, json_t **response)

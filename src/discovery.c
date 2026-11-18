@@ -3890,6 +3890,20 @@ static struct fmd_ld *dev_ld(struct fmd_component *dev, unsigned int id)
 }
 
 /*
+ * @ld's allocation has been read: it is known again, and the journal's
+ * record of a Set LD Allocations whose outcome was not known is ended
+ * (src/journal.c)
+ */
+static void ld_alloc_known(struct fmd_ctx *ctx, struct fmd_ld *ld)
+{
+	ld->alloc_unknown = false;
+	if (ld->journal_id[0]) {
+		fmd_journal_end(ctx, ld->journal_id, "Read");
+		ld->journal_id[0] = '\0';
+	}
+}
+
+/*
  * Get LD Allocations for @ld alone, on @ep through @ti: @ld takes what it
  * says, and is known again. Returns 0 or the error of get_ld_allocations().
  */
@@ -3913,7 +3927,7 @@ static int read_ld(struct fmd_ctx *ctx, struct fmd_component *dev,
 	ld->memory_size = bytes;
 	if (ld->alloc_unknown)
 		fmd_info(ctx, "%s: LD %u allocation known again", dev->id, ld->ld_id);
-	ld->alloc_unknown = false;
+	ld_alloc_known(ctx, ld);
 	return 0;
 }
 
@@ -4005,7 +4019,7 @@ int fmd_ld_alloc_refresh(struct fmd_ctx *ctx, struct fmd_component *dev)
 				 ld->memory_size >> 20);
 		ld->memory_size = bytes[i];
 		ld->alloc_range2 = range2[i];
-		ld->alloc_unknown = false;
+		ld_alloc_known(ctx, ld);
 	}
 	/*
 	 * One not read, past a page that failed, keeps what it had, and is
@@ -4569,6 +4583,51 @@ int fmd_sld_partition_refresh(struct fmd_ctx *ctx, struct fmd_sld *sld)
 		sld->unknown_delete[0] = '\0';
 	}
 
+	/*
+	 * A chunk POSTed before a restart, with an outcome not known (the
+	 * journal, src/journal.c): the device has what it asked for, and it
+	 * is made again, staged, under its Id and at its offset; or not, and
+	 * it is not
+	 */
+	if (sld->partition_unknown && sld->unknown_post[0]) {
+		struct fmd_component *d = NULL;
+
+		fmd_for_each_child_type(&sld->base, dom, FMD_COMPONENT_DOMAIN) {
+			d = dom;
+			break;
+		}
+		if (fmd_partition_next_volatile(&part) != sld->unknown_next) {
+			fmd_warn(ctx, "%s: chunk %s, POSTed before the restart, "
+				 "was not staged: not made again", sld->base.id,
+				 sld->unknown_post);
+		} else if (fmd_topology_find_chunk(&ctx->topology, sld->unknown_post)) {
+			/* there already */
+		} else if (!d || (!(chunk = fmd_chunk_create_in_domain_id(&ctx->topology,
+					fmd_to_domain(d), sld->unknown_post,
+					sld->unknown_post_size, sld->unknown_post_offset,
+					"Volatile", -1)) &&
+				   /* its range taken by a chunk read back: another */
+				   !(chunk = fmd_chunk_create_in_domain_id(&ctx->topology,
+					fmd_to_domain(d), sld->unknown_post,
+					sld->unknown_post_size, FMD_CHUNK_OFFSET_AUTO,
+					"Volatile", -1)))) {
+			fmd_err(ctx, "%s: chunk %s, POSTed before the restart, is "
+				"staged and cannot be made again", sld->base.id,
+				sld->unknown_post);
+		} else {
+			fmd_info(ctx, "%s: chunk %s, POSTed before the restart, is "
+				 "staged: made again", sld->base.id, chunk->base.id);
+			chunk->staged = true;
+			chunk->staged_vmem = sld->unknown_next;
+		}
+		sld->unknown_post[0] = '\0';
+	}
+
+	/* the journal's record of what made it not known is over */
+	if (sld->journal_id[0]) {
+		fmd_journal_end(ctx, sld->journal_id, "Read");
+		sld->journal_id[0] = '\0';
+	}
 	fmd_topology_wrlock(&ctx->topology);
 	sld->partition = part;
 	if (sld->partition_unknown)

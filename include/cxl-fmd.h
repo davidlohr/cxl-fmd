@@ -666,6 +666,21 @@ struct fmd_sld {
 	bool partition_unknown;
 	char unknown_delete[FMD_MAX_ID_LEN];
 	uint64_t unknown_next;
+	/*
+	 * A chunk POST, made before a restart, whose Set Partition Info
+	 * outcome is in the journal (src/journal.c) and not known:
+	 * @unknown_post its Id, at @unknown_post_offset for
+	 * @unknown_post_size bytes, staged for @unknown_next. The read that
+	 * finds Next Volatile Capacity @unknown_next makes it again, staged.
+	 */
+	char unknown_post[FMD_MAX_ID_LEN];
+	uint64_t unknown_post_offset;
+	uint64_t unknown_post_size;
+	/*
+	 * The journal record of the Set Partition Info whose outcome is not
+	 * known ("" for none): ended once the partition is read
+	 */
+	char journal_id[FMD_TASK_ID_LEN];
 
 	/* Get Health Info (4200h) response, if health_valid */
 	struct cxlmi_cmd_memdev_get_health_info_rsp health;
@@ -792,6 +807,9 @@ struct fmd_ld {
 	uint64_t memory_size;
 	uint64_t alloc_range2;               /* Range 2 Allocation Multiplier */
 	bool alloc_unknown;                  /* see fmd_ld_alloc_set(), fmd_ld_alloc_refresh() */
+	char journal_id[FMD_TASK_ID_LEN];    /* the journal record of the Set LD
+						Allocations that made it so; ended
+						when it is read (src/journal.c) */
 	uint64_t range_start;
 	uint64_t range_length;
 
@@ -1658,6 +1676,9 @@ struct fmd_ctx {
 	struct fmd_task *tasks;
 	int task_next_id;
 
+	/* The operation journal (src/journal.c); NULL when there is none */
+	struct fmd_journal *journal;
+
 	/*
 	 * The state of the fabric: the topology, the VCS tables of the
 	 * switches, the connections, and everything hanging off them. None of
@@ -1694,6 +1715,7 @@ struct fmd_ctx {
 		unsigned int rescan_sec;	/* 0 disables */
 		unsigned int http_threads;	/* threads serving requests */
 		char *mock_topology_path;
+		char *state_dir;		/* --state-dir: the journal's */
 	} config;
 };
 
@@ -1809,6 +1831,18 @@ struct fmd_dc_extent *fmd_dc_extent_create(const char *id);
 struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	struct fmd_topology *topo,
 	struct fmd_mem_domain *domain,
+	uint64_t size,
+	uint64_t offset,
+	const char *address_range_type,
+	int backing_ld);
+/*
+ * The same, Id @id: a chunk made again after a restart (src/journal.c).
+ * NULL also if some component has @id.
+ */
+struct fmd_mem_chunk *fmd_chunk_create_in_domain_id(
+	struct fmd_topology *topo,
+	struct fmd_mem_domain *domain,
+	const char *id,
 	uint64_t size,
 	uint64_t offset,
 	const char *address_range_type,
@@ -2078,6 +2112,14 @@ struct fmd_dc_task {
 	uint64_t done_bytes;
 };
 
+/*
+ * Complete reads of its host, showing nothing of it, after which a task
+ * whose command had no response that could be read ends (cxl-fmd's
+ * choice, decision 11 of the follow-up review; to be revisited once how
+ * long hosts take to answer an offer is known)
+ */
+#define FMD_DC_QUIET_READS 3
+
 struct fmd_task {
 	char id[FMD_TASK_ID_LEN];            /* "{boot}-{n}" */
 	enum fmd_task_kind kind;
@@ -2100,6 +2142,15 @@ struct fmd_task {
 	enum fmd_task_outcome outcome;       /* of an Exception */
 	uint16_t rc;                         /* FMD_TASK_RC: Table 8-208 code */
 	struct fmd_dc_task *dc;              /* FMD_TASK_DC_*: what it follows */
+	/*
+	 * Made again from the journal at start-up (src/journal.c): the
+	 * operation of an earlier run that had not ended. Served Interrupted,
+	 * with Oem.Cxl.OperatorDecision, until it ends; a DELETE of its
+	 * monitor ends it (fmd_task_cancellable()).
+	 */
+	bool recovered;
+	/* ... and its switch or device has not been seen since: kept */
+	bool unseen;
 	struct fmd_task *next;
 };
 
@@ -2162,12 +2213,32 @@ void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, const char *id);
 /*
  * Whether a DELETE of @task's monitor ends it: a DC task, Running, whose
- * command had no response that could be read (dc->unknown_send)
+ * command had no response that could be read (dc->unknown_send), or a
+ * task made again from the journal that has not ended (task->recovered)
  */
 bool fmd_task_cancellable(const struct fmd_task *task);
 /* unlist @task and free it; fabric_lock held exclusively, and dcd_lock */
 void fmd_task_remove(struct fmd_ctx *ctx, struct fmd_task *task);
 bool fmd_tasks_running(struct fmd_ctx *ctx);
+/*
+ * A task made again from the journal (src/journal.c), under its Id of the
+ * earlier run, @id: a bind or unbind of @key on switch @key->switch_id,
+ * whose vPPB read @before before the command, Interrupted with its op lost
+ * (fmd_tasks_reconcile() ends it), or a DC task with @dc (taken over), in
+ * the shape of one whose command had no response that could be read.
+ * @unseen: its switch or device has not been seen since the restart.
+ * NULL if out of memory.
+ */
+struct fmd_task *fmd_task_recover_vppb(struct fmd_ctx *ctx, const char *id,
+				       enum fmd_task_kind kind,
+				       const struct fmd_bind_key *key,
+				       const struct fmd_vppb_seen *before,
+				       uint8_t unbind_option, bool unseen);
+struct fmd_task *fmd_task_recover_dc(struct fmd_ctx *ctx, const char *id,
+				     enum fmd_task_kind kind,
+				     struct fmd_dc_task *dc, bool unseen);
+/* the next Id of this run, "{boot}-{n}", for an operation with no task */
+void fmd_op_id(struct fmd_ctx *ctx, char *buf, size_t len);
 void fmd_tasks_poll(struct fmd_ctx *ctx);
 void fmd_tasks_free(struct fmd_ctx *ctx);
 /*
@@ -2191,6 +2262,77 @@ void fmd_tasks_reconcile(struct fmd_ctx *ctx, struct fmd_switch *sw,
  * settles (fmd_task_interrupt()).
  */
 #define FMD_OP_UNCONFIRMED 3
+
+/*
+ * The operation journal (src/journal.c): with --state-dir, each command
+ * that changes the fabric (Bind vPPB 5201h, Unbind vPPB 5202h, Set LD
+ * Allocations 5402h, Set Partition Info 4101h, Initiate Dynamic Capacity
+ * Add 5604h and Release 5605h) has a record written, and on the disk
+ * (fdatasync), before it is sent, and another when its operation is over.
+ * What a restart finds without the second is made again from the first:
+ * the task under its Id, Interrupted, with its hold, or the fence of the
+ * LD or SLD, and settled on what the device shows. The format and every
+ * rule of it are cxl-fmd's.
+ *
+ * Each fmd_journal_*() that writes a record before a command returns 0, or
+ * -EIO when it could not be written and synced: then nothing is to be
+ * sent, and the request is answered FMD_JOURNAL_UNAVAILABLE (503). All of
+ * them do nothing, and return 0, with no journal (ctx->journal NULL).
+ */
+#define FMD_JOURNAL_UNAVAILABLE 7
+#define FMD_JOURNAL_FILE "journal.jsonl"
+#define FMD_JOURNAL_LOCK "journal.lock"
+#define FMD_JOURNAL_VERSION 1
+/* the file is written again with only the records not ended past this */
+#define FMD_JOURNAL_COMPACT_BYTES (1024 * 1024)
+/* the most of a request's body a record keeps */
+#define FMD_JOURNAL_BODY_MAX 4096
+
+/*
+ * Open the journal in @dir, made if it is not there: take its lock (-EBUSY
+ * if another cxl-fmd has it), read what it holds, cut a last line a crash
+ * left part-written. -EPROTO for a file of another version, or with a
+ * line that cannot be read before its last: nothing is started on it.
+ */
+int fmd_journal_open(struct fmd_ctx *ctx, const char *dir);
+/*
+ * After discovery, before any request: make again what the records not
+ * ended stand for, end those settled, and write the file again with the
+ * rest (fmd_journal_compact()).
+ */
+void fmd_journal_recover(struct fmd_ctx *ctx);
+int fmd_journal_compact(struct fmd_ctx *ctx);
+/* close it, ending nothing: what is under way is so at the next start */
+void fmd_journal_close(struct fmd_ctx *ctx);
+/* a bind or unbind of @task (its Id, key and before), about to be sent */
+int fmd_journal_vppb(struct fmd_ctx *ctx, const struct fmd_task *task,
+		     uint8_t unbind_option);
+/* Set LD Allocations of @ld of @dev from @old to @new bytes, for @chunk_id */
+int fmd_journal_ld_alloc(struct fmd_ctx *ctx, const char *id,
+			 const struct fmd_component *dev, const struct fmd_ld *ld,
+			 uint64_t old, uint64_t new, const char *chunk_id);
+/*
+ * Set Partition Info of @dev (@ld of an MLD, else NULL) to @next volatile
+ * (256 MB units), for a chunk @what ("POST", "DELETE") or a "PATCH" of its
+ * Memory (@chunk NULL); @before as last read
+ */
+int fmd_journal_partition(struct fmd_ctx *ctx, const char *id,
+			  const struct fmd_component *dev, const struct fmd_ld *ld,
+			  const char *what, const struct fmd_mem_chunk *chunk,
+			  uint64_t next,
+			  const struct cxlmi_cmd_memdev_get_partition_info_rsp *before);
+/* a DC add or release of @task: its request, baseline and hold */
+int fmd_journal_dc(struct fmd_ctx *ctx, const struct fmd_task *task);
+/*
+ * The operation of record @id is over, @result saying how: written, not
+ * synced (a record lost only has a restart look again). Nothing for an @id
+ * with no record.
+ */
+void fmd_journal_end(struct fmd_ctx *ctx, const char *id, const char *result);
+/* how many records are not ended */
+int fmd_journal_open_ops(struct fmd_ctx *ctx);
+/* what a record is synced with; tests replace it */
+extern int (*fmd_journal_sync)(int fd);
 
 /*
  * Background Operation Status (0002h) of a switch, for an operation with

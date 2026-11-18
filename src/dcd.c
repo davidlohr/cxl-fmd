@@ -3472,14 +3472,6 @@ static void dc_task_done(struct fmd_dc_task *dc, struct fmd_dc_range *v, int n,
 	dc->done_bytes = bytes;
 }
 
-/*
- * Complete reads of its host, showing nothing of it, after which a task
- * whose command had no response that could be read ends (cxl-fmd's
- * choice, decision 11 of the follow-up review; to be revisited once how
- * long hosts take to answer an offer is known)
- */
-#define FMD_DC_QUIET_READS 3
-
 /* an add a zero-length, zero-Tag Add Capacity Response may answer */
 #define DC_AMBIGUOUS_MSG "An ambiguous Add Capacity Response, with no " \
 	"capacity and no Tag, was read: it may answer this add or another; " \
@@ -3931,6 +3923,15 @@ void fmd_dc_tasks_poll(struct fmd_ctx *ctx)
 		if (task->state != FMD_TASK_RUNNING || !fmd_task_is_dc(task))
 			continue;
 		dev = fmd_topology_find(&ctx->topology, task->dc->dev_id);
+		/*
+		 * One made again from the journal keeps its hold until its
+		 * device is found, or a DELETE of its monitor ends it
+		 */
+		if ((!dev || !fmd_memdev_dcd(dev)) && task->recovered) {
+			task->unseen = true;
+			continue;
+		}
+		task->unseen = false;
 		if (!dev || !fmd_memdev_dcd(dev)) {
 			fmd_dc_task_end(ctx, task, false, FMD_TASK_UNKNOWN,
 					"The device is gone: what its host did is not known");

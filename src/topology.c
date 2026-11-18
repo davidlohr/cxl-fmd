@@ -798,9 +798,10 @@ static uint64_t find_free_offset(struct fmd_mem_domain *domain, uint64_t size)
 	return offset;
 }
 
-struct fmd_mem_chunk *fmd_chunk_create_in_domain(
+static struct fmd_mem_chunk *chunk_create_in_domain(
 	struct fmd_topology *topo,
 	struct fmd_mem_domain *domain,
+	const char *id,
 	uint64_t size,
 	uint64_t offset,
 	const char *address_range_type,
@@ -831,8 +832,11 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	if (chunk_overlaps(domain, offset, size))
 		return NULL;
 
-	/* Generate chunk ID */
-	generate_chunk_id(topo, domain, chunk_id, sizeof(chunk_id));
+	/* Generate chunk ID, unless it has one */
+	if (id)
+		snprintf(chunk_id, sizeof(chunk_id), "%s", id);
+	else
+		generate_chunk_id(topo, domain, chunk_id, sizeof(chunk_id));
 
 	/* Create the chunk */
 	chunk = fmd_chunk_create(chunk_id);
@@ -858,6 +862,33 @@ struct fmd_mem_chunk *fmd_chunk_create_in_domain(
 	domain->remaining -= size;
 
 	return chunk;
+}
+
+struct fmd_mem_chunk *fmd_chunk_create_in_domain(
+	struct fmd_topology *topo,
+	struct fmd_mem_domain *domain,
+	uint64_t size,
+	uint64_t offset,
+	const char *address_range_type,
+	int backing_ld)
+{
+	return chunk_create_in_domain(topo, domain, NULL, size, offset,
+				      address_range_type, backing_ld);
+}
+
+struct fmd_mem_chunk *fmd_chunk_create_in_domain_id(
+	struct fmd_topology *topo,
+	struct fmd_mem_domain *domain,
+	const char *id,
+	uint64_t size,
+	uint64_t offset,
+	const char *address_range_type,
+	int backing_ld)
+{
+	if (!id || !*id || fmd_topology_find(topo, id))
+		return NULL;
+	return chunk_create_in_domain(topo, domain, id, size, offset,
+				      address_range_type, backing_ld);
 }
 
 int fmd_chunk_remove(struct fmd_topology *topo, struct fmd_mem_chunk *chunk)

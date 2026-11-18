@@ -1036,8 +1036,21 @@ and whose `message` says what the host accepted or released, a `DELETE`
 gone `500` "Outcome unknown". The statuses are cxl-fmd's choices. Only
 the task of a command whose response could not be read can be cancelled
 (DSP0266: "If a service supports cancellation of a task, the Allow header
-shall contain DELETE for the task monitor"), as above; tasks are not kept
-across a restart, and of the tasks that are over the newest 64 are kept.
+shall contain DELETE for the task monitor"), as above, and one taken up
+again after a restart. Of the tasks that are over the newest 64 are kept.
+
+**Across a restart.** With the operation journal (`--state-dir`, see
+"Operations under way across a restart" in
+[Redfish-API.md](Redfish-API.md#operations-under-way-across-a-restart)),
+the 5604h or 5605h of each task is recorded, with its request, its
+baseline and its hold, and synced to the disk before it is sent; a task
+that has not ended when cxl-fmd stops is made again when it starts, under
+its Id, as one whose response could not be read (`unknown_send`): it
+holds its host and Tag, ends on what the host's lists show or after 3
+reads that show nothing of it, and a `DELETE` of its monitor ends it. It
+is served `Interrupted`, with `Oem.Cxl.OperatorDecision` `Required`,
+while it runs. Without the journal (the default with `--mock`), tasks are
+not kept across a restart. These are cxl-fmd's choices.
 
 ### Dynamic Capacity Add Reference (5606h) / Remove Reference (5607h)
 

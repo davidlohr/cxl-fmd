@@ -15728,6 +15728,816 @@ out:
 /* the build renames main() so that the daemon's own can be linked in */
 #undef main
 
+/*
+ * Follow-up review item 6 (F6d), decision 13: the operation journal. Each
+ * test runs an operation whose response is lost, frees the context (the
+ * daemon stops: nothing is ended), and makes a new one on the same state
+ * directory and the same device (the restart): the operation is made
+ * again under its Id, holds what it held, and ends on what the device
+ * shows.
+ */
+static void journal_tmpdir(char *dir, size_t len)
+{
+	snprintf(dir, len, "/tmp/cxl-fmd-journal-XXXXXX");
+	if (!mkdtemp(dir)) {
+		printf("FAIL  cannot make a state directory\n");
+		exit(1);
+	}
+}
+
+static void journal_rmdir(const char *dir)
+{
+	static const char *const files[] = {
+		FMD_JOURNAL_FILE, FMD_JOURNAL_LOCK, "journal.tmp",
+	};
+	char path[512];
+
+	for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+		snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
+		unlink(path);
+	}
+	rmdir(dir);
+}
+
+static struct fmd_ctx *journal_ctx(const char *dir)
+{
+	struct fmd_ctx *ctx = new_ctx();
+	int rc = fmd_journal_open(ctx, dir);
+
+	CHECK(rc == 0 && ctx->journal, "the journal in %s: %d", dir, rc);
+	return ctx;
+}
+
+/* what Task @id serves: TaskState, and Oem.Cxl.OperatorDecision or "" */
+static bool journal_served(struct fmd_ctx *ctx, const char *id, const char *state,
+			   bool decision)
+{
+	json_t *t = fmd_redfish_task(ctx, id);
+	const char *s = json_string_value(json_object_get(t, "TaskState"));
+	const char *d = json_string_value(json_object_get(json_object_get(
+		json_object_get(t, "Oem"), "Cxl"), "OperatorDecision"));
+	bool ok = s && !strcmp(s, state) &&
+		  (decision ? d && !strcmp(d, "Required") : !d);
+
+	if (!ok)
+		printf("      Task %s: %s, OperatorDecision %s\n", id, s ? s : "(none)",
+		       d ? d : "(none)");
+	json_decref(t);
+	return ok;
+}
+
+/*
+ * A bind POST whose 5201h response is lost, and a restart. The read of the
+ * VCSs at the restart shows vPPB 1 as @at_start: at 01h the task stays
+ * Interrupted, a retry is answered with it and sends no 5201h, and the
+ * next read settles it; bound, it is settled at once. With no switch at
+ * the restart (@at_start NULL) it waits, holding the vPPB, until a DELETE
+ * of its monitor.
+ */
+static void journal_bind(uint64_t serial, const uint8_t *at_start)
+{
+	char dir[64], sw_id[FMD_MAX_ID_LEN], body[512], cid[FMD_CONN_ID_LEN];
+	char tid[FMD_TASK_ID_LEN] = "";
+	struct cxlmi_endpoint *ep;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	struct fmd_ctx *ctx;
+	json_t *resp = NULL;
+	unsigned int s0;
+	int rc;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_switch(ctx, serial);
+	sw = w1_setup(ctx, ep, serial, sw_id, &host);
+	CHECK(sw && host, "no switch or host");
+	if (!sw || !host)
+		goto out;
+	read_vppb1(ctx, ep, sw, unbound);
+	w1_post_body(body, sizeof(body), host, sw_id);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, unbound, unbound);
+	}
+	answer(ep, 0x5201, (void *)r6_lost, sizeof(r6_lost));
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && task && task->state == FMD_TASK_INTERRUPTED &&
+	      fmd_journal_open_ops(ctx) == 1,
+	      "the bind, 5201h lost: %d, %d records open", rc, fmd_journal_open_ops(ctx));
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+	snprintf(tid, sizeof(tid), "%s", task->id);
+	fmd_ctx_free(ctx);
+
+	/* the restart */
+	ctx = journal_ctx(dir);
+	if (!at_start) {
+		fmd_journal_recover(ctx);
+		task = fmd_task_find(ctx, tid);
+		fmd_tasks_poll(ctx);
+		CHECK(task && task->recovered && task->unseen &&
+		      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+		      fmd_journal_open_ops(ctx) == 1 && fmd_task_cancellable(task) &&
+		      journal_served(ctx, tid, "Interrupted", true),
+		      "no switch: task %d, %d ops", task ? (int)task->state : -1,
+		      ops_count(ctx));
+		CHECK(fmd_redfish_task_monitor_delete(ctx, tid) == 204 &&
+		      !fmd_task_find(ctx, tid) && !ops_count(ctx) &&
+		      !fmd_journal_open_ops(ctx), "no switch: a DELETE of the monitor");
+		goto out;
+	}
+	ep = new_switch(ctx, serial);
+	sw = w1_setup(ctx, ep, serial, sw_id, &host);
+	if (!sw || !host)
+		goto out;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, at_start, unbound);
+	fmd_journal_recover(ctx);
+	task = fmd_task_find(ctx, tid);
+	if (at_start == vppb_ld1) {
+		CHECK(task && task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+		      !fmd_journal_open_ops(ctx) && conn_state(ctx, cid) == FMD_CONN_ENABLED &&
+		      journal_served(ctx, tid, "Completed", false),
+		      "bound at the restart: task %d (%s)", task ? (int)task->state : -1,
+		      task ? task->message : "");
+		goto out;
+	}
+	CHECK(task && task->recovered && task->state == FMD_TASK_INTERRUPTED &&
+	      ops_count(ctx) == 1 && ctx->binding_ops->lost &&
+	      conn_state(ctx, cid) == FMD_CONN_STARTING &&
+	      fmd_journal_open_ops(ctx) == 1 &&
+	      journal_served(ctx, tid, "Interrupted", true),
+	      "at 01h at the restart: task %d, %d ops, Connection %d",
+	      task ? (int)task->state : -1, ops_count(ctx), conn_state(ctx, cid));
+	if (!task)
+		goto out;
+	/* a retry: the same task, no 5201h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	answer_rc(ep, 0x5201, CXLMI_RET_INPUT);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+	CHECK(rc == FMD_OP_STARTED && commands_sent(ep) - s0 == 2 &&
+	      last_opcode(ep) == 0x5200 && resp &&
+	      !strcmp(json_string_value(json_object_get(resp, "Id")), tid),
+	      "a retry after the restart: %d, %u sent, last %04xh", rc,
+	      commands_sent(ep) - s0, last_opcode(ep));
+	json_decref(resp);
+	resp = NULL;
+	cxlmi_mock_clear_responses(ep);
+	/* the read that settles it */
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      !fmd_journal_open_ops(ctx) && journal_served(ctx, tid, "Completed", false),
+	      "read bound: task %d (%s)", task->state, task->message);
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+}
+
+/* an unbind (DELETE) whose 5202h response is lost, and a restart */
+static void journal_unbind(uint64_t serial)
+{
+	char dir[64], sw_id[FMD_MAX_ID_LEN], cid[FMD_CONN_ID_LEN];
+	char tid[FMD_TASK_ID_LEN] = "";
+	struct cxlmi_endpoint *ep;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_task *task;
+	struct fmd_ctx *ctx;
+	json_t *resp = NULL;
+	unsigned int s0;
+	int rc;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_switch(ctx, serial);
+	sw = w1_setup(ctx, ep, serial, sw_id, &host);
+	if (!sw)
+		goto out;
+	read_vppb1(ctx, ep, sw, vppb_ld1);
+	snprintf(cid, sizeof(cid), "%s_vcs2_vppb1_p5_ld1", sw_id);
+	for (int i = 0; i < 2; i++) {
+		answer_vcs(ep, 0, 0, port2, unbound);
+		answer_vcs(ep, 2, 1, vppb_ld1, unbound);
+	}
+	answer(ep, 0x5202, (void *)r6_lost, sizeof(r6_lost));
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	task = ctx->tasks;
+	CHECK(rc == FMD_OP_STARTED && task && task->kind == FMD_TASK_UNBIND &&
+	      fmd_journal_open_ops(ctx) == 1, "the unbind, 5202h lost: %d", rc);
+	json_decref(resp);
+	resp = NULL;
+	if (!task)
+		goto out;
+	snprintf(tid, sizeof(tid), "%s", task->id);
+	fmd_ctx_free(ctx);
+
+	ctx = journal_ctx(dir);
+	ep = new_switch(ctx, serial);
+	sw = w1_setup(ctx, ep, serial, sw_id, &host);
+	if (!sw)
+		goto out;
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	fmd_journal_recover(ctx);
+	task = fmd_task_find(ctx, tid);
+	CHECK(task && task->kind == FMD_TASK_UNBIND && task->recovered &&
+	      task->state == FMD_TASK_INTERRUPTED && ops_count(ctx) == 1 &&
+	      conn_state(ctx, cid) == FMD_CONN_UPDATING &&
+	      journal_served(ctx, tid, "Interrupted", true),
+	      "the unbind at the restart: task %d, Connection %d",
+	      task ? (int)task->state : -1, conn_state(ctx, cid));
+	if (!task)
+		goto out;
+	/* a retry: 503, no 5202h */
+	answer_vcs(ep, 0, 0, port2, unbound);
+	answer_vcs(ep, 2, 1, vppb_busy, unbound);
+	answer_rc(ep, 0x5202, CXLMI_RET_SUCCESS);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_delete_connection(ctx, "CXL", cid, &resp);
+	CHECK(rc == -3 && commands_sent(ep) - s0 == 2 && last_opcode(ep) == 0x5200,
+	      "a DELETE after the restart: %d, %u sent", rc, commands_sent(ep) - s0);
+	json_decref(resp);
+	resp = NULL;
+	cxlmi_mock_clear_responses(ep);
+	read_vppb1(ctx, ep, sw, unbound);
+	CHECK(task->state == FMD_TASK_COMPLETED && !ops_count(ctx) &&
+	      conn_state(ctx, cid) < 0 && !fmd_journal_open_ops(ctx),
+	      "read unbound: task %d (%s)", task->state, task->message);
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+}
+
+/*
+ * A Set LD Allocations (chunk POST on LD 0) whose response is lost and
+ * cannot be read back, and a restart: LD 0 is read at once (@read), and
+ * the record ends; or that read fails, and LD 0 is fenced, its record open,
+ * until a read of it.
+ */
+static void journal_ld_alloc(uint64_t serial, bool read)
+{
+	static const char post[] = "{\"MemoryChunkSizeMiB\": 256, \"InterleaveSets\": "
+		"[{\"Memory\": {\"@odata.id\": \"/redfish/v1/Chassis/%s/Memory/%s_ld%d\"}}]}";
+	char dir[64], id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], body[512];
+	struct cxlmi_endpoint *ep;
+	struct fmd_ld *ld0, *ld1;
+	struct fmd_ctx *ctx;
+	json_t *resp = NULL;
+	unsigned int s0;
+	int rc;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_mld_sized(ctx, serial, 2, 0, 4, 10ULL << 30);
+	fmd_discover(ctx);
+	device_id(id, sizeof(id), serial);
+	snprintf(dom, sizeof(dom), "%s_domain0", id);
+	snprintf(body, sizeof(body), post, id, id, 0);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	if (!ld0) {
+		CHECK(0, "no LD 0");
+		goto out;
+	}
+	answer_get_ld(ep, 0, 4);
+	answer_rc(ep, 0x5402, CXLMI_RET_INTERNAL);
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -14 && ld0->alloc_unknown && fmd_journal_open_ops(ctx) == 1,
+	      "5402h lost: %d, %d records open", rc, fmd_journal_open_ops(ctx));
+	json_decref(resp);
+	resp = NULL;
+	fmd_ctx_free(ctx);
+
+	ctx = journal_ctx(dir);
+	ep = new_mld_sized(ctx, serial, 2, 0, 4, 10ULL << 30);
+	fmd_discover(ctx);
+	cxlmi_mock_clear_responses(ep);
+	ld0 = fmd_topology_find_ld(&ctx->topology, id, 0);
+	ld1 = fmd_topology_find_ld(&ctx->topology, id, 1);
+	if (!ld0 || !ld1)
+		goto out;
+	CHECK(!ld0->alloc_unknown, "LD 0 not known after discovery");
+	if (read)
+		answer_get_ld(ep, 0, 5);
+	else
+		answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	fmd_journal_recover(ctx);
+	if (read) {
+		CHECK(!ld0->alloc_unknown && ld0->memory_size == 5ULL << 28 &&
+		      !fmd_journal_open_ops(ctx) && last_opcode(ep) == 0x5401,
+		      "read at the restart: unknown %d, %" PRIu64 " MiB, %d open",
+		      ld0->alloc_unknown, ld0->memory_size >> 20,
+		      fmd_journal_open_ops(ctx));
+		goto out;
+	}
+	CHECK(ld0->alloc_unknown && ld0->journal_id[0] && fmd_journal_open_ops(ctx) == 1,
+	      "not read at the restart: unknown %d, %d open", ld0->alloc_unknown,
+	      fmd_journal_open_ops(ctx));
+	/* a POST on LD 1 reads LD 0 first, and sends nothing while it cannot */
+	snprintf(body, sizeof(body), post, id, id, 1);
+	answer_rc(ep, 0x5401, CXLMI_RET_INTERNAL);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_post_memory_chunk(ctx, id, dom, body, strlen(body), &resp);
+	CHECK(rc == -5 && commands_sent(ep) - s0 == 1 && ld0->alloc_unknown,
+	      "a POST on LD 1 while LD 0 is not known: %d, %u sent", rc,
+	      commands_sent(ep) - s0);
+	json_decref(resp);
+	resp = NULL;
+	answer_get_ld(ep, 0, 4);
+	rc = fmd_ld_alloc_refresh_ld(ctx, fmd_topology_find(&ctx->topology, id), ld0);
+	CHECK(rc == 0 && !ld0->alloc_unknown && !ld0->journal_id[0] &&
+	      !fmd_journal_open_ops(ctx), "LD 0 read: %d, %d open", rc,
+	      fmd_journal_open_ops(ctx));
+out:
+	json_decref(resp);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+}
+
+/*
+ * A Volatile SLD chunk POST whose Set Partition Info response is lost and
+ * cannot be read back, and a restart. The read of the partition then shows
+ * Next Volatile @next (units of 256 MB; 20 is what the POST asked for), or
+ * fails (@next 0): the chunk is made again, staged, under its Id, if the
+ * device has it staged, and not otherwise; while the read fails, the SLD
+ * is fenced.
+ */
+static void journal_sld_post(uint64_t serial, uint64_t next)
+{
+	char dir[64], id[FMD_MAX_ID_LEN], dom[FMD_MAX_ID_LEN + 16], a[64], b[64];
+	struct cxlmi_endpoint *ep;
+	struct fmd_mem_chunk *ca;
+	struct fmd_component *c;
+	struct fmd_sld *sld;
+	struct fmd_ctx *ctx;
+	unsigned int s0;
+	int rc;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	sld = sld_partitionable(ctx, &ep, serial, id, dom);
+	if (!sld) {
+		CHECK(0, "no SLD");
+		goto out;
+	}
+	answer_4101_lost(ep);
+	answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+	rc = sld_vol_post(ctx, id, dom, a, sizeof(a));
+	c = fmd_first_child_type(&fmd_topology_find_domain(&ctx->topology, dom)->base,
+				 FMD_COMPONENT_CHUNK);
+	CHECK(rc == -19 && c && sld->partition_unknown && fmd_journal_open_ops(ctx) == 1,
+	      "4101h lost: %d, %d open", rc, fmd_journal_open_ops(ctx));
+	if (!c)
+		goto out;
+	snprintf(a, sizeof(a), "%s", c->id);
+	fmd_ctx_free(ctx);
+
+	ctx = journal_ctx(dir);
+	sld = sld_partitionable(ctx, &ep, serial, id, dom);
+	if (!sld)
+		goto out;
+	if (next)
+		answer_partition(ep, 16, 48, next, 64 - next);
+	else
+		answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+	fmd_journal_recover(ctx);
+	ca = fmd_topology_find_chunk(&ctx->topology, a);
+	if (next == 20) {
+		CHECK(ca && ca->staged && ca->staged_vmem == 20 && !sld->partition_unknown &&
+		      !fmd_journal_open_ops(ctx) && domain_chunks(ctx, dom) == 1,
+		      "staged at the restart: chunk %s, %d open", ca ? "made" : "not made",
+		      fmd_journal_open_ops(ctx));
+	} else if (next) {
+		CHECK(!ca && !sld->partition_unknown && !fmd_journal_open_ops(ctx) &&
+		      domain_chunks(ctx, dom) == 0,
+		      "not staged at the restart: chunk %s, %d open",
+		      ca ? "made" : "not made", fmd_journal_open_ops(ctx));
+	} else {
+		CHECK(!ca && sld->partition_unknown && fmd_journal_open_ops(ctx) == 1,
+		      "not read at the restart: unknown %d, %d open",
+		      sld->partition_unknown, fmd_journal_open_ops(ctx));
+		/* nothing that changes the partition is sent until it is read */
+		answer_rc(ep, 0x4100, CXLMI_RET_INTERNAL);
+		s0 = commands_sent(ep);
+		rc = sld_vol_post(ctx, id, dom, b, sizeof(b));
+		CHECK(rc == -5 && commands_sent(ep) - s0 == 1 && last_opcode(ep) == 0x4100,
+		      "a POST while not known: %d, %u sent", rc, commands_sent(ep) - s0);
+		answer_partition(ep, 16, 48, 20, 44);
+		rc = fmd_sld_partition_refresh(ctx, sld);
+		ca = fmd_topology_find_chunk(&ctx->topology, a);
+		CHECK(rc == 0 && ca && ca->staged && !fmd_journal_open_ops(ctx),
+		      "read later: %d, chunk %s", rc, ca ? "made" : "not made");
+	}
+out:
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+}
+
+/*
+ * A DC add whose 5604h response is lost, and a restart: its task, under its
+ * Id, holds the host and Tag, and ends on what the host shows (@how 0: the
+ * capacity listed; 1: three reads that show nothing; 2: the device not
+ * found at the restart, and a DELETE of the monitor).
+ */
+static void journal_dc_add(uint64_t serial, int how)
+{
+	struct dc_ext with_bb[2] = {
+		{ 1ULL << 30, 1ULL << 28, dc_tag, 0 },
+		{ (1ULL << 30) + (1ULL << 28), 1ULL << 28, r6_tag_bb, 0 },
+	};
+	char dir[64], id[FMD_MAX_ID_LEN], tid[FMD_TASK_ID_LEN] = "";
+	struct cxlmi_endpoint *ep;
+	struct fmd_task *t;
+	struct fmd_ctx *ctx;
+	const char *msg = NULL;
+	json_t *task = NULL;
+	unsigned int s0;
+	int rc;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_device(ctx);
+	device_id(id, sizeof(id), serial);
+	t = hw_dcd(ctx, ep, serial, 0x08) ? r6_lost_add(ctx, ep, id) : NULL;
+	CHECK(t && fmd_journal_open_ops(ctx) == 1, "the add: %d open",
+	      fmd_journal_open_ops(ctx));
+	if (!t)
+		goto out;
+	snprintf(tid, sizeof(tid), "%s", t->id);
+	fmd_ctx_free(ctx);
+
+	ctx = journal_ctx(dir);
+	ep = new_device(ctx);
+	if (how == 2) {
+		fmd_journal_recover(ctx);
+		t = fmd_task_find(ctx, tid);
+		fmd_dc_tasks_poll(ctx);
+		CHECK(t && t->recovered && t->unseen && t->state == FMD_TASK_RUNNING &&
+		      fmd_journal_open_ops(ctx) == 1 &&
+		      journal_served(ctx, tid, "Interrupted", true),
+		      "no device: task %d", t ? (int)t->state : -1);
+		CHECK(fmd_redfish_task_monitor_delete(ctx, tid) == 204 &&
+		      !fmd_journal_open_ops(ctx), "no device: a DELETE of the monitor");
+		goto out;
+	}
+	if (!hw_dcd(ctx, ep, serial, 0x08))
+		goto out;
+	fmd_journal_recover(ctx);
+	t = fmd_task_find(ctx, tid);
+	CHECK(t && t->recovered && t->state == FMD_TASK_RUNNING && t->dc->unknown_send &&
+	      t->kind == FMD_TASK_DC_ADD && t->dc->n_base == 1 &&
+	      fmd_journal_open_ops(ctx) == 1 &&
+	      journal_served(ctx, tid, "Interrupted", true),
+	      "the add at the restart: task %d", t ? (int)t->state : -1);
+	if (!t)
+		goto out;
+	/* the same add again: refused, nothing sent */
+	answer_dc_refresh(ep, 0x08);
+	answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+	answer_dc_refresh(ep, 0x08);
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_tag_add, strlen(r6_tag_add),
+				       &msg, &task);
+	CHECK(rc == -EALREADY && commands_sent(ep) == s0,
+	      "the add again after the restart: %d, %u sent", rc, commands_sent(ep) - s0);
+	json_decref(task);
+	task = NULL;
+	cxlmi_mock_clear_responses(ep);
+	if (how == 0) {
+		answer_dcd_host_nt(ep, 3, with_bb, 2);
+		answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+		fmd_dcd_retry_stale(ctx);
+		CHECK(t->state == FMD_TASK_COMPLETED && !fmd_journal_open_ops(ctx) &&
+		      journal_served(ctx, tid, "Completed", false),
+		      "the capacity listed: task %d (%s)", t->state, t->message);
+	} else {
+		for (int i = 0; i < 3; i++) {
+			answer_dc_refresh(ep, 0x08);
+			fmd_dcd_retry_stale(ctx);
+		}
+		CHECK(t->state == FMD_TASK_EXCEPTION && !fmd_journal_open_ops(ctx),
+		      "three quiet reads: task %d (%s)", t->state, t->message);
+	}
+out:
+	json_decref(task);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+}
+
+/* a MemoryExtent DELETE (a release) whose 5605h response is lost, and a restart */
+static void journal_dc_release(uint64_t serial)
+{
+	char dir[64], id[FMD_MAX_ID_LEN], tid[FMD_TASK_ID_LEN] = "";
+	struct cxlmi_endpoint *ep;
+	struct fmd_task *t;
+	struct fmd_ctx *ctx;
+	const char *msg = NULL;
+	json_t *task = NULL;
+	unsigned int s0;
+	int rc;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_device(ctx);
+	device_id(id, sizeof(id), serial);
+	if (!hw_dcd(ctx, ep, serial, 0x08))
+		goto out;
+	cxlmi_mock_clear_responses(ep);
+	answer(ep, 0x5605, (void *)r6_lost, sizeof(r6_lost));
+	rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000", &msg, &task);
+	CHECK(rc == FMD_OP_STARTED && ctx->tasks && fmd_journal_open_ops(ctx) == 1,
+	      "the DELETE, 5605h lost: %d", rc);
+	json_decref(task);
+	task = NULL;
+	if (rc != FMD_OP_STARTED)
+		goto out;
+	snprintf(tid, sizeof(tid), "%s", ctx->tasks->id);
+	fmd_ctx_free(ctx);
+
+	ctx = journal_ctx(dir);
+	ep = new_device(ctx);
+	if (!hw_dcd(ctx, ep, serial, 0x08))
+		goto out;
+	fmd_journal_recover(ctx);
+	t = fmd_task_find(ctx, tid);
+	CHECK(t && t->recovered && t->kind == FMD_TASK_DC_RELEASE &&
+	      t->state == FMD_TASK_RUNNING && t->dc->ext_id[0] &&
+	      journal_served(ctx, tid, "Interrupted", true),
+	      "the release at the restart: task %d", t ? (int)t->state : -1);
+	if (!t)
+		goto out;
+	s0 = commands_sent(ep);
+	rc = fmd_redfish_delete_dc_memory_extent(ctx, id, id, "ext_0_40000000", &msg, &task);
+	CHECK(rc == -EALREADY && commands_sent(ep) == s0,
+	      "the DELETE again after the restart: %d", rc);
+	json_decref(task);
+	task = NULL;
+	cxlmi_mock_clear_responses(ep);
+	answer_dcd_host_nt(ep, 3, NULL, 0);
+	answer_rc(ep, 0x5608, CXLMI_RET_UNSUPPORTED);
+	fmd_dcd_retry_stale(ctx);
+	CHECK(t->state == FMD_TASK_COMPLETED && !fmd_journal_open_ops(ctx),
+	      "the extent gone: task %d (%s)", t->state, t->message);
+out:
+	json_decref(task);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+}
+
+static void test_journal_restart(void)
+{
+	int before = failures;
+
+	journal_bind(0x5fa0, vppb_busy);
+	journal_bind(0x5fa1, vppb_ld1);
+	journal_bind(0x5fa2, NULL);
+	journal_unbind(0x5fa3);
+	journal_ld_alloc(0xfa4, true);
+	journal_ld_alloc(0xfa5, false);
+	journal_sld_post(0x5fa6, 20);
+	journal_sld_post(0x5fa7, 16);
+	journal_sld_post(0x5fa8, 0);
+	journal_dc_add(0xfa9, 0);
+	journal_dc_add(0xfaa, 1);
+	journal_dc_add(0xfab, 2);
+	journal_dc_release(0xfac);
+	report("an operation under way is made again after a restart", before);
+}
+
+/* the journal's file in @dir, as @text */
+static void journal_write(const char *dir, const char *text)
+{
+	char path[512];
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/%s", dir, FMD_JOURNAL_FILE);
+	f = fopen(path, "w");
+	if (f) {
+		fputs(text, f);
+		fclose(f);
+	}
+}
+
+static long journal_size(const char *dir, char *text, size_t len)
+{
+	char path[512];
+	long n = -1;
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/%s", dir, FMD_JOURNAL_FILE);
+	f = fopen(path, "r");
+	if (f) {
+		n = (long)fread(text, 1, len - 1, f);
+		text[n > 0 ? n : 0] = '\0';
+		fseek(f, 0, SEEK_END);
+		n = ftell(f);
+		fclose(f);
+	}
+	return n;
+}
+
+#define J_OP(id) "{\"t\":\"op\",\"id\":\"" id "\",\"kind\":\"ld_alloc\"," \
+	"\"dev\":{\"type\":\"mld\",\"serial\":\"0x0\",\"id\":\"none\"}," \
+	"\"scope\":{\"ld\":0}}\n"
+
+static int j_sync_calls;
+
+static int j_sync_fails(int fd)
+{
+	(void)fd;
+	j_sync_calls++;
+	errno = EIO;
+	return -1;
+}
+
+static int j_sync_counts(int fd)
+{
+	(void)fd;
+	j_sync_calls++;
+	return 0;
+}
+
+static void test_journal_file(void)
+{
+	char dir[64], text[8192];
+	struct fmd_ctx *ctx;
+	int before = failures, rc;
+	long size;
+
+	/* a last line cut short by a crash is cut off; the rest is read */
+	journal_tmpdir(dir, sizeof(dir));
+	journal_write(dir, "{\"t\":\"boot\",\"v\":1}\n" J_OP("aa-1") J_OP("aa-2")
+		      "{\"t\":\"end\",\"id\":\"aa-2\"}\n{\"t\":\"op\",\"id\":\"aa-3\",\"ki");
+	ctx = new_ctx();
+	rc = fmd_journal_open(ctx, dir);
+	size = journal_size(dir, text, sizeof(text));
+	CHECK(rc == 0 && fmd_journal_open_ops(ctx) == 1 && size > 0 &&
+	      !strstr(text, "aa-3") && text[size - 1] == '\n' &&
+	      strstr(text, "\"t\":\"end\",\"id\":\"aa-2\"}\n{\"t\":\"boot\""),
+	      "a torn last line: %d, %d open, %s", rc, fmd_journal_open_ops(ctx), text);
+	/* compaction: the boot record and the one record not ended */
+	rc = fmd_journal_compact(ctx);
+	size = journal_size(dir, text, sizeof(text));
+	CHECK(rc == 0 && strstr(text, "aa-1") && !strstr(text, "aa-2") &&
+	      !strncmp(text, "{\"t\":\"boot\"", 11) && strchr(text, '\n') &&
+	      !strchr(strchr(text, '\n') + 1, '\n')[1],
+	      "compacted: %d, %s", rc, text);
+	fmd_ctx_free(ctx);
+	/* and read again so: what was not ended is still there */
+	ctx = new_ctx();
+	rc = fmd_journal_open(ctx, dir);
+	CHECK(rc == 0 && fmd_journal_open_ops(ctx) == 1, "read again: %d, %d open", rc,
+	      fmd_journal_open_ops(ctx));
+	/* a second cxl-fmd on the state directory is refused */
+	{
+		struct fmd_ctx *other = new_ctx();
+
+		rc = fmd_journal_open(other, dir);
+		CHECK(rc == -EBUSY && !other->journal, "a second one: %d", rc);
+		fmd_ctx_free(other);
+	}
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+
+	/* a line before the last that cannot be read: not started on it */
+	journal_tmpdir(dir, sizeof(dir));
+	journal_write(dir, "{\"t\":\"boot\",\"v\":1}\n{\"t\":\"op\",\"id\n" J_OP("bb-1"));
+	ctx = new_ctx();
+	rc = fmd_journal_open(ctx, dir);
+	CHECK(rc == -EPROTO && !ctx->journal, "a bad line in the middle: %d", rc);
+	fmd_ctx_free(ctx);
+	/* nor on a file of another version */
+	journal_write(dir, "{\"t\":\"boot\",\"v\":2}\n" J_OP("bb-1"));
+	ctx = new_ctx();
+	rc = fmd_journal_open(ctx, dir);
+	CHECK(rc == -EPROTO && !ctx->journal, "version 2: %d", rc);
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+
+	/* past FMD_JOURNAL_COMPACT_BYTES the file is written again */
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	fmd_journal_sync = j_sync_counts;
+	{
+		struct fmd_mld *mld = fmd_mld_create("cxl_00000000000000fd");
+		struct fmd_ld *ld = fmd_ld_create("cxl_00000000000000fd_ld0", 0);
+		char id[FMD_TASK_ID_LEN];
+		bool grew = false, synced = true;
+
+		rc = 0;
+		for (int i = 0; mld && ld && i < 20000; i++) {
+			fmd_op_id(ctx, id, sizeof(id));
+			j_sync_calls = 0;
+			rc = fmd_journal_ld_alloc(ctx, id, &mld->base, ld, 0, 1, "c");
+			synced &= j_sync_calls >= 1;
+			if (rc)
+				break;
+			fmd_journal_end(ctx, id, "Completed");
+			size = journal_size(dir, text, sizeof(text));
+			if (size > FMD_JOURNAL_COMPACT_BYTES)
+				grew = true;
+			if (grew && size < 4096)
+				break;
+		}
+		size = journal_size(dir, text, sizeof(text));
+		CHECK(rc == 0 && synced, "a record not written, or not synced: %d", rc);
+		CHECK(grew && size < 4096 && !fmd_journal_open_ops(ctx),
+		      "compacted past %d bytes: %ld bytes now", FMD_JOURNAL_COMPACT_BYTES,
+		      size);
+		if (ld)
+			fmd_component_free(&ld->base);
+		if (mld)
+			fmd_component_free(&mld->base);
+	}
+	fmd_journal_sync = fdatasync;
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+	report("the journal's file: a torn tail, a bad line, compaction", before);
+}
+
+/*
+ * A record that cannot be synced: 503 (FMD_JOURNAL_UNAVAILABLE), nothing
+ * sent, and nothing more is written until a restart
+ */
+static void test_journal_fail_closed(void)
+{
+	char dir[64], sw_id[FMD_MAX_ID_LEN], body[512], id[FMD_MAX_ID_LEN];
+	struct cxlmi_endpoint *ep;
+	struct fmd_switch *sw;
+	struct fmd_host *host;
+	struct fmd_ctx *ctx;
+	const char *msg = NULL;
+	json_t *resp = NULL;
+	int before = failures, rc;
+	unsigned int s0;
+
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_switch(ctx, 0x5fb0);
+	sw = w1_setup(ctx, ep, 0x5fb0, sw_id, &host);
+	if (!sw || !host) {
+		CHECK(0, "no switch or host");
+		goto out;
+	}
+	read_vppb1(ctx, ep, sw, unbound);
+	w1_post_body(body, sizeof(body), host, sw_id);
+	fmd_journal_sync = j_sync_fails;
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < 2; i++) {
+			answer_vcs(ep, 0, 0, port2, unbound);
+			answer_vcs(ep, 2, 1, unbound, unbound);
+		}
+		answer_rc(ep, 0x5201, CXLMI_RET_SUCCESS);
+		s0 = commands_sent(ep);
+		rc = fmd_redfish_post_connection(ctx, "CXL", body, strlen(body), &resp);
+		CHECK(rc == FMD_JOURNAL_UNAVAILABLE && last_opcode(ep) == 0x5200 &&
+		      commands_sent(ep) - s0 == 2 && !ctx->tasks && !ops_count(ctx) &&
+		      !fmd_journal_open_ops(ctx),
+		      "pass %d: %d, %u sent, last %04xh", pass, rc,
+		      commands_sent(ep) - s0, last_opcode(ep));
+		json_decref(resp);
+		resp = NULL;
+		cxlmi_mock_clear_responses(ep);
+		/* a sync that works again does not make the journal trusted */
+		fmd_journal_sync = fdatasync;
+	}
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+
+	/* a DC add */
+	journal_tmpdir(dir, sizeof(dir));
+	ctx = journal_ctx(dir);
+	ep = new_device(ctx);
+	device_id(id, sizeof(id), 0xfb1);
+	if (hw_dcd(ctx, ep, 0xfb1, 0x08)) {
+		cxlmi_mock_clear_responses(ep);
+		answer_rc(ep, 0x5604, CXLMI_RET_SUCCESS);
+		fmd_journal_sync = j_sync_fails;
+		s0 = commands_sent(ep);
+		rc = fmd_redfish_action_dc_add(ctx, id, id, "0", r6_tag_add,
+					       strlen(r6_tag_add), &msg, &resp);
+		CHECK(rc == FMD_JOURNAL_UNAVAILABLE && commands_sent(ep) == s0 &&
+		      !ctx->tasks, "a DC add: %d, %u sent", rc, commands_sent(ep) - s0);
+		json_decref(resp);
+		resp = NULL;
+		fmd_journal_sync = fdatasync;
+	}
+out:
+	fmd_journal_sync = fdatasync;
+	fmd_ctx_free(ctx);
+	journal_rmdir(dir);
+	report("a command whose journal record cannot be synced is not sent", before);
+}
+
 int main(void)
 {
 	test_sld();
@@ -15885,6 +16695,9 @@ int main(void)
 	test_r6_dc_lost_reply();
 	test_r6_add_response_attribution();
 	test_d8_dc_device_ceiling();
+	test_journal_restart();
+	test_journal_file();
+	test_journal_fail_closed();
 
 	printf("%d checks, %d failed, %d expected failures\n", checks,
 	       failures, xfails);

@@ -325,6 +325,21 @@ static enum MHD_Result send_mctp_restricted(struct MHD_Connection *conn)
 }
 
 /*
+ * A request whose command could not have its record written to the
+ * operation journal, and synced, before it was sent (FMD_JOURNAL_UNAVAILABLE,
+ * src/journal.c): 503, nothing sent. A command without its record is what
+ * the journal is there to prevent (cxl-fmd's choice).
+ */
+static enum MHD_Result send_journal_unavailable(struct MHD_Connection *conn)
+{
+	return send_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
+			  "The operation journal could not be written: nothing was sent",
+			  fmd_redfish_message(FMD_RF_GENERAL_ERROR,
+				"Make the state directory (--state-dir) writable, and "
+				"resubmit the request.", NULL, 0));
+}
+
+/*
  * The answer to a security action (fmd_redfish_ld_security_action() and
  * the Memory aliases), @action at @url: 200 with no body when it was
  * carried out; 404 if there is no such resource or action; 400 for a
@@ -1700,6 +1715,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == FMD_OP_STARTED)
 			return send_dc_started(conn, task);
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		return send_errno(ctx, conn, rc, msg, url, action_of(url),
 				  body, body_size);
 	}
@@ -1717,6 +1734,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == FMD_OP_STARTED)
 			return send_dc_started(conn, task);
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		return send_errno(ctx, conn, rc, msg, url, action_of(url),
 				  body, body_size);
 	}
@@ -1791,6 +1810,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == -1)
 			return send_not_found(conn, url, "Chassis or MemoryDomain not found");
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		if (rc == FMD_MCTP_RESTRICTED)
 			return send_mctp_restricted(conn);
 		if (rc == -2)
@@ -1905,6 +1926,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 		json_decref(task);
 		if (rc == 0)
 			return send_no_content(conn);
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		if (rc == -1)
 			return send_not_found(conn, url, "Connection not found");
 		if (rc == -3)
@@ -1979,6 +2002,8 @@ static enum MHD_Result handle_request_post(struct fmd_ctx *ctx,
 
 		if (rc == -1)
 			return send_not_found(conn, url, "Fabric not found");
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		if (rc == -2)
 			return send_bad_body(conn, body, body_size, "Invalid request body",
 					     RF_GENERAL(FMD_RES_CORRECT));
@@ -2177,6 +2202,8 @@ static enum MHD_Result handle_request_patch(struct fmd_ctx *ctx,
 			return send_json_response(conn, MHD_HTTP_OK, NULL);
 		if (rc == -1)
 			return send_not_found(conn, url, "Resource not found");
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		if (rc == FMD_MCTP_RESTRICTED)
 			return send_mctp_restricted(conn);
 		if (rc == -2)
@@ -2270,6 +2297,8 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 			return send_no_content(conn);
 		if (rc == -1)
 			return send_not_found(conn, url, "Memory chunk not found");
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		if (rc == FMD_MCTP_RESTRICTED)
 			return send_mctp_restricted(conn);
 		if (rc == -2)
@@ -2332,6 +2361,8 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 								task, location);
 		}
 		json_decref(task);
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		if (rc == -3)
 			return send_vppb_failure(conn, FMD_TASK_UNBIND, -EAGAIN);
 		if (rc == -7)
@@ -2369,6 +2400,8 @@ static enum MHD_Result handle_request_delete(struct fmd_ctx *ctx,
 
 		if (rc == FMD_OP_STARTED)
 			return send_dc_started(conn, task);
+		if (rc == FMD_JOURNAL_UNAVAILABLE)
+			return send_journal_unavailable(conn);
 		return send_errno(ctx, conn, rc, msg, url, NULL, NULL, 0);
 	}
 

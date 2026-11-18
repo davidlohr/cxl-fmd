@@ -57,11 +57,30 @@ static void signal_handler(int sig)
 enum {
 	OPT_ALLOW_MCTP_RESTRICTED = 256,
 	OPT_LOCK_FILE,
+	OPT_STATE_DIR,
 };
 
 /* Where the lock file is when --lock-file does not say */
 #define FMD_LOCK_DIR	"/run/cxl-fmd"
 #define FMD_LOCK_NAME	"cxl-fmd.lock"
+
+/*
+ * Where the operation journal is when --state-dir does not say: the first
+ * directory of $STATE_DIRECTORY (systemd's StateDirectory=), else
+ * /var/lib/cxl-fmd, which a host reboot keeps, unlike /run (cxl-fmd's
+ * choice). Made by fmd_journal_open() if it is not there.
+ */
+#define FMD_STATE_DIR	"/var/lib/cxl-fmd"
+
+static void state_default_path(char *path, size_t len)
+{
+	const char *sd = getenv("STATE_DIRECTORY");
+
+	if (sd && *sd)
+		snprintf(path, len, "%.*s", (int)strcspn(sd, ":"), sd);
+	else
+		snprintf(path, len, "%s", FMD_STATE_DIR);
+}
 
 /*
  * The lock file's path when none is given: in the first directory of
@@ -167,6 +186,10 @@ static void print_usage(const char *prog)
 	       "      --lock-file PATH  Exit if another cxl-fmd holds PATH, else hold\n"
 	       "                        it (default: cxl-fmd.lock in $RUNTIME_DIRECTORY,\n"
 	       "                        or in %s; none with --mock)\n"
+	       "      --state-dir DIR   Keep the operation journal in DIR, so that\n"
+	       "                        operations under way survive a restart\n"
+	       "                        (default: $STATE_DIRECTORY, or %s;\n"
+	       "                        none with --mock unless given)\n"
 	       "  -v, --verbose         Increase verbosity (can repeat)\n"
 	       "  -h, --help            Show this help\n"
 	       "  -V, --version         Show version\n"
@@ -178,7 +201,8 @@ static void print_usage(const char *prog)
 	       "\n",
 	       prog, FMD_DEFAULT_PORT, FMD_DEFAULT_EVENT_POLL_SEC,
 	       FMD_DEFAULT_RESCAN_SEC,
-	       FMD_MAX_HTTP_THREADS, FMD_DEFAULT_HTTP_THREADS, FMD_LOCK_DIR);
+	       FMD_MAX_HTTP_THREADS, FMD_DEFAULT_HTTP_THREADS, FMD_LOCK_DIR,
+	       FMD_STATE_DIR);
 }
 
 static void print_version(void)
@@ -237,7 +261,9 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 	fmd_redfish_stop(ctx);
 	fmd_events_cleanup(ctx);
 
+	/* what is under way is not ended: the next start looks at it */
 	fmd_tasks_free(ctx);
+	fmd_journal_close(ctx);
 	free(ctx->known_eps);
 	free(ctx->retry_eps);
 	free(ctx->ioctl_eps);
@@ -253,6 +279,7 @@ void fmd_ctx_free(struct fmd_ctx *ctx)
 
 	if (ctx->config.mock_topology_path)
 		free(ctx->config.mock_topology_path);
+	free(ctx->config.state_dir);
 
 	if (ctx->cxlmi)
 		cxlmi_free_ctx(ctx->cxlmi);
@@ -277,6 +304,7 @@ int main(int argc, char *argv[])
 		{"event-poll", required_argument, NULL, 'e'},
 		{"allow-mctp-restricted", no_argument, NULL, OPT_ALLOW_MCTP_RESTRICTED},
 		{"lock-file", required_argument, NULL, OPT_LOCK_FILE},
+		{"state-dir", required_argument, NULL, OPT_STATE_DIR},
 		{"verbose", no_argument,       NULL, 'v'},
 		{"help",    no_argument,       NULL, 'h'},
 		{"version", no_argument,       NULL, 'V'},
@@ -296,6 +324,8 @@ int main(int argc, char *argv[])
 	bool allow_mctp_restricted = false;
 	const char *lock_path = NULL;
 	char lock_default[PATH_MAX];
+	const char *state_dir = NULL;
+	char state_default[PATH_MAX];
 	int lock_fd = -1;
 
 	while ((opt = getopt_long(argc, argv, "p:M:cN:r:mie:vhV", long_opts, NULL)) != -1) {
@@ -368,6 +398,13 @@ int main(int argc, char *argv[])
 			}
 			lock_path = optarg;
 			break;
+		case OPT_STATE_DIR:
+			if (!*optarg) {
+				fprintf(stderr, "Invalid state directory: an empty path\n");
+				return EXIT_FAILURE;
+			}
+			state_dir = optarg;
+			break;
 		case 'v':
 			verbosity++;
 			break;
@@ -436,6 +473,25 @@ int main(int argc, char *argv[])
 			 "messages; no host may be driving these devices "
 			 "(CXL r4.0 Table 8-308 note 4)");
 
+	/*
+	 * The journal, before anything is sent: it is locked, so that two
+	 * cxl-fmd cannot share it, and what it holds of an earlier run is
+	 * read. A mock topology keeps none unless one is named; --check
+	 * changes nothing, and keeps none.
+	 */
+	if (!state_dir && !mock_path) {
+		state_default_path(state_default, sizeof(state_default));
+		state_dir = state_default;
+	}
+	if (state_dir && !check_only) {
+		ctx->config.state_dir = strdup(state_dir);
+		if (fmd_journal_open(ctx, state_dir) < 0) {
+			fmd_err(ctx, "Cannot use the operation journal in %s",
+				state_dir);
+			goto out;
+		}
+	}
+
 	/* Load mock topology or discover real devices */
 	if (mock_path) {
 		fmd_info(ctx, "Running in MOCK mode");
@@ -481,6 +537,12 @@ int main(int argc, char *argv[])
 			goto out;
 		}
 	}
+
+	/*
+	 * What the journal holds of an earlier run is made again on what
+	 * discovery found, before any request is taken
+	 */
+	fmd_journal_recover(ctx);
 
 	if (!mock_path && use_mctp)
 		fmd_events_init(ctx);

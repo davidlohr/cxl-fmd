@@ -17,6 +17,8 @@ cxl-fmd \- CXL Fabric Manager daemon with a Redfish API
 .RB [ \-\-allow\-mctp\-restricted ]
 .RB [ \-\-lock\-file
 .IR path ]
+.RB [ \-\-state\-dir
+.IR dir ]
 .RB [ \-v ...]
 .br
 .B cxl-fmd
@@ -29,6 +31,8 @@ cxl-fmd \- CXL Fabric Manager daemon with a Redfish API
 .IR threads ]
 .RB [ \-\-lock\-file
 .IR path ]
+.RB [ \-\-state\-dir
+.IR dir ]
 .RB [ \-v ...]
 .br
 .B cxl-fmd
@@ -175,6 +179,32 @@ See
 .B ONE FABRIC MANAGER
 below.
 .TP
+.BI \-\-state\-dir\  dir
+Keep the operation journal in
+.IR dir ,
+made if it is not there, so that a bind, unbind or memory change under way
+when
+.B cxl-fmd
+stops is taken up again when it starts; see
+.B OPERATION JOURNAL
+below.
+The default is the first directory of
+.BR $STATE_DIRECTORY ,
+or else
+.IR /var/lib/cxl-fmd ,
+which, unlike
+.IR /run ,
+a reboot of the host keeps.
+.B cxl-fmd
+exits with status 1 if the directory cannot be made or opened, if another
+.B cxl-fmd
+uses it, or if its journal cannot be read.
+With
+.B \-M
+there is no journal unless this option is given; with
+.B \-c
+there is none.
+.TP
 .BR \-v ", " \-\-verbose
 Log more.
 May be repeated.
@@ -314,6 +344,11 @@ shows what the host did; while it runs, the host is read on every
 .B \-\-event\-poll
 tick, and nothing else is accepted for the same host and tag.
 No time limit ends a task.
+One whose command had no response that could be read, or that was taken
+up again after a restart (see
+.B OPERATION JOURNAL
+below), ends after 3 reads of the host that show nothing of it, or on a
+DELETE of its task monitor.
 .SH BINDING IN THE BACKGROUND
 A switch carries out a bind or an unbind as a background command.
 When it has started one and not finished it,
@@ -345,6 +380,58 @@ The connection's
 action, which is
 .BR cxl-fmd 's
 own, sends the unbind again as a simulated surprise hot-removal.
+.SH OPERATION JOURNAL
+Before it sends Bind vPPB, Unbind vPPB, Set LD Allocations, Set Partition
+Info, Initiate Dynamic Capacity Add or Initiate Dynamic Capacity Release,
+.B cxl-fmd
+writes a record of the operation to
+.I journal.jsonl
+in the state directory
+.RB ( \-\-state\-dir )
+and syncs it to the disk
+.RB ( fdatasync (2)).
+If that fails, nothing is sent: the request is answered
+.BR "503 Service Unavailable" ,
+and so is every later one that would send such a command, until
+.B cxl-fmd
+is restarted.
+When the operation is over, another record says so; it is not synced.
+.PP
+When
+.B cxl-fmd
+starts, after discovery and before it takes requests, each operation with
+no such second record is taken up again: a bind, an unbind or a Dynamic
+Capacity add or release is a task again, under its earlier ID, served as
+.I Interrupted
+with
+.I Oem.Cxl.OperatorDecision
+set to
+.IR Required ;
+it holds its vPPB, or its host and tag, as it did, and ends on what a read
+of the switch or the host shows.
+The logical device of a Set LD Allocations, and the SLD of a Set Partition
+Info, are read again, and no memory chunk of them changes until they are;
+a chunk whose Set Partition Info the SLD shows staged is made again under
+its ID.
+A DELETE of the task monitor ends a task taken up again whose outcome no
+read has shown, and frees what it holds; one whose switch or device is not
+found waits for it, or for that DELETE.
+.PP
+The journal is written again with only the records not ended at each
+start and when it grows past 1 MiB.
+A last line that a crash cut short is left out; a journal of another
+version, or with a line before its last that cannot be read, stops
+.B cxl-fmd
+from starting: move it away to start without it.
+The state directory is locked
+.RI ( journal.lock )
+as the lock file is, so two
+.B cxl-fmd
+cannot share it.
+.PP
+Each such command costs one sync of the state directory's file system,
+paid while the request holds the fabric: requests that change the fabric
+wait for it in turn.
 .SH ONE FABRIC MANAGER
 Two Fabric Managers driving one switch would each act on what the other
 does: a connection is each vPPB found bound, whoever bound it, and deleting
@@ -396,7 +483,8 @@ was given.
 .TP
 .B 1
 An option is invalid, the lock file is held by another process or could not
-be made, the topology file could not be read or is not a valid fabric,
+be made, the state directory could not be made or locked or its journal
+could not be read, the topology file could not be read or is not a valid fabric,
 discovery failed, or the HTTP port could not be opened.
 .SH SECURITY
 .B cxl-fmd

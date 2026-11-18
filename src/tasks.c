@@ -53,6 +53,25 @@ static void task_key(const struct fmd_task *task, struct fmd_bind_key *key)
 
 void *(*fmd_task_calloc)(size_t nmemb, size_t size) = calloc;
 
+/*
+ * The next Task Id: "{boot}-{n}", n counting up from 1 in this run. With
+ * the boot id of each run drawn at random, a monitor URI of an earlier run
+ * answers 404 and is not given to another task (cxl-fmd's choice). A task
+ * is named when it is made, before its command is sent, so that the
+ * journal's record of the command carries the Id (src/journal.c); one
+ * discarded leaves its number unused.
+ */
+void fmd_op_id(struct fmd_ctx *ctx, char *buf, size_t len)
+{
+	snprintf(buf, len, "%s-%d", ctx->topology.boot_id, ++ctx->task_next_id);
+}
+
+static void task_name(struct fmd_ctx *ctx, struct fmd_task *task)
+{
+	if (!task->id[0])
+		fmd_op_id(ctx, task->id, sizeof(task->id));
+}
+
 struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 				struct fmd_switch *sw,
 				const struct fmd_bind_key *key)
@@ -75,6 +94,7 @@ struct fmd_task *fmd_task_alloc(struct fmd_ctx *ctx, enum fmd_task_kind kind,
 	snprintf(task->switch_id, sizeof(task->switch_id), "%s", sw->base.id);
 	fmd_conn_id_format(key, task->connection_id, sizeof(task->connection_id));
 	fmd_vppb_seen(sw, key->vcs_id, key->vppb_id, &task->before);
+	task_name(ctx, task);
 	return task;
 }
 
@@ -110,18 +130,8 @@ struct fmd_task *fmd_dc_task_new(struct fmd_ctx *ctx, enum fmd_task_kind kind)
 	task->kind = kind;
 	task->state = FMD_TASK_RUNNING;
 	task->dc->host_id = -1;
+	task_name(ctx, task);
 	return task;
-}
-
-/*
- * The next Task Id: "{boot}-{n}", n counting up from 1 in this run. With
- * the boot id of each run drawn at random, a monitor URI of an earlier run
- * answers 404 and is not given to another task (cxl-fmd's choice).
- */
-static void task_name(struct fmd_ctx *ctx, struct fmd_task *task)
-{
-	snprintf(task->id, sizeof(task->id), "%s-%d", ctx->topology.boot_id,
-		 ++ctx->task_next_id);
 }
 
 void fmd_dc_task_list(struct fmd_ctx *ctx, struct fmd_task *task)
@@ -146,6 +156,7 @@ void fmd_dc_task_end(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 		fmd_info(ctx, "Task %s: %s", task->id, message);
 	else
 		fmd_err(ctx, "Task %s: %s", task->id, message);
+	fmd_journal_end(ctx, task->id, ok ? "Completed" : "Exception");
 }
 
 struct fmd_task *fmd_task_activate(struct fmd_ctx *ctx, struct fmd_task *task,
@@ -260,9 +271,14 @@ struct fmd_task *fmd_task_find(struct fmd_ctx *ctx, const char *id)
 
 bool fmd_task_cancellable(const struct fmd_task *task)
 {
+	if (task && task->recovered)
+		return task->state == FMD_TASK_RUNNING ||
+		       task->state == FMD_TASK_INTERRUPTED;
 	return task && fmd_task_is_dc(task) && task->state == FMD_TASK_RUNNING &&
 	       task->dc->unknown_send;
 }
+
+static void task_drop_op(struct fmd_ctx *ctx, struct fmd_task *task);
 
 void fmd_task_remove(struct fmd_ctx *ctx, struct fmd_task *task)
 {
@@ -271,10 +287,97 @@ void fmd_task_remove(struct fmd_ctx *ctx, struct fmd_task *task)
 	for (pp = &ctx->tasks; *pp; pp = &(*pp)->next) {
 		if (*pp == task) {
 			*pp = task->next;
+			/* a bind's or unbind's hold on its vPPB goes with it */
+			if (!fmd_task_is_dc(task))
+				task_drop_op(ctx, task);
+			fmd_journal_end(ctx, task->id, "Deleted");
 			task_free(task);
 			return;
 		}
 	}
+}
+
+/* @task, made again from the journal, is listed under its earlier Id */
+static void task_list_recovered(struct fmd_ctx *ctx, struct fmd_task *task,
+				const char *id, bool unseen)
+{
+	snprintf(task->id, sizeof(task->id), "%s", id);
+	task->recovered = true;
+	task->unseen = unseen;
+	task->start = time(NULL);
+	task->next = ctx->tasks;
+	ctx->tasks = task;
+}
+
+struct fmd_task *fmd_task_recover_vppb(struct fmd_ctx *ctx, const char *id,
+				       enum fmd_task_kind kind,
+				       const struct fmd_bind_key *key,
+				       const struct fmd_vppb_seen *before,
+				       uint8_t unbind_option, bool unseen)
+{
+	struct fmd_task *task = fmd_task_calloc(1, sizeof(*task));
+	struct fmd_binding_op *op;
+
+	if (!task)
+		return NULL;
+	task->kind = kind;
+	task->state = FMD_TASK_INTERRUPTED;
+	snprintf(task->switch_id, sizeof(task->switch_id), "%s", key->switch_id);
+	task->vcs_id = key->vcs_id;
+	task->vppb_id = key->vppb_id;
+	task->port_id = key->port_id;
+	task->ld_id = key->ld_id;
+	task->before = *before;
+	fmd_conn_id_format(key, task->connection_id, sizeof(task->connection_id));
+	/* the op holds the vPPB, and says what it is becoming, as before */
+	op = fmd_binding_op_find(ctx, key->switch_id, key->vcs_id, key->vppb_id);
+	if (op)
+		fmd_binding_op_remove(ctx, op);
+	op = fmd_binding_op_add(ctx, key, kind == FMD_TASK_BIND ?
+				FMD_BIND_OP_BIND : FMD_BIND_OP_UNBIND,
+				unbind_option, id, before);
+	if (!op) {
+		free(task);
+		return NULL;
+	}
+	op->lost = true;
+	snprintf(task->message, sizeof(task->message), "Outcome unknown: cxl-fmd "
+		 "restarted while this %s was under way, and %s; the vPPB is read "
+		 "again until it settles, or a DELETE of the task monitor ends it",
+		 kind == FMD_TASK_BIND ? "bind" : "unbind", unseen ?
+		 "the switch has not been seen since" :
+		 "whether the switch carried it out is not known");
+	task_list_recovered(ctx, task, id, unseen);
+	fmd_warn(ctx, "Task %s: made again from the journal, Interrupted: %s",
+		 task->id, task->message);
+	return task;
+}
+
+struct fmd_task *fmd_task_recover_dc(struct fmd_ctx *ctx, const char *id,
+				     enum fmd_task_kind kind,
+				     struct fmd_dc_task *dc, bool unseen)
+{
+	struct fmd_task *task = fmd_task_calloc(1, sizeof(*task));
+
+	if (!task)
+		return NULL;
+	task->kind = kind;
+	/* followed as one whose response could not be read (dcd.c) */
+	task->state = FMD_TASK_RUNNING;
+	task->dc = dc;
+	dc->unknown_send = true;
+	dc->quiet_reads = 0;
+	snprintf(task->message, sizeof(task->message), "Outcome unknown: cxl-fmd "
+		 "restarted after the command was sent, and %s; the task ends on "
+		 "what the host shows, after %d reads that show nothing of it, or on "
+		 "a DELETE of its monitor", unseen ?
+		 "the device has not been seen since" :
+		 "whether the device carried it out is not known",
+		 FMD_DC_QUIET_READS);
+	task_list_recovered(ctx, task, id, unseen);
+	fmd_warn(ctx, "Task %s: made again from the journal: %s", task->id,
+		 task->message);
+	return task;
 }
 
 bool fmd_tasks_running(struct fmd_ctx *ctx)
@@ -309,6 +412,7 @@ static void task_finish(struct fmd_ctx *ctx, struct fmd_task *task, bool ok,
 		fmd_info(ctx, "Task %s: %s", task->id, message);
 	else
 		fmd_err(ctx, "Task %s: %s", task->id, message);
+	fmd_journal_end(ctx, task->id, ok ? "Completed" : "Exception");
 }
 
 
@@ -731,10 +835,17 @@ void fmd_tasks_poll(struct fmd_ctx *ctx)
 			continue;
 
 		sw = fmd_topology_find_switch(&ctx->topology, task->switch_id);
+		/*
+		 * One made again from the journal waits for its switch, which
+		 * may not be found yet, or for a DELETE of its monitor
+		 */
+		if (!sw && task->recovered)
+			continue;
 		if (!sw) {
 			task_lost(ctx, task, NULL, "The switch is gone");
 			continue;
 		}
+		task->unseen = false;
 		/* one that is Interrupted waits for a read of the VCSs */
 		if (task->state == FMD_TASK_INTERRUPTED)
 			continue;
