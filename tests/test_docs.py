@@ -15,6 +15,9 @@ plainly: a DELETE of a sharable extent releases the host's whole tag
 T6), and TLS, authentication and the listen address are deferred gaps
 (F16). The questions for DMTF are drafted, to be submitted by the
 maintainer, and the docs do not say they were raised (F12.8, DCD-T5b).
+
+The libcxlmi wrap names a commit, so every checkout builds the same
+libcxlmi (follow-up K10).
 """
 
 import re
@@ -179,3 +182,15 @@ def test_dmtf_questions_are_drafted_not_raised():
         assert words not in flat(text), words
     assert not re.search(r"\b(was|were|has been|have been) (raised|submitted|sent)"
                          r" (to|with) (DMTF|the Redfish Forum)", flat(text))
+
+
+def test_libcxlmi_is_pinned():
+    """The libcxlmi wrap names a full commit SHA, not a branch or head
+    (follow-up review K10), so that every fresh checkout builds the same
+    libcxlmi; docs/testing.md says how to move it."""
+    wrap = (DOCS.parent / "subprojects" / "libcxlmi.wrap").read_text()
+    revs = re.findall(r"^revision\s*=\s*(\S+)\s*$", wrap, re.M)
+    assert len(revs) == 1, wrap
+    assert re.fullmatch(r"[0-9a-f]{40}", revs[0]), revs[0]
+    text = (DOCS / "testing.md").read_text()
+    assert "meson subprojects update --reset libcxlmi" in text

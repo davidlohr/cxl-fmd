@@ -1,6 +1,6 @@
 [wrap-git]
 url = https://github.com/computexpresslink/libcxlmi.git
-revision = head
+revision = b0d14c815aa88429f9b887e6e7ad3daaf2fe7570
 depth = 1
 
 [provide]

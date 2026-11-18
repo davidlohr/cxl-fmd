@@ -13,7 +13,7 @@ The daemon discovers CXL topology by issuing CCI commands over MCTP or kernel io
 - GCC or Clang with C17 support
 - libmicrohttpd
 - jansson (JSON library)
-- libcxlmi
+- libcxlmi, fetched by Meson at the commit pinned in `subprojects/libcxlmi.wrap` (see [docs/testing.md](docs/testing.md#the-libcxlmi-version))
 
 ### Build Instructions
 

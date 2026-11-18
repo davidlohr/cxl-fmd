@@ -28,6 +28,25 @@ python scripts/run_redfish_validator.py
 ./scripts/qemu/qemu-cxl-test.sh --kernel /boot/vmlinuz-$(uname -r)
 ```
 
+## The libcxlmi Version
+
+libcxlmi is built as a Meson subproject from the commit that
+`subprojects/libcxlmi.wrap` names in `revision`, a full 40-character SHA, so
+that every checkout, CI's included, builds the same libcxlmi. A floating
+`revision = head` built whatever upstream had last, and a fresh CI checkout
+then built another libcxlmi than an existing developer tree, which Meson does
+not fetch again.
+
+To move to a newer libcxlmi, edit the SHA in the same commit as the cxl-fmd
+change that needs it, and update the checkout:
+
+```bash
+meson subprojects update --reset libcxlmi
+```
+
+Pin only a commit that is in the upstream repository named by `url`.
+`test_docs.py` checks that the wrap names a full SHA.
+
 ## Meson Test Integration
 
 Tests are integrated with meson's test framework for easy CI integration.
@@ -88,7 +107,7 @@ meson test -C build --list
 | `redfish` | redfish-endpoints | Basic endpoint accessibility | pytest |
 | `api` | topology-inventory, orchestration, tasks, hot-removal, event-logs, concurrency, memory-lifecycle, connections, cxl-business-rules, error-handling, dcd, mock-bindings | Full API tests | pytest, requests |
 | `security` | fuzzing, adversarial | Input fuzzing and security tests | pytest, requests |
-| `unit` | discovery, mock-topologies, manpage, lock-file, docs, unit-topologies, redfish-validator-gate, redfish-protocol-validator-gate | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, one cxl-fmd per lock file (`test_lock_file.py`), statements the docs must keep (`test_docs.py`: one cxl-fmd per fabric, a lock file that fences one host only, the DCD `DELETE` and zero-Tag contracts, the deferred TLS, authentication and listen address), 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch), and what fails a run of either validator (below) | pytest, requests (the pytest ones) |
+| `unit` | discovery, mock-topologies, manpage, lock-file, docs, unit-topologies, redfish-validator-gate, redfish-protocol-validator-gate | The discovery harness (`discovery-tests`), the checks of the mock topologies, the man page against `--help`, one cxl-fmd per lock file (`test_lock_file.py`), statements the docs must keep (`test_docs.py`: one cxl-fmd per fabric, a lock file that fences one host only, the DCD `DELETE` and zero-Tag contracts, the deferred TLS, authentication and listen address, a libcxlmi pinned to a commit), 7 combinations of attachment and device type (all but a Multi-Headed MLD on a switch), and what fails a run of either validator (below) | pytest, requests (the pytest ones) |
 | `validator` | redfish-validator-sld, redfish-validator-mld, redfish-validator-event-logs, redfish-validator-hot-removal, redfish-validator-dcd, redfish-validator-dcd-perhost, redfish-validator-degraded, redfish-validator-all, redfish-protocol-validator | The DMTF Redfish Service Validator over `single-sld.json`, `mld-device.json`, `event-logs.json` (a switch, its VCSs, connections, tasks and log services), `hot-removal.json` after a device with a connection has been pulled out, `dcd-device.json`, `dcd-shared-perhost.json`, `degraded-device.json` (`Status.Conditions` and the `CxlHealth` registry), and (`redfish-validator-all`) every other topology in `mock/` and `mock/unit/`. Oem extensions are checked (no `--nooemcheck`), against cxl-fmd's Oem schema `Cxl_v1.xml`, which the validator fetches from `/redfish/v1/Schemas` through `$metadata` (the copy it saves in `schema/dmtf/csdl` is removed after each run). A run fails on any `FAIL`, and on any `WARN` but the deprecated `TemporaryThroughputReductionSupported` cxl-fmd still serves: the validator reports a bad Oem extension only as a `WARN`. `redfish-protocol-validator` runs the DMTF Redfish-Protocol-Validator over every topology in `mock/` and `mock/unit/` (see "DMTF Redfish-Protocol-Validator") | pytest, `.venv-validator` |
 
 ### Test Timeouts
