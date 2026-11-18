@@ -155,10 +155,19 @@ GET /redfish/v1/Systems                                      Systems Collection 
    - `cxlmi_cmd_identify()` (0x0001) - Get device type
    - For Type 3 devices:
      - `cxlmi_cmd_fmapi_get_multiheaded_info()` (0x5500) - MHD detection
-     - `cxlmi_cmd_fmapi_get_ld_info()` (0x5400) - MLD detection (ld_count > 1)
+     - `cxlmi_cmd_fmapi_get_ld_info()` (0x5400) - MLD detection: a device
+       that answers it at all is an MLD, whatever its LD Count (Table 8-397:
+       MM, "Mandatory for all MLD components (prohibited for SLD
+       components)"); one that answers Unsupported (or Unsupported Mailbox
+       or CCI) is an SLD, and any other failure is tried again later
+       (fmd_probe_result(), "Devices that are not ready" in
+       docs/Redfish-API.md)
    - For SLD: `cxlmi_cmd_memdev_identify()` (0x4000), partition/health info
    - For MLD: `cxlmi_cmd_fmapi_get_ld_allocations()` (0x5401), QoS info
-   - For MHD: `cxlmi_cmd_fmapi_get_head_info()` (0x5501), LD pool bindings
+   - For MHD: `cxlmi_cmd_fmapi_get_head_info()` (0x5501), LD pool bindings;
+     a head with more than one LD mapped presents as an MLD, with one as an
+     SLD (Section 2.5, src/discovery.c `head->presentation`). That rule is
+     for the heads of a multi-headed device only, not for the 0x5400 check
    - For Switch: `cxlmi_cmd_fmapi_identify_sw_device()` (0x5100), VCS/port info
    - For any Type 3: `cxlmi_cmd_fmapi_get_dcd_info()` (0x5600); on success
      per host 0x5601/0x5603 and device-wide 0x5608 (src/dcd.c)
